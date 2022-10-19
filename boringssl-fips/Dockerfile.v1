@@ -1,4 +1,7 @@
-#Dockerfile for the image used to compile the FIPS-compliant boringssl
+# Dockerfile for the image used to pre-compile the FIPS-compliant boringssl library
+# We use this because the latest FIPS-certified boringssl build requires an old
+# clang version that we don't want to use in our general toolchain.
+
 # Pull base image.
 FROM ubuntu:18.04
 
@@ -17,8 +20,8 @@ RUN apt install -y cmake
 
 #install go
 ENV GOROOT_BOOTSTRAP=/usr./make.bash
-RUN wget https://go.dev/dl/go1.13.8.linux-amd64.tar.gz
-RUN tar -xzvf go1.13.8.linux-amd64.tar.gz
+RUN wget https://go.dev/dl/go1.12.7.linux-amd64.tar.gz
+RUN tar -xzvf go1.12.7.linux-amd64.tar.gz
 ENV PATH=/go/bin/:$PATH
 ENV GOROOT=/go/
 
@@ -34,4 +37,5 @@ ENV PATH=/usr/local/clang_7.0.1/bin:/go/bin/:/usr/local/sbin:/usr/local/bin:/usr
 
 #build boringssl
 RUN git clone https://github.com/cloudflare/boring.git
-RUN cd boring/boring-sys/ && cargo build --features fips
+ENV PATH=/root/.cargo/bin/:$PATH
+RUN cd boring/boring-sys/ && cargo build --release --features fips
