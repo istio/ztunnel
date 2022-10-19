@@ -1,0 +1,37 @@
+#Dockerfile for the image used to compile the FIPS-compliant boringssl
+# Pull base image.
+FROM ubuntu:18.04
+
+RUN apt-get update
+RUN apt-get install -y curl build-essential software-properties-common gccgo-5 tar wget git xz-utils
+
+#install latest rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+ENV PATH=/root/.cargo/bin/:$PATH
+RUN rustup default stable
+
+#install cmake
+RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | apt-key add -
+RUN apt-add-repository 'deb https://apt.kitware.com/ubuntu/ bionic main' && apt-get update
+RUN apt install -y cmake
+
+#install go
+ENV GOROOT_BOOTSTRAP=/usr./make.bash
+RUN wget https://go.dev/dl/go1.13.8.linux-amd64.tar.gz
+RUN tar -xzvf go1.13.8.linux-amd64.tar.gz
+ENV PATH=/go/bin/:$PATH
+ENV GOROOT=/go/
+
+#install clang_7.0.1
+RUN apt-get remove clang
+RUN wget https://releases.llvm.org/7.0.1/clang%2bllvm-7.0.1-x86_64-linux-gnu-ubuntu-18.04.tar.xz
+RUN tar -xvf clang+llvm-7.0.1-x86_64-linux-gnu-ubuntu-18.04.tar.xz
+RUN mv clang+llvm-7.0.1-x86_64-linux-gnu-ubuntu-18.04 clang_7.0.1
+RUN mv clang_7.0.1 /usr/local/
+RUN ln -s /usr/local/clang_7.0.1/bin/clang /usr/local/clang_7.0.1/bin/clang++-7
+ENV LD_LIBRARY_PATH=/usr/local/clang_7.0.1/lib:
+ENV PATH=/usr/local/clang_7.0.1/bin:/go/bin/:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+#build boringssl
+RUN git clone https://github.com/cloudflare/boring.git
+RUN cd boring/boring-sys/ && cargo build --features fips
