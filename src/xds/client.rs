@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
+use hyper::Uri;
 
 use prost::Message;
 use tracing::{debug, info, warn};
@@ -130,19 +131,11 @@ impl AdsClient {
             n => info!("Starting ADS client with {n} workloads"),
         };
 
-        // TODO: copy JWT auth logic from CA client and use TLS here
-        let _address = if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "https://istiod.istio-system:15012"
-        } else {
-            "https://localhost:15012"
-        };
-        let address = if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "http://istiod.istio-system:15010"
-        } else {
-            "http://localhost:15010"
-        };
-        let svc = tls::test_certs().grpc_connector(address).unwrap();
-        let mut client = AggregatedDiscoveryServiceClient::new(svc);
+        // TODO: use UDS
+        let address = "http://localhost:15010";
+
+        let mut client = AggregatedDiscoveryServiceClient::connect(address).await.unwrap();
+
         let (discovery_req_tx, mut discovery_req_rx) =
             tokio::sync::mpsc::channel::<DeltaDiscoveryRequest>(100);
         let watches = initial_watches.clone();
