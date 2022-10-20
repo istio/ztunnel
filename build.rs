@@ -16,8 +16,7 @@ fn main() -> Result<(), anyhow::Error> {
     let config = {
         let mut c = prost_build::Config::new();
         c.disable_comments(Some("."));
-        c.type_attribute(".istio.workload", "#[derive(serde::Deserialize)]");
-        c.type_attribute(".istio.workload.Workload", "#[serde(default)]");
+        c.bytes(&[".istio.workload.Workload"]);
         c
     };
     tonic_build::configure()

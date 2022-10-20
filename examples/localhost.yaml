@@ -2,5 +2,5 @@
 # This allows local testing by sending requests through the local ztunnel other servers running on localhost.
 - name: local
   namespace: default
-  address: "127.0.0.1"
-  protocol: 1
+  workload_ip: "127.0.0.1"
+  protocol: Hbone

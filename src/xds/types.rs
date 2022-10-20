@@ -37,4 +37,4 @@ pub mod istio {
     }
 }
 
-pub const WORKLOAD_TYPE: &str = "type.googleapis.com/proto.Workload";
+pub const WORKLOAD_TYPE: &str = "type.googleapis.com/istio.workload.Workload";

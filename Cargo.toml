@@ -18,7 +18,7 @@ path = "src/main.rs"
 futures = "0.3.12"
 hyper = { version = "0.14.18", features = ["full"] }
 tokio = {"version"= "1", features=["full"]}
-bytes = "1"
+bytes = { version = "1", features=["serde"]}
 log = "0.4"
 tower = { version = "0.4.12", features = ["full"] }
 libc = "0.2.126"
