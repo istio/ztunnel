@@ -93,7 +93,8 @@ impl Certs {
         });
 
         conn.set_alpn_protos(Alpn::H2.encode())?;
-        conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+        conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
+        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
         let mut http = hyper::client::HttpConnector::new();
         http.enforce_http(false);
         let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
@@ -118,8 +119,8 @@ impl Certs {
         let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
 
         // Force use of TLSv1.3.
-        conn.clear_options(ssl::SslOptions::NO_TLSV1_3);
         conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
         conn.set_cipher_list(
             "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
         )?;
@@ -153,6 +154,7 @@ impl Certs {
 
         conn.set_alpn_protos(Alpn::H2.encode())?;
         conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
 
         Ok(conn.build())
     }
@@ -219,5 +221,5 @@ pub fn test_certs() -> Certs {
 
 #[test]
 fn is_fips_enabled() {
-    assert_eq!(boring::fips::enabled(), true);
+    assert!(boring::fips::enabled());
 }
