@@ -55,7 +55,7 @@ impl Outbound {
                         let res = oc.proxy(stream).await;
                         match res {
                             Ok(_) => info!("outbound proxy complete"),
-                            Err(ref e) => warn!("outbound proxy failed: {:?}", e),
+                            Err(ref e) => warn!("outbound proxy failed: {}", e),
                         };
                     });
                 }
@@ -73,11 +73,8 @@ struct OutboundConnection {
 
 impl OutboundConnection {
     async fn proxy(&self, mut stream: TcpStream) -> Result<(), Error> {
-        // For now we only support IPv4 but we are binding to IPv6 address; convert everything to IPv4
-        let remote_addr = match stream.peer_addr().expect("must receive peer addr").ip() {
-            IpAddr::V4(i) => IpAddr::V4(i),
-            IpAddr::V6(i) => IpAddr::V4(i.to_ipv4().unwrap()),
-        };
+        let remote_addr =
+            super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
         debug!("request from {} to {}", remote_addr, orig);
         let req = self.build_request(remote_addr, orig);

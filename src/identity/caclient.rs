@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use log::info;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::codegen::InterceptedService;
@@ -14,7 +13,7 @@ use crate::tls::TlsGrpcChannel;
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 use crate::xds::istio::ca::IstioCertificateRequest;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
 }
@@ -26,7 +25,7 @@ impl CaClient {
         } else {
             "https://localhost:15012"
         };
-        let svc = tls::test_certs().grpc_connector(address).unwrap();
+        let svc = tls::grpc_connector(address).unwrap();
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
         CaClient { client }
     }
@@ -40,9 +39,7 @@ impl CaClient {
         let csr: Vec<u8> = cs.csr;
         let pkey = cs.pkey;
 
-        let csr = std::str::from_utf8(&csr)
-            .map_err(Error::Utf8Error)?
-            .to_string();
+        let csr = std::str::from_utf8(&csr).map_err(Error::Utf8)?.to_string();
         let req = IstioCertificateRequest {
             csr,
             validity_duration: 60 * 60 * 24, // 24 hours
@@ -55,12 +52,11 @@ impl CaClient {
                 )]),
             }),
         };
-        let resp = self.client.create_certificate(req).await.unwrap();
+        let resp = self.client.create_certificate(req).await?;
         let resp = resp.into_inner();
-        info!("got cert {:?}", resp.cert_chain);
         Ok(tls::cert_from(
             &pkey,
-            resp.cert_chain.last().unwrap().as_bytes(),
+            resp.cert_chain.first().unwrap().as_bytes(),
         ))
     }
 }
