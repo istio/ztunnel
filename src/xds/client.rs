@@ -24,6 +24,14 @@ pub struct HandlerContext {
     rejects: Vec<RejectedConfig>,
 }
 
+impl HandlerContext {
+    pub fn new() -> HandlerContext {
+        HandlerContext {
+            ..Default::default()
+        }
+    }
+}
+
 struct RejectedConfig {
     name: String,
     reason: anyhow::Error,
@@ -211,9 +219,7 @@ impl AdsClient {
                 }
             }
 
-            let mut ctx = HandlerContext {
-                ..Default::default()
-            };
+            let mut ctx = HandlerContext::new();
             workload_handler.handle(&mut ctx, updates);
 
             let error_detail = match ctx.rejects.len() {
@@ -267,6 +273,7 @@ pub struct XdsResource<T: prost::Message> {
     pub resource: T,
 }
 
+#[derive(Debug)]
 pub enum XdsUpdate<T: prost::Message> {
     Update(XdsResource<T>),
     Remove(String),

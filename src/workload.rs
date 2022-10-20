@@ -1,16 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
+use futures::future::TryFutureExt;
 use thiserror::Error;
+
 use tracing::{debug, error, info};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::workload::WorkloadError::ProtocolParseError;
-use crate::xds;
-use crate::xds::{HandlerContext, XdsUpdate};
+use crate::xds::{Handler, HandlerContext, XdsResource, XdsUpdate};
+use crate::{config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize)]
 pub enum Protocol {
@@ -140,8 +143,9 @@ impl TryFrom<&XdsWorkload> for Workload {
 }
 
 pub struct WorkloadManager {
-    pub workloads: Arc<Mutex<WorkloadInformation>>,
-    pub xds_client: xds::AdsClient,
+    workloads: Arc<Mutex<WorkloadInformation>>,
+    xds_client: xds::AdsClient,
+    local_client: LocalClient,
 }
 
 fn handle_xds<F: FnOnce() -> Result<(), anyhow::Error>>(
@@ -149,6 +153,7 @@ fn handle_xds<F: FnOnce() -> Result<(), anyhow::Error>>(
     name: String,
     f: F,
 ) {
+    debug!("handling update {}", name);
     let result: Result<(), anyhow::Error> = f();
     if let Err(e) = result {
         ctx.reject(name, e)
@@ -163,8 +168,6 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadInformation>> {
             handle_xds(ctx, name, || {
                 match res {
                     XdsUpdate::Update(w) => {
-                        // TODO: use name
-                        // info!("handling update {}", res.name);
                         let workload = Workload::try_from(&w.resource)?;
                         // TODO: we process each item on its own, this may lead to heavy lock contention.
                         // Need batch updates?
@@ -193,17 +196,67 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadInformation>> {
 }
 
 impl WorkloadManager {
-    pub fn new() -> WorkloadManager {
+    pub fn new(config: config::Config) -> WorkloadManager {
         let workloads: Arc<Mutex<WorkloadInformation>> = Default::default();
         let xds_workloads = workloads.clone();
         let xds_client = xds::Config::new()
             .with_workload_handler(xds_workloads)
             .watch(xds::WORKLOAD_TYPE.into())
             .build();
+        let local_workloads = workloads.clone();
+        let local_client = LocalClient {
+            path: config.local_xds_path,
+            workloads: local_workloads,
+        };
         WorkloadManager {
             xds_client,
             workloads,
+            local_client,
         }
+    }
+
+    pub async fn run(self) -> anyhow::Result<()> {
+        tokio::try_join!(
+            self.xds_client.run().map_err(|e| anyhow::anyhow!(e)),
+            self.local_client.run()
+        )?;
+        Ok(())
+    }
+
+    pub fn workloads(&self) -> Arc<Mutex<WorkloadInformation>> {
+        self.workloads.clone()
+    }
+}
+
+/// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
+struct LocalClient {
+    path: Option<String>,
+    workloads: Arc<Mutex<WorkloadInformation>>,
+}
+
+impl LocalClient {
+    async fn run(self) -> Result<(), anyhow::Error> {
+        let path = match self.path {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        info!("running local client");
+        // Currently, we just load the file once. In the future, we could dynamically reload.
+        let data = tokio::fs::read_to_string(path).await?;
+        let r: Vec<XdsWorkload> = serde_yaml::from_str(&data)?;
+        let mut ctx = HandlerContext::new();
+        let events: Vec<_> = r
+            .into_iter()
+            .map(|w| {
+                XdsUpdate::Update(XdsResource {
+                    name: w.name.clone(),
+                    resource: w,
+                })
+            })
+            .collect();
+        info!("created {} local workloads", events.len());
+        self.workloads.handle(&mut ctx, events);
+        Ok(())
     }
 }
 

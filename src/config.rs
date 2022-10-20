@@ -14,6 +14,9 @@ pub struct Config {
 
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
+
+    /// Filepath to a local xds file for workloads, as YAML.
+    pub local_xds_path: Option<String>,
 }
 
 impl Default for Config {
@@ -29,6 +32,9 @@ impl Default for Config {
             outbound_addr: "[::]:15001".parse().unwrap(),
 
             local_node: Some(std::env::var("NODE_NAME").unwrap_or_else(|_| "".into()))
+                .filter(|s| !s.is_empty()),
+
+            local_xds_path: Some(std::env::var("LOCAL_XDS_PATH").unwrap_or_else(|_| "".into()))
                 .filter(|s| !s.is_empty()),
         }
     }
