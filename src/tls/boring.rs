@@ -216,3 +216,8 @@ pub fn test_certs() -> Certs {
     let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
     Certs { cert, key }
 }
+
+#[test]
+fn is_fips_enabled() {
+    assert_eq!(boring::fips::enabled(), true);
+}
