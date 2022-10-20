@@ -55,22 +55,22 @@ async fn main() -> anyhow::Result<()> {
 
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
-    let workload_manager = workload::WorkloadManager::new();
+    let config = config::Config {
+        ..Default::default()
+    };
+    let workload_manager = workload::WorkloadManager::new(config.clone());
 
-    let workloads = workload_manager.workloads.clone();
+    let workloads = workload_manager.workloads();
     admin::Builder::new("[::]:15022".parse().unwrap(), workloads)
         .set_ready()
         .bind()
         .expect("admin server starts")
         .spawn();
-    let config = config::Config {
-        ..Default::default()
-    };
-    let workloads = workload_manager.workloads.clone();
+    let workloads = workload_manager.workloads();
     let proxy = proxy::Proxy::new(config, workloads).await?;
     tasks.push(tokio::spawn(async move {
-        if let Err(e) = workload_manager.xds_client.run().await {
-            error!("ads server error: {}", e);
+        if let Err(e) = workload_manager.run().await {
+            error!("workload manager: {}", e);
         }
     }));
     tasks.push(tokio::spawn(proxy.run()));

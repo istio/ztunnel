@@ -1,21 +1,28 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
+use futures::future::TryFutureExt;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
-use crate::workload::WorkloadError::ProtocolParseError;
-use crate::xds;
+use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{HandlerContext, XdsUpdate};
+use crate::{config, xds};
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
-    Hbone,
     Tcp,
+    Hbone,
+}
+
+impl Default for Protocol {
+    fn default() -> Self {
+        Protocol::Tcp
+    }
 }
 
 impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
@@ -23,34 +30,34 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
 
     fn try_from(value: Option<xds::istio::workload::Protocol>) -> Result<Self, Self::Error> {
         match value {
-            Some(xds::istio::workload::Protocol::Http2connect) => Ok(Protocol::Hbone),
+            Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::Hbone),
             Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::Hbone),
-            None => Err(ProtocolParseError("unknown type".into())),
+            None => Err(ProtocolParse("unknown type".into())),
         }
     }
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Workload {
     pub workload_ip: IpAddr,
-    pub remote_proxy: Option<IpAddr>,
+    #[serde(default)]
+    pub waypoint_address: Option<IpAddr>,
+    #[serde(default)]
     pub gateway_ip: Option<SocketAddr>,
-    pub identity: String,
-    // TODO: optional?
+    #[serde(default)]
     pub protocol: Protocol,
 
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub namespace: String,
-    pub canonical_name: String,
-    pub canonical_revision: String,
-    pub workload_type: String,
-    pub workload_name: String,
-    pub uid: String,
+
+    #[serde(default)]
     pub node: String,
 
-    pub enforce: bool,
+    #[serde(default)]
     pub native_hbone: bool,
-    // RBAC:        *uproxyapi.Authorization,
 }
 
 impl Workload {
@@ -63,9 +70,8 @@ impl fmt::Display for Workload {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Workload{{{}{} at {} via {} ({:?})}}",
+            "Workload{{{} at {} via {} ({:?})}}",
             self.name,
-            self.identity,
             self.workload_ip,
             self.gateway_ip
                 .map(|x| format!("{}", x))
@@ -85,9 +91,8 @@ impl fmt::Display for Upstream {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Upstream{{{}{} at {}:{} via {} ({:?})}}",
+            "Upstream{{{} at {}:{} via {} ({:?})}}",
             self.workload.name,
-            self.workload.identity,
             self.workload.workload_ip,
             self.port,
             self.workload
@@ -99,58 +104,57 @@ impl fmt::Display for Upstream {
     }
 }
 
-fn non_empty_string(s: &str) -> Option<&str> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+fn byte_to_ip(b: bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
+    Ok(match b.len() {
+        0 => None,
+        4 => {
+            let v: [u8; 4] = (&*b).try_into().expect("size already proven");
+            Some(IpAddr::V4(Ipv4Addr::from(v)))
+        }
+        16 => {
+            let v: [u8; 16] = (&*b).try_into().expect("size already proven");
+            Some(IpAddr::V6(Ipv6Addr::from(v)))
+        }
+        n => return Err(WorkloadError::ByteAddressParse(n)),
+    })
 }
 
 impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
-        let remote = non_empty_string(resource.remote_proxy.as_str())
-            .map(|r| r.parse::<IpAddr>())
-            .transpose()?;
+        let waypoint = byte_to_ip(resource.waypoint_address.clone())?;
+        let address =
+            byte_to_ip(resource.address.clone())?.ok_or(WorkloadError::ByteAddressParse(0))?;
         // TODO can we borrow instead of clone everywhere?
         Ok(Workload {
-            workload_ip: resource.address.parse::<IpAddr>()?,
-            remote_proxy: remote,
+            workload_ip: address,
+            waypoint_address: waypoint,
             gateway_ip: None,
 
-            identity: resource.identity.clone(),
             protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
                 resource.protocol,
             ))?,
 
             name: resource.name.clone(),
             namespace: resource.namespace.clone(),
-            canonical_name: resource.canonical_name.clone(),
-            canonical_revision: resource.canonical_revision.clone(),
-            workload_type: resource.workload_type.clone(),
-            workload_name: resource.workload_name.clone(),
-            uid: resource.uid.clone(),
             node: resource.node.clone(),
 
-            enforce: resource.enforce,
             native_hbone: resource.native_hbone,
         })
     }
 }
 
 pub struct WorkloadManager {
-    pub workloads: Arc<Mutex<WorkloadInformation>>,
-    pub xds_client: xds::AdsClient,
+    workloads: Arc<Mutex<WorkloadInformation>>,
+    xds_client: xds::AdsClient,
+    local_client: LocalClient,
 }
 
-fn handle_xds<F: FnOnce() -> Result<(), anyhow::Error>>(
-    ctx: &mut HandlerContext,
-    name: String,
-    f: F,
-) {
-    let result: Result<(), anyhow::Error> = f();
+fn handle_xds<F: FnOnce() -> anyhow::Result<()>>(ctx: &mut HandlerContext, name: String, f: F) {
+    debug!("handling update {}", name);
+    let result: anyhow::Result<()> = f();
     if let Err(e) = result {
+        warn!("rejecting workload {name}: {e}");
         ctx.reject(name, e)
     }
 }
@@ -163,8 +167,6 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadInformation>> {
             handle_xds(ctx, name, || {
                 match res {
                     XdsUpdate::Update(w) => {
-                        // TODO: use name
-                        // info!("handling update {}", res.name);
                         let workload = Workload::try_from(&w.resource)?;
                         // TODO: we process each item on its own, this may lead to heavy lock contention.
                         // Need batch updates?
@@ -193,17 +195,60 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadInformation>> {
 }
 
 impl WorkloadManager {
-    pub fn new() -> WorkloadManager {
+    pub fn new(config: config::Config) -> WorkloadManager {
         let workloads: Arc<Mutex<WorkloadInformation>> = Default::default();
         let xds_workloads = workloads.clone();
         let xds_client = xds::Config::new()
             .with_workload_handler(xds_workloads)
             .watch(xds::WORKLOAD_TYPE.into())
             .build();
+        let local_workloads = workloads.clone();
+        let local_client = LocalClient {
+            path: config.local_xds_path,
+            workloads: local_workloads,
+        };
         WorkloadManager {
             xds_client,
             workloads,
+            local_client,
         }
+    }
+
+    pub async fn run(self) -> anyhow::Result<()> {
+        tokio::try_join!(
+            self.xds_client.run().map_err(|e| anyhow::anyhow!(e)),
+            self.local_client.run()
+        )?;
+        Ok(())
+    }
+
+    pub fn workloads(&self) -> Arc<Mutex<WorkloadInformation>> {
+        self.workloads.clone()
+    }
+}
+
+/// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
+struct LocalClient {
+    path: Option<String>,
+    workloads: Arc<Mutex<WorkloadInformation>>,
+}
+
+impl LocalClient {
+    async fn run(self) -> Result<(), anyhow::Error> {
+        let path = match self.path {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        info!("running local client");
+        // Currently, we just load the file once. In the future, we could dynamically reload.
+        let data = tokio::fs::read_to_string(path).await?;
+        let r: Vec<Workload> = serde_yaml::from_str(&data)?;
+        let mut wli = self.workloads.lock().unwrap();
+        for wl in r {
+            info!("inserting local workloads {wl}");
+            wli.insert(wl);
+        }
+        Ok(())
     }
 }
 
@@ -263,21 +308,14 @@ impl WorkloadInformation {
                 port: addr.port(),
                 workload: Workload {
                     workload_ip: addr.ip(),
-                    remote_proxy: None,
+                    waypoint_address: None,
                     gateway_ip: Some(addr),
-                    identity: "".to_string(),
                     protocol: Protocol::Tcp,
 
                     name: "".to_string(),
                     namespace: "".to_string(),
-                    canonical_name: "".to_string(),
-                    canonical_revision: "".to_string(),
-                    workload_type: "".to_string(),
-                    workload_name: "".to_string(),
-                    uid: "".to_string(),
                     node: "".to_string(),
 
-                    enforce: false,
                     native_hbone: false,
                 },
             },
@@ -287,8 +325,8 @@ impl WorkloadInformation {
 
     fn set_gateway_ip(us: &mut Upstream) {
         let mut ip = us.workload.workload_ip;
-        if us.workload.remote_proxy.is_some() {
-            ip = us.workload.remote_proxy.unwrap();
+        if us.workload.waypoint_address.is_some() {
+            ip = us.workload.waypoint_address.unwrap();
         }
         if us.workload.gateway_ip.is_none() {
             us.workload.gateway_ip = Some(match us.workload.protocol {
@@ -299,10 +337,13 @@ impl WorkloadInformation {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Error, Debug)]
 pub enum WorkloadError {
-    #[error("failed to parse address")]
-    AddressParseError(#[from] net::AddrParseError),
+    #[error("failed to parse address: {0}")]
+    AddressParse(#[from] net::AddrParseError),
+    #[error("failed to parse address, had {0} bytes")]
+    ByteAddressParse(usize),
     #[error("unknown protocol {0}")]
-    ProtocolParseError(String),
+    ProtocolParse(String),
 }

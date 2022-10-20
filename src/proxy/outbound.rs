@@ -196,7 +196,7 @@ impl OutboundConnection {
             direction: Direction::Outbound, // TODO set this
             request_type: RequestType::Direct,
         };
-        if source_workload.remote_proxy.is_some() {
+        if source_workload.waypoint_address.is_some() {
             // Source has a remote proxy. We should delegate everything to that proxy - do not even resolve VIP.
             // TODO: add client skipping
             req.request_type = RequestType::ToClientWaypoint;
@@ -206,10 +206,10 @@ impl OutboundConnection {
             // Load balancing decision is deferred to remote proxy
             req.destination = target;
             // Send to the remote proxy
-            req.gateway = SocketAddr::from((source_workload.remote_proxy.unwrap(), 15001));
+            req.gateway = SocketAddr::from((source_workload.waypoint_address.unwrap(), 15001));
             // Always use HBONE here
             req.protocol = Protocol::Hbone;
-        } else if us.workload.remote_proxy.is_some() {
+        } else if us.workload.waypoint_address.is_some() {
             // TODO: even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
             if is_vip {
@@ -221,7 +221,7 @@ impl OutboundConnection {
             req.protocol = Protocol::Hbone;
             // Let the client remote know we are on the inbound path.
             req.direction = Direction::Inbound;
-            req.gateway = SocketAddr::from((us.workload.remote_proxy.unwrap(), 15006));
+            req.gateway = SocketAddr::from((us.workload.waypoint_address.unwrap(), 15006));
         } else if !us.workload.node.is_empty()
             && self.cfg.local_node == Some(us.workload.node)
             && req.protocol == Protocol::Hbone
