@@ -1,3 +1,4 @@
+use boring::ssl::ConnectConfiguration;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
@@ -8,10 +9,11 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::proxy::Error;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
-use crate::{socket, tls};
+use crate::{identity, socket};
 
 pub struct Outbound {
     cfg: Config,
+    cert_manager: identity::SecretManager,
     workloads: Arc<Mutex<WorkloadInformation>>,
     listener: TcpListener,
 }
@@ -19,6 +21,7 @@ pub struct Outbound {
 impl Outbound {
     pub async fn new(
         cfg: Config,
+        cert_manager: identity::SecretManager,
         workloads: Arc<Mutex<WorkloadInformation>>,
     ) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
@@ -31,6 +34,7 @@ impl Outbound {
 
         Ok(Outbound {
             cfg,
+            cert_manager,
             workloads,
             listener,
         })
@@ -48,6 +52,7 @@ impl Outbound {
                     info!("accepted outbound connection from {}", remote);
                     let cfg = self.cfg.clone();
                     let oc = OutboundConnection {
+                        cert_manager: self.cert_manager.clone(),
                         workloads: self.workloads.clone(),
                         cfg,
                     };
@@ -66,6 +71,7 @@ impl Outbound {
 }
 
 struct OutboundConnection {
+    cert_manager: identity::SecretManager,
     workloads: Arc<Mutex<WorkloadInformation>>,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     cfg: Config,
@@ -103,8 +109,11 @@ impl OutboundConnection {
                     .unwrap();
 
                 let mut request_sender = if self.cfg.tls {
+                    let id = req.source.identity();
+                    let cert = self.cert_manager.fetch_certificate(id).await?;
+                    let connector = cert.connector()?.configure()?;
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
-                    let tls_stream = connect_tls(tcp_stream).await?;
+                    let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
                         .handshake(tls_stream)
                         .await
@@ -184,7 +193,7 @@ impl OutboundConnection {
         };
         let mut req = Request {
             protocol: us.workload.protocol,
-            _source: source_workload.clone(), // TODO drop clone
+            source: source_workload.clone(), // TODO drop clone
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
             gateway: us
                 .workload
@@ -241,7 +250,7 @@ impl OutboundConnection {
 struct Request {
     protocol: Protocol,
     direction: Direction,
-    _source: Workload,
+    source: Workload,
     destination: SocketAddr,
     gateway: SocketAddr,
     request_type: RequestType,
@@ -263,16 +272,15 @@ enum RequestType {
 }
 
 async fn connect_tls(
+    mut connector: ConnectConfiguration,
     stream: TcpStream,
 ) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
-    let conn = tls::test_certs().connector();
-    let mut cfg = conn.unwrap().configure().unwrap();
-    cfg.set_verify_hostname(false);
-    cfg.set_use_server_name_indication(false);
+    connector.set_verify_hostname(false);
+    connector.set_use_server_name_indication(false);
     let addr = stream.local_addr();
-    cfg.set_verify_callback(boring::ssl::SslVerifyMode::PEER, move |_, x509| {
+    connector.set_verify_callback(boring::ssl::SslVerifyMode::PEER, move |_, x509| {
         info!("TLS callback for {:?}: {:?}", addr, x509.error());
         true
     });
-    tokio_boring::connect(cfg, "", stream).await
+    tokio_boring::connect(connector, "", stream).await
 }

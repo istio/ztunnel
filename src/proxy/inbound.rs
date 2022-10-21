@@ -51,7 +51,7 @@ impl Inbound {
                 Ok::<_, hyper::Error>(service_fn(Self::serve_connect))
             });
             let boring_acceptor = crate::tls::BoringTlsAcceptor {
-                acceptor: CertProvider {
+                acceptor: InboundCertProvider {
                     workloads: self.workloads.clone(),
                     cert_manager: self.cert_manager.clone(),
                 },
@@ -147,13 +147,13 @@ impl Inbound {
 }
 
 #[derive(Clone)]
-struct CertProvider {
+struct InboundCertProvider {
     cert_manager: identity::SecretManager,
     workloads: Arc<Mutex<WorkloadInformation>>,
 }
 
 #[async_trait::async_trait]
-impl crate::tls::CertProvider for CertProvider {
+impl crate::tls::CertProvider for InboundCertProvider {
     async fn fetch_cert(&self, fd: RawFd) -> Result<boring::ssl::SslAcceptor, TlsError> {
         let orig = crate::socket::orig_dst_addr_fd(fd).map_err(TlsError::DestinationLookup)?;
         let identity = {

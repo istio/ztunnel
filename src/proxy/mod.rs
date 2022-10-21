@@ -1,3 +1,4 @@
+use boring::error::ErrorStack;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -9,7 +10,7 @@ use inbound::Inbound;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::workload::WorkloadInformation;
-use crate::{config, identity};
+use crate::{config, identity, tls};
 
 mod inbound;
 mod inbound_passthrough;
@@ -29,8 +30,8 @@ impl Proxy {
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound_passthrough = InboundPassthrough::new(cfg.clone());
-        let inbound = Inbound::new(cfg.clone(), workloads.clone(), secret_manager).await?;
-        let outbound = Outbound::new(cfg.clone(), workloads).await?;
+        let inbound = Inbound::new(cfg.clone(), workloads.clone(), secret_manager.clone()).await?;
+        let outbound = Outbound::new(cfg.clone(), secret_manager, workloads).await?;
         Ok(Proxy {
             inbound,
             inbound_passthrough,
@@ -65,6 +66,15 @@ pub enum Error {
 
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
+
+    #[error("tls error: {0}")]
+    Tls(#[from] tls::Error),
+
+    #[error("ssl error: {0}")]
+    Ssl(#[from] ErrorStack),
+
+    #[error("identity error: {0}")]
+    Identity(#[from] identity::Error),
 }
 
 pub async fn copy_hbone(

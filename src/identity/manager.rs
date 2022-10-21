@@ -1,4 +1,5 @@
 use std::fmt;
+use tracing::instrument;
 
 use super::CaClient;
 use super::Error;
@@ -39,6 +40,7 @@ impl SecretManager {
         SecretManager { client }
     }
 
+    #[instrument(skip_all, fields(%id))]
     pub async fn fetch_certificate(&self, id: Identity) -> Result<tls::Certs, Error> {
         self.client.clone().fetch_certificate(id).await
     }

@@ -242,15 +242,6 @@ where
     }
 }
 
-const CERT: &[u8] = include_bytes!("cert.crt");
-const PKEY: &[u8] = include_bytes!("cert.key");
-
-pub fn test_certs() -> Certs {
-    let cert = x509::X509::from_pem(CERT).unwrap();
-    let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
-    Certs { cert, key }
-}
-
 #[test]
 fn is_fips_enabled() {
     assert!(boring::fips::enabled());
