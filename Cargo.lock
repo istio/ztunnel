@@ -1874,6 +1874,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "boring",
  "bytes",
  "console-subscriber",

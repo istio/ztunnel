@@ -1,14 +1,16 @@
+use boring::error::ErrorStack;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tracing::info;
 
 use inbound::Inbound;
 
-use crate::config;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::workload::WorkloadInformation;
+use crate::{config, identity, tls};
 
 mod inbound;
 mod inbound_passthrough;
@@ -24,11 +26,12 @@ impl Proxy {
     pub async fn new(
         cfg: config::Config,
         workloads: Arc<Mutex<WorkloadInformation>>,
+        secret_manager: identity::SecretManager,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound_passthrough = InboundPassthrough::new(cfg.clone());
-        let inbound = Inbound::new(cfg.clone()).await?;
-        let outbound = Outbound::new(cfg.clone(), workloads).await?;
+        let inbound = Inbound::new(cfg.clone(), workloads.clone(), secret_manager.clone()).await?;
+        let outbound = Outbound::new(cfg.clone(), secret_manager, workloads).await?;
         Ok(Proxy {
             inbound,
             inbound_passthrough,
@@ -63,6 +66,15 @@ pub enum Error {
 
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
+
+    #[error("tls error: {0}")]
+    Tls(#[from] tls::Error),
+
+    #[error("ssl error: {0}")]
+    Ssl(#[from] ErrorStack),
+
+    #[error("identity error: {0}")]
+    Identity(#[from] identity::Error),
 }
 
 pub async fn copy_hbone(
@@ -110,4 +122,13 @@ pub async fn copy_hbone(
     // };
     //
     // tokio::try_join!(client_to_server, server_to_client).map(|_| ())
+}
+
+fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
+    // For now we only support IPv4 but we are binding to IPv6 address; convert everything to IPv4
+    // TODO: Support IPv6 fully
+    match ip.ip() {
+        IpAddr::V4(i) => IpAddr::V4(i),
+        IpAddr::V6(i) => IpAddr::V4(i.to_ipv4().unwrap()),
+    }
 }

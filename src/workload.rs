@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
+use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{HandlerContext, XdsUpdate};
 use crate::{config, xds};
@@ -52,12 +53,25 @@ pub struct Workload {
     pub name: String,
     #[serde(default)]
     pub namespace: String,
+    #[serde(default)]
+    pub service_account: String,
 
     #[serde(default)]
     pub node: String,
 
     #[serde(default)]
     pub native_hbone: bool,
+}
+
+impl Workload {
+    pub fn identity(&self) -> Identity {
+        Identity::Spiffe {
+            /// TODO: don't hardcode
+            trust_domain: "cluster.local".to_string(),
+            namespace: self.namespace.clone(),
+            service_account: self.service_account.clone(),
+        }
+    }
 }
 
 impl Workload {
@@ -137,6 +151,14 @@ impl TryFrom<&XdsWorkload> for Workload {
 
             name: resource.name.clone(),
             namespace: resource.namespace.clone(),
+            service_account: {
+                let result = resource.service_account.clone();
+                if result.is_empty() {
+                    "default".into()
+                } else {
+                    result
+                }
+            },
             node: resource.node.clone(),
 
             native_hbone: resource.native_hbone,
@@ -315,6 +337,7 @@ impl WorkloadInformation {
                     name: "".to_string(),
                     namespace: "".to_string(),
                     node: "".to_string(),
+                    service_account: "".to_string(),
 
                     native_hbone: false,
                 },

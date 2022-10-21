@@ -5,6 +5,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::{Code, Request, Status};
 
+#[derive(Clone, Debug)]
 pub enum AuthSource {
     Token(PathBuf),
 }

@@ -1,5 +1,8 @@
 use core::fmt;
 use std::future::Future;
+use std::io;
+use std::net::IpAddr;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::task::Poll;
 
@@ -17,7 +20,9 @@ use hyper::{Request, Uri};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tonic::body::BoxBody;
 use tower::Service;
-use tracing::info;
+use tracing::{error, info};
+
+use crate::identity;
 
 use super::Error;
 
@@ -77,42 +82,39 @@ pub struct TlsGrpcChannel {
     client: hyper::Client<hyper_boring::HttpsConnector<hyper::client::HttpConnector>, BoxBody>,
 }
 
+/// grpc_connector provides a client TLS channel for gRPC requests.
+pub fn grpc_connector(uri: &'static str) -> Result<TlsGrpcChannel, Error> {
+    let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+
+    conn.set_verify(ssl::SslVerifyMode::NONE);
+    conn.set_verify_callback(ssl::SslVerifyMode::NONE, |_, x509| {
+        info!("ssl: {:?}", x509.error());
+        // TODO: this MUST verify before upstreaming
+        true
+    });
+
+    conn.set_alpn_protos(Alpn::H2.encode())?;
+    conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
+    conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+    let mut http = hyper::client::HttpConnector::new();
+    http.enforce_http(false);
+    let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
+    https.set_callback(|cc, _| {
+        // TODO: this MUST verify before upstreaming
+        cc.set_verify_hostname(false);
+        Ok(())
+    });
+
+    // Configure hyper's client to be h2 only and build with the
+    // correct https connector.
+    let hyper = hyper::Client::builder().http2_only(true).build(https);
+
+    let uri = Uri::from_static(uri);
+
+    Ok(TlsGrpcChannel { uri, client: hyper })
+}
+
 impl Certs {
-    pub fn grpc_connector(&self, uri: &'static str) -> Result<TlsGrpcChannel, Error> {
-        let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
-
-        // conn.set_private_key(&self.key)?;
-        // conn.set_certificate(&self.cert)?;
-        // conn.check_private_key()?;
-
-        conn.set_verify(ssl::SslVerifyMode::NONE);
-        conn.set_verify_callback(ssl::SslVerifyMode::NONE, |_, x509| {
-            info!("ssl: {:?}", x509.error());
-            // TODO: this MUST verify before upstreaming
-            true
-        });
-
-        conn.set_alpn_protos(Alpn::H2.encode())?;
-        conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
-        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
-        let mut http = hyper::client::HttpConnector::new();
-        http.enforce_http(false);
-        let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
-        https.set_callback(|cc, _| {
-            // TODO: this MUST verify before upstreaming
-            cc.set_verify_hostname(false);
-            Ok(())
-        });
-
-        // Configure hyper's client to be h2 only and build with the
-        // correct https connector.
-        let hyper = hyper::Client::builder().http2_only(true).build(https);
-
-        let uri = Uri::from_static(uri);
-
-        Ok(TlsGrpcChannel { uri, client: hyper })
-    }
-
     pub fn acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
         let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
         // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
@@ -193,30 +195,51 @@ impl Alpn {
     }
 }
 
-#[derive(Clone)]
-pub struct BoringTlsAcceptor(pub ssl::SslAcceptor);
+#[async_trait::async_trait]
+pub trait CertProvider: Send + Sync + Clone {
+    async fn fetch_cert(&self, fd: RawFd) -> Result<ssl::SslAcceptor, TlsError>;
+}
 
-impl<C> tls_listener::AsyncTls<C> for BoringTlsAcceptor
+#[derive(Clone)]
+pub struct BoringTlsAcceptor<F: CertProvider> {
+    /// Acceptor is a function that determines the TLS context to use. As input, the FD of the client
+    /// connection is provided.
+    pub acceptor: F,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum TlsError {
+    #[error("tls handshake error")]
+    Handshake,
+    #[error("certificate lookup error: {0} is not a known destination")]
+    CertificateLookup(IpAddr),
+    #[error("destination lookup error")]
+    DestinationLookup(#[source] io::Error),
+    #[error("signing error: {0}")]
+    SigningError(#[from] identity::Error),
+    #[error("ssl error: {0}")]
+    SslError(#[from] Error),
+}
+
+impl<C, F> tls_listener::AsyncTls<C> for BoringTlsAcceptor<F>
 where
-    C: AsyncRead + AsyncWrite + Unpin + Send + fmt::Debug + 'static,
+    C: AsRawFd + AsyncRead + AsyncWrite + Unpin + Send + fmt::Debug + 'static,
+    F: CertProvider + 'static,
 {
     type Stream = tokio_boring::SslStream<C>;
-    type Error = tokio_boring::HandshakeError<C>;
+    type Error = TlsError;
     type AcceptFuture = Pin<Box<dyn Future<Output = Result<Self::Stream, Self::Error>> + Send>>;
 
     fn accept(&self, conn: C) -> Self::AcceptFuture {
-        let tls = self.0.clone();
-        Box::pin(async move { tokio_boring::accept(&tls, conn).await })
+        let fd = conn.as_raw_fd();
+        let acceptor = self.acceptor.clone();
+        Box::pin(async move {
+            let tls = acceptor.fetch_cert(fd).await?;
+            tokio_boring::accept(&tls, conn)
+                .await
+                .map_err(|_| TlsError::Handshake)
+        })
     }
-}
-
-const CERT: &[u8] = include_bytes!("cert.crt");
-const PKEY: &[u8] = include_bytes!("cert.key");
-
-pub fn test_certs() -> Certs {
-    let cert = x509::X509::from_pem(CERT).unwrap();
-    let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
-    Certs { cert, key }
 }
 
 #[test]

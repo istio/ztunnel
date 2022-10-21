@@ -12,7 +12,9 @@ pub use auth::*;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("failed to create CSR: {0}")]
-    SigningError(#[from] tls::Error),
+    Signing(#[from] tls::Error),
+    #[error("signing gRPC error ({}): {}", .0.code(), .0.message())]
+    SigningRequest(#[from] tonic::Status),
     #[error("failed to process string: {0}")]
-    Utf8Error(#[from] Utf8Error),
+    Utf8(#[from] Utf8Error),
 }

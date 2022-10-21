@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::os::unix::io::AsRawFd;
 
 use tokio::io;
 use tokio::net::TcpListener;
@@ -6,8 +7,6 @@ use tokio::net::TcpListener;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-
     let fd = l.as_raw_fd();
 
     unsafe {
@@ -28,9 +27,23 @@ pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-pub fn orig_dst_addr(sock: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
-    use std::os::unix::io::AsRawFd;
+pub fn orig_dst_addr_fd<T: AsRawFd>(sock: T) -> io::Result<SocketAddr> {
+    let fd = sock.as_raw_fd();
 
+    unsafe { linux::so_original_dst(fd) }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn orig_dst_addr_fd<T: AsRawFd>(sock: T) -> io::Result<SocketAddr> {
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "SO_ORIGINAL_DST not supported on this operating system",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub fn orig_dst_addr(sock: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     let fd = sock.as_raw_fd();
 
     unsafe { linux::so_original_dst(fd) }

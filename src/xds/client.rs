@@ -149,7 +149,7 @@ impl AdsClient {
         } else {
             "http://localhost:15010"
         };
-        let svc = tls::test_certs().grpc_connector(address).unwrap();
+        let svc = tls::grpc_connector(address).unwrap();
         let mut client = AggregatedDiscoveryServiceClient::new(svc);
         let (discovery_req_tx, mut discovery_req_rx) =
             tokio::sync::mpsc::channel::<DeltaDiscoveryRequest>(100);
