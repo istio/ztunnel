@@ -15,3 +15,6 @@ check:
 format:
 	cargo clippy --fix --allow-staged --allow-dirty
 	cargo fmt
+
+presubmit: export RUSTFLAGS = -D warnings
+presubmit: build test format gen-check
