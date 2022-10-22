@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
@@ -80,6 +81,68 @@ impl Workload {
     }
 }
 
+pub struct WorkloadBuilder {
+    gateway_ip: Option<SocketAddr>,
+    name: String,
+    namespace: String,
+    native_hbone: bool,
+    node: String,
+    protocol: Protocol,
+    service_account: String,
+    waypoint_address: Option<IpAddr>,
+    workload_ip: IpAddr,
+}
+
+impl WorkloadBuilder {
+    pub fn new(
+        name: String,
+        namespace: String,
+        native_hbone: bool,
+        node: String,
+        protocol: Protocol,
+        service_account: String,
+        workload_ip: IpAddr,
+    ) -> WorkloadBuilder {
+        WorkloadBuilder {
+            gateway_ip: None,
+            name,
+            namespace,
+            native_hbone,
+            node,
+            protocol,
+            service_account,
+            waypoint_address: None,
+            workload_ip,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn gateway_ip(mut self, gateway_ip: Option<SocketAddr>) -> WorkloadBuilder {
+        self.gateway_ip = gateway_ip;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn waypoint_address(mut self, waypoint_address: IpAddr) -> WorkloadBuilder {
+        self.waypoint_address = Some(waypoint_address);
+        self
+    }
+
+    pub fn build(self) -> Workload {
+        Workload {
+            gateway_ip: self.gateway_ip,
+            name: self.name,
+            namespace: self.namespace,
+            native_hbone: self.native_hbone,
+            node: self.node,
+            protocol: self.protocol,
+            service_account: self.service_account,
+            waypoint_address: self.waypoint_address,
+            workload_ip: self.workload_ip,
+        }
+    }
+}
+
 impl fmt::Display for Workload {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -118,51 +181,34 @@ impl fmt::Display for Upstream {
     }
 }
 
-fn byte_to_ip(b: bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
-    Ok(match b.len() {
-        0 => None,
-        4 => {
-            let v: [u8; 4] = (&*b).try_into().expect("size already proven");
-            Some(IpAddr::V4(Ipv4Addr::from(v)))
-        }
-        16 => {
-            let v: [u8; 16] = (&*b).try_into().expect("size already proven");
-            Some(IpAddr::V6(Ipv6Addr::from(v)))
-        }
-        n => return Err(WorkloadError::ByteAddressParse(n)),
-    })
+fn byte_to_ip(b: &bytes::Bytes) -> Result<IpAddr, WorkloadError> {
+    let s = std::str::from_utf8(b).expect("error converting bytes to string");
+    match IpAddr::from_str(s) {
+        Ok(ip) => Ok(ip),
+        Err(_) => Err(WorkloadError::ByteAddressParse(b.len())),
+    }
 }
 
 impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
-        let waypoint = byte_to_ip(resource.waypoint_address.clone())?;
-        let address =
-            byte_to_ip(resource.address.clone())?.ok_or(WorkloadError::ByteAddressParse(0))?;
-        // TODO can we borrow instead of clone everywhere?
-        Ok(Workload {
-            workload_ip: address,
-            waypoint_address: waypoint,
-            gateway_ip: None,
-
-            protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
-                resource.protocol,
-            ))?,
-
-            name: resource.name.clone(),
-            namespace: resource.namespace.clone(),
-            service_account: {
-                let result = resource.service_account.clone();
-                if result.is_empty() {
-                    "default".into()
-                } else {
-                    result
-                }
-            },
-            node: resource.node.clone(),
-
-            native_hbone: resource.native_hbone,
-        })
+        let resource = resource.to_owned();
+        let workload_ip = byte_to_ip(&resource.address)?;
+        let protocol =
+            Protocol::try_from(xds::istio::workload::Protocol::from_i32(resource.protocol))?;
+        let service_account =
+            Option::from(resource.service_account).unwrap_or(String::from("default"));
+        let workload = WorkloadBuilder::new(
+            resource.name,
+            resource.namespace,
+            resource.native_hbone,
+            resource.node,
+            protocol,
+            service_account,
+            workload_ip,
+        )
+        .build();
+        Ok(workload)
     }
 }
 
@@ -361,7 +407,7 @@ impl WorkloadInformation {
 }
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum WorkloadError {
     #[error("failed to parse address: {0}")]
     AddressParse(#[from] net::AddrParseError),
@@ -369,4 +415,58 @@ pub enum WorkloadError {
     ByteAddressParse(usize),
     #[error("unknown protocol {0}")]
     ProtocolParse(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn byte_to_ip_garbage() {
+        let garbage = "foo";
+        let result = byte_to_ip(&Bytes::from(garbage));
+        assert!(result.is_err());
+        let actual_error_kind: WorkloadError = result.unwrap_err();
+        let expected_error_kind = WorkloadError::ByteAddressParse(garbage.len());
+        assert_eq!(actual_error_kind, expected_error_kind);
+    }
+
+    #[test]
+    fn byte_to_ipv4_empty() {
+        let empty = "";
+        let result = byte_to_ip(&Bytes::from(empty));
+        assert!(result.is_err())
+    }
+
+    #[test]
+    fn byte_to_ipv4_loopback() {
+        let loopback = "127.0.0.1";
+        let result = byte_to_ip(&Bytes::from(loopback));
+        assert!(result.is_ok());
+        let loopback_ip = result.unwrap();
+        assert_eq!(loopback_ip.to_string(), loopback);
+    }
+
+    #[test]
+    fn byte_to_ipv4() {
+        let ipv4 = "1.1.1.1";
+        let result = byte_to_ip(&Bytes::from(ipv4));
+        assert!(result.is_ok());
+        let ip_addr = result.unwrap();
+        assert!(ip_addr.is_ipv4(), "was not ipv4");
+        assert_eq!(ip_addr.to_string(), ipv4, "to_string mismatch");
+    }
+
+    #[test]
+    fn byte_to_ipv6() {
+        let ipv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
+        let result = byte_to_ip(&Bytes::from(ipv6));
+        assert!(result.is_ok());
+        let ip_addr = result.unwrap();
+        assert!(ip_addr.is_ipv6(), "was not ipv6");
+        assert!(!ip_addr.is_ipv4(), "was ipv4");
+        assert_eq!(ip_addr.to_string(), "2001:db8:85a3::8a2e:370:7334");
+        assert_ne!(ip_addr.is_unspecified(), true);
+    }
 }
