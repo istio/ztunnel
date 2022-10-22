@@ -123,8 +123,8 @@ impl WorkloadBuilder {
     }
 
     #[allow(dead_code)]
-    pub fn waypoint_address(mut self, waypoint_address: IpAddr) -> WorkloadBuilder {
-        self.waypoint_address = Some(waypoint_address);
+    pub fn waypoint_address(mut self, waypoint_address: Option<IpAddr>) -> WorkloadBuilder {
+        self.waypoint_address = waypoint_address;
         self
     }
 
@@ -181,11 +181,14 @@ impl fmt::Display for Upstream {
     }
 }
 
-fn byte_to_ip(b: &bytes::Bytes) -> Result<IpAddr, WorkloadError> {
+fn byte_to_ip(b: &bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
     let s = std::str::from_utf8(b).expect("error converting bytes to string");
+    if s.is_empty() {
+        return Ok(None);
+    }
     match IpAddr::from_str(s) {
-        Ok(ip) => Ok(ip),
-        Err(_) => Err(WorkloadError::ByteAddressParse(b.len())),
+        Ok(ip) => Ok(Some(ip)),
+        Err(_) => Err(WorkloadError::ByteAddressParse(s.len())),
     }
 }
 
@@ -193,7 +196,9 @@ impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource = resource.to_owned();
-        let workload_ip = byte_to_ip(&resource.address)?;
+        let workload_ip =
+            byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
+        let waypoint_ip = byte_to_ip(&resource.waypoint_address)?;
         let protocol =
             Protocol::try_from(xds::istio::workload::Protocol::from_i32(resource.protocol))?;
         let service_account =
@@ -207,6 +212,7 @@ impl TryFrom<&XdsWorkload> for Workload {
             service_account,
             workload_ip,
         )
+        .waypoint_address(waypoint_ip)
         .build();
         Ok(workload)
     }
@@ -423,50 +429,99 @@ mod tests {
     use bytes::Bytes;
 
     #[test]
-    fn byte_to_ip_garbage() {
+    fn byte_to_ipaddr_garbage() {
         let garbage = "foo";
         let result = byte_to_ip(&Bytes::from(garbage));
         assert!(result.is_err());
-        let actual_error_kind: WorkloadError = result.unwrap_err();
-        let expected_error_kind = WorkloadError::ByteAddressParse(garbage.len());
-        assert_eq!(actual_error_kind, expected_error_kind);
+        let actual_error: WorkloadError = result.unwrap_err();
+        let expected_error = WorkloadError::ByteAddressParse(garbage.len());
+        assert_eq!(actual_error, expected_error);
     }
 
     #[test]
-    fn byte_to_ipv4_empty() {
+    fn byte_to_ipaddr_empty() {
         let empty = "";
         let result = byte_to_ip(&Bytes::from(empty));
-        assert!(result.is_err())
+        assert!(result.is_ok());
+        let maybe_ip_addr = result.unwrap();
+        assert!(maybe_ip_addr.is_none());
     }
 
     #[test]
-    fn byte_to_ipv4_loopback() {
+    fn byte_to_ipaddr_unspecified() {
+        let unspecified = "0.0.0.0";
+        let result = byte_to_ip(&Bytes::from(unspecified));
+        assert!(result.is_ok());
+        let maybe_ip_addr = result.unwrap();
+        assert!(maybe_ip_addr.is_some());
+        let ip_addr = maybe_ip_addr.unwrap();
+        assert!(ip_addr.is_unspecified(), "was not unspecified")
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v4_loopback() {
         let loopback = "127.0.0.1";
         let result = byte_to_ip(&Bytes::from(loopback));
         assert!(result.is_ok());
-        let loopback_ip = result.unwrap();
-        assert_eq!(loopback_ip.to_string(), loopback);
+        let maybe_loopback_ip = result.unwrap();
+        assert!(maybe_loopback_ip.is_some());
+        assert_eq!(maybe_loopback_ip.unwrap().to_string(), loopback);
     }
 
     #[test]
-    fn byte_to_ipv4() {
+    fn byte_to_ipaddr_v4_localhost() {
+        let localhost = "localhost";
+        let result = byte_to_ip(&Bytes::from(localhost));
+        assert!(result.is_err());
+        let actual_error: WorkloadError = result.unwrap_err();
+        let expected_error = WorkloadError::ByteAddressParse(localhost.len());
+        assert_eq!(actual_error, expected_error);
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v4() {
         let ipv4 = "1.1.1.1";
         let result = byte_to_ip(&Bytes::from(ipv4));
         assert!(result.is_ok());
-        let ip_addr = result.unwrap();
+        let maybe_ip_addr = result.unwrap();
+        let ip_addr = maybe_ip_addr.unwrap();
         assert!(ip_addr.is_ipv4(), "was not ipv4");
+        assert!(!ip_addr.is_ipv6(), "was ipv6");
+        assert!(!ip_addr.is_unspecified(), "was unspecified");
         assert_eq!(ip_addr.to_string(), ipv4, "to_string mismatch");
     }
 
     #[test]
-    fn byte_to_ipv6() {
+    fn byte_to_ipaddr_v6() {
         let ipv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
         let result = byte_to_ip(&Bytes::from(ipv6));
         assert!(result.is_ok());
-        let ip_addr = result.unwrap();
+        let maybe_ip_addr = result.unwrap();
+        assert!(maybe_ip_addr.is_some());
+        let ip_addr = maybe_ip_addr.unwrap();
         assert!(ip_addr.is_ipv6(), "was not ipv6");
         assert!(!ip_addr.is_ipv4(), "was ipv4");
         assert_eq!(ip_addr.to_string(), "2001:db8:85a3::8a2e:370:7334");
         assert_ne!(ip_addr.is_unspecified(), true);
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v6_loopback_short() {
+        let loopback = "::1";
+        let result = byte_to_ip(&Bytes::from(loopback));
+        assert!(result.is_ok());
+        let maybe_loopback_ip = result.unwrap();
+        assert!(maybe_loopback_ip.is_some());
+        assert_eq!(maybe_loopback_ip.unwrap().to_string(), loopback);
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v6_loopback_long() {
+        let loopback = "0:0:0:0:0:0:0:1";
+        let result = byte_to_ip(&Bytes::from(loopback));
+        assert!(result.is_ok());
+        let maybe_loopback_ip = result.unwrap();
+        assert!(maybe_loopback_ip.is_some());
+        assert_eq!(maybe_loopback_ip.unwrap().to_string(), "::1");
     }
 }
