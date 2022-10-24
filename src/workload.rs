@@ -202,7 +202,7 @@ impl TryFrom<&XdsWorkload> for Workload {
         let protocol =
             Protocol::try_from(xds::istio::workload::Protocol::from_i32(resource.protocol))?;
         let service_account =
-            Option::from(resource.service_account).unwrap_or(String::from("default"));
+            Option::from(resource.service_account).unwrap_or_else(|| String::from("default"));
         let workload = WorkloadBuilder::new(
             resource.name,
             resource.namespace,
@@ -413,7 +413,7 @@ impl WorkloadInformation {
 }
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum WorkloadError {
     #[error("failed to parse address: {0}")]
     AddressParse(#[from] net::AddrParseError),
@@ -502,7 +502,7 @@ mod tests {
         assert!(ip_addr.is_ipv6(), "was not ipv6");
         assert!(!ip_addr.is_ipv4(), "was ipv4");
         assert_eq!(ip_addr.to_string(), "2001:db8:85a3::8a2e:370:7334");
-        assert_ne!(ip_addr.is_unspecified(), true);
+        assert!(!ip_addr.is_unspecified());
     }
 
     #[test]
