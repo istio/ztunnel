@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Mutex};
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
@@ -19,13 +18,13 @@ pub struct Inbound {
     cfg: Config,
     listener: TcpListener,
     cert_manager: identity::SecretManager,
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    workloads: WorkloadInformation,
 }
 
 impl Inbound {
     pub async fn new(
         cfg: Config,
-        workloads: Arc<Mutex<WorkloadInformation>>,
+        workloads: WorkloadInformation,
         cert_manager: identity::SecretManager,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
@@ -149,7 +148,7 @@ impl Inbound {
 #[derive(Clone)]
 struct InboundCertProvider {
     cert_manager: identity::SecretManager,
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    workloads: WorkloadInformation,
 }
 
 #[async_trait::async_trait]
@@ -159,8 +158,6 @@ impl crate::tls::CertProvider for InboundCertProvider {
         let identity = {
             let remote_addr = super::to_canonical_ip(orig);
             self.workloads
-                .lock()
-                .unwrap()
                 .find_workload(&remote_addr)
                 .ok_or(TlsError::CertificateLookup(remote_addr))?
                 .identity()

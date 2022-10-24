@@ -19,6 +19,8 @@ pub struct Config {
 
     /// Filepath to a local xds file for workloads, as YAML.
     pub local_xds_path: Option<String>,
+    /// If true, on-demand XDS will be used
+    pub xds_on_demand: bool,
 
     pub auth: identity::AuthSource,
 }
@@ -40,6 +42,7 @@ impl Default for Config {
 
             local_xds_path: Some(std::env::var("LOCAL_XDS_PATH").unwrap_or_else(|_| "".into()))
                 .filter(|s| !s.is_empty()),
+            xds_on_demand: std::env::var("XDS_ON_DEMAND").unwrap_or_else(|_| "".into()) == "on",
 
             auth: identity::AuthSource::Token(PathBuf::from(
                 r"./var/run/secrets/tokens/istio-token",

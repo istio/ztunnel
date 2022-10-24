@@ -13,7 +13,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
-use crate::xds::{HandlerContext, XdsUpdate};
+use crate::xds::{Demander, HandlerContext, XdsUpdate};
 use crate::{config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -73,12 +73,6 @@ impl Workload {
             namespace: self.namespace.clone(),
             service_account: self.service_account.clone(),
         }
-    }
-}
-
-impl Workload {
-    fn resource_name(&self) -> String {
-        self.name.to_owned() + "/" + self.namespace.as_str()
     }
 }
 
@@ -168,7 +162,7 @@ impl TryFrom<&XdsWorkload> for Workload {
 }
 
 pub struct WorkloadManager {
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    workloads: WorkloadInformation,
     xds_client: xds::AdsClient,
     local_client: LocalClient,
 }
@@ -182,7 +176,7 @@ fn handle_xds<F: FnOnce() -> anyhow::Result<()>>(ctx: &mut HandlerContext, name:
     }
 }
 
-impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadInformation>> {
+impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
     fn handle(&self, ctx: &mut HandlerContext, updates: Vec<XdsUpdate<XdsWorkload>>) {
         let mut wli = self.lock().unwrap();
         for res in updates {
@@ -219,9 +213,9 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadInformation>> {
 
 impl WorkloadManager {
     pub fn new(config: config::Config) -> WorkloadManager {
-        let workloads: Arc<Mutex<WorkloadInformation>> = Default::default();
+        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
-        let xds_client = xds::Config::new()
+        let xds_client = xds::Config::new(config.clone())
             .with_workload_handler(xds_workloads)
             .watch(xds::WORKLOAD_TYPE.into())
             .build();
@@ -229,6 +223,15 @@ impl WorkloadManager {
         let local_client = LocalClient {
             path: config.local_xds_path,
             workloads: local_workloads,
+        };
+        let demand = if config.xds_on_demand {
+            Some(xds_client.demander())
+        } else {
+            None
+        };
+        let workloads = WorkloadInformation {
+            info: workloads,
+            demand,
         };
         WorkloadManager {
             xds_client,
@@ -245,7 +248,7 @@ impl WorkloadManager {
         Ok(())
     }
 
-    pub fn workloads(&self) -> Arc<Mutex<WorkloadInformation>> {
+    pub fn workloads(&self) -> WorkloadInformation {
         self.workloads.clone()
     }
 }
@@ -253,7 +256,7 @@ impl WorkloadManager {
 /// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
 struct LocalClient {
     path: Option<String>,
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    workloads: Arc<Mutex<WorkloadStore>>,
 }
 
 impl LocalClient {
@@ -275,40 +278,79 @@ impl LocalClient {
     }
 }
 
-#[derive(serde::Serialize, Default)]
-/// A WorkloadInformation encapsulates all information about workloads in the mesh
+/// WorkloadInformation wraps WorkloadStore, but is able to additionally request resources on-demand.
+/// It is designed to be cheap to clone.
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct WorkloadInformation {
-    workloads: HashMap<IpAddr, Workload>,
-    name_index: HashMap<String, IpAddr>,
-    vips: HashMap<SocketAddr, HashSet<Upstream>>,
+    #[serde(flatten)]
+    info: Arc<Mutex<WorkloadStore>>,
+
+    /// demand, if present, is used to request on-demand updates for workloads.
+    #[serde(skip_serializing)]
+    demand: Option<Demander>,
 }
 
 impl WorkloadInformation {
-    fn insert(&mut self, w: Workload) {
-        let wip = w.workload_ip;
-        let wname = w.resource_name();
-        self.workloads.insert(wip, w);
-        self.name_index.insert(wname, wip);
-    }
-
-    fn remove(&mut self, name: String) {
-        if let Some(ip) = self.name_index.remove(&name) {
-            if let Some(_workload) = self.workloads.remove(&ip) {
-                // TODO: store VIPs in workload so we can remove them
-            } else {
-                panic!(
-                    "removed name {} with ip {}, but was not found in workload map",
-                    name, ip
-                )
+    pub async fn fetch_workload(&self, addr: &IpAddr) -> Option<Workload> {
+        // Wait for it on-demand, *if* needed
+        debug!("lookup workload for {addr}");
+        match self.find_workload(addr) {
+            None => {
+                if let Some(demand) = &self.demand {
+                    info!("workload not found, sending on-demand request for {addr}");
+                    demand.demand(addr.to_string()).await.recv().await;
+                    debug!("on demand ready: {addr}");
+                    self.find_workload(addr)
+                } else {
+                    None
+                }
             }
+            wl @ Some(_) => wl,
         }
     }
 
-    pub fn find_workload(&self, addr: &IpAddr) -> Option<&Workload> {
+    pub fn find_workload(&self, addr: &IpAddr) -> Option<Workload> {
+        let wi = self.info.lock().unwrap();
+        wi.find_workload(addr).cloned()
+    }
+
+    pub async fn find_upstream(&self, addr: SocketAddr) -> (Upstream, bool) {
+        let _ = self.fetch_workload(&addr.ip()).await;
+        let wi = self.info.lock().unwrap();
+        wi.find_upstream(addr)
+    }
+}
+
+/// A WorkloadStore encapsulates all information about workloads in the mesh
+#[derive(serde::Serialize, Default, Debug)]
+struct WorkloadStore {
+    workloads: HashMap<IpAddr, Workload>,
+    vips: HashMap<SocketAddr, HashSet<Upstream>>,
+}
+
+impl WorkloadStore {
+    fn insert(&mut self, w: Workload) {
+        let wip = w.workload_ip;
+        self.workloads.insert(wip, w);
+    }
+
+    fn remove(&mut self, ip: String) {
+        use std::str::FromStr;
+        let ip: IpAddr = match IpAddr::from_str(&ip) {
+            Err(e) => {
+                error!("received invalid resource removal {}, ignoring: {}", ip, e);
+                return;
+            }
+            Ok(i) => i,
+        };
+        self.workloads.remove(&ip);
+    }
+
+    fn find_workload(&self, addr: &IpAddr) -> Option<&Workload> {
         self.workloads.get(addr)
     }
 
-    pub fn find_upstream(&self, addr: SocketAddr) -> (Upstream, bool) {
+    fn find_upstream(&self, addr: SocketAddr) -> (Upstream, bool) {
         if let Some(upstream) = self.vips.get(&addr) {
             let us: &Upstream = upstream.iter().next().unwrap();
             // TODO: avoid clone
@@ -374,6 +416,8 @@ pub enum WorkloadError {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use bytes::Bytes;
 
     use super::*;
@@ -463,5 +507,64 @@ mod tests {
         let maybe_loopback_ip = result.unwrap();
         assert!(maybe_loopback_ip.is_some());
         assert_eq!(maybe_loopback_ip.unwrap().to_string(), "::1");
+    }
+
+    #[test]
+    fn workload_information() {
+        let default = Workload {
+            workload_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+
+            waypoint_address: None,
+            gateway_ip: None,
+            protocol: Default::default(),
+            name: "".to_string(),
+            namespace: "".to_string(),
+            service_account: "".to_string(),
+            node: "".to_string(),
+            native_hbone: false,
+        };
+        let mut wi = WorkloadStore::default();
+        assert_eq!((wi.workloads.len()), 0);
+        assert_eq!((wi.vips.len()), 0);
+
+        let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        wi.insert(Workload {
+            workload_ip: ip1,
+            name: "some name".to_string(),
+            ..default.clone()
+        });
+        assert_eq!((wi.workloads.len()), 1);
+        assert_eq!(
+            wi.find_workload(&ip1),
+            Some(&Workload {
+                workload_ip: ip1,
+                name: "some name".to_string(),
+                ..default.clone()
+            })
+        );
+
+        wi.remove("invalid".to_string());
+        assert_eq!(
+            wi.find_workload(&ip1),
+            Some(&Workload {
+                workload_ip: ip1,
+                name: "some name".to_string(),
+                ..default.clone()
+            })
+        );
+
+        wi.remove("127.0.0.2".to_string());
+        assert_eq!(
+            wi.find_workload(&ip1),
+            Some(&Workload {
+                workload_ip: ip1,
+                name: "some name".to_string(),
+                ..default
+            })
+        );
+
+        wi.remove("127.0.0.1".to_string());
+        assert_eq!(wi.find_workload(&ip1), None);
+        assert_eq!(wi.workloads.len(), 0);
     }
 }
