@@ -34,7 +34,7 @@ pub fn orig_dst_addr_fd<T: AsRawFd>(sock: T) -> io::Result<SocketAddr> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn orig_dst_addr_fd<T: AsRawFd>(sock: T) -> io::Result<SocketAddr> {
+pub fn orig_dst_addr_fd<T: AsRawFd>(_: T) -> io::Result<SocketAddr> {
     Err(io::Error::new(
         io::ErrorKind::Other,
         "SO_ORIGINAL_DST not supported on this operating system",
@@ -50,10 +50,19 @@ pub fn orig_dst_addr(sock: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn orig_dst_addr(_: &TcpStream) -> io::Result<SocketAddr> {
+pub fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     Err(io::Error::new(
         io::ErrorKind::Other,
         "SO_ORIGINAL_DST not supported on this operating system",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(unsafe_code)]
+pub fn set_transparent(_: &TcpListener) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "IP_TRANSPARENT not supported on this operating system",
     ))
 }
 
