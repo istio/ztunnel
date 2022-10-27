@@ -131,14 +131,9 @@ fn byte_to_ip(b: &bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
             let v: [u8; 16] = b.deref().try_into().expect("size already proven");
             Some(IpAddr::from(v))
         }
-        n => {
-            println!("invalid ip address length: {n}");
-            return Err(WorkloadError::ByteAddressParse(n));
-        }
+        n => return Err(WorkloadError::ByteAddressParse(n)),
     })
 }
-
-const DEFAULT_SERVICE_ACCOUNT: &str = "default";
 
 impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
@@ -157,8 +152,14 @@ impl TryFrom<&XdsWorkload> for Workload {
 
             name: resource.name,
             namespace: resource.namespace,
-            service_account: Option::from(resource.service_account)
-                .unwrap_or_else(|| DEFAULT_SERVICE_ACCOUNT.into()),
+            service_account: {
+                let result = resource.service_account;
+                if result.is_empty() {
+                    "default".into()
+                } else {
+                    result
+                }
+            },
             node: resource.node,
 
             native_hbone: resource.native_hbone,
