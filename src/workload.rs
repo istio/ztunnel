@@ -455,9 +455,7 @@ mod tests {
 
     #[test]
     fn byte_to_ipaddr_v6_loopback() {
-        let addr_vec: Vec<u8> = Vec::from([
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-        ]);
+        let addr_vec: Vec<u8> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
         let bytes = &Bytes::from(addr_vec);
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
