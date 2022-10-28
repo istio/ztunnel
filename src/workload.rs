@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::convert::Into;
+use std::net::{IpAddr, SocketAddr};
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
@@ -118,16 +120,16 @@ impl fmt::Display for Upstream {
     }
 }
 
-fn byte_to_ip(b: bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
+fn byte_to_ip(b: &bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
     Ok(match b.len() {
         0 => None,
         4 => {
-            let v: [u8; 4] = (&*b).try_into().expect("size already proven");
-            Some(IpAddr::V4(Ipv4Addr::from(v)))
+            let v: [u8; 4] = b.deref().try_into().expect("size already proven");
+            Some(IpAddr::from(v))
         }
         16 => {
-            let v: [u8; 16] = (&*b).try_into().expect("size already proven");
-            Some(IpAddr::V6(Ipv6Addr::from(v)))
+            let v: [u8; 16] = b.deref().try_into().expect("size already proven");
+            Some(IpAddr::from(v))
         }
         n => return Err(WorkloadError::ByteAddressParse(n)),
     })
@@ -136,10 +138,9 @@ fn byte_to_ip(b: bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
 impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
-        let waypoint = byte_to_ip(resource.waypoint_address.clone())?;
-        let address =
-            byte_to_ip(resource.address.clone())?.ok_or(WorkloadError::ByteAddressParse(0))?;
-        // TODO can we borrow instead of clone everywhere?
+        let resource: XdsWorkload = resource.to_owned();
+        let waypoint = byte_to_ip(&resource.waypoint_address)?;
+        let address = byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
         Ok(Workload {
             workload_ip: address,
             waypoint_address: waypoint,
@@ -149,17 +150,17 @@ impl TryFrom<&XdsWorkload> for Workload {
                 resource.protocol,
             ))?,
 
-            name: resource.name.clone(),
-            namespace: resource.namespace.clone(),
+            name: resource.name,
+            namespace: resource.namespace,
             service_account: {
-                let result = resource.service_account.clone();
+                let result = resource.service_account;
                 if result.is_empty() {
                     "default".into()
                 } else {
                     result
                 }
             },
-            node: resource.node.clone(),
+            node: resource.node,
 
             native_hbone: resource.native_hbone,
         })
@@ -361,7 +362,7 @@ impl WorkloadInformation {
 }
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum WorkloadError {
     #[error("failed to parse address: {0}")]
     AddressParse(#[from] net::AddrParseError),
@@ -369,4 +370,98 @@ pub enum WorkloadError {
     ByteAddressParse(usize),
     #[error("unknown protocol {0}")]
     ProtocolParse(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[test]
+    fn byte_to_ipaddr_garbage() {
+        let garbage = "not_an_ip";
+        let bytes = Bytes::from(garbage);
+        let result = byte_to_ip(&bytes);
+        assert!(result.is_err());
+        let actual_error: WorkloadError = result.unwrap_err();
+        let expected_error = WorkloadError::ByteAddressParse(garbage.len());
+        assert_eq!(actual_error, expected_error);
+    }
+
+    #[test]
+    fn byte_to_ipaddr_empty() {
+        let empty = "";
+        let bytes = Bytes::from(empty);
+        let result = byte_to_ip(&bytes);
+        assert!(result.is_ok());
+        let maybe_ip_addr = result.unwrap();
+        assert!(maybe_ip_addr.is_none());
+    }
+
+    #[test]
+    fn byte_to_ipaddr_unspecified() {
+        let unspecified: Vec<u8> = vec![0, 0, 0, 0];
+        let bytes = Bytes::from(unspecified);
+        let result = byte_to_ip(&bytes);
+        assert!(result.is_ok());
+        let maybe_ip_addr = result.unwrap();
+        assert!(maybe_ip_addr.is_some());
+        let ip_addr = maybe_ip_addr.unwrap();
+        assert!(ip_addr.is_unspecified(), "was not unspecified")
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v4_loopback() {
+        let loopback: Vec<u8> = vec![127, 0, 0, 1];
+        let bytes = Bytes::from(loopback);
+        let result = byte_to_ip(&bytes);
+        assert!(result.is_ok());
+        let maybe_loopback_ip = result.unwrap();
+        assert!(maybe_loopback_ip.is_some());
+        assert_eq!(maybe_loopback_ip.unwrap().to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v4_happy() {
+        let addr_vec: Vec<u8> = Vec::from([1, 1, 1, 1]);
+        let bytes = &Bytes::from(addr_vec);
+        let result = byte_to_ip(bytes);
+        assert!(result.is_ok());
+        let maybe_ip_addr = result.unwrap();
+        assert!(maybe_ip_addr.is_some());
+        let ip_addr = maybe_ip_addr.unwrap();
+        assert!(ip_addr.is_ipv4(), "was not ipv4");
+        assert!(!ip_addr.is_ipv6(), "was ipv6");
+        assert!(!ip_addr.is_unspecified(), "was unspecified");
+        assert_eq!(ip_addr.to_string(), "1.1.1.1");
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v6_happy() {
+        let addr: Vec<u8> = Vec::from([
+            32, 1, 13, 184, 133, 163, 0, 0, 0, 0, 138, 46, 3, 112, 115, 52,
+        ]);
+        let bytes = &Bytes::from(addr);
+        let result = byte_to_ip(bytes);
+        assert!(result.is_ok());
+        let maybe_ip_addr = result.unwrap();
+        assert!(maybe_ip_addr.is_some());
+        let ip_addr = maybe_ip_addr.unwrap();
+        assert!(ip_addr.is_ipv6(), "was not ipv6");
+        assert!(!ip_addr.is_ipv4(), "was ipv4");
+        assert!(!ip_addr.is_unspecified());
+        assert_eq!(ip_addr.to_string(), "2001:db8:85a3::8a2e:370:7334");
+    }
+
+    #[test]
+    fn byte_to_ipaddr_v6_loopback() {
+        let addr_vec: Vec<u8> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let bytes = &Bytes::from(addr_vec);
+        let result = byte_to_ip(bytes);
+        assert!(result.is_ok());
+        let maybe_loopback_ip = result.unwrap();
+        assert!(maybe_loopback_ip.is_some());
+        assert_eq!(maybe_loopback_ip.unwrap().to_string(), "::1");
+    }
 }
