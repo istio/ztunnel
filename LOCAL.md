@@ -10,6 +10,25 @@ A local file can configure workloads: `LOCAL_XDS_PATH=./examples/localhost.yaml 
 
 This example adds a workload for `127.0.0.1`, allowing us to send requests to/from localhost.
 
+## Authentication
+
+Ztunnel authentication for CA requires a pod-bound Service Account token. This makes local running a
+bit more complex than normally.
+
+First, you must have at least 1 ztunnel pod running. Then the below command will fetch a token:
+
+```shell
+ztunnel-local-bootstrap () {
+  pod="$(kubectl get pods -lapp=ztunnel -n istio-system -ojson | jq '.items[0]')"
+  sa="$(<<<"${pod}"  jq -r '.spec.serviceAccountName')"
+  uid="$(<<<"${pod}"  jq -r '.metadata.uid')"
+  name="$(<<<"${pod}"  jq -r '.metadata.name')"
+  mkdir -p ./var/run/secrets/tokens ./var/run/secrets/istio
+  kubectl create token $sa -n istio-system --audience=istio-ca --duration=240h --bound-object-kind Pod --bound-object-name="${name}" --bound-object-uid="${uid}" > ./var/run/secrets/tokens/istio-token
+  kubectl -n istio-system get secret istio-ca-secret -ojsonpath='{.data.ca-cert\.pem}' | base64 -d > ./var/run/secrets/istio/root-cert.pem
+}
+```
+
 ## XDS and CA
 
 While XDS is not a hard requirement due to the static config file, the CA is.
