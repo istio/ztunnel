@@ -47,9 +47,10 @@ Initial setup:
 sudo useradd iptables1
 function redirect-to () {
   redirect-to-clean
-  sudo iptables -t nat -I OUTPUT 1 -p tcp -m owner --uid-owner 1000 -j REDIRECT --to-ports "${1:?port}" -m comment --comment "local-redirect-to"
-  sudo ip6tables -t nat -I OUTPUT 1 -p tcp -m owner --uid-owner 1000 -j REDIRECT --to-ports "${1:?port}" -m comment --comment "local-redirect-to"
-  echo "Redirecting calls from UID 1000 to ${1}"
+  uid=$(id -u iptables1)
+  sudo iptables -t nat -I OUTPUT 1 -p tcp -m owner --uid-owner "$uid" -j REDIRECT --to-ports "${1:?port}" -m comment --comment "local-redirect-to"
+  sudo ip6tables -t nat -I OUTPUT 1 -p tcp -m owner --uid-owner "$uid" -j REDIRECT --to-ports "${1:?port}" -m comment --comment "local-redirect-to"
+  echo "Redirecting calls from UID $uid to ${1}"
   echo "Try: sudo -u iptables1 curl"
 }
 function redirect-to-clean () {
