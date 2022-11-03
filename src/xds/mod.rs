@@ -14,5 +14,5 @@ pub enum Error {
     Connection(#[source] tonic::Status),
     /// Attempted to send on a MPSC channel which has been canceled
     #[error(transparent)]
-    RequestFailure(#[from] mpsc::error::SendError<DeltaDiscoveryRequest>),
+    RequestFailure(#[from] Box<mpsc::error::SendError<DeltaDiscoveryRequest>>),
 }

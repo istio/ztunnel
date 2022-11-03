@@ -260,7 +260,7 @@ impl AdsClient {
                     ..Default::default()
                 })
                 .await
-                .map_err(Error::RequestFailure)?;
+                .map_err(|e| Error::RequestFailure(Box::new(e)))?;
         }
         info!("Stream terminate");
         Ok(())
