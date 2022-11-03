@@ -44,15 +44,15 @@ impl Proxy {
     pub async fn new(
         cfg: config::Config,
         workloads: WorkloadInformation,
-        secret_manager: identity::SecretManager,
+        cert_manager: identity::SecretManager,
         drain: Watch,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound_passthrough = InboundPassthrough::new(cfg.clone());
-        let inbound = Inbound::new(cfg.clone(), workloads.clone(), secret_manager.clone()).await?;
+        let inbound = Inbound::new(cfg.clone(), workloads.clone(), cert_manager.clone()).await?;
         let outbound = Outbound::new(
             cfg.clone(),
-            secret_manager.clone(),
+            cert_manager.clone(),
             workloads.clone(),
             inbound.address().port(),
             drain,
@@ -60,7 +60,7 @@ impl Proxy {
         .await?;
         let socks5 = Socks5::new(
             cfg.clone(),
-            secret_manager.clone(),
+            cert_manager.clone(),
             inbound.address().port(),
             workloads.clone(),
         )

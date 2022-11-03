@@ -75,7 +75,7 @@ impl Socks5 {
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
-async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
+async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
     // Version(5), Number of auth methods
     let mut version = [0u8; 2];
     stream.read_exact(&mut version).await?;
