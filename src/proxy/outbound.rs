@@ -236,7 +236,7 @@ impl OutboundConnection {
             // so we need to explicitly send it to ourselves.
             // In the future this could be optimized to avoid a full network traversal.
             req.request_type = RequestType::DirectLocal;
-            req.gateway = "127.0.0.1:15008".parse().unwrap();
+            req.gateway = "127.0.0.1:15088".parse().unwrap();
         } else if us.workload.name.is_empty() {
             req.request_type = RequestType::Passthrough;
         } else {
