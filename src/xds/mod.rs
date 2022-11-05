@@ -15,4 +15,6 @@ pub enum Error {
     /// Attempted to send on a MPSC channel which has been canceled
     #[error(transparent)]
     RequestFailure(#[from] Box<mpsc::error::SendError<DeltaDiscoveryRequest>>),
+    #[error("failed to send on demand resource")]
+    OnDemandSend(),
 }

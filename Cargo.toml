@@ -36,7 +36,7 @@ thiserror = "1.0.34"
 lazy_static = "1.4.0"
 pprof = { version = "0.10.1", features = ["protobuf", "protobuf-codec"] }
 gperftools = { version = "0.2.0", features = ["heap"], optional = true }
-serde = { version = "1.0.144", features = ["derive"] }
+serde = { version = "1.0.144", features = ["derive", "rc"] }
 serde_json = "1.0.85"
 tryhard = "0.5.0"
 num_cpus = "1.13.1"

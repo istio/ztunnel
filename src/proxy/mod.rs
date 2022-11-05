@@ -1,7 +1,7 @@
 use boring::error::ErrorStack;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+
 use tokio::net::TcpStream;
 use tracing::info;
 
@@ -25,7 +25,7 @@ pub struct Proxy {
 impl Proxy {
     pub async fn new(
         cfg: config::Config,
-        workloads: Arc<Mutex<WorkloadInformation>>,
+        workloads: WorkloadInformation,
         secret_manager: identity::SecretManager,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup

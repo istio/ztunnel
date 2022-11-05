@@ -1,6 +1,5 @@
 use boring::ssl::ConnectConfiguration;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -14,7 +13,7 @@ use crate::{identity, socket};
 pub struct Outbound {
     cfg: Config,
     cert_manager: identity::SecretManager,
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    workloads: WorkloadInformation,
     listener: TcpListener,
 }
 
@@ -22,7 +21,7 @@ impl Outbound {
     pub async fn new(
         cfg: Config,
         cert_manager: identity::SecretManager,
-        workloads: Arc<Mutex<WorkloadInformation>>,
+        workloads: WorkloadInformation,
     ) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
             .await
@@ -72,7 +71,7 @@ impl Outbound {
 
 struct OutboundConnection {
     cert_manager: identity::SecretManager,
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     cfg: Config,
 }
@@ -82,8 +81,8 @@ impl OutboundConnection {
         let remote_addr =
             super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
-        debug!("request from {} to {}", remote_addr, orig);
-        let req = self.build_request(remote_addr, orig);
+        let req = self.build_request(remote_addr, orig).await;
+        debug!("request from {} to {}", req.source.name, orig);
         match req.protocol {
             Protocol::Hbone => {
                 info!(
@@ -180,15 +179,16 @@ impl OutboundConnection {
         }
     }
 
-    fn build_request(&self, downstream: IpAddr, target: SocketAddr) -> Request {
+    async fn build_request(&self, downstream: IpAddr, target: SocketAddr) -> Request {
         let (source_workload, us, is_vip) = {
-            let wi = self.workloads.lock().unwrap();
-            let source_workload = wi
-                .find_workload(&downstream)
-                .expect("todo: source must be found")
-                .clone();
+            let source_workload = self
+                .workloads
+                .fetch_workload(&downstream)
+                .await
+                .expect("todo: source must be found");
 
-            let (us, is_vip) = wi.find_upstream(target);
+            // TODO: we want a single lock for source and upstream probably...?
+            let (us, is_vip) = self.workloads.find_upstream(target).await;
             (source_workload, us, is_vip)
         };
         let mut req = Request {
