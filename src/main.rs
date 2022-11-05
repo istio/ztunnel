@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let workload_manager = workload::WorkloadManager::new(config.clone());
 
     let workloads = workload_manager.workloads();
-    admin::Builder::new("[::]:15022".parse().unwrap(), workloads)
+    admin::Builder::new("[::]:15021".parse().unwrap(), workloads)
         .set_ready()
         .bind()
         .expect("admin server starts")
