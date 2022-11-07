@@ -232,11 +232,14 @@ impl OutboundConnection {
             && self.cfg.local_node == Some(us.workload.node)
             && req.protocol == Protocol::Hbone
         {
-            // Sending to a node on the same node (ourselves). Requests from the node proxy are not captured,
-            // so we need to explicitly send it to ourselves.
+            // Sending to a node on the same node (ourselves).
             // In the future this could be optimized to avoid a full network traversal.
             req.request_type = RequestType::DirectLocal;
-            req.gateway = "127.0.0.1:15088".parse().unwrap();
+            // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
+            // expects to lookup the desired certificate based on the destination IP. If we send directly,
+            // we would try to lookup an IP for 127.0.0.1.
+            // Instead, we send to the actual IP, but iptables in the pod ensures traffic is redirected to 15008.
+            req.gateway = SocketAddr::from((req.gateway.ip(), 15088));
         } else if us.workload.name.is_empty() {
             req.request_type = RequestType::Passthrough;
         } else {
