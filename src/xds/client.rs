@@ -3,6 +3,7 @@ use std::fmt;
 use std::time::Duration;
 
 use prost::Message;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -86,7 +87,7 @@ impl Config {
     }
 
     pub fn build(self) -> AdsClient {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
         AdsClient {
             config: self,
             workloads: HashSet::new(),
@@ -105,8 +106,8 @@ pub struct AdsClient {
     /// pending stores a list of all resources that are pending and XDS push
     pending: HashMap<ResourceKey, oneshot::Sender<()>>,
 
-    demand: tokio::sync::mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
-    demand_tx: tokio::sync::mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
+    demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
+    demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
@@ -126,7 +127,7 @@ impl Demanded {
 /// Demander allows requesting XDS resources on-demand
 #[derive(Debug, Clone)]
 pub struct Demander {
-    demand: tokio::sync::mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
+    demand: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 }
 
 impl Demander {
@@ -172,6 +173,7 @@ impl AdsClient {
                     // TODO: we may need more nuance here; if we fail due to invalid initial request we may overload
                     // But we want to reconnect from MaxConnectionAge immediately.
                     warn!("XDS client error: {}, retrying", e);
+                    backoff = Duration::from_millis(10);
                 }
                 Ok(_) => {
                     warn!("XDS client complete");
@@ -183,7 +185,6 @@ impl AdsClient {
 
     async fn run_internal(&mut self) -> Result<(), Error> {
         let initial_watches = &self.config.initial_watches;
-        let workload_handler = &self.config.workload_handler;
         let workloads = &mut self.workloads;
         match workloads.len() {
             0 => info!("Starting initial ADS client"),
@@ -203,8 +204,7 @@ impl AdsClient {
         };
         let svc = tls::grpc_connector(address).unwrap();
         let mut client = AggregatedDiscoveryServiceClient::new(svc);
-        let (discovery_req_tx, mut discovery_req_rx) =
-            tokio::sync::mpsc::channel::<DeltaDiscoveryRequest>(100);
+        let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);
         let watches = initial_watches.clone();
         let irv: HashMap<String, String> = workloads
             .iter()
@@ -243,7 +243,7 @@ impl AdsClient {
         };
 
         info!("Starting stream");
-        let mut respones_stream = client
+        let mut response_stream = client
             .delta_aggregated_resources(tonic::Request::new(outbound))
             .await
             .map_err(Error::Connection)?
@@ -251,136 +251,145 @@ impl AdsClient {
 
         info!("Stream established");
 
-        let demand = &mut self.demand;
         loop {
             tokio::select! {
-                demand_event = demand.recv() => {
-                    info!("received on demand request {demand_event:?}");
-                    let (tx, demand_event) = match demand_event {
-                        None => continue,
-                        Some(d) => d,
-                    };
-                    let ResourceKey { type_url, name } = demand_event.clone();
-                    self.pending.insert(demand_event, tx);
-                    discovery_req_tx
-                        .send(DeltaDiscoveryRequest {
-                            type_url,
-                            node: Some(Node {
-                                id: format!(
-                                    "{}~{}~{}.{}~{}.svc.cluster.local",
-                                    "sidecar", "1.1.1.1", "test", "test", "test"
-                                ),
-                                ..Default::default()
-                            }),
-                            resource_names_subscribe: vec![name],
-                            ..Default::default()
-                        })
-                        .await
-                        .map_err(|e| Error::RequestFailure(Box::new(e)))?;
+                _demand_event = self.demand.recv() => {
+                    self.handle_demand_event(None, &discovery_req_tx).await?;
                 }
-                msg = respones_stream.message() =>{
-                    let response = match msg? {
-                        None => break,
-                        Some(r) => r
-                    };
-                    let type_url = response.type_url;
-                    info!(
-                        type_url = type_url.clone(),
-                        size = response.resources.len(),
-                        "received response"
-                    );
-                    let mut updates: Vec<XdsUpdate<Workload>> = Vec::new();
-                    for res in response.resources.iter().cloned() {
-                        let resource = Resource::try_from(res).unwrap();
-                        let _cpy = resource.clone();
-                        match resource {
-                            Resource::Workload(inner) => {
-                                let name = inner.name.clone();
-                                let up = XdsUpdate::Update(inner);
-                                updates.push(up);
-                                workloads.insert(name.clone());
-                                let pending = {
-                                    self.pending.remove(&ResourceKey {
-                                        name: name.clone(),
-                                        type_url: type_url.clone(),
-                                    })
-                                };
-                                if let Some(send) = pending {
-                                debug!("on demand notify {}", name);
-                                    send.send(()).map_err(|_| Error::OnDemandSend())?;
-                                }
-                            }
-                        }
-                    }
-                    for res in response.removed_resources {
-                        workloads.remove(&res.clone());
-                        debug!("received delete resource {:#?}", res);
-                            let pending = {
-                                self.pending.remove(&ResourceKey {
-                                    name: res.clone(),
-                                    type_url: type_url.clone(),
-                                })
-                            };
-                            if let Some(send) = pending {
-                                debug!("on demand notify {}", res);
-                                send.send(()).map_err(|_| Error::OnDemandSend())?;
-                            }
-                        match type_url.clone().as_str() {
-                            xds::WORKLOAD_TYPE => {
-                                updates.push(XdsUpdate::Remove(res));
-                            }
-                            _ => warn!("ignoring unwatched type {}", type_url),
-                        }
-                    }
-
-                    let mut ctx = HandlerContext::new();
-                    workload_handler.handle(&mut ctx, updates);
-
-                    let error_detail = match ctx.rejects.len() {
-                        0 => None,
-                        _ => Some(
-                            ctx.rejects
-                                .into_iter()
-                                .map(|reject| reject.to_string())
-                                .collect::<Vec<String>>()
-                                .join("; "),
-                        ),
-                    };
-                    info!(
-                        type_url = type_url.clone(),
-                        none = response.nonce,
-                        "sending {}",
-                        if error_detail.is_some() {
-                            "NACK"
-                        } else {
-                            "ACK"
-                        }
-                    );
-                    discovery_req_tx
-                        .send(DeltaDiscoveryRequest {
-                            type_url: type_url.clone(),
-                            node: Some(Node {
-                                id: format!(
-                                    "{}~{}~{}.{}~{}.svc.cluster.local",
-                                    "sidecar", "1.1.1.1", "test", "test", "test"
-                                ),
-                                ..Default::default()
-                            }),
-                            response_nonce: response.nonce.clone(),
-                            error_detail: error_detail.map(|msg| Status {
-                                message: msg,
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .await
-                        .map_err(|e| Error::RequestFailure(Box::new(e)))?;
-
+                msg = response_stream.message() =>{
+                    self.handle_stream_event(msg?, &discovery_req_tx).await?;
                 }
 
             }
         }
-        info!("Stream terminate");
+    }
+
+    async fn handle_stream_event(
+        &mut self,
+        stream_event: Option<DeltaDiscoveryResponse>,
+        send: &mpsc::Sender<DeltaDiscoveryRequest>,
+    ) -> Result<(), Error> {
+        let Some(response) = stream_event else {
+            return Ok(());
+        };
+        let type_url = response.type_url;
+        info!(
+            type_url = type_url.clone(),
+            size = response.resources.len(),
+            "received response"
+        );
+        let mut updates: Vec<XdsUpdate<Workload>> = Vec::new();
+        for res in response.resources.iter().cloned() {
+            let resource = Resource::try_from(res).unwrap();
+            let _cpy = resource.clone();
+            match resource {
+                Resource::Workload(inner) => {
+                    let name = inner.name.clone();
+                    let up = XdsUpdate::Update(inner);
+                    updates.push(up);
+                    self.workloads.insert(name.clone());
+                    let pending = {
+                        self.pending.remove(&ResourceKey {
+                            name: name.clone(),
+                            type_url: type_url.clone(),
+                        })
+                    };
+                    if let Some(send) = pending {
+                        debug!("on demand notify {}", name);
+                        send.send(()).map_err(|_| Error::OnDemandSend())?;
+                    }
+                }
+            }
+        }
+        for res in response.removed_resources {
+            self.workloads.remove(&res.clone());
+            debug!("received delete resource {:#?}", res);
+            let pending = {
+                self.pending.remove(&ResourceKey {
+                    name: res.clone(),
+                    type_url: type_url.clone(),
+                })
+            };
+            if let Some(send) = pending {
+                debug!("on demand notify {}", res);
+                send.send(()).map_err(|_| Error::OnDemandSend())?;
+            }
+            match type_url.clone().as_str() {
+                xds::WORKLOAD_TYPE => {
+                    updates.push(XdsUpdate::Remove(res));
+                }
+                _ => warn!("ignoring unwatched type {}", type_url),
+            }
+        }
+
+        let mut ctx = HandlerContext::new();
+        self.config.workload_handler.handle(&mut ctx, updates);
+
+        let error_detail = match ctx.rejects.len() {
+            0 => None,
+            _ => Some(
+                ctx.rejects
+                    .into_iter()
+                    .map(|reject| reject.to_string())
+                    .collect::<Vec<String>>()
+                    .join("; "),
+            ),
+        };
+        info!(
+            type_url = type_url.clone(),
+            none = response.nonce,
+            "sending {}",
+            if error_detail.is_some() {
+                "NACK"
+            } else {
+                "ACK"
+            }
+        );
+        send.send(DeltaDiscoveryRequest {
+            type_url: type_url.clone(),
+            node: Some(Node {
+                id: format!(
+                    "{}~{}~{}.{}~{}.svc.cluster.local",
+                    "sidecar", "1.1.1.1", "test", "test", "test"
+                ),
+                ..Default::default()
+            }),
+            response_nonce: response.nonce.clone(),
+            error_detail: error_detail.map(|msg| Status {
+                message: msg,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| Error::RequestFailure(Box::new(e)))
+    }
+
+    async fn handle_demand_event(
+        &mut self,
+        demand_event: Option<(oneshot::Sender<()>, ResourceKey)>,
+        send: &mpsc::Sender<DeltaDiscoveryRequest>,
+    ) -> Result<(), Error> {
+        info!("received on demand request {demand_event:?}");
+        let Some((tx, demand_event)) = demand_event else {
+            return Ok(());
+        };
+        let ResourceKey { type_url, name } = demand_event.clone();
+        self.pending.insert(demand_event, tx);
+        send.send(DeltaDiscoveryRequest {
+            type_url,
+            node: Some(Node {
+                id: format!(
+                    "{}~{}~{}.{}~{}.svc.cluster.local",
+                    "sidecar", "1.1.1.1", "test", "test", "test"
+                ),
+                ..Default::default()
+            }),
+            resource_names_subscribe: vec![name],
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| Error::RequestFailure(Box::new(e)))?;
         Ok(())
     }
 }
