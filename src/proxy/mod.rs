@@ -125,7 +125,7 @@ pub async fn copy_hbone(
 }
 
 fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
-    // add another match has to be used for IPv4 and IPv6 support
+    // another match has to be used for IPv4 and IPv6 support
     // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
     match ip.ip() {
         IpAddr::V4(i) => IpAddr::V4(i),
