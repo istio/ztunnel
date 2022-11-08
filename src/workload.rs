@@ -416,7 +416,7 @@ pub enum WorkloadError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     use bytes::Bytes;
 
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn byte_to_ipaddr_unspecified() {
-        let unspecified: Vec<u8> = vec![0, 0, 0, 0];
+        let unspecified: Vec<u8> = Ipv4Addr::UNSPECIFIED.octets().to_vec();
         let bytes = Bytes::from(unspecified);
         let result = byte_to_ip(&bytes);
         assert!(result.is_ok());
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn byte_to_ipaddr_v4_loopback() {
-        let loopback: Vec<u8> = vec![127, 0, 0, 1];
+        let loopback: Vec<u8> = Ipv4Addr::LOCALHOST.octets().to_vec();
         let bytes = Bytes::from(loopback);
         let result = byte_to_ip(&bytes);
         assert!(result.is_ok());
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn byte_to_ipaddr_v6_loopback() {
-        let addr_vec: Vec<u8> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let addr_vec: Vec<u8> = Ipv6Addr::LOCALHOST.octets().to_vec();
         let bytes = &Bytes::from(addr_vec);
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn workload_information() {
         let default = Workload {
-            workload_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
 
             waypoint_address: None,
             gateway_ip: None,
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
 
-        let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ip1 = IpAddr::V4(Ipv4Addr::LOCALHOST);
         wi.insert(Workload {
             workload_ip: ip1,
             name: "some name".to_string(),
