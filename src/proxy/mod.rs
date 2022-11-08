@@ -1,6 +1,6 @@
 use boring::error::ErrorStack;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use tokio::net::TcpStream;
 use tracing::info;
@@ -125,10 +125,15 @@ pub async fn copy_hbone(
 }
 
 fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
-    // Return an IPv4addr if it's an IPv4-mapped addresses or IPv6addr by using to_canonical() if
-    // the SocketAddr is a SocketAddrV6
+    // add another match has to be used for IPv4 and IPv6 support
+    // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
     match ip.ip() {
         IpAddr::V4(i) => IpAddr::V4(i),
-        IpAddr::V6(i) => IpAddr::V6(i).to_canonical(),
+        IpAddr::V6(i) => {
+            match i.octets() {
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
+                _ => IpAddr::V6(i),
+            }
+        },
     }
 }
