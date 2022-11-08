@@ -129,11 +129,11 @@ fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
     // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
     match ip.ip() {
         IpAddr::V4(i) => IpAddr::V4(i),
-        IpAddr::V6(i) => {
-            match i.octets() {
-                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-                _ => IpAddr::V6(i),
+        IpAddr::V6(i) => match i.octets() {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
+                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
             }
+            _ => IpAddr::V6(i),
         },
     }
 }
