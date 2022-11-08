@@ -75,18 +75,18 @@ async fn main() -> anyhow::Result<()> {
     }));
     tasks.push(tokio::spawn(proxy.run()));
 
-    tasks.push(tokio::spawn(async move {
-        let auth =
-            identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token"));
-        let mut ca = identity::CaClient::new(auth);
-        let id = identity::Identity::Spiffe {
-            trust_domain: "cluster.local".to_string(),
-            namespace: "istio-system".to_string(),
-            service_account: "ztunnel".to_string(),
-        };
-        let certs = ca.fetch_certificate(id).await;
-        info!("got certs {certs:?}");
-    }));
+    // tasks.push(tokio::spawn(async move {
+    //     let auth =
+    //         identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token"));
+    //     let mut ca = identity::CaClient::new(auth);
+    //     let id = identity::Identity::Spiffe {
+    //         trust_domain: "cluster.local".to_string(),
+    //         namespace: "istio-system".to_string(),
+    //         service_account: "ztunnel".to_string(),
+    //     };
+    //     let certs = ca.fetch_certificate(id).await;
+    //     info!("got certs {certs:?}");
+    // }));
 
     futures::future::join_all(tasks).await;
     Ok(())
