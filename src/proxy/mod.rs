@@ -125,10 +125,10 @@ pub async fn copy_hbone(
 }
 
 fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
-    // For now we only support IPv4 but we are binding to IPv6 address; convert everything to IPv4
-    // TODO: Support IPv6 fully
+    // Return an IPv4addr if it's an IPv4-mapped addresses or IPv6addr by using to_canonical() if
+    // the SocketAddr is a SocketAddrV6
     match ip.ip() {
         IpAddr::V4(i) => IpAddr::V4(i),
-        IpAddr::V6(i) => IpAddr::V4(i.to_ipv4().unwrap()),
+        IpAddr::V6(i) => IpAddr::V6(i).to_canonical(),
     }
 }
