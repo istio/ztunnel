@@ -1,5 +1,5 @@
+use boring::ssl::ConnectConfiguration;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -8,18 +8,20 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::proxy::Error;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
-use crate::{socket, tls};
+use crate::{identity, socket};
 
 pub struct Outbound {
     cfg: Config,
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    cert_manager: identity::SecretManager,
+    workloads: WorkloadInformation,
     listener: TcpListener,
 }
 
 impl Outbound {
     pub async fn new(
         cfg: Config,
-        workloads: Arc<Mutex<WorkloadInformation>>,
+        cert_manager: identity::SecretManager,
+        workloads: WorkloadInformation,
     ) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
             .await
@@ -31,6 +33,7 @@ impl Outbound {
 
         Ok(Outbound {
             cfg,
+            cert_manager,
             workloads,
             listener,
         })
@@ -48,6 +51,7 @@ impl Outbound {
                     info!("accepted outbound connection from {}", remote);
                     let cfg = self.cfg.clone();
                     let oc = OutboundConnection {
+                        cert_manager: self.cert_manager.clone(),
                         workloads: self.workloads.clone(),
                         cfg,
                     };
@@ -55,7 +59,7 @@ impl Outbound {
                         let res = oc.proxy(stream).await;
                         match res {
                             Ok(_) => info!("outbound proxy complete"),
-                            Err(ref e) => warn!("outbound proxy failed: {:?}", e),
+                            Err(ref e) => warn!("outbound proxy failed: {}", e),
                         };
                     });
                 }
@@ -66,21 +70,19 @@ impl Outbound {
 }
 
 struct OutboundConnection {
-    workloads: Arc<Mutex<WorkloadInformation>>,
+    cert_manager: identity::SecretManager,
+    workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     cfg: Config,
 }
 
 impl OutboundConnection {
     async fn proxy(&self, mut stream: TcpStream) -> Result<(), Error> {
-        // For now we only support IPv4 but we are binding to IPv6 address; convert everything to IPv4
-        let remote_addr = match stream.peer_addr().expect("must receive peer addr").ip() {
-            IpAddr::V4(i) => IpAddr::V4(i),
-            IpAddr::V6(i) => IpAddr::V4(i.to_ipv4().unwrap()),
-        };
+        let remote_addr =
+            super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
-        debug!("request from {} to {}", remote_addr, orig);
-        let req = self.build_request(remote_addr, orig);
+        let req = self.build_request(remote_addr, orig).await;
+        debug!("request from {} to {}", req.source.name, orig);
         match req.protocol {
             Protocol::Hbone => {
                 info!(
@@ -106,8 +108,11 @@ impl OutboundConnection {
                     .unwrap();
 
                 let mut request_sender = if self.cfg.tls {
+                    let id = req.source.identity();
+                    let cert = self.cert_manager.fetch_certificate(id).await?;
+                    let connector = cert.connector()?.configure()?;
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
-                    let tls_stream = connect_tls(tcp_stream).await?;
+                    let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
                         .handshake(tls_stream)
                         .await
@@ -174,20 +179,21 @@ impl OutboundConnection {
         }
     }
 
-    fn build_request(&self, downstream: IpAddr, target: SocketAddr) -> Request {
+    async fn build_request(&self, downstream: IpAddr, target: SocketAddr) -> Request {
         let (source_workload, us, is_vip) = {
-            let wi = self.workloads.lock().unwrap();
-            let source_workload = wi
-                .find_workload(&downstream)
-                .expect("todo: source must be found")
-                .clone();
+            let source_workload = self
+                .workloads
+                .fetch_workload(&downstream)
+                .await
+                .expect("todo: source must be found");
 
-            let (us, is_vip) = wi.find_upstream(target);
+            // TODO: we want a single lock for source and upstream probably...?
+            let (us, is_vip) = self.workloads.find_upstream(target).await;
             (source_workload, us, is_vip)
         };
         let mut req = Request {
             protocol: us.workload.protocol,
-            _source: source_workload.clone(), // TODO drop clone
+            source: source_workload.clone(), // TODO drop clone
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
             gateway: us
                 .workload
@@ -196,7 +202,7 @@ impl OutboundConnection {
             direction: Direction::Outbound, // TODO set this
             request_type: RequestType::Direct,
         };
-        if source_workload.remote_proxy.is_some() {
+        if source_workload.waypoint_address.is_some() {
             // Source has a remote proxy. We should delegate everything to that proxy - do not even resolve VIP.
             // TODO: add client skipping
             req.request_type = RequestType::ToClientWaypoint;
@@ -206,10 +212,10 @@ impl OutboundConnection {
             // Load balancing decision is deferred to remote proxy
             req.destination = target;
             // Send to the remote proxy
-            req.gateway = SocketAddr::from((source_workload.remote_proxy.unwrap(), 15001));
+            req.gateway = SocketAddr::from((source_workload.waypoint_address.unwrap(), 15001));
             // Always use HBONE here
             req.protocol = Protocol::Hbone;
-        } else if us.workload.remote_proxy.is_some() {
+        } else if us.workload.waypoint_address.is_some() {
             // TODO: even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
             if is_vip {
@@ -221,16 +227,19 @@ impl OutboundConnection {
             req.protocol = Protocol::Hbone;
             // Let the client remote know we are on the inbound path.
             req.direction = Direction::Inbound;
-            req.gateway = SocketAddr::from((us.workload.remote_proxy.unwrap(), 15006));
+            req.gateway = SocketAddr::from((us.workload.waypoint_address.unwrap(), 15006));
         } else if !us.workload.node.is_empty()
             && self.cfg.local_node == Some(us.workload.node)
             && req.protocol == Protocol::Hbone
         {
-            // Sending to a node on the same node (ourselves). Requests from the node proxy are not captured,
-            // so we need to explicitly send it to ourselves.
+            // Sending to a node on the same node (ourselves).
             // In the future this could be optimized to avoid a full network traversal.
             req.request_type = RequestType::DirectLocal;
-            req.gateway = "127.0.0.1:15008".parse().unwrap();
+            // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
+            // expects to lookup the desired certificate based on the destination IP. If we send directly,
+            // we would try to lookup an IP for 127.0.0.1.
+            // Instead, we send to the actual IP, but iptables in the pod ensures traffic is redirected to 15008.
+            req.gateway = SocketAddr::from((req.gateway.ip(), 15088));
         } else if us.workload.name.is_empty() {
             req.request_type = RequestType::Passthrough;
         } else {
@@ -244,7 +253,7 @@ impl OutboundConnection {
 struct Request {
     protocol: Protocol,
     direction: Direction,
-    _source: Workload,
+    source: Workload,
     destination: SocketAddr,
     gateway: SocketAddr,
     request_type: RequestType,
@@ -266,16 +275,15 @@ enum RequestType {
 }
 
 async fn connect_tls(
+    mut connector: ConnectConfiguration,
     stream: TcpStream,
 ) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
-    let conn = tls::test_certs().connector();
-    let mut cfg = conn.unwrap().configure().unwrap();
-    cfg.set_verify_hostname(false);
-    cfg.set_use_server_name_indication(false);
+    connector.set_verify_hostname(false);
+    connector.set_use_server_name_indication(false);
     let addr = stream.local_addr();
-    cfg.set_verify_callback(boring::ssl::SslVerifyMode::PEER, move |_, x509| {
+    connector.set_verify_callback(boring::ssl::SslVerifyMode::PEER, move |_, x509| {
         info!("TLS callback for {:?}: {:?}", addr, x509.error());
         true
     });
-    tokio_boring::connect(cfg, "", stream).await
+    tokio_boring::connect(connector, "", stream).await
 }

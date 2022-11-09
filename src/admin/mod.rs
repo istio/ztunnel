@@ -2,8 +2,7 @@
 
 use hyper::{Body, Request, Response};
 use pprof::protos::Message;
-use std::ops::Deref;
-use std::sync::Mutex;
+
 use std::{
     net::SocketAddr,
     sync::{
@@ -30,7 +29,7 @@ use tracing::info;
 /// Supports configuring an admin server
 pub struct Builder {
     addr: SocketAddr,
-    workload_info: Arc<Mutex<WorkloadInformation>>,
+    workload_info: WorkloadInformation,
     ready: Readiness,
 }
 
@@ -38,14 +37,14 @@ pub struct Server {
     addr: SocketAddr,
     ready: Readiness,
     server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
-    workload_info: Arc<Mutex<WorkloadInformation>>,
+    workload_info: WorkloadInformation,
 }
 
 #[derive(Clone, Debug)]
 pub struct Readiness(Arc<AtomicBool>);
 
 impl Builder {
-    pub fn new(addr: SocketAddr, f: Arc<Mutex<WorkloadInformation>>) -> Self {
+    pub fn new(addr: SocketAddr, f: WorkloadInformation) -> Self {
         Self {
             addr,
             ready: Readiness(Arc::new(false.into())),
@@ -186,13 +185,8 @@ async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
     }
 }
 
-async fn handle_config_dump(
-    dump: Arc<Mutex<WorkloadInformation>>,
-    _req: Request<Body>,
-) -> Response<Body> {
-    let wli = dump.lock().unwrap();
-
-    let vec = serde_json::to_vec(wli.deref()).unwrap();
+async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> Response<Body> {
+    let vec = serde_json::to_vec(&dump).unwrap();
     Response::builder()
         .status(hyper::StatusCode::OK)
         .body(vec.into())

@@ -1,6 +1,8 @@
-use crate::identity::caclient::CaClient;
 use std::fmt;
+use tracing::instrument;
 
+use super::CaClient;
+use super::Error;
 use crate::tls;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -27,15 +29,19 @@ impl fmt::Display for Identity {
     }
 }
 
+#[derive(Clone)]
 pub struct SecretManager {
     client: CaClient,
 }
 
 impl SecretManager {
-    pub fn new() -> SecretManager {
-        todo!()
+    pub fn new(cfg: crate::config::Config) -> SecretManager {
+        let client = CaClient::new(cfg.auth);
+        SecretManager { client }
     }
-    pub fn fetch_certificate(_id: Identity) -> tls::Certs {
-        todo!()
+
+    #[instrument(skip_all, fields(%id))]
+    pub async fn fetch_certificate(&self, id: Identity) -> Result<tls::Certs, Error> {
+        self.client.clone().fetch_certificate(id).await
     }
 }

@@ -2,7 +2,7 @@
 name = "ztunnel"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.64"
+rust-version = "1.65"
 
 [features]
 default = []
@@ -18,7 +18,7 @@ path = "src/main.rs"
 futures = "0.3.12"
 hyper = { version = "0.14.18", features = ["full"] }
 tokio = {"version"= "1", features=["full"]}
-bytes = "1"
+bytes = { version = "1", features=["serde"]}
 log = "0.4"
 tower = { version = "0.4.12", features = ["full"] }
 libc = "0.2.126"
@@ -36,15 +36,16 @@ thiserror = "1.0.34"
 lazy_static = "1.4.0"
 pprof = { version = "0.10.1", features = ["protobuf", "protobuf-codec"] }
 gperftools = { version = "0.2.0", features = ["heap"], optional = true }
-serde = { version = "1.0.144", features = ["derive"] }
+serde = { version = "1.0.144", features = ["derive", "rc"] }
 serde_json = "1.0.85"
 tryhard = "0.5.0"
 num_cpus = "1.13.1"
-# TODO: FIPS
-boring = { version = "2.1.0", features = [] }
-tokio-boring = { version = "2.1.5", features = [] }
-hyper-boring = "2.1.2"
+boring = { version = "2.1.0", features = ['fips'] }
+tokio-boring = { version = "2.1.5", features = ['fips'] }
+hyper-boring = { version= "2.1.2", features = ['fips'] }
 anyhow = "1.0.65"
+serde_yaml = "0.9.13"
+async-trait = "0.1.58"
 
 [build-dependencies]
 tonic-build = "0.8"

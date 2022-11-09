@@ -5,6 +5,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::{Code, Request, Status};
 
+#[derive(Clone, Debug)]
 pub enum AuthSource {
     Token(PathBuf),
 }
@@ -13,7 +14,7 @@ impl AuthSource {
     pub fn load(&self) -> io::Result<Vec<u8>> {
         match self {
             AuthSource::Token(path) => {
-                let t = std::fs::read(&path)?;
+                let t = std::fs::read(path)?;
 
                 if t.is_empty() {
                     return Err(io::Error::new(
