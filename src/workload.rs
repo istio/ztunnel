@@ -1,3 +1,4 @@
+use rand::prelude::IteratorRandom;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
@@ -352,7 +353,9 @@ impl WorkloadStore {
 
     fn find_upstream(&self, addr: SocketAddr) -> (Upstream, bool) {
         if let Some(upstream) = self.vips.get(&addr) {
-            let us: &Upstream = upstream.iter().next().unwrap();
+            // Randomly pick an upstream
+            // TODO: do this more efficiently, and not just randomly
+            let us: &Upstream = upstream.iter().choose(&mut rand::thread_rng()).unwrap();
             // TODO: avoid clone
             let mut us: Upstream = us.clone();
             Self::set_gateway_ip(&mut us);
