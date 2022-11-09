@@ -1,6 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use boring::ssl::ConnectConfiguration;
+use drain::Watch;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
@@ -15,6 +16,7 @@ pub struct Outbound {
     cert_manager: identity::SecretManager,
     workloads: WorkloadInformation,
     listener: TcpListener,
+    drain: Watch,
 }
 
 impl Outbound {
@@ -22,6 +24,7 @@ impl Outbound {
         cfg: Config,
         cert_manager: identity::SecretManager,
         workloads: WorkloadInformation,
+        drain: Watch,
     ) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
             .await
@@ -36,6 +39,7 @@ impl Outbound {
             cert_manager,
             workloads,
             listener,
+            drain,
         })
     }
 
@@ -43,27 +47,39 @@ impl Outbound {
         let addr = self.listener.local_addr().unwrap();
         info!("outbound listener established {}", addr);
 
-        loop {
-            // Asynchronously wait for an inbound socket.
-            let socket = self.listener.accept().await;
-            match socket {
-                Ok((stream, remote)) => {
-                    info!("accepted outbound connection from {}", remote);
-                    let cfg = self.cfg.clone();
-                    let oc = OutboundConnection {
-                        cert_manager: self.cert_manager.clone(),
-                        workloads: self.workloads.clone(),
-                        cfg,
-                    };
-                    tokio::spawn(async move {
-                        let res = oc.proxy(stream).await;
-                        match res {
-                            Ok(_) => info!("outbound proxy complete"),
-                            Err(ref e) => warn!("outbound proxy failed: {}", e),
+        let accept = async move {
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                match socket {
+                    Ok((stream, remote)) => {
+                        info!("accepted outbound connection from {}", remote);
+                        let cfg = self.cfg.clone();
+                        let oc = OutboundConnection {
+                            cert_manager: self.cert_manager.clone(),
+                            workloads: self.workloads.clone(),
+                            cfg,
                         };
-                    });
+                        tokio::spawn(async move {
+                            let res = oc.proxy(stream).await;
+                            match res {
+                                Ok(_) => info!("outbound proxy complete"),
+                                Err(ref e) => warn!("outbound proxy failed: {}", e),
+                            };
+                        });
+                    }
+                    Err(e) => error!("Failed TCP handshake {}", e),
                 }
-                Err(e) => error!("Failed TCP handshake {}", e),
+            }
+        };
+
+        // Stop accepting once we drain.
+        // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
+        // this, but will need some timeout period, as we have no back-pressure mechanism on connections.
+        tokio::select! {
+            res = accept => { res }
+            _ = self.drain.signaled() => {
+                info!("outbound drained");
             }
         }
     }
