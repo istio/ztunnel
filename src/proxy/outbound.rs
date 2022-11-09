@@ -1,6 +1,6 @@
-use boring::ssl::ConnectConfiguration;
 use std::net::{IpAddr, SocketAddr};
 
+use boring::ssl::ConnectConfiguration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
@@ -265,7 +265,7 @@ enum Direction {
     Outbound,
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 enum RequestType {
     ToClientWaypoint,
     ToServerWaypoint,
@@ -286,4 +286,171 @@ async fn connect_tls(
         true
     });
     tokio_boring::connect(connector, "", stream).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use bytes::Bytes;
+
+    use crate::workload;
+    use crate::xds::istio::workload::Protocol as XdsProtocol;
+    use crate::xds::istio::workload::Workload as XdsWorkload;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn build_request() {
+        let cfg = Config {
+            local_node: Some("local-node".to_string()),
+            ..Default::default()
+        };
+        let wl = workload::WorkloadStore::test_store(vec![
+            XdsWorkload {
+                name: "source-workload".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 1]),
+                node: "local-node".to_string(),
+                ..Default::default()
+            },
+            XdsWorkload {
+                name: "test-tcp".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                protocol: XdsProtocol::Direct as i32,
+                node: "remote-node".to_string(),
+                virtual_ips: Default::default(),
+                ..Default::default()
+            },
+            XdsWorkload {
+                name: "test-hbone".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 3]),
+                protocol: XdsProtocol::Http as i32,
+                node: "remote-node".to_string(),
+                virtual_ips: Default::default(),
+                ..Default::default()
+            },
+            XdsWorkload {
+                name: "test-tcp-local".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 4]),
+                protocol: XdsProtocol::Direct as i32,
+                node: "local-node".to_string(),
+                virtual_ips: Default::default(),
+                ..Default::default()
+            },
+            XdsWorkload {
+                name: "test-hbone".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 5]),
+                protocol: XdsProtocol::Http as i32,
+                node: "local-node".to_string(),
+                virtual_ips: Default::default(),
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        let wi = WorkloadInformation {
+            info: Arc::new(Mutex::new(wl)),
+            demand: None,
+        };
+        let outbound = OutboundConnection {
+            cert_manager: identity::SecretManager::new(cfg.clone()),
+            workloads: wi,
+            cfg,
+        };
+
+        compare(
+            &outbound,
+            "1.2.3.4:80",
+            ExpectedRequest {
+                protocol: Protocol::Tcp,
+                destination: "1.2.3.4:80",
+                gateway: "1.2.3.4:80",
+                request_type: RequestType::Passthrough,
+            },
+            "unknown dest",
+        )
+        .await;
+
+        compare(
+            &outbound,
+            "127.0.0.2:80",
+            ExpectedRequest {
+                protocol: Protocol::Tcp,
+                destination: "127.0.0.2:80",
+                gateway: "127.0.0.2:80",
+                request_type: RequestType::Direct,
+            },
+            "known dest, remote node, TCP",
+        )
+        .await;
+
+        compare(
+            &outbound,
+            "127.0.0.3:80",
+            ExpectedRequest {
+                protocol: Protocol::Hbone,
+                destination: "127.0.0.3:80",
+                gateway: "127.0.0.3:15008",
+                request_type: RequestType::Direct,
+            },
+            "known dest, remote node, HBONE",
+        )
+        .await;
+
+        compare(
+            &outbound,
+            "127.0.0.4:80",
+            ExpectedRequest {
+                protocol: Protocol::Tcp,
+                destination: "127.0.0.4:80",
+                gateway: "127.0.0.4:80",
+                request_type: RequestType::Direct,
+            },
+            "known dest, local node, TCP",
+        )
+        .await;
+
+        compare(
+            &outbound,
+            "127.0.0.5:80",
+            ExpectedRequest {
+                protocol: Protocol::Hbone,
+                destination: "127.0.0.5:80",
+                gateway: "127.0.0.5:15088",
+                request_type: RequestType::DirectLocal,
+            },
+            "known dest, local node, HBONE",
+        )
+        .await;
+    }
+
+    #[derive(PartialEq, Debug)]
+    struct ExpectedRequest<'a> {
+        protocol: Protocol,
+        destination: &'a str,
+        gateway: &'a str,
+        request_type: RequestType,
+    }
+
+    async fn compare(
+        outbound: &OutboundConnection,
+        to: &str,
+        exp: ExpectedRequest<'_>,
+        name: &str,
+    ) {
+        let req = outbound
+            .build_request("127.0.0.1".parse().unwrap(), to.parse().unwrap())
+            .await;
+        let req = ExpectedRequest {
+            protocol: req.protocol,
+            destination: &req.destination.to_string(),
+            gateway: &req.gateway.to_string(),
+            request_type: req.request_type,
+        };
+        assert_eq!(exp, req, "{}", name);
+    }
 }
