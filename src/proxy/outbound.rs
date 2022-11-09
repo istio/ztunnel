@@ -16,7 +16,7 @@ pub struct Outbound {
     cert_manager: identity::SecretManager,
     workloads: WorkloadInformation,
     listener: TcpListener,
-    pub drain: Watch,
+    drain: Watch,
 }
 
 impl Outbound {
