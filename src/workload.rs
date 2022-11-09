@@ -34,7 +34,7 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
     fn try_from(value: Option<xds::istio::workload::Protocol>) -> Result<Self, Self::Error> {
         match value {
             Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::Hbone),
-            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::Hbone),
+            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::Tcp),
             None => Err(ProtocolParse("unknown type".into())),
         }
     }
@@ -184,21 +184,9 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
             handle_xds(ctx, name, || {
                 match res {
                     XdsUpdate::Update(w) => {
-                        let workload = Workload::try_from(&w.resource)?;
                         // TODO: we process each item on its own, this may lead to heavy lock contention.
                         // Need batch updates?
-                        wli.insert(workload.clone());
-                        for (vip, pl) in &w.resource.virtual_ips {
-                            let ip = vip.parse::<IpAddr>()?;
-                            for port in &pl.ports {
-                                let addr = SocketAddr::from((ip, port.service_port as u16));
-                                let us = Upstream {
-                                    workload: workload.clone(), // TODO avoid clones
-                                    port: port.target_port as u16,
-                                };
-                                wli.vips.entry(addr).or_default().insert(us);
-                            }
-                        }
+                        wli.insert_xds_workload(w.resource)?
                     }
                     XdsUpdate::Remove(name) => {
                         info!("handling delete {}", name);
@@ -283,11 +271,11 @@ impl LocalClient {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct WorkloadInformation {
     #[serde(flatten)]
-    info: Arc<Mutex<WorkloadStore>>,
+    pub info: Arc<Mutex<WorkloadStore>>,
 
     /// demand, if present, is used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
-    demand: Option<Demander>,
+    pub demand: Option<Demander>,
 }
 
 impl WorkloadInformation {
@@ -323,12 +311,38 @@ impl WorkloadInformation {
 
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
-struct WorkloadStore {
+pub struct WorkloadStore {
     workloads: HashMap<IpAddr, Workload>,
     vips: HashMap<SocketAddr, HashSet<Upstream>>,
 }
 
 impl WorkloadStore {
+    #[cfg(test)]
+    pub fn test_store(workloads: Vec<XdsWorkload>) -> anyhow::Result<WorkloadStore> {
+        let mut store = WorkloadStore::default();
+        for w in workloads {
+            store.insert_xds_workload(w)?;
+        }
+        Ok(store)
+    }
+
+    fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
+        let workload = Workload::try_from(&w)?;
+        self.insert(workload.clone());
+        for (vip, pl) in &w.virtual_ips {
+            let ip = vip.parse::<IpAddr>()?;
+            for port in &pl.ports {
+                let addr = SocketAddr::from((ip, port.service_port as u16));
+                let us = Upstream {
+                    workload: workload.clone(), // TODO avoid clones
+                    port: port.target_port as u16,
+                };
+                self.vips.entry(addr).or_default().insert(us);
+            }
+        }
+        Ok(())
+    }
+
     fn insert(&mut self, w: Workload) {
         let wip = w.workload_ip;
         self.workloads.insert(wip, w);
