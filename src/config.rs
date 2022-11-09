@@ -1,5 +1,5 @@
 use crate::identity;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -33,9 +33,9 @@ impl Default for Config {
             connection_window_size: 4 * 1024 * 1024,
             frame_size: 1024 * 1024,
 
-            inbound_addr: "[::]:15008".parse().unwrap(),
-            inbound_plaintext_addr: "[::]:15006".parse().unwrap(),
-            outbound_addr: "[::]:15001".parse().unwrap(),
+            inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
+            inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
+            outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
             local_node: Some(std::env::var("NODE_NAME").unwrap_or_else(|_| "".into()))
                 .filter(|s| !s.is_empty()),
