@@ -1,5 +1,5 @@
 use crate::identity;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time;
@@ -39,9 +39,9 @@ impl Default for Config {
 
             termination_grace_period: Duration::from_secs(5),
 
-            inbound_addr: "[::]:15008".parse().unwrap(),
-            inbound_plaintext_addr: "[::]:15006".parse().unwrap(),
-            outbound_addr: "[::]:15001".parse().unwrap(),
+            inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
+            inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
+            outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
             local_node: Some(std::env::var("NODE_NAME").unwrap_or_else(|_| "".into()))
                 .filter(|s| !s.is_empty()),

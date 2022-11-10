@@ -13,7 +13,7 @@ pub async fn spawn(shutdown: signal::Shutdown, config: config::Config) -> anyhow
     let workload_manager = workload::WorkloadManager::new(config.clone());
 
     let workloads = workload_manager.workloads();
-    admin::Builder::new("[::]:15021".parse().unwrap(), workloads)
+    admin::Builder::new(workloads)
         .set_ready()
         .bind()
         .expect("admin server starts")
