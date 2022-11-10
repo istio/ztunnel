@@ -61,8 +61,11 @@ pub struct Workload {
 
     #[serde(default)]
     pub workload_name: String,
+    #[serde(default)]
     pub workload_type: String,
+    #[serde(default)]
     pub canonical_name: String,
+    #[serde(default)]
     pub canonical_revision: String,
 
     #[serde(default)]
@@ -604,5 +607,26 @@ mod tests {
         wi.remove("127.0.0.1".to_string());
         assert_eq!(wi.find_workload(&ip1), None);
         assert_eq!(wi.workloads.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn local_client() {
+        let dir = std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("localhost.yaml")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let local_client = LocalClient {
+            path: Some(dir),
+            workloads: workloads.clone(),
+        };
+        local_client.run().await.expect("client should run");
+        let store = workloads.lock().unwrap();
+        let wl = store.find_workload(&"127.0.0.1".parse().unwrap());
+        // Make sure we get a valid workload
+        assert!(wl.is_some());
+        assert_eq!(wl.unwrap().service_account, "default");
     }
 }
