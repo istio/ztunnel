@@ -412,7 +412,7 @@ impl WorkloadStore {
             None => {
                 let mut ip = us.workload.workload_ip;
                 if let Some(addr) = us.workload.waypoint_address {
-                    ip = addr
+                    ip = addr;
                 }
                 us.workload.gateway_ip = Some(match us.workload.protocol {
                     Protocol::Hbone => SocketAddr::from((ip, 15008)),
