@@ -1,4 +1,3 @@
-use rand::prelude::IteratorRandom;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
@@ -7,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
 use futures::future::TryFutureExt;
+use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -58,6 +58,12 @@ pub struct Workload {
     pub namespace: String,
     #[serde(default)]
     pub service_account: String,
+
+    #[serde(default)]
+    pub workload_name: String,
+    pub workload_type: String,
+    pub canonical_name: String,
+    pub canonical_revision: String,
 
     #[serde(default)]
     pub node: String,
@@ -136,6 +142,7 @@ impl TryFrom<&XdsWorkload> for Workload {
         let resource: XdsWorkload = resource.to_owned();
         let waypoint = byte_to_ip(&resource.waypoint_address)?;
         let address = byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
+        let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
             waypoint_address: waypoint,
@@ -156,6 +163,11 @@ impl TryFrom<&XdsWorkload> for Workload {
                 }
             },
             node: resource.node,
+
+            workload_name: resource.workload_name,
+            workload_type,
+            canonical_name: resource.canonical_name,
+            canonical_revision: resource.canonical_revision,
 
             native_hbone: resource.native_hbone,
         })
@@ -398,6 +410,10 @@ impl WorkloadStore {
                     namespace: "".to_string(),
                     node: "".to_string(),
                     service_account: "".to_string(),
+                    workload_name: "".to_string(),
+                    workload_type: "".to_string(),
+                    canonical_name: "".to_string(),
+                    canonical_revision: "".to_string(),
 
                     native_hbone: false,
                 },
@@ -537,7 +553,12 @@ mod tests {
             name: "".to_string(),
             namespace: "".to_string(),
             service_account: "".to_string(),
+            workload_name: "".to_string(),
+            workload_type: "".to_string(),
+            canonical_name: "".to_string(),
+            canonical_revision: "".to_string(),
             node: "".to_string(),
+
             native_hbone: false,
         };
         let mut wi = WorkloadStore::default();
