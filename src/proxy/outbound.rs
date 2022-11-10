@@ -120,6 +120,7 @@ impl OutboundConnection {
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
+                    .header("baggage", baggage(&req))
                     .body(hyper::Body::empty())
                     .unwrap();
 
@@ -163,7 +164,7 @@ impl OutboundConnection {
                             .await
                             .expect("hbone client copy");
                     }
-                    Err(e) => eprintln!("upgrade error: {}, {}", e, code),
+                    Err(e) => error!("upgrade error: {}, {}", e, code),
                 }
                 info!("request complete");
                 Ok(())
@@ -263,6 +264,17 @@ impl OutboundConnection {
         }
         req
     }
+}
+
+fn baggage(r: &Request) -> String {
+    format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version}",
+        cluster="Kubernetes",// todo
+        namespace=r.source.namespace,
+        workload_type=r.source.workload_type,
+        workload_name=r.source.workload_name,
+        name=r.source.canonical_name,
+        version=r.source.canonical_revision,
+    )
 }
 
 #[derive(Debug)]
