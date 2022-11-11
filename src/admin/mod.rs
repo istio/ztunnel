@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{signal};
+use crate::signal;
 
 #[cfg(feature = "gperftools")]
 use gperftools::heap_profiler::HEAP_PROFILER;
