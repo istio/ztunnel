@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+use crate::{signal};
+
 #[cfg(feature = "gperftools")]
 use gperftools::heap_profiler::HEAP_PROFILER;
 #[cfg(feature = "gperftools")]
@@ -79,7 +81,7 @@ impl Builder {
 }
 
 impl Server {
-    pub fn spawn(self) {
+    pub fn spawn(self, shutdown: &signal::Shutdown) {
         let ready = self.ready.clone();
         let workload_info = self.workload_info.clone();
         let server = self
@@ -121,9 +123,13 @@ impl Server {
                 }
             }));
 
+        let shutdown_trigger = shutdown.trigger();
         tokio::spawn(async move {
             info!("Serving admin server at {}", self.addr);
-            server.await
+            if let Err(err) = server.await {
+                eprintln!("Serving admin start failed: {err}");
+                shutdown_trigger.shutdown_now().await;
+            }
         });
     }
 }
