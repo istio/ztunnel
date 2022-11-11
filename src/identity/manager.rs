@@ -14,9 +14,10 @@
 
 use std::fmt;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use tokio::time::{sleep, Duration};
 use tracing::instrument;
+use tokio::sync::watch;
 
 use super::CaClient;
 use super::Error;
@@ -50,37 +51,46 @@ impl fmt::Display for Identity {
 #[derive(Clone)]
 pub struct SecretManager {
     client: CaClient,
-    cache: Arc<Mutex<HashMap<Identity, tls::Certs>>>,
+    cache: Arc<RwLock<HashMap<Identity, watch::Receiver<Option<tls::Certs>>>>>,
 }
 
 impl SecretManager {
     pub fn new(cfg: crate::config::Config) -> SecretManager {
-        let client = CaClient::new(cfg.auth);
-        let cache: HashMap<Identity, tls::Certs> = Default::default();
-        return SecretManager { client: client, cache: Arc::new(Mutex::new(cache)) };
+        let caclient = CaClient::new(cfg.auth);
+        let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
+        SecretManager {
+            client: caclient,
+            cache: Arc::new(RwLock::new(cache))
+        }
     }
 
-    pub async fn refresh_handler(id: Identity, ctx: SecretManager, initial_sleep_time: u64) {
-        info!("refreshing certs for id {} in {:?} seconds", id, initial_sleep_time);
-        sleep(Duration::from_secs(initial_sleep_time)).await;
+    pub async fn refresh_handler(id: Identity, mut ctx: SecretManager,
+                                 initial_sleep_time: Duration,
+                                 tx: watch::Sender<Option<tls::Certs>>) {
+        sleep(initial_sleep_time).await;
         loop {
-            match ctx.client.clone().fetch_certificate(&id.clone()).await {
+            match ctx.client.fetch_certificate(&id).await {
                 Err(e) => {
                     // Cert refresh has failed. Drop cert from the cache.
                     warn!("Failed cert refresh for id {:?}: {:?}", id, e);
-                    { // lock cache
-                        let mut locked_cache = ctx.cache.lock().unwrap();
+                    {
+                        let mut locked_cache = ctx.cache.write().unwrap();
                         locked_cache.remove(&id.clone());
-                    } // unlock cache
+                    }
                     return;
                 }
                 Ok(fetched_certs) => {
-                    info!("refreshed certs {:?}", fetched_certs);
-                    { // lock cache
-                        let mut locked_cache = ctx.cache.lock().unwrap();
-                        locked_cache.insert(id.clone(), fetched_certs.clone());
-                    } // unlock cache
-                    let sleep_dur = Duration::from_secs(fetched_certs.get_seconds_until_refresh());
+
+                    let sleep_dur = fetched_certs.get_duration_until_refresh();
+                    match tx.send(Some(fetched_certs.clone())) {
+                        Err(_) => {
+                            let mut locked_cache = ctx.cache.write().unwrap();
+                            locked_cache.remove(&id.clone());
+                        },
+                        Ok(_) => {
+                            info!("refreshed certs for id: {:?}", id);
+                        }
+                    }
                     info!("refreshing certs for id {} in {:?} seconds", id, sleep_dur);
                     sleep(sleep_dur).await;
                 }
@@ -90,28 +100,88 @@ impl SecretManager {
 
     #[instrument(skip_all, fields(%id))]
     pub async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
-        // Check cache first
-        { // lock cache
-            let locked_cache = self.cache.lock().unwrap();
-            let cache_certs: std::option::Option<&tls::Certs> = locked_cache.get(id);
-            info!("cache certs for req: {:?}", cache_certs);
-            if cache_certs.is_some() {
-                return Ok(cache_certs.unwrap().clone())
+        loop {
+            let mut tx_option: Option<watch::Sender<Option<tls::Certs>>> = None;
+            let mut cache_rx = None;
+            {
+                let read_locked_cache = self.cache.read().unwrap();
+                match read_locked_cache.get(id) {
+                    None => {
+                        drop(read_locked_cache);
+                        let mut write_locked_cache = self.cache.write().unwrap();
+                        match write_locked_cache.get(id) {
+
+                            Some(cert_rx) => {
+                                // A different thread got here before us and is handling the fetch.
+                                // Take a copy of the receiver.
+                                cache_rx = Some(cert_rx.clone());
+                            },
+                            None => {
+                                let (tx, rx) = watch::channel(None);
+                                write_locked_cache.insert(id.clone(), rx);
+                                tx_option = Some(tx);
+                            }
+                        };
+                    }
+                    Some(cert_rcvr) => {
+                        info!("Got cached cert receiver.");
+                        cache_rx = Some(cert_rcvr.clone());
+                    }
+                }
             }
-        } // unlock cache
 
-        // No cache entry, fetch it and spawn refresh handler
-        let fetched_certs = self.client.clone().fetch_certificate(id).await?;
-        info!("fetched certs {:?}", fetched_certs);
-        { // lock cache
-            let mut locked_cache = self.cache.lock().unwrap();
-            locked_cache.insert(id.clone(), fetched_certs.clone());
-        } // unlock cache
+            // We made a transmitter, so fetch the cert and send the result.
+            if tx_option.is_some() {
+                let certs = self.client.fetch_certificate(id).await;
+                match certs {
+                    Ok(c) => {
+                        let tx = tx_option.unwrap();
+                        match tx.send(Some(c.clone())) {
+                            Ok(_) => {
+                                tokio::spawn(SecretManager::refresh_handler(
+                                    id.clone(),
+                                    self.clone(),
+                                    c.get_duration_until_refresh(),
+                                    tx));
+                            },
+                            Err(e) => {
+                                warn!("Failed to send fetched certs on channel: {:?}", e);
+                                let mut locked_cache = self.cache.write().unwrap();
+                                locked_cache.remove(id);
+                            }
+                        }
 
-        tokio::spawn(SecretManager::refresh_handler(id.clone(),
-                                                        self.clone(),
-                                                        fetched_certs.get_seconds_until_refresh()));
+                        return Ok(c);
+                    },
+                    Err(e) => {
+                        let mut locked_cache = self.cache.write().unwrap();
+                        locked_cache.remove(id);
+                        return Err(e);
+                    }
+                }
+            }
 
-        Ok(fetched_certs.clone())
+            // We found a channel receiver in the cache, so use it to get the cert.
+            loop {
+                let current_cert_info = cache_rx.as_mut().unwrap();
+                {
+                    let current_cert = current_cert_info.borrow_and_update();
+                    if current_cert.is_some() {
+                        return Ok(current_cert.clone().unwrap());
+                    }
+                }
+                // "None" means CA request in progress.  Wait for it.
+                match current_cert_info.changed().await {
+                    Err(_) => {
+                        // CA request failed or other error.
+                        warn!("Cert sender has been dropped.");
+                        break;
+                    }
+                    Ok(_) => {
+                        continue;
+                    }
+                }
+            }
+        }
     }
 }

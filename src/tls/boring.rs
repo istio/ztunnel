@@ -19,6 +19,7 @@ use std::net::IpAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::task::Poll;
+use std::time::Duration;
 
 use boring::ec::{EcGroup, EcKey};
 use boring::hash::MessageDigest;
@@ -97,15 +98,15 @@ pub struct Certs {
     key: pkey::PKey<pkey::Private>,
 }
 
-impl<'a> Certs {
-    pub fn not_before(&'a self) -> &'a Asn1TimeRef {
+impl Certs {
+    pub fn not_before(&self) -> &Asn1TimeRef {
         self.cert.not_before()
     }
-    pub fn not_after(&'a self) -> &'a Asn1TimeRef {
+    pub fn not_after(&self) -> &Asn1TimeRef {
         self.cert.not_after()
     }
 
-    pub fn get_seconds_until_refresh(&self) -> u64 {
+    pub fn get_duration_until_refresh(&self) -> Duration {
         let current = Asn1Time::days_from_now(0).unwrap();
         let start: &Asn1TimeRef = self.not_before();
         let end: &Asn1TimeRef = self.not_after();
@@ -117,9 +118,9 @@ impl<'a> Certs {
         let elapsed_secs = elapsed.days * 86400 + elapsed.secs; // 86400 secs/day
         let returnval : i32 = halflife-elapsed_secs;
         if returnval < 0 {
-            return 0 as u64
+            return Duration::from_secs(0);
         }
-        returnval as u64
+        Duration::from_secs(u64::try_from(returnval).unwrap())
     }
 }
 
