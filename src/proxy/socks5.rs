@@ -1,23 +1,16 @@
 use crate::config::Config;
-use crate::proxy::outbound::Outbound;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::Error;
 use anyhow::Result;
-use futures::{
-    future::FutureExt,
-    io::{AsyncRead, AsyncWrite},
-};
 use net::Ipv4Addr;
 use std::net;
 use byteorder::{BigEndian, ByteOrder};
-use std::io::Read;
-use std::io::Write;
-use crate::workload::{Protocol, Workload, WorkloadInformation};
+use crate::workload::WorkloadInformation;
 use crate::{identity, socket};
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use tokio::io::AsyncWriteExt;
 
 pub struct Socks5 {
@@ -69,7 +62,7 @@ impl Socks5 {
 
                         match handle(oc, stream).await {
                             Err(err) => log::error!("handshake error: {}", err),
-                            Ok(server_socket) => {}
+                            Ok(_) => {}
                         }
                     });
                 }
@@ -158,12 +151,12 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
     stream.read_exact(&mut port).await?;
     let port = BigEndian::read_u16(&port);
 
-    let mut host = SocketAddr::new(ip, port);
+    let host = SocketAddr::new(ip, port);
 
     let remote_addr =
         super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
 
-    let mut buf = [
+    let buf = [
         0x05u8,
         0x00, 0x00, // success, rsv
         0x01, 0x00, 0x00, 0x00, 0x00, // IPv4

@@ -4,7 +4,7 @@ use hyper::{Body, Request, Response};
 use pprof::protos::Message;
 
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -44,9 +44,9 @@ pub struct Server {
 pub struct Readiness(Arc<AtomicBool>);
 
 impl Builder {
-    pub fn new(addr: SocketAddr, f: WorkloadInformation) -> Self {
+    pub fn new(f: WorkloadInformation) -> Self {
         Self {
-            addr,
+            addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
             ready: Readiness(Arc::new(false.into())),
             workload_info: f,
         }

@@ -2,7 +2,8 @@
 
 Along with running in a Kubernetes, ztunnel can be run locally for development purposes.
 
-This doc covers ztunnel specifically, for general Istio local development see [Local Istio Development](https://github.com/howardjohn/local-istio-development).
+This doc covers ztunnel specifically, for general Istio local development see
+[Local Istio Development](https://github.com/howardjohn/local-istio-development).
 
 ## Workloads
 
@@ -12,59 +13,42 @@ This example adds a workload for `127.0.0.1`, allowing us to send requests to/fr
 
 ## Authentication
 
-Ztunnel authentication for CA requires a pod-bound Service Account token. This makes local running a
-bit more complex than normally.
+Ztunnel authentication for CA requires a pod-bound Service Account token.
+This makes local running a bit more complex than normally.
 
-First, you must have at least 1 ztunnel pod running. Then the below command will fetch a token:
+First, you must have at least 1 ztunnel pod running.
+See the [instructions](https://github.com/istio/istio/blob/experimental-ambient/CONTRIBUTING.md)
+for deploying a ztunnel.
+
+Then the below command will fetch a token:
 
 ```shell
-ztunnel-local-bootstrap () {
-  pod="$(kubectl get pods -lapp=ztunnel -n istio-system -ojson | jq '.items[0]')"
-  sa="$(<<<"${pod}"  jq -r '.spec.serviceAccountName')"
-  uid="$(<<<"${pod}"  jq -r '.metadata.uid')"
-  name="$(<<<"${pod}"  jq -r '.metadata.name')"
-  mkdir -p ./var/run/secrets/tokens ./var/run/secrets/istio
-  kubectl create token $sa -n istio-system --audience=istio-ca --duration=240h --bound-object-kind Pod --bound-object-name="${name}" --bound-object-uid="${uid}" > ./var/run/secrets/tokens/istio-token
-  kubectl -n istio-system get secret istio-ca-secret -ojsonpath='{.data.ca-cert\.pem}' | base64 -d > ./var/run/secrets/istio/root-cert.pem
-}
+source ./scripts/local.sh
+ztunnel-local-bootstrap
 ```
 
 ## XDS and CA
 
 While XDS is not a hard requirement due to the static config file, the CA is.
+When running locally, ztunnel will automatically connect to an Istiod running on localhost.
 
 Istiod can be run locally as simply as `go run ./pilot/cmd/pilot-discovery discovery`.
 
-When running locally, ztunnel will automatically connect to an Istiod running on localhost.
-
 ## Sending requests
 
-Ztunnel expects requests to be redirected with iptables. The following scripts can help do this:
+Ztunnel expects requests to be redirected with iptables. The following functions can help do this:
 
-Initial setup:
+* `redirect-user-setup` sets up a new user specified by `$ZTUNNEL_REDIRECT_USER`
+* `redirect-to <port>` redirects all traffic from `$ZTUNNEL_REDIRECT_USER` to the given port.
+* `redirect-to-clean` removes any iptables rules setup by `redirect-to`
+* `redirect-run <cmd>` runs the command as `$ZTUNNEL_REDIRECT_USER`.
 
-```shell
-sudo useradd iptables1
-function redirect-to () {
-  redirect-to-clean
-  uid=$(id -u iptables1)
-  sudo iptables -t nat -I OUTPUT 1 -p tcp -m owner --uid-owner "$uid" -j REDIRECT --to-ports "${1:?port}" -m comment --comment "local-redirect-to"
-  sudo ip6tables -t nat -I OUTPUT 1 -p tcp -m owner --uid-owner "$uid" -j REDIRECT --to-ports "${1:?port}" -m comment --comment "local-redirect-to"
-  echo "Redirecting calls from UID $uid to ${1}"
-  echo "Try: sudo -u iptables1 curl"
-}
-function redirect-to-clean () {
-  sudo iptables-save | grep '^\-A' | grep "local-redirect-to" | cut -c 4- | xargs -r -L 1 echo sudo iptables -t nat -D
-  sudo iptables-save | grep '^\-A' | grep "local-redirect-to" | cut -c 4- | xargs -r -L 1 sudo iptables -t nat -D
-  sudo ip6tables-save | grep '^\-A' | grep "local-redirect-to" | cut -c 4- | xargs -r -L 1 echo sudo ip6tables -t nat -D
-  sudo ip6tables-save | grep '^\-A' | grep "local-redirect-to" | cut -c 4- | xargs -r -L 1 sudo ip6tables -t nat -D
-}
-alias redirect-run=`sudo -u iptables1`
-```
-
-Then, setup redirection logic for all requests from the `iptables1` user to 15001:
+To setup redirection logic for all requests from the `iptables1` user to 15001:
 
 ```shell
+source ./scripts/local.sh
+export ZTUNNEL_REDIRECT_USER="iptables1"
+redirect-user-setup
 redirect-to 15001
 ```
 

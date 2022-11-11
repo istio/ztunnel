@@ -1,4 +1,5 @@
 use boring::error::ErrorStack;
+use drain::Watch;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -30,11 +31,12 @@ impl Proxy {
         cfg: config::Config,
         workloads: WorkloadInformation,
         secret_manager: identity::SecretManager,
+        drain: Watch,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound_passthrough = InboundPassthrough::new(cfg.clone());
         let inbound = Inbound::new(cfg.clone(), workloads.clone(), secret_manager.clone()).await?;
-        let outbound = Outbound::new(cfg.clone(), secret_manager.clone(), workloads.clone()).await?;
+        let outbound = Outbound::new(cfg.clone(), secret_manager.clone(), workloads.clone(), drain).await?;
         let socks5 = Socks5::new(cfg.clone(), secret_manager.clone(), workloads.clone()).await?;
         Ok(Proxy {
             inbound,

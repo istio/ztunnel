@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
 use futures::future::TryFutureExt;
+use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -34,7 +35,7 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
     fn try_from(value: Option<xds::istio::workload::Protocol>) -> Result<Self, Self::Error> {
         match value {
             Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::Hbone),
-            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::Hbone),
+            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::Tcp),
             None => Err(ProtocolParse("unknown type".into())),
         }
     }
@@ -57,6 +58,15 @@ pub struct Workload {
     pub namespace: String,
     #[serde(default)]
     pub service_account: String,
+
+    #[serde(default)]
+    pub workload_name: String,
+    #[serde(default)]
+    pub workload_type: String,
+    #[serde(default)]
+    pub canonical_name: String,
+    #[serde(default)]
+    pub canonical_revision: String,
 
     #[serde(default)]
     pub node: String,
@@ -135,6 +145,7 @@ impl TryFrom<&XdsWorkload> for Workload {
         let resource: XdsWorkload = resource.to_owned();
         let waypoint = byte_to_ip(&resource.waypoint_address)?;
         let address = byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
+        let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
             waypoint_address: waypoint,
@@ -155,6 +166,11 @@ impl TryFrom<&XdsWorkload> for Workload {
                 }
             },
             node: resource.node,
+
+            workload_name: resource.workload_name,
+            workload_type,
+            canonical_name: resource.canonical_name,
+            canonical_revision: resource.canonical_revision,
 
             native_hbone: resource.native_hbone,
         })
@@ -184,21 +200,9 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
             handle_xds(ctx, name, || {
                 match res {
                     XdsUpdate::Update(w) => {
-                        let workload = Workload::try_from(&w.resource)?;
                         // TODO: we process each item on its own, this may lead to heavy lock contention.
                         // Need batch updates?
-                        wli.insert(workload.clone());
-                        for (vip, pl) in &w.resource.virtual_ips {
-                            let ip = vip.parse::<IpAddr>()?;
-                            for port in &pl.ports {
-                                let addr = SocketAddr::from((ip, port.service_port as u16));
-                                let us = Upstream {
-                                    workload: workload.clone(), // TODO avoid clones
-                                    port: port.target_port as u16,
-                                };
-                                wli.vips.entry(addr).or_default().insert(us);
-                            }
-                        }
+                        wli.insert_xds_workload(w.resource)?
                     }
                     XdsUpdate::Remove(name) => {
                         info!("handling delete {}", name);
@@ -283,11 +287,11 @@ impl LocalClient {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct WorkloadInformation {
     #[serde(flatten)]
-    info: Arc<Mutex<WorkloadStore>>,
+    pub info: Arc<Mutex<WorkloadStore>>,
 
     /// demand, if present, is used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
-    demand: Option<Demander>,
+    pub demand: Option<Demander>,
 }
 
 impl WorkloadInformation {
@@ -323,12 +327,38 @@ impl WorkloadInformation {
 
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
-struct WorkloadStore {
+pub struct WorkloadStore {
     workloads: HashMap<IpAddr, Workload>,
     vips: HashMap<SocketAddr, HashSet<Upstream>>,
 }
 
 impl WorkloadStore {
+    #[cfg(test)]
+    pub fn test_store(workloads: Vec<XdsWorkload>) -> anyhow::Result<WorkloadStore> {
+        let mut store = WorkloadStore::default();
+        for w in workloads {
+            store.insert_xds_workload(w)?;
+        }
+        Ok(store)
+    }
+
+    fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
+        let workload = Workload::try_from(&w)?;
+        self.insert(workload.clone());
+        for (vip, pl) in &w.virtual_ips {
+            let ip = vip.parse::<IpAddr>()?;
+            for port in &pl.ports {
+                let addr = SocketAddr::from((ip, port.service_port as u16));
+                let us = Upstream {
+                    workload: workload.clone(), // TODO avoid clones
+                    port: port.target_port as u16,
+                };
+                self.vips.entry(addr).or_default().insert(us);
+            }
+        }
+        Ok(())
+    }
+
     fn insert(&mut self, w: Workload) {
         let wip = w.workload_ip;
         self.workloads.insert(wip, w);
@@ -352,7 +382,9 @@ impl WorkloadStore {
 
     fn find_upstream(&self, addr: SocketAddr) -> (Upstream, bool) {
         if let Some(upstream) = self.vips.get(&addr) {
-            let us: &Upstream = upstream.iter().next().unwrap();
+            // Randomly pick an upstream
+            // TODO: do this more efficiently, and not just randomly
+            let us: &Upstream = upstream.iter().choose(&mut rand::thread_rng()).unwrap();
             // TODO: avoid clone
             let mut us: Upstream = us.clone();
             Self::set_gateway_ip(&mut us);
@@ -381,6 +413,10 @@ impl WorkloadStore {
                     namespace: "".to_string(),
                     node: "".to_string(),
                     service_account: "".to_string(),
+                    workload_name: "".to_string(),
+                    workload_type: "".to_string(),
+                    canonical_name: "".to_string(),
+                    canonical_revision: "".to_string(),
 
                     native_hbone: false,
                 },
@@ -390,13 +426,15 @@ impl WorkloadStore {
     }
 
     fn set_gateway_ip(us: &mut Upstream) {
-        let mut ip = us.workload.workload_ip;
-        if us.workload.waypoint_address.is_some() {
-            ip = us.workload.waypoint_address.unwrap();
-        }
         if us.workload.gateway_ip.is_none() {
             us.workload.gateway_ip = Some(match us.workload.protocol {
-                Protocol::Hbone => SocketAddr::from((ip, 15008)),
+                Protocol::Hbone => {
+                    let mut ip = us.workload.workload_ip;
+                    if let Some(addr) = us.workload.waypoint_address {
+                        ip = addr;
+                    }
+                    SocketAddr::from((ip, 15008))
+                }
                 Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),
             });
         }
@@ -520,7 +558,12 @@ mod tests {
             name: "".to_string(),
             namespace: "".to_string(),
             service_account: "".to_string(),
+            workload_name: "".to_string(),
+            workload_type: "".to_string(),
+            canonical_name: "".to_string(),
+            canonical_revision: "".to_string(),
             node: "".to_string(),
+
             native_hbone: false,
         };
         let mut wi = WorkloadStore::default();
@@ -566,5 +609,26 @@ mod tests {
         wi.remove("127.0.0.1".to_string());
         assert_eq!(wi.find_workload(&ip1), None);
         assert_eq!(wi.workloads.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn local_client() {
+        let dir = std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("localhost.yaml")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let local_client = LocalClient {
+            path: Some(dir),
+            workloads: workloads.clone(),
+        };
+        local_client.run().await.expect("client should run");
+        let store = workloads.lock().unwrap();
+        let wl = store.find_workload(&"127.0.0.1".parse().unwrap());
+        // Make sure we get a valid workload
+        assert!(wl.is_some());
+        assert_eq!(wl.unwrap().service_account, "default");
     }
 }
