@@ -46,6 +46,7 @@ hyper-boring = { version= "2.1.2", features = ['fips'] }
 anyhow = "1.0.65"
 serde_yaml = "0.9.13"
 async-trait = "0.1.58"
+byteorder = "1.3.4"
 
 [build-dependencies]
 tonic-build = "0.8"

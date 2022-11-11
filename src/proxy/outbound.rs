@@ -69,11 +69,11 @@ impl Outbound {
     }
 }
 
-struct OutboundConnection {
-    cert_manager: identity::SecretManager,
-    workloads: WorkloadInformation,
+pub struct OutboundConnection {
+    pub cert_manager: identity::SecretManager,
+    pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
-    cfg: Config,
+    pub cfg: Config,
 }
 
 impl OutboundConnection {
@@ -81,7 +81,12 @@ impl OutboundConnection {
         let remote_addr =
             super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
+        return self.proxy_to(stream, remote_addr, orig).await
+    }
+
+    pub async fn proxy_to(&self, mut stream: TcpStream, remote_addr: IpAddr, orig: SocketAddr) -> Result<(), Error> {
         let req = self.build_request(remote_addr, orig).await;
+
         debug!("request from {} to {}", req.source.name, orig);
         match req.protocol {
             Protocol::Hbone => {
@@ -153,7 +158,7 @@ impl OutboundConnection {
                 Ok(())
             }
             Protocol::Tcp => {
-                info!(
+                debug!(
                     "Proxying to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
@@ -173,6 +178,13 @@ impl OutboundConnection {
                 };
 
                 tokio::try_join!(client_to_server, server_to_client)?;
+
+                // TODO: metrics, time, more info, etc.
+                // Probably shouldn't log at start
+                info!(
+                    "Proxying DONE to {} using TCP via {} type {:?}",
+                    req.destination, req.gateway, req.request_type
+                );
 
                 Ok(())
             }
