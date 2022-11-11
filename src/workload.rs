@@ -407,18 +407,15 @@ impl WorkloadStore {
     }
 
     fn set_gateway_ip(us: &mut Upstream) {
-        match us.workload.gateway_ip {
-            Some(_) => (),
-            None => {
-                let mut ip = us.workload.workload_ip;
-                if let Some(addr) = us.workload.waypoint_address {
-                    ip = addr;
-                }
-                us.workload.gateway_ip = Some(match us.workload.protocol {
-                    Protocol::Hbone => SocketAddr::from((ip, 15008)),
-                    Protocol::Tcp => SocketAddr::from((ip, us.port)),
-                });
+        if let None = us.workload.gateway_ip {
+            let mut ip = us.workload.workload_ip;
+            if let Some(addr) = us.workload.waypoint_address {
+                ip = addr;
             }
+            us.workload.gateway_ip = Some(match us.workload.protocol {
+                Protocol::Hbone => SocketAddr::from((ip, 15008)),
+                Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),
+            });
         }
     }
 }
