@@ -21,6 +21,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
+use boring::asn1::{Asn1Time, Asn1TimeRef};
 use boring::ec::{EcGroup, EcKey};
 use boring::hash::MessageDigest;
 use boring::nid::Nid;
@@ -30,7 +31,6 @@ use boring::ssl::{self, SslContextBuilder};
 use boring::stack::Stack;
 use boring::x509::extension::SubjectAlternativeName;
 use boring::x509::{self, GeneralName, X509StoreContext, X509StoreContextRef, X509VerifyResult};
-use boring::asn1::{Asn1Time, Asn1TimeRef};
 use hyper::client::ResponseFuture;
 use hyper::{Request, Uri};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -113,10 +113,10 @@ impl Certs {
 
         let total_lifetime = start.diff(end).unwrap();
         let total_lifetime_secs = total_lifetime.days * 86400 + total_lifetime.secs;
-        let halflife = total_lifetime_secs/2;
+        let halflife = total_lifetime_secs / 2;
         let elapsed = start.diff(&current).unwrap();
         let elapsed_secs = elapsed.days * 86400 + elapsed.secs; // 86400 secs/day
-        let returnval : i32 = halflife-elapsed_secs;
+        let returnval: i32 = halflife - elapsed_secs;
         if returnval < 0 {
             return Duration::from_secs(0);
         }

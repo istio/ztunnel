@@ -15,9 +15,9 @@
 use std::fmt;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tracing::instrument;
-use tokio::sync::watch;
 
 use super::CaClient;
 use super::Error;
@@ -60,13 +60,16 @@ impl SecretManager {
         let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
         SecretManager {
             client: caclient,
-            cache: Arc::new(RwLock::new(cache))
+            cache: Arc::new(RwLock::new(cache)),
         }
     }
 
-    pub async fn refresh_handler(id: Identity, mut ctx: SecretManager,
-                                 initial_sleep_time: Duration,
-                                 tx: watch::Sender<Option<tls::Certs>>) {
+    pub async fn refresh_handler(
+        id: Identity,
+        mut ctx: SecretManager,
+        initial_sleep_time: Duration,
+        tx: watch::Sender<Option<tls::Certs>>,
+    ) {
         sleep(initial_sleep_time).await;
         loop {
             match ctx.client.fetch_certificate(&id).await {
@@ -80,13 +83,12 @@ impl SecretManager {
                     return;
                 }
                 Ok(fetched_certs) => {
-
                     let sleep_dur = fetched_certs.get_duration_until_refresh();
                     match tx.send(Some(fetched_certs.clone())) {
                         Err(_) => {
                             let mut locked_cache = ctx.cache.write().unwrap();
                             locked_cache.remove(&id.clone());
-                        },
+                        }
                         Ok(_) => {
                             info!("refreshed certs for id: {:?}", id);
                         }
@@ -110,12 +112,11 @@ impl SecretManager {
                         drop(read_locked_cache);
                         let mut write_locked_cache = self.cache.write().unwrap();
                         match write_locked_cache.get(id) {
-
                             Some(cert_rx) => {
                                 // A different thread got here before us and is handling the fetch.
                                 // Take a copy of the receiver.
                                 cache_rx = Some(cert_rx.clone());
-                            },
+                            }
                             None => {
                                 let (tx, rx) = watch::channel(None);
                                 write_locked_cache.insert(id.clone(), rx);

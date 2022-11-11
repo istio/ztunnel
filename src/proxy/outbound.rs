@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::{Instant};
 use std::net::{IpAddr, SocketAddr};
+use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
@@ -84,10 +84,15 @@ impl Outbound {
                         tokio::spawn(async move {
                             let res = oc.proxy(stream).await;
                             match res {
-                                Ok(_) => info!("outbound proxy complete ({}ms)",
-                                                        start_outbound_instant.elapsed().as_millis()),
-                                Err(ref e) => warn!("outbound proxy failed: {} ({}ms)", e,
-                                                        start_outbound_instant.elapsed().as_millis()),
+                                Ok(_) => info!(
+                                    "outbound proxy complete ({}ms)",
+                                    start_outbound_instant.elapsed().as_millis()
+                                ),
+                                Err(ref e) => warn!(
+                                    "outbound proxy failed: {} ({}ms)",
+                                    e,
+                                    start_outbound_instant.elapsed().as_millis()
+                                ),
                             };
                         });
                     }
