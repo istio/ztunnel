@@ -17,7 +17,7 @@ pub async fn spawn(shutdown: signal::Shutdown, config: config::Config) -> anyhow
         .set_ready()
         .bind()
         .expect("admin server starts")
-        .spawn(&shutdown);
+        .spawn();
     let workloads = workload_manager.workloads();
     let secrets = identity::SecretManager::new(config.clone());
     let proxy = proxy::Proxy::new(config.clone(), workloads, secrets, drain_rx).await?;
