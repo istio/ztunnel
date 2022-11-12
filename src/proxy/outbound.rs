@@ -207,91 +207,93 @@ impl OutboundConnection {
             .expect("todo: source must be found");
 
         // TODO: we want a single lock for source and upstream probably...?
-        if let Some(us) = self.workloads.find_upstream(target).await {
-            // For case source client has enabled waypoint
-            if source_workload.waypoint_address.is_some() {
-                let waypoint_address = source_workload.waypoint_address.unwrap();
-                return Request {
-                    // Always use HBONE here
-                    protocol: Protocol::Hbone,
-                    source: source_workload,
-                    // Load balancing decision is deferred to remote proxy
-                    destination: target,
-                    // Send to the remote proxy
-                    gateway: SocketAddr::from((waypoint_address, 15001)),
-                    // Let the client remote know we are on the outbound path. The remote proxy should strictly
-                    // validate the identity when we declare this
-                    direction: Direction::Outbound,
-                    // Source has a remote proxy. We should delegate everything to that proxy - do not even resolve VIP.
-                    // TODO: add client skipping
-                    request_type: RequestType::ToClientWaypoint,
-                };
-            }
-            // For case upstream server has enabled waypoint
-            if us.workload.waypoint_address.is_some() {
-                // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
-                // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-                return Request {
-                    // Always use HBONE here
-                    protocol: Protocol::Hbone,
-                    source: source_workload,
-                    // Use the original VIP, not translated
-                    destination: target,
-                    gateway: SocketAddr::from((us.workload.waypoint_address.unwrap(), 15006)),
-                    // Let the client remote know we are on the inbound path.
-                    direction: Direction::Inbound,
-                    request_type: RequestType::ToServerWaypoint,
-                };
-            }
-            // For case source client and upstream server are on the same node
-            if !us.workload.node.is_empty()
-                && self.cfg.local_node == Some(us.workload.node)
-                && us.workload.protocol == Protocol::Hbone
-            {
-                return Request {
-                    protocol: us.workload.protocol,
-                    source: source_workload,
-                    destination: SocketAddr::from((us.workload.workload_ip, us.port)),
-                    // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
-                    // expects to lookup the desired certificate based on the destination IP. If we send directly,
-                    // we would try to lookup an IP for 127.0.0.1.
-                    // Instead, we send to the actual IP, but iptables in the pod ensures traffic is redirected to 15008.
-                    gateway: SocketAddr::from((
-                        us.workload
-                            .gateway_ip
-                            .expect("todo: refactor gateway ip handling")
-                            .ip(),
-                        15088,
-                    )),
-                    direction: Direction::Outbound,
-                    // Sending to a node on the same node (ourselves).
-                    // In the future this could be optimized to avoid a full network traversal.
-                    request_type: RequestType::DirectLocal,
-                };
-            }
-            // For case no waypoint for both side and direct to remote node proxy
+        let us = self.workloads.find_upstream(target).await;
+        if us.is_none() {
+            // For case no upstream found, passthrough it
+            return Request {
+                protocol: Protocol::Tcp,
+                source: source_workload,
+                destination: target,
+                gateway: target,
+                direction: Direction::Outbound,
+                request_type: RequestType::Passthrough,
+            };
+        }
+
+        let us = us.unwrap();
+        // For case source client has enabled waypoint
+        if source_workload.waypoint_address.is_some() {
+            let waypoint_address = source_workload.waypoint_address.unwrap();
+            return Request {
+                // Always use HBONE here
+                protocol: Protocol::Hbone,
+                source: source_workload,
+                // Load balancing decision is deferred to remote proxy
+                destination: target,
+                // Send to the remote proxy
+                gateway: SocketAddr::from((waypoint_address, 15001)),
+                // Let the client remote know we are on the outbound path. The remote proxy should strictly
+                // validate the identity when we declare this
+                direction: Direction::Outbound,
+                // Source has a remote proxy. We should delegate everything to that proxy - do not even resolve VIP.
+                // TODO: add client skipping
+                request_type: RequestType::ToClientWaypoint,
+            };
+        }
+        // For case upstream server has enabled waypoint
+        if us.workload.waypoint_address.is_some() {
+            // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
+            // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
+            return Request {
+                // Always use HBONE here
+                protocol: Protocol::Hbone,
+                source: source_workload,
+                // Use the original VIP, not translated
+                destination: target,
+                gateway: SocketAddr::from((us.workload.waypoint_address.unwrap(), 15006)),
+                // Let the client remote know we are on the inbound path.
+                direction: Direction::Inbound,
+                request_type: RequestType::ToServerWaypoint,
+            };
+        }
+        // For case source client and upstream server are on the same node
+        if !us.workload.node.is_empty()
+            && self.cfg.local_node == Some(us.workload.node)
+            && us.workload.protocol == Protocol::Hbone
+        {
             return Request {
                 protocol: us.workload.protocol,
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
-                gateway: us
-                    .workload
-                    .gateway_ip
-                    .expect("todo: refactor gateway ip handling"),
+                // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
+                // expects to lookup the desired certificate based on the destination IP. If we send directly,
+                // we would try to lookup an IP for 127.0.0.1.
+                // Instead, we send to the actual IP, but iptables in the pod ensures traffic is redirected to 15008.
+                gateway: SocketAddr::from((
+                    us.workload
+                        .gateway_ip
+                        .expect("todo: refactor gateway ip handling")
+                        .ip(),
+                    15088,
+                )),
                 direction: Direction::Outbound,
-                request_type: RequestType::Direct,
+                // Sending to a node on the same node (ourselves).
+                // In the future this could be optimized to avoid a full network traversal.
+                request_type: RequestType::DirectLocal,
             };
         }
-
-        // For case no upstream found, passthrough it
-        Request {
-            protocol: Protocol::Tcp,
+        // For case no waypoint for both side and direct to remote node proxy
+        return Request {
+            protocol: us.workload.protocol,
             source: source_workload,
-            destination: target,
-            gateway: target,
+            destination: SocketAddr::from((us.workload.workload_ip, us.port)),
+            gateway: us
+                .workload
+                .gateway_ip
+                .expect("todo: refactor gateway ip handling"),
             direction: Direction::Outbound,
-            request_type: RequestType::Passthrough,
-        }
+            request_type: RequestType::Direct,
+        };
     }
 }
 
