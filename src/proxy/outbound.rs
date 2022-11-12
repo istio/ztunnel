@@ -283,7 +283,7 @@ impl OutboundConnection {
             };
         }
         // For case no waypoint for both side and direct to remote node proxy
-        return Request {
+        Request {
             protocol: us.workload.protocol,
             source: source_workload,
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
@@ -293,7 +293,7 @@ impl OutboundConnection {
                 .expect("todo: refactor gateway ip handling"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
-        };
+        }
     }
 }
 
