@@ -91,7 +91,7 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
     stream.read_exact(&mut methods).await?;
 
     // Client must include 'unauthenticated' (0).
-    if !methods.into_iter().any(0) {
+    if !methods.into_iter().any(|x| x == 0) {
         return Err(anyhow::anyhow!("unsupported auth method"));
     }
 
