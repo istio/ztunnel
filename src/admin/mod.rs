@@ -111,9 +111,9 @@ impl Server {
                                 "/debug/gprof/heap" => {
                                     Ok::<_, hyper::Error>(handle_gprof_heap(req).await)
                                 }
-                                "/quitquitquit" => {
-                                     Ok::<_, hyper::Error>(handle_server_shutdown(shutdown_trigger, req).await)
-                                }
+                                "/quitquitquit" => Ok::<_, hyper::Error>(
+                                    handle_server_shutdown(shutdown_trigger, req).await,
+                                ),
                                 "/config_dump" => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
@@ -197,7 +197,10 @@ async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
     }
 }
 
-async fn handle_server_shutdown(shutdown_trigger: signal::ShutdownTrigger, _req: Request<Body>) -> Response<Body> {
+async fn handle_server_shutdown(
+    shutdown_trigger: signal::ShutdownTrigger,
+    _req: Request<Body>,
+) -> Response<Body> {
     shutdown_trigger.shutdown_now().await;
     Response::builder()
         .status(hyper::StatusCode::OK)
