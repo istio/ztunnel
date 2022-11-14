@@ -57,6 +57,8 @@ pub struct Workload {
     #[serde(default)]
     pub namespace: String,
     #[serde(default)]
+    pub trust_domain: String,
+    #[serde(default)]
     pub service_account: String,
 
     #[serde(default)]
@@ -78,8 +80,7 @@ pub struct Workload {
 impl Workload {
     pub fn identity(&self) -> Identity {
         Identity::Spiffe {
-            /// TODO: don't hardcode
-            trust_domain: "cluster.local".to_string(),
+            trust_domain: self.trust_domain.clone(),
             namespace: self.namespace.clone(),
             service_account: self.service_account.clone(),
         }
@@ -157,6 +158,17 @@ impl TryFrom<&XdsWorkload> for Workload {
 
             name: resource.name,
             namespace: resource.namespace,
+            // Here is a consensus between server and client:
+            // Default value of the field will be elided
+            // by server side to improve efficiency.
+            trust_domain: {
+                let result = resource.trust_domain;
+                if result.is_empty() {
+                    "cluster.local".into()
+                } else {
+                    result
+                }
+            },
             service_account: {
                 let result = resource.service_account;
                 if result.is_empty() {
@@ -411,6 +423,7 @@ impl WorkloadStore {
 
                     name: "".to_string(),
                     namespace: "".to_string(),
+                    trust_domain: "".to_string(),
                     node: "".to_string(),
                     service_account: "".to_string(),
                     workload_name: "".to_string(),
@@ -555,6 +568,7 @@ mod tests {
             protocol: Default::default(),
             name: "".to_string(),
             namespace: "".to_string(),
+            trust_domain: "".to_string(),
             service_account: "".to_string(),
             workload_name: "".to_string(),
             workload_type: "".to_string(),
