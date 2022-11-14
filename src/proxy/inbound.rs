@@ -55,12 +55,12 @@ impl Inbound {
                     cert_manager: self.cert_manager.clone(),
                 },
             };
+            let mut listener = hyper::server::conn::AddrIncoming::from_listener(self.listener)
+                .expect("hbone bind");
+            listener.set_nodelay(true);
             let incoming = hyper::server::accept::from_stream(
                 tls_listener::builder(boring_acceptor)
-                    .listen(
-                        hyper::server::conn::AddrIncoming::from_listener(self.listener)
-                            .expect("hbone bind"),
-                    )
+                    .listen(listener)
                     .filter(|conn| {
                         // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
                         if let Err(err) = conn {
