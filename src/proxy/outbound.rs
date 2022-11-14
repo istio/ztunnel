@@ -318,11 +318,14 @@ async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
 
     use crate::workload;
+    use crate::xds::istio::workload::Port as XdsPort;
+    use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Protocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
 
@@ -376,6 +379,23 @@ mod tests {
                 protocol: XdsProtocol::Http as i32,
                 node: "local-node".to_string(),
                 virtual_ips: Default::default(),
+                ..Default::default()
+            },
+            XdsWorkload {
+                name: "test-hbone-vip".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 6]),
+                protocol: XdsProtocol::Http as i32,
+                node: "local-node".to_string(),
+                virtual_ips: HashMap::from([(
+                    "127.0.1.1".to_string(),
+                    XdsPortList {
+                        ports: vec![XdsPort {
+                            service_port: 80,
+                            target_port: 8080,
+                        }],
+                    },
+                )]),
                 ..Default::default()
             },
         ])
@@ -449,6 +469,19 @@ mod tests {
                 protocol: Protocol::Hbone,
                 destination: "127.0.0.5:80",
                 gateway: "127.0.0.5:15088",
+                request_type: RequestType::DirectLocal,
+            },
+            "known dest, local node, HBONE",
+        )
+        .await;
+
+        compare(
+            &outbound,
+            "127.0.1.1:80",
+            ExpectedRequest {
+                protocol: Protocol::Hbone,
+                destination: "127.0.0.6:8080",
+                gateway: "127.0.0.6:15088",
                 request_type: RequestType::DirectLocal,
             },
             "known dest, local node, HBONE",
