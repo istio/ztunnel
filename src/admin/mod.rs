@@ -1,7 +1,6 @@
 // Forked from https://github.com/olix0r/kubert/blob/main/kubert/src/admin.rs
 
 use hyper::{Body, Request, Response};
-use lazy_static::lazy_static;
 use pprof::protos::Message;
 
 use std::{
@@ -13,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+use crate::signal;
+
 #[cfg(feature = "gperftools")]
 use gperftools::heap_profiler::HEAP_PROFILER;
 #[cfg(feature = "gperftools")]
@@ -20,20 +21,12 @@ use gperftools::profiler::PROFILER;
 
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
-use tokio::sync::{oneshot::Sender, Mutex};
 
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
 
 use crate::workload::WorkloadInformation;
 use tracing::{error, info};
-
-lazy_static! {
-    /// Channel used to send shutdown signal - wrapped in an Option to allow
-    /// it to be taken by value (since oneshot channels consume themselves on
-    /// send) and an Arc<Mutex> to allow it to be safely shared between threads
-    static ref SHUTDOWN_TX: Arc<Mutex<Option<Sender<()>>>> = <_>::default();
-}
 
 /// Supports configuring an admin server
 pub struct Builder {
@@ -88,23 +81,22 @@ impl Builder {
 }
 
 impl Server {
-    #[tokio::main]
-    pub async fn spawn(self) {
+    pub fn spawn(self, shutdown: &signal::Shutdown) {
         let ready = self.ready.clone();
-        // Prepare the signal for when the admin server starts shutting down...
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        SHUTDOWN_TX.lock().await.replace(tx);
         let workload_info = self.workload_info.clone();
+        let shutdown_trigger = shutdown.trigger();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
                 let ready = ready.clone();
                 let workload_info = workload_info.clone();
+                let shutdown_trigger = shutdown_trigger.clone();
                 async move {
                     let workload_info = workload_info.clone();
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
                         let ready = ready.clone();
                         let workload_info = workload_info.clone();
+                        let shutdown_trigger = shutdown_trigger.clone();
                         async move {
                             match req.uri().path() {
                                 "/healthz/ready" => {
@@ -119,12 +111,12 @@ impl Server {
                                 "/debug/gprof/heap" => {
                                     Ok::<_, hyper::Error>(handle_gprof_heap(req).await)
                                 }
+                                "/quitquitquit" => {
+                                     Ok::<_, hyper::Error>(handle_server_shutdown(shutdown_trigger, req).await)
+                                }
                                 "/config_dump" => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
-                                "/quitquitquit" => {
-                                    Ok::<_, hyper::Error>(handle_server_shutdown(req).await)
-                                }
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
@@ -137,14 +129,14 @@ impl Server {
                 }
             }));
 
-        let graceful = server.with_graceful_shutdown(async {
+        let shutdown_trigger = shutdown.trigger();
+        tokio::spawn(async move {
             info!("Serving admin server at {}", self.addr);
-            rx.await.ok();
+            if let Err(err) = server.await {
+                error!("Serving admin start failed: {err}");
+                shutdown_trigger.shutdown_now().await;
+            }
         });
-        // Await admin server receive the signal...
-        if let Err(e) = graceful.await {
-            error!("admin server shutdown failed: {}", e);
-        }
     }
 }
 
@@ -205,24 +197,20 @@ async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
     }
 }
 
+async fn handle_server_shutdown(shutdown_trigger: signal::ShutdownTrigger, _req: Request<Body>) -> Response<Body> {
+    shutdown_trigger.shutdown_now().await;
+    Response::builder()
+        .status(hyper::StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .body("shutdown now\n".into())
+        .unwrap()
+}
+
 async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> Response<Body> {
     let vec = serde_json::to_vec(&dump).unwrap();
     Response::builder()
         .status(hyper::StatusCode::OK)
         .body(vec.into())
-        .unwrap()
-}
-
-async fn handle_server_shutdown(_req: Request<Body>) -> Response<Body> {
-    // Attempt to send a shutdown signal, if one hasn't already been sent
-    if let Some(tx) = SHUTDOWN_TX.lock().await.take() {
-        let _ = tx.send(());
-    }
-
-    Response::builder()
-        .status(hyper::StatusCode::OK)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
-        .body("shutdown now\n".into())
         .unwrap()
 }
 

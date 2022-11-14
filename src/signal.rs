@@ -38,6 +38,7 @@ impl Default for Shutdown {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct ShutdownTrigger {
     shutdown_tx: mpsc::Sender<()>,
 }
