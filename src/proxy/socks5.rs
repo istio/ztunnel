@@ -2,11 +2,9 @@ use crate::config::Config;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::Error;
 use anyhow::Result;
-use net::Ipv4Addr;
-use std::net;
 use byteorder::{BigEndian, ByteOrder};
 use crate::workload::WorkloadInformation;
-use crate::{identity, socket};
+use crate::identity;
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -29,10 +27,6 @@ impl Socks5 {
         let listener: TcpListener = TcpListener::bind("127.0.0.1:15080")
             .await
             .map_err(Error::Bind)?;
-        match socket::set_transparent(&listener) {
-            Err(_e) => info!("running without transparent mode"),
-            _ => info!("running with transparent mode"),
-        };
 
         Ok(Socks5 {
             cfg,
@@ -72,57 +66,59 @@ impl Socks5 {
     }
 }
 
+// hande will process a SOCKS5 connection. This supports a minimnal subset of the protocol,
+// sufficient to integrate with common clients:
+// - only unauthenticated requests
+// - only CONNECT, with IPv4 or IPv6
 async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
 
-    let mut version = [0u8];
-    //let (r, w) = stream.into_split();
-    //read_exact(&r, &mut version).await?;
+    // Version(5), Number of auth methods
+    let mut version = [0u8; 2];
     stream.read_exact(&mut version).await?;
 
     if version[0] != 0x05 {
         return Err(anyhow::anyhow!("Invalid version"));
     }
 
-    let mut nmethods = [0u8];
-    stream.read_exact(&mut nmethods).await?;
-    let nmethods = nmethods[0];
+    let nmethods = version[1];
 
     if nmethods == 0 {
         return Err(anyhow::anyhow!("Invalid auth methods"));
     }
 
+    // List of supported auth methods
     let mut methods = vec![0u8; nmethods as usize];
     stream.read_exact(&mut methods).await?;
 
-    let a =  methods.into_iter().find(|m| *m == 0);
-    if a == None {
-        return Err(anyhow::anyhow!("unsupported method"));
+    // Client must include 'unauthenticated' (0).
+    if !methods.into_iter().any(0) {
+        return Err(anyhow::anyhow!("unsupported auth method"));
     }
 
+    // Select 'unauthenticated' (0).
     stream.write_all(&[0x05, 0x00]).await?;
 
-    let mut version = [0u8];
-    stream.read_exact(&mut version).await?;
-    let version = version[0];
+    // Version(5), Command - only support CONNECT (1)
+    let mut version_command = [0u8; 2];
+    stream.read_exact(&mut version_command).await?;
+    let version = version_command[0];
 
     if version != 0x05 {
-        return Err(anyhow::anyhow!("unsupported auth"));
+        return Err(anyhow::anyhow!("unsupported version"));
     }
 
-    let mut command = [0u8];
-    stream.read_exact(&mut command).await?;
-
-    if command[0] != 1 {
+    if version_command[1] != 1 {
         return Err(anyhow::anyhow!("unsupported command"));
     }
 
     // Skip RSV
     stream.read_exact(&mut [0]).await?;
 
+    // Address type
     let mut atyp = [0u8];
     stream.read_exact(&mut atyp).await?;
 
-    let mut ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let ip;
 
     match atyp[0] {
         0x01 => {
@@ -140,6 +136,8 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
             stream.read_exact(&mut domain_length).await?;
             let mut domain = vec![0u8; domain_length[0] as usize];
             stream.read_exact(&mut domain).await?;
+            // TODO: DNS lookup, if we want to integrate with HTTP-based apps without
+            // a DNS server.
             return Err(anyhow::anyhow!("unsupported host"));
         }
         _ => {
@@ -156,11 +154,12 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
     let remote_addr =
         super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
 
+    // Send dummy values - the client generally ignores it.
     let buf = [
-        0x05u8,
+        0x05u8, // versuib
         0x00, 0x00, // success, rsv
         0x01, 0x00, 0x00, 0x00, 0x00, // IPv4
-        0x00, 0x00
+        0x00, 0x00 // port
     ];
     stream.write_all(&buf).await?;
 
