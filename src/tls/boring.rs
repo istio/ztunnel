@@ -27,7 +27,7 @@ use boring::pkey;
 use boring::pkey::PKey;
 use boring::ssl;
 use boring::stack::Stack;
-use boring::x509;
+use boring::x509::{self, X509StoreContextRef, X509StoreContext};
 use boring::x509::extension::SubjectAlternativeName;
 use hyper::client::ResponseFuture;
 use hyper::{Request, Uri};
@@ -36,7 +36,7 @@ use tonic::body::BoxBody;
 use tower::Service;
 use tracing::{error, info};
 
-use crate::identity;
+use crate::identity::{self, Identity};
 
 use super::Error;
 
@@ -87,6 +87,7 @@ impl CsrOptions {
 pub struct Certs {
     // TODO: pretty sure this needs the full chain at some point
     cert: x509::X509,
+    // root: x509::X509,
     key: pkey::PKey<pkey::Private>,
 }
 
@@ -128,7 +129,12 @@ pub fn grpc_connector(uri: &'static str) -> Result<TlsGrpcChannel, Error> {
     Ok(TlsGrpcChannel { uri, client: hyper })
 }
 
+
 impl Certs {
+    fn verify_mode()  -> ssl::SslVerifyMode {
+        ssl::SslVerifyMode::PEER | ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT
+    }
+
     pub fn acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
         let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
         // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
@@ -146,8 +152,7 @@ impl Certs {
         conn.check_private_key()?;
 
         // Ensure that client certificates are validated when present.
-        conn.set_verify(ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-        conn.set_verify_callback(ssl::SslVerifyMode::PEER, |_, _| {
+        conn.set_verify_callback(Self::verify_mode(), |_, _| {
             // TODO: this MUST verify before upstreaming
             true
         });
@@ -155,24 +160,65 @@ impl Certs {
 
         Ok(conn.build())
     }
-    pub fn connector(&self) -> Result<ssl::SslConnector, Error> {
+    pub fn connector(&self, id: Identity) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
 
         conn.set_private_key(&self.key)?;
         conn.set_certificate(&self.cert)?;
+        conn.set_ca_file("./var/run/secrets/istio/root-cert.pem")?;
         conn.check_private_key()?;
 
-        conn.set_verify(ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-        conn.set_verify_callback(ssl::SslVerifyMode::PEER, |_, _| {
-            // TODO: this MUST verify before upstreaming
-            true
-        });
+        conn.set_verify_callback(Self::verify_mode(), Verifier::Exact(id).build());
 
         conn.set_alpn_protos(Alpn::H2.encode())?;
         conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
         conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
 
         Ok(conn.build())
+    }
+}
+
+#[derive(Clone)]
+enum Verifier {
+    // Does not verify the identity.
+    None,
+
+    // Allows exactly one identity
+    Exact(Identity),
+    // TODO other types could be allowlist/denylist or some combo for RBAC
+}
+
+impl Verifier {
+    // TODO other logic from 
+    fn build(self) -> impl Fn(bool, &mut X509StoreContextRef) -> bool { 
+        move |verified,ctx| {
+            if !verified {
+                // log errs from ctx? definitely increment counters
+                return false;
+            }
+            let v = self.clone(); // TODO appease borrow checking in a cleaner way 
+            match v {
+                Verifier::None => true, 
+                Verifier::Exact(id) => {
+                    let ssl_idx = X509StoreContext::ssl_idx().expect("BUG: store context ssl index missing");
+                    let ssl = ctx.ex_data(ssl_idx).expect("BUG: ssl data missing");
+                    let cert =  ssl.peer_certificate().expect("BUG: missing peer cert");
+                    let  Some(sans) = cert.subject_alt_names() else {
+                        return false;
+                    };
+                    for san in sans {
+                        if let Some(uri_san) = san.uri() {
+                            let want_san = format!("{id}");
+                            if uri_san ==  want_san{
+                                info!("verified SAN {}", want_san);
+                                return true;
+                            }
+                        }
+                    }           
+                   false 
+                }, 
+            }
+        }
     }
 }
 

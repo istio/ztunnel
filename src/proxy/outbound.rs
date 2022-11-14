@@ -149,8 +149,8 @@ impl OutboundConnection {
 
                 let mut request_sender = if self.cfg.tls {
                     let id = req.source.identity();
-                    let cert = self.cert_manager.fetch_certificate(id).await?;
-                    let connector = cert.connector()?.configure()?;
+                    let cert = self.cert_manager.fetch_certificate(id.clone()).await?;
+                    let connector = cert.connector(id)?.configure()?;
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
@@ -305,6 +305,7 @@ impl OutboundConnection {
             protocol: us.workload.protocol,
             source: source_workload,
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
+            destination_identity: us.workload.identity(),
             gateway: us
                 .workload
                 .gateway_address
@@ -334,6 +335,7 @@ struct Request {
     destination: SocketAddr,
     gateway: SocketAddr,
     request_type: RequestType,
+    destination_identity: identity::Identity,
 }
 
 #[derive(Debug)]
@@ -357,11 +359,15 @@ async fn connect_tls(
 ) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
     connector.set_verify_hostname(false);
     connector.set_use_server_name_indication(false);
-    let addr = stream.local_addr();
-    connector.set_verify_callback(boring::ssl::SslVerifyMode::PEER, move |_, x509| {
-        info!("TLS callback for {:?}: {:?}", addr, x509.error());
-        true
-    });
+    // let addr = stream.local_addr();
+    // let verify_mode = {
+    //     use boring::ssl::SslVerifyMode;
+    //     SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT
+    // };
+    // connector.set_verify_callback(verify_mode, move |_, x509| {
+    //     info!("TLS callback for {:?}: {:?}", addr, x509.error());
+    //     true
+    // });
     tokio_boring::connect(connector, "", stream).await
 }
 
