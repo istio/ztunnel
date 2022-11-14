@@ -33,7 +33,7 @@ pub async fn spawn(shutdown: signal::Shutdown, config: config::Config) -> anyhow
     });
 
     // Wait for a signal to shutdown
-    // TODO: add a explicit way to trigger this from admin server
+    // There is an explicit way to trigger this from admin server
     shutdown.wait().await;
 
     // Start a drain; this will wait for all drain_rx handles to be dropped before completing,
