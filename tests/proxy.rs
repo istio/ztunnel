@@ -1,10 +1,10 @@
 use helpers::*;
-use hyper::{Client, Body, Request, Method};
+use hyper::{Body, Client, Method, Request};
 use once_cell::sync::Lazy;
 use std::thread;
 use std::time::Duration;
-use tracing::warn;
 use tokio::time;
+use tracing::warn;
 use ztunnel::*;
 mod helpers;
 
@@ -32,7 +32,7 @@ async fn test_quit_lifecycle() {
     let config = config::Config {
         ..Default::default()
     };
-       
+
     let shutdown = signal::Shutdown::new();
     time::timeout(Duration::from_secs(1), app::spawn(shutdown, config))
         .await
@@ -44,7 +44,8 @@ async fn test_quit_lifecycle() {
         .method(Method::POST)
         .uri("http://localhost:15021/quitquitquit")
         .header("content-type", "application/json")
-        .body(Body::default()).unwrap();
+        .body(Body::default())
+        .unwrap();
     let client = Client::new();
     let resp = client.request(req).await;
     match resp {
