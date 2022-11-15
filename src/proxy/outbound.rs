@@ -197,20 +197,22 @@ impl OutboundConnection {
     }
 
     async fn build_request(&self, downstream: IpAddr, target: SocketAddr) -> Request {
-        let (source_workload, us, is_vip) = {
+        let (source_workload, waypoint_address, us, is_vip) = {
             let source_workload = self
                 .workloads
                 .fetch_workload(&downstream)
                 .await
                 .expect("todo: source must be found");
 
+            let waypoint_address = source_workload.waypoint_address;
+
             // TODO: we want a single lock for source and upstream probably...?
             let (us, is_vip) = self.workloads.find_upstream(target).await;
-            (source_workload, us, is_vip)
+            (source_workload, waypoint_address, us, is_vip)
         };
         let mut req = Request {
             protocol: us.workload.protocol,
-            source: source_workload.clone(), // TODO drop clone
+            source: source_workload,
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
             gateway: us
                 .workload
@@ -219,7 +221,7 @@ impl OutboundConnection {
             direction: Direction::Outbound, // TODO set this
             request_type: RequestType::Direct,
         };
-        if source_workload.waypoint_address.is_some() {
+        if waypoint_address.is_some() {
             // Source has a remote proxy. We should delegate everything to that proxy - do not even resolve VIP.
             // TODO: add client skipping
             req.request_type = RequestType::ToClientWaypoint;
@@ -229,7 +231,7 @@ impl OutboundConnection {
             // Load balancing decision is deferred to remote proxy
             req.destination = target;
             // Send to the remote proxy
-            req.gateway = SocketAddr::from((source_workload.waypoint_address.unwrap(), 15001));
+            req.gateway = SocketAddr::from((waypoint_address.unwrap(), 15001));
             // Always use HBONE here
             req.protocol = Protocol::Hbone;
         } else if us.workload.waypoint_address.is_some() {
