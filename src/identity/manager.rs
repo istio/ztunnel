@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use async_trait::async_trait;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tracing::instrument;
 
-use super::CaClient;
 use super::Error;
+use super::{CaClient, CertificateProvider};
 use crate::tls;
 use tracing::{info, warn};
+
+const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Identity {
@@ -49,13 +52,13 @@ impl fmt::Display for Identity {
 }
 
 #[derive(Clone)]
-pub struct SecretManager {
-    client: CaClient,
+pub struct SecretManager<T: CertificateProvider> {
+    client: T,
     cache: Arc<RwLock<HashMap<Identity, watch::Receiver<Option<tls::Certs>>>>>,
 }
 
-impl SecretManager {
-    pub fn new(cfg: crate::config::Config) -> SecretManager {
+impl SecretManager<CaClient> {
+    pub fn new(cfg: crate::config::Config) -> SecretManager<CaClient> {
         let caclient = CaClient::new(cfg.auth);
         let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
         SecretManager {
@@ -63,45 +66,67 @@ impl SecretManager {
             cache: Arc::new(RwLock::new(cache)),
         }
     }
+}
 
+impl<T: CertificateProvider> SecretManager<T> {
     pub async fn refresh_handler(
         id: Identity,
-        mut ctx: SecretManager,
+        cache: Arc<RwLock<HashMap<Identity, watch::Receiver<Option<tls::Certs>>>>>,
+        mut ca_client: T,
         initial_sleep_time: Duration,
         tx: watch::Sender<Option<tls::Certs>>,
     ) {
+        info!("refreshing certs for id {} in {:?}", id, initial_sleep_time);
         sleep(initial_sleep_time).await;
         loop {
-            match ctx.client.fetch_certificate(&id).await {
+            let sleep_dur;
+            match ca_client.fetch_certificate(&id).await {
                 Err(e) => {
                     // Cert refresh has failed. Drop cert from the cache.
                     warn!("Failed cert refresh for id {:?}: {:?}", id, e);
-                    {
-                        let mut locked_cache = ctx.cache.write().unwrap();
-                        locked_cache.remove(&id.clone());
+                    let mut write_locked_cache = cache.write().unwrap();
+                    match write_locked_cache.get(&id) {
+                        Some(certs_rx) => {
+                            if certs_rx.borrow().clone().unwrap().is_expired() {
+                                write_locked_cache.remove(&id.clone());
+                            }
+                            sleep_dur = CERT_REFRESH_FAILURE_RETRY_DELAY;
+                        }
+                        None => {
+                            return;
+                        }
                     }
-                    return;
+                    {
+                        let mut locked_cache = cache.write().unwrap();
+                        locked_cache.remove(&id);
+                    }
                 }
                 Ok(fetched_certs) => {
-                    let sleep_dur = fetched_certs.get_duration_until_refresh();
+                    sleep_dur = fetched_certs.get_duration_until_refresh();
                     match tx.send(Some(fetched_certs.clone())) {
                         Err(_) => {
-                            let mut locked_cache = ctx.cache.write().unwrap();
-                            locked_cache.remove(&id.clone());
+                            // This means no receivers left. Should not be possible.
+                            let mut locked_cache = cache.write().unwrap();
+                            locked_cache.remove(&id);
+                            return;
                         }
                         Ok(_) => {
                             info!("refreshed certs for id: {:?}", id);
                         }
                     }
-                    info!("refreshing certs for id {} in {:?} seconds", id, sleep_dur);
-                    sleep(sleep_dur).await;
+                    info!("refreshing certs for id {} in {:?}", id, sleep_dur);
                 }
             }
+            sleep(sleep_dur).await;
         }
     }
+}
 
+#[async_trait]
+impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for SecretManager<T> {
     #[instrument(skip_all, fields(%id))]
-    pub async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
+    #[instrument(skip_all, fields(%id))]
+    async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
         loop {
             let mut tx_option: Option<watch::Sender<Option<tls::Certs>>> = None;
             let mut cache_rx = None;
@@ -125,26 +150,27 @@ impl SecretManager {
                         };
                     }
                     Some(cert_rcvr) => {
-                        info!("Got cached cert receiver.");
                         cache_rx = Some(cert_rcvr.clone());
                     }
                 }
             }
 
             // We made a transmitter, so fetch the cert and send the result.
-            if tx_option.is_some() {
+            if let Some(tx) = tx_option {
+                info!("Fetching cert.");
                 let certs = self.client.fetch_certificate(id).await;
                 match certs {
                     Ok(c) => {
-                        let tx = tx_option.unwrap();
                         match tx.send(Some(c.clone())) {
                             Ok(_) => {
                                 tokio::spawn(SecretManager::refresh_handler(
                                     id.clone(),
-                                    self.clone(),
+                                    self.cache.clone(),
+                                    self.client.clone(),
                                     c.get_duration_until_refresh(),
-                                    tx));
-                            },
+                                    tx,
+                                ));
+                            }
                             Err(e) => {
                                 warn!("Failed to send fetched certs on channel: {:?}", e);
                                 let mut locked_cache = self.cache.write().unwrap();
@@ -153,7 +179,7 @@ impl SecretManager {
                         }
 
                         return Ok(c);
-                    },
+                    }
                     Err(e) => {
                         let mut locked_cache = self.cache.write().unwrap();
                         locked_cache.remove(id);
@@ -168,6 +194,7 @@ impl SecretManager {
                 {
                     let current_cert = current_cert_info.borrow_and_update();
                     if current_cert.is_some() {
+                        info!("Got cached cert.");
                         return Ok(current_cert.clone().unwrap());
                     }
                 }
@@ -184,5 +211,58 @@ impl SecretManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        identity::{self, *},
+        tls::tests::generate_test_certs,
+    };
+
+    #[derive(Clone, Debug)]
+    struct MockCaClient;
+
+    #[async_trait]
+    impl CertificateProvider for MockCaClient {
+        async fn fetch_certificate(&mut self, _id: &Identity) -> Result<tls::Certs, Error> {
+            let certs: tls::Certs = generate_test_certs(10);
+            return Ok(certs);
+        }
+    }
+
+    impl SecretManager<MockCaClient> {
+        pub fn new_mock() -> SecretManager<MockCaClient> {
+            let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
+            let ca_client = MockCaClient;
+            SecretManager {
+                client: ca_client,
+                cache: Arc::new(RwLock::new(cache)),
+            }
+        }
+    }
+
+    async fn stress(mut sm: SecretManager<MockCaClient>, iterations: u32) {
+        for i in 0..iterations {
+            let id = identity::Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "istio-system".to_string(),
+                service_account: format!("ztunnel{}", i),
+            };
+            sm.fetch_certificate(&id).await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_stress_caching() {
+        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let secret_manager = SecretManager::new_mock();
+        for _n in 0..8 {
+            tasks.push(tokio::spawn(stress(secret_manager.clone(), 5000)));
+        }
+        futures::future::join_all(tasks).await;
+        assert_eq!(5000, secret_manager.cache.read().unwrap().len());
     }
 }

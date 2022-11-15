@@ -24,6 +24,7 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::identity;
 use crate::proxy::inbound::InboundConnect::Hbone;
+use crate::identity::{CertificateProvider};
 use crate::tls::TlsError;
 use crate::workload::WorkloadInformation;
 
@@ -32,7 +33,7 @@ use super::Error;
 pub struct Inbound {
     cfg: Config,
     listener: TcpListener,
-    cert_manager: identity::SecretManager,
+    cert_manager: identity::SecretManager<identity::CaClient>,
     workloads: WorkloadInformation,
 }
 
@@ -40,7 +41,7 @@ impl Inbound {
     pub async fn new(
         cfg: Config,
         workloads: WorkloadInformation,
-        cert_manager: identity::SecretManager,
+        cert_manager: identity::SecretManager<identity::CaClient>,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
             .await
@@ -204,7 +205,7 @@ pub(super) enum InboundConnect {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: identity::SecretManager,
+    cert_manager: identity::SecretManager<identity::CaClient>,
     workloads: WorkloadInformation,
 }
 

@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 pub struct Socks5 {
     cfg: Config,
-    cert_manager: identity::SecretManager,
+    cert_manager: identity::SecretManager<identity::CaClient>,
     workloads: WorkloadInformation,
     hbone_port: u16,
     listener: TcpListener,
@@ -22,7 +22,7 @@ pub struct Socks5 {
 impl Socks5 {
     pub async fn new(
         cfg: Config,
-        cert_manager: identity::SecretManager,
+        cert_manager: identity::SecretManager<identity::CaClient>,
         hbone_port: u16,
         workloads: WorkloadInformation,
     ) -> Result<Socks5, Error> {

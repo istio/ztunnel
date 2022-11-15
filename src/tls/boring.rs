@@ -98,18 +98,36 @@ pub struct Certs {
     key: pkey::PKey<pkey::Private>,
 }
 
-impl Certs {
-    pub fn not_before(&self) -> &Asn1TimeRef {
-        self.cert.not_before()
+impl PartialEq for Certs {
+    fn ne(&self, other: &Self) -> bool {
+        !self.eq(other)
     }
-    pub fn not_after(&self) -> &Asn1TimeRef {
-        self.cert.not_after()
+
+    fn eq(&self, other: &Self) -> bool {
+        self.cert.to_der().iter().eq(other.cert.to_der().iter())
+            && self
+                .key
+                .private_key_to_der()
+                .iter()
+                .eq(other.key.private_key_to_der().iter())
+    }
+}
+
+impl Certs {
+    pub fn is_expired(&self) -> bool {
+        let current = Asn1Time::days_from_now(0).unwrap();
+        let end: &Asn1TimeRef = self.cert.not_after();
+        let time_until_expired = current.diff(end).unwrap();
+        if time_until_expired.secs > 0 {
+            return false;
+        }
+        return true;
     }
 
     pub fn get_duration_until_refresh(&self) -> Duration {
         let current = Asn1Time::days_from_now(0).unwrap();
-        let start: &Asn1TimeRef = self.not_before();
-        let end: &Asn1TimeRef = self.not_after();
+        let start: &Asn1TimeRef = self.cert.not_before();
+        let end: &Asn1TimeRef = self.cert.not_after();
 
         let total_lifetime = start.diff(end).unwrap();
         let total_lifetime_secs = total_lifetime.days * 86400 + total_lifetime.secs;
@@ -355,10 +373,45 @@ where
     }
 }
 
-#[test]
-#[cfg(feature = "fips")]
-fn is_fips_enabled() {
-    assert!(boring::fips::enabled());
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    const CERT: &[u8] = include_bytes!("cert.crt");
+    const PKEY: &[u8] = include_bytes!("cert.key");
+
+    pub fn test_certs() -> Certs {
+        let cert = x509::X509::from_pem(CERT).unwrap();
+        let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
+        Certs { cert, key, chain: unimplemented!() }
+    }
+
+    // Creates an invalid dummy cert with overridden expire time
+    pub fn generate_test_certs(seconds_until_expiry: u64) -> Certs {
+        let mut tmp = x509::X509::builder().unwrap();
+        let current = Asn1Time::days_from_now(0).unwrap();
+        let expire_time: i64 = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + seconds_until_expiry)
+            .try_into()
+            .unwrap();
+        tmp.set_not_before(&current)
+            .expect("error setting cert 'not_before'");
+        tmp.set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
+            .expect("error setting cert 'not_after'");
+
+        let cert = tmp.build();
+        let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
+        Certs { cert, key, chain: unimplemented!() }
+    }
+
+    #[test]
+    fn is_fips_enabled() {
+        assert!(boring::fips::enabled());
+    }
 }
 
 #[test]

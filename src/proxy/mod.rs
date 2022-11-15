@@ -17,10 +17,9 @@ use drain::Watch;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use inbound::Inbound;
 use tokio::net::TcpStream;
 use tracing::{error, info};
-
-use inbound::Inbound;
 
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
@@ -44,7 +43,7 @@ impl Proxy {
     pub async fn new(
         cfg: config::Config,
         workloads: WorkloadInformation,
-        cert_manager: identity::SecretManager,
+        cert_manager: identity::SecretManager<identity::CaClient>,
         drain: Watch,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup

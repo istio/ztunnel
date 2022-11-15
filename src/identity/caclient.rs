@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use async_trait::*;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::codegen::InterceptedService;
@@ -32,6 +33,11 @@ pub struct CaClient {
     pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
 }
 
+#[async_trait]
+pub trait CertificateProvider {
+    async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error>;
+}
+
 impl CaClient {
     pub fn new(auth: AuthSource) -> CaClient {
         let address = if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
@@ -43,9 +49,12 @@ impl CaClient {
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
         CaClient { client }
     }
+}
 
+#[async_trait]
+impl CertificateProvider for CaClient {
     #[instrument(skip_all)]
-    pub async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
+    async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
         let cs = tls::CsrOptions {
             san: id.to_string(),
         }

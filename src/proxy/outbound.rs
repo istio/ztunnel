@@ -22,13 +22,14 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::proxy::inbound::{Inbound, InboundConnect};
+use crate::identity::CertificateProvider;
 use crate::proxy::Error;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
 use crate::{identity, socket};
 
 pub struct Outbound {
     cfg: Config,
-    cert_manager: identity::SecretManager,
+    cert_manager: identity::SecretManager<identity::CaClient>,
     workloads: WorkloadInformation,
     listener: TcpListener,
     drain: Watch,
@@ -38,7 +39,7 @@ pub struct Outbound {
 impl Outbound {
     pub async fn new(
         cfg: Config,
-        cert_manager: identity::SecretManager,
+        cert_manager: identity::SecretManager<identity::CaClient>,
         workloads: WorkloadInformation,
         hbone_port: u16,
         drain: Watch,
@@ -73,7 +74,7 @@ impl Outbound {
                 let socket = self.listener.accept().await;
                 let start_outbound_instant = Instant::now();
                 match socket {
-                    Ok((stream, remote)) => {
+                    Ok((stream, _remote)) => {
                         let cfg = self.cfg.clone();
                         let mut oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),
@@ -85,13 +86,13 @@ impl Outbound {
                             let res = oc.proxy(stream).await;
                             match res {
                                 Ok(_) => info!(
-                                    "outbound proxy complete ({}ms)",
-                                    start_outbound_instant.elapsed().as_millis()
+                                    "outbound proxy complete ({:?})",
+                                    start_outbound_instant.elapsed()
                                 ),
                                 Err(ref e) => warn!(
-                                    "outbound proxy failed: {} ({}ms)",
+                                    "outbound proxy failed: {} ({:?})",
                                     e,
-                                    start_outbound_instant.elapsed().as_millis()
+                                    start_outbound_instant.elapsed()
                                 ),
                             };
                         });
@@ -114,7 +115,7 @@ impl Outbound {
 }
 
 pub struct OutboundConnection {
-    pub cert_manager: identity::SecretManager,
+    pub cert_manager: identity::SecretManager<identity::CaClient>,
     pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     pub cfg: Config,
