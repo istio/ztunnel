@@ -318,7 +318,7 @@ impl WorkloadInformation {
         wi.find_workload(addr).cloned()
     }
 
-    pub async fn find_upstream(&self, addr: SocketAddr) -> (Upstream, bool) {
+    pub async fn find_upstream(&self, addr: SocketAddr) -> Option<Upstream> {
         let _ = self.fetch_workload(&addr.ip()).await;
         let wi = self.info.lock().unwrap();
         wi.find_upstream(addr)
@@ -380,7 +380,7 @@ impl WorkloadStore {
         self.workloads.get(addr)
     }
 
-    fn find_upstream(&self, addr: SocketAddr) -> (Upstream, bool) {
+    fn find_upstream(&self, addr: SocketAddr) -> Option<Upstream> {
         if let Some(upstream) = self.vips.get(&addr) {
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
@@ -389,7 +389,7 @@ impl WorkloadStore {
             let mut us: Upstream = us.clone();
             Self::set_gateway_ip(&mut us);
             debug!("found upstream from VIP: {}", us);
-            return (us, true);
+            return Some(us);
         }
         if let Some(wl) = self.workloads.get(&addr.ip()) {
             let mut us = Upstream {
@@ -398,31 +398,9 @@ impl WorkloadStore {
             };
             Self::set_gateway_ip(&mut us);
             debug!("found upstream: {}", us);
-            return (us, false);
+            return Some(us);
         }
-        (
-            Upstream {
-                port: addr.port(),
-                workload: Workload {
-                    workload_ip: addr.ip(),
-                    waypoint_address: None,
-                    gateway_ip: Some(addr),
-                    protocol: Protocol::Tcp,
-
-                    name: "".to_string(),
-                    namespace: "".to_string(),
-                    node: "".to_string(),
-                    service_account: "".to_string(),
-                    workload_name: "".to_string(),
-                    workload_type: "".to_string(),
-                    canonical_name: "".to_string(),
-                    canonical_revision: "".to_string(),
-
-                    native_hbone: false,
-                },
-            },
-            false,
-        )
+        None
     }
 
     fn set_gateway_ip(us: &mut Upstream) {
