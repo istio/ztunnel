@@ -113,26 +113,35 @@ impl Inbound {
             &Method::CONNECT => {
                 // TODO: uri or host?
                 let uri = req.uri();
-
                 let addr: SocketAddr = uri.to_string().as_str().parse().expect("must be an addr");
-                let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-                info!("Got {} request to {}", req.method(), uri);
-                *res.status_mut() = StatusCode::OK;
-                tokio::task::spawn(async move {
-                    match hyper::upgrade::on(req).await {
-                        Ok(mut upgraded) => {
-                            super::copy_hbone("hbone server", &mut upgraded, &mut stream)
-                                .await
-                                .expect("hbone server copy");
-                        }
-                        Err(e) => {
-                            // Not sure if this can even happen
-                            error!("No upgrade {e}");
-                        }
+                let stream = tokio::net::TcpStream::connect(addr).await;
+                match stream {
+                    Err(err) => {
+                        warn!("connect to {} failed: {}", addr, err);
+                        *res.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                        return Ok(res);
                     }
-                });
-                // Send back our 200. TODO: 503 on failure to connect
-                Ok(res)
+                    Ok(stream) => {
+                        let mut stream = stream;
+                        info!("Got {} request to {}", req.method(), uri);
+                        *res.status_mut() = StatusCode::OK;
+                        tokio::task::spawn(async move {
+                            match hyper::upgrade::on(req).await {
+                                Ok(mut upgraded) => {
+                                    super::copy_hbone("hbone server", &mut upgraded, &mut stream)
+                                        .await
+                                        .expect("hbone server copy");
+                                }
+                                Err(e) => {
+                                    // Not sure if this can even happen
+                                    error!("No upgrade {e}");
+                                }
+                            }
+                        });
+                        // Send back our 200. TODO: 503 on failure to connect
+                        Ok(res)
+                    }
+                }
             }
             // Return the 404 Not Found for other routes.
             method => {
