@@ -94,13 +94,13 @@ impl Config {
             pending: Default::default(),
             demand: rx,
             demand_tx: tx,
-            node_id: generate_node_id(), 
+            node_id: generate_node_id(),
         }
     }
 }
 
 fn generate_node_id() -> String {
-    // TODO: may add new type, but this requires changing together with pilot-discovery 
+    // TODO: may add new type, but this requires changing together with pilot-discovery
     let node_type = "sidecar";
     let ip = std::env::var("INSTANCE_IP").unwrap_or_else(|_| "1.1.1.1".to_string());
     let pod_name = std::env::var("POD_NAME").unwrap_or_else(|_| "test".to_string());
