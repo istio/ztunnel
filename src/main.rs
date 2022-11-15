@@ -10,7 +10,7 @@ use ztunnel::*;
 // #[global_allocator]
 // static GLOBAL: tcmalloc::TCMalloc = tcmalloc::TCMalloc;
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
     let config = ztunnel::config::Config {
         ..Default::default()
@@ -21,7 +21,5 @@ fn main() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async move {
-            let _ = app::spawn(signal::Shutdown::new(), config).await;
-        });
+        .block_on(async move { app::spawn(signal::Shutdown::new(), config).await })
 }
