@@ -17,7 +17,7 @@ pub async fn spawn(shutdown: signal::Shutdown, config: config::Config) -> anyhow
         .set_ready()
         .bind()
         .expect("admin server starts")
-        .spawn();
+        .spawn(&shutdown);
     let workloads = workload_manager.workloads();
     let secrets = identity::SecretManager::new(config.clone());
     let proxy = proxy::Proxy::new(config.clone(), workloads, secrets, drain_rx).await?;
@@ -33,7 +33,7 @@ pub async fn spawn(shutdown: signal::Shutdown, config: config::Config) -> anyhow
     });
 
     // Wait for a signal to shutdown
-    // TODO: add a explicit way to trigger this from admin server
+    // There is an explicit way to trigger this from admin server
     shutdown.wait().await;
 
     // Start a drain; this will wait for all drain_rx handles to be dropped before completing,
