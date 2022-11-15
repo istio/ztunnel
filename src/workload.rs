@@ -329,6 +329,8 @@ impl WorkloadInformation {
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
     workloads: HashMap<IpAddr, Workload>,
+    // workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
+    workload_to_vip: HashMap<IpAddr, HashSet<(SocketAddr, u16)>>,
     vips: HashMap<SocketAddr, HashSet<Upstream>>,
 }
 
@@ -344,6 +346,7 @@ impl WorkloadStore {
 
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
+        let wip = workload.workload_ip;
         self.insert(workload.clone());
         for (vip, pl) in &w.virtual_ips {
             let ip = vip.parse::<IpAddr>()?;
@@ -354,6 +357,10 @@ impl WorkloadStore {
                     port: port.target_port as u16,
                 };
                 self.vips.entry(addr).or_default().insert(us);
+                self.workload_to_vip
+                    .entry(wip)
+                    .or_default()
+                    .insert((addr, port.target_port as u16));
             }
         }
         Ok(())
@@ -373,7 +380,22 @@ impl WorkloadStore {
             }
             Ok(i) => i,
         };
-        self.workloads.remove(&ip);
+        if let Some(prev) = self.workloads.remove(&ip) {
+            if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
+                for (vip, target_port) in vips {
+                    let us = Upstream {
+                        workload: prev.clone(),
+                        port: target_port,
+                    };
+                    if let Some(wls) = self.vips.get_mut(&vip) {
+                        wls.remove(&us);
+                        if wls.is_empty() {
+                            self.vips.remove(&vip);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn find_workload(&self, addr: &IpAddr) -> Option<&Workload> {
@@ -435,6 +457,9 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use bytes::Bytes;
+
+    use crate::xds::istio::workload::Port as XdsPort;
+    use crate::xds::istio::workload::PortList as XdsPortList;
 
     use super::*;
 
@@ -535,9 +560,9 @@ mod tests {
             protocol: Default::default(),
             name: "".to_string(),
             namespace: "".to_string(),
-            service_account: "".to_string(),
+            service_account: "default".to_string(),
             workload_name: "".to_string(),
-            workload_type: "".to_string(),
+            workload_type: "deployment".to_string(),
             canonical_name: "".to_string(),
             canonical_revision: "".to_string(),
             node: "".to_string(),
@@ -548,12 +573,16 @@ mod tests {
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
 
-        let ip1 = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        wi.insert(Workload {
-            workload_ip: ip1,
+        let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
+        let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let xds_ip2 = Bytes::copy_from_slice(&[127, 0, 0, 2]);
+
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip1.clone(),
             name: "some name".to_string(),
-            ..default.clone()
-        });
+            ..Default::default()
+        })
+        .unwrap();
         assert_eq!((wi.workloads.len()), 1);
         assert_eq!(
             wi.find_workload(&ip1),
@@ -587,6 +616,65 @@ mod tests {
         wi.remove("127.0.0.1".to_string());
         assert_eq!(wi.find_workload(&ip1), None);
         assert_eq!(wi.workloads.len(), 0);
+
+        // Add two workloads into the VIP
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip1,
+            name: "some name".to_string(),
+            virtual_ips: HashMap::from([(
+                "127.0.1.1".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            )]),
+            ..Default::default()
+        })
+        .unwrap();
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip2,
+            name: "some name2".to_string(),
+            virtual_ips: HashMap::from([(
+                "127.0.1.1".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            )]),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_vips(&wi, vec!["some name", "some name2"]);
+        wi.remove("127.0.0.2".to_string());
+        assert_vips(&wi, vec!["some name"]);
+        wi.remove("127.0.0.1".to_string());
+        assert_vips(&wi, vec![]);
+    }
+
+    #[track_caller]
+    fn assert_vips(wi: &WorkloadStore, want: Vec<&str>) {
+        let mut wants: HashSet<String> = HashSet::from_iter(want.iter().map(|x| x.to_string()));
+        let mut found: HashSet<String> = HashSet::new();
+        // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
+        // at least once, and no unexpected results
+        for _ in 0..1000 {
+            if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap()) {
+                let n = us.workload.name.clone();
+                found.insert(n.clone());
+                wants.remove(&n);
+            }
+        }
+        if !wants.is_empty() {
+            panic!("expected all names to be found, but missed {want:?} (found {found:?})");
+        }
+        if found.len() != want.len() {
+            panic!("found unexpected items: {found:?}");
+        }
     }
 
     #[tokio::test]
