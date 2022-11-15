@@ -94,8 +94,19 @@ impl Config {
             pending: Default::default(),
             demand: rx,
             demand_tx: tx,
+            node_id: generate_node_id(),
         }
     }
+}
+
+fn generate_node_id() -> String {
+    // TODO: may add new type, but this requires changing together with pilot-discovery
+    let node_type = "sidecar";
+    let ip = std::env::var("INSTANCE_IP").unwrap_or_else(|_| "1.1.1.1".to_string());
+    let pod_name = std::env::var("POD_NAME").unwrap_or_else(|_| "test".to_string());
+    let ns = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "test".to_string());
+    let dns_domain = format!("{}.{}", ns, "svc.cluster.local");
+    format!("{}~{}~{}.{}~{}", node_type, ip, pod_name, ns, dns_domain)
 }
 
 pub struct AdsClient {
@@ -108,6 +119,8 @@ pub struct AdsClient {
 
     demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
     demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
+
+    node_id: String,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
@@ -186,6 +199,7 @@ impl AdsClient {
     async fn run_internal(&mut self) -> Result<(), Error> {
         let initial_watches = &self.config.initial_watches;
         let workloads = &mut self.workloads;
+        let node_id = self.node_id.clone();
         match workloads.len() {
             0 => info!("Starting initial ADS client"),
             n => info!("Starting ADS client with {n} workloads"),
@@ -224,7 +238,7 @@ impl AdsClient {
                 let initial = DeltaDiscoveryRequest {
                     type_url: request_type.clone(),
                     node: Some(Node{
-                        id: format!("{}~{}~{}.{}~{}.svc.cluster.local", "sidecar", "1.1.1.1", "test", "test", "test"),
+                        id: node_id.clone(),
                         ..Default::default()
                     }),
                     initial_resource_versions: irv,
@@ -348,10 +362,7 @@ impl AdsClient {
         send.send(DeltaDiscoveryRequest {
             type_url: type_url.clone(),
             node: Some(Node {
-                id: format!(
-                    "{}~{}~{}.{}~{}.svc.cluster.local",
-                    "sidecar", "1.1.1.1", "test", "test", "test"
-                ),
+                id: self.node_id.clone(),
                 ..Default::default()
             }),
             response_nonce: response.nonce.clone(),
@@ -379,10 +390,7 @@ impl AdsClient {
         send.send(DeltaDiscoveryRequest {
             type_url,
             node: Some(Node {
-                id: format!(
-                    "{}~{}~{}.{}~{}.svc.cluster.local",
-                    "sidecar", "1.1.1.1", "test", "test", "test"
-                ),
+                id: self.node_id.clone(),
                 ..Default::default()
             }),
             resource_names_subscribe: vec![name],
