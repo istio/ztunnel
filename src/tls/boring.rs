@@ -99,10 +99,6 @@ pub struct Certs {
 }
 
 impl PartialEq for Certs {
-    fn ne(&self, other: &Self) -> bool {
-        !self.eq(other)
-    }
-
     fn eq(&self, other: &Self) -> bool {
         self.cert.to_der().iter().eq(other.cert.to_der().iter())
             && self
@@ -121,7 +117,7 @@ impl Certs {
         if time_until_expired.secs > 0 {
             return false;
         }
-        return true;
+        true
     }
 
     pub fn get_duration_until_refresh(&self) -> Duration {
