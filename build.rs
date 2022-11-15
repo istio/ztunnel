@@ -1,3 +1,5 @@
+use std::process::Command;
+
 // This build script is used to generate the rust source files that
 // we need for XDS GRPC communication.
 fn main() -> Result<(), anyhow::Error> {
@@ -39,5 +41,25 @@ fn main() -> Result<(), anyhow::Error> {
         println!("cargo:rerun-if-changed={}", path.to_str().unwrap());
     }
 
+    match Command::new("common/scripts/report_build_info.sh").output() {
+        Ok(output) => {
+            for line in String::from_utf8(output.stdout).unwrap().lines() {
+                // Each line looks like `istio.io/pkg/version.buildGitRevision=abc`
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.split('.').last().unwrap();
+                    println!("cargo:rustc-env=ZTUNNEL_BUILD_{}={}", key, value);
+                } else {
+                    println!("cargo:warning=invalid build output {}", line);
+                }
+            }
+        }
+        Err(err) => {
+            println!("cargo:warning={}", err);
+        }
+    };
+    println!(
+        "cargo:rustc-env=ZTUNNEL_BUILD_RUSTC_VERSION={}",
+        rustc_version::version().unwrap()
+    );
     Ok(())
 }

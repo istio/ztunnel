@@ -57,6 +57,7 @@ tryhard = "0.5.0"
 tonic-build = "0.8"
 prost-build = "0.11"
 anyhow = "1.0.65"
+rustc_version = "0.4.0"
 
 [profile.release]
 opt-level = 3
