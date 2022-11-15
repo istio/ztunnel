@@ -58,6 +58,8 @@ pub struct Workload {
     pub namespace: String,
     #[serde(default)]
     pub service_account: String,
+    #[serde(default)]
+    pub trust_domain: String,
 
     #[serde(default)]
     pub workload_name: String,
@@ -78,8 +80,7 @@ pub struct Workload {
 impl Workload {
     pub fn identity(&self) -> Identity {
         Identity::Spiffe {
-            /// TODO: don't hardcode
-            trust_domain: "cluster.local".to_string(),
+            trust_domain: self.trust_domain.clone(),
             namespace: self.namespace.clone(),
             service_account: self.service_account.clone(),
         }
@@ -165,6 +166,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                     result
                 }
             },
+            trust_domain: resource.trust_domain,
             node: resource.node,
 
             workload_name: resource.workload_name,
@@ -413,6 +415,7 @@ impl WorkloadStore {
                     namespace: "".to_string(),
                     node: "".to_string(),
                     service_account: "".to_string(),
+                    trust_domain: "".to_string(),
                     workload_name: "".to_string(),
                     workload_type: "".to_string(),
                     canonical_name: "".to_string(),
@@ -558,6 +561,7 @@ mod tests {
             name: "".to_string(),
             namespace: "".to_string(),
             service_account: "".to_string(),
+            trust_domain: "cluster.local".to_string(),
             workload_name: "".to_string(),
             workload_type: "".to_string(),
             canonical_name: "".to_string(),
@@ -577,13 +581,22 @@ mod tests {
             ..default.clone()
         });
         assert_eq!((wi.workloads.len()), 1);
+        let wl = wi.find_workload(&ip1);
         assert_eq!(
-            wi.find_workload(&ip1),
+            wl,
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
                 ..default.clone()
             })
+        );
+        assert_eq!(
+            wl.unwrap().identity(),
+            Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "".to_string(),
+                service_account: "".to_string(),
+            }
         );
 
         wi.remove("invalid".to_string());
