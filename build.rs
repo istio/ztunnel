@@ -22,7 +22,7 @@ fn main() -> Result<(), anyhow::Error> {
         c
     };
     tonic_build::configure()
-        .build_server(true)
+        .build_server(false)
         .compile_with_config(
             config,
             &proto_files
