@@ -675,19 +675,25 @@ mod tests {
             canonical_revision: "test-cVer".to_string(),
 
             node: "test-Node".to_string(),
-            native_hbone: false
+            native_hbone: false,
         };
         assert_eq!(wi.find_workload(&wl_ip), Some(&wl));
 
         //verify us is correct
         let us_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(3, 3, 3, 3), 80));
-        let mut wl_with_gateway:Workload = wl.clone();
+        let mut wl_with_gateway: Workload = wl.clone();
         let gw_ip: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 8080));
         wl_with_gateway.gateway_ip = Some(gw_ip);
-        assert_eq!(wi.find_upstream(us_addr), (Upstream {
-            workload : wl_with_gateway,
-            port: 8080
-        }, true));
+        assert_eq!(
+            wi.find_upstream(us_addr),
+            (
+                Upstream {
+                    workload: wl_with_gateway,
+                    port: 8080
+                },
+                true
+            )
+        );
 
         //tear down
         wi.remove("1.1.1.1".to_string());
