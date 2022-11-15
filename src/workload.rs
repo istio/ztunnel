@@ -454,11 +454,15 @@ pub enum WorkloadError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
 
     use bytes::Bytes;
 
     use super::*;
+
+    use crate::xds::istio::workload::Port as XdsPort;
+    use crate::xds::istio::workload::PortList as XdsPortList;
+    use crate::xds::istio::workload::WorkloadType;
 
     #[test]
     fn byte_to_ipaddr_garbage() {
@@ -609,6 +613,88 @@ mod tests {
         wi.remove("127.0.0.1".to_string());
         assert_eq!(wi.find_workload(&ip1), None);
         assert_eq!(wi.workloads.len(), 0);
+    }
+
+    #[test]
+    fn upstream_information() {
+        let xds_wl: XdsWorkload = XdsWorkload {
+            name: "test-us".to_string(),
+            namespace: "test-us-ns".to_string(),
+            address: Bytes::copy_from_slice(&[1, 1, 1, 1]),
+            network: "test-network".to_string(),
+            protocol: Default::default(),
+            trust_domain: "test-trust_domain".to_string(),
+            service_account: "test-sa".to_string(),
+            waypoint_address: Bytes::copy_from_slice(&[2, 2, 2, 2]),
+            node: "test-Node".to_string(),
+            canonical_name: "test-cName".to_string(),
+            canonical_revision: "test-cVer".to_string(),
+            workload_type: WorkloadType::Pod.into(),
+            workload_name: "test-wlName".to_string(),
+            native_hbone: false,
+            virtual_ips: HashMap::from([(
+                "3.3.3.3".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let mut wi = WorkloadStore::default();
+        assert_eq!((wi.workloads.len()), 0);
+        assert_eq!((wi.vips.len()), 0);
+
+        let res = wi.insert_xds_workload(xds_wl);
+        assert!(res.is_ok());
+
+        //verify workload is inserted
+        assert_eq!((wi.workloads.len()), 1);
+
+        //verify us is inserted
+        assert_eq!((wi.vips.len()), 1);
+
+        //verify try_from()'s workload is correct
+        let wl_ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let wl: Workload = Workload {
+            workload_ip: wl_ip,
+            waypoint_address: Some(IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2))),
+            gateway_ip: None,
+            protocol: Default::default(),
+
+            name: "test-us".to_string(),
+            namespace: "test-us-ns".to_string(),
+            service_account: "test-sa".to_string(),
+
+            workload_name: "test-wlName".to_string(),
+            workload_type: "pod".to_string(),
+            canonical_name: "test-cName".to_string(),
+            canonical_revision: "test-cVer".to_string(),
+
+            node: "test-Node".to_string(),
+            native_hbone: false
+        };
+        assert_eq!(wi.find_workload(&wl_ip), Some(&wl));
+
+        //verify us is correct
+        let us_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(3, 3, 3, 3), 80));
+        let mut wl_with_gateway:Workload = wl.clone();
+        let gw_ip: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 8080));
+        wl_with_gateway.gateway_ip = Some(gw_ip);
+        assert_eq!(wi.find_upstream(us_addr), (Upstream {
+            workload : wl_with_gateway,
+            port: 8080
+        }, true));
+
+        //tear down
+        wi.remove("1.1.1.1".to_string());
+        assert_eq!((wi.workloads.len()), 0);
+
+        //why don't remove us ?
+        //assert_eq!((wi.vips.len()), 0);
     }
 
     #[tokio::test]
