@@ -454,10 +454,12 @@ pub enum WorkloadError {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use bytes::Bytes;
+
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;
-    use bytes::Bytes;
-    use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
 
@@ -653,6 +655,7 @@ mod tests {
         wi.remove("127.0.0.1".to_string());
         assert_vips(&wi, vec![]);
     }
+
     #[track_caller]
     fn assert_vips(wi: &WorkloadStore, want: Vec<&str>) {
         let mut wants: HashSet<String> = HashSet::from_iter(want.iter().map(|x| x.to_string()));
@@ -660,9 +663,8 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            let (us, _) = wi.find_upstream("127.0.1.1:80".parse().unwrap());
-            let n = us.workload.name.clone();
-            if !n.is_empty() {
+            if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap()) {
+                let n = us.workload.name.clone();
                 found.insert(n.clone());
                 wants.remove(&n);
             }
@@ -674,6 +676,7 @@ mod tests {
             panic!("found unexpected items: {found:?}");
         }
     }
+
     #[tokio::test]
     async fn local_client() {
         let dir = std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
