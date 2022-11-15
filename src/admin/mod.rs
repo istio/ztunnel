@@ -201,12 +201,20 @@ async fn handle_server_shutdown(
     shutdown_trigger: signal::ShutdownTrigger,
     _req: Request<Body>,
 ) -> Response<Body> {
-    shutdown_trigger.shutdown_now().await;
-    Response::builder()
-        .status(hyper::StatusCode::OK)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
-        .body("shutdown now\n".into())
-        .unwrap()
+    match *_req.method() {
+        hyper::Method::POST => {
+            shutdown_trigger.shutdown_now().await;
+            Response::builder()
+                .status(hyper::StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "text/plain")
+                .body("shutdown now\n".into())
+                .unwrap()
+        }
+        _ => Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(Body::default())
+            .unwrap(),
+    }
 }
 
 async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> Response<Body> {
