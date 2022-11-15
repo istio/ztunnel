@@ -2,7 +2,7 @@
 name = "ztunnel"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.64"
+rust-version = "1.65"
 
 [features]
 default = []
@@ -47,14 +47,13 @@ tls-listener = { version  = "0.5.1", features = ["hyper-h2"] }
 tokio = {"version"= "1", features=["full"]}
 tokio-boring = { version = "2.1.5", features = ['fips'] }
 tokio-stream = "0.1.9"
-tonic = "0.8"
+tonic = { version = "0.8", default-features=false, features = ["channel", "prost", "codegen"]}
 tower = { version = "0.4.12", features = ["full"] }
 tracing = "0.1.34"
 tracing-subscriber = { version = "0.3.11" , features = ["registry", "env-filter"]}
-tryhard = "0.5.0"
 
 [build-dependencies]
-tonic-build = "0.8"
+tonic-build = { version = "0.8", default-features=false, features = ["prost"] }
 prost-build = "0.11"
 anyhow = "1.0.65"
 rustc_version = "0.4.0"
