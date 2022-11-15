@@ -85,6 +85,9 @@ pub enum Error {
     Identity(#[from] identity::Error),
 }
 
+// TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
+const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
+
 pub async fn copy_hbone(
     desc: &str,
     upgraded: &mut hyper::upgrade::Upgraded,
@@ -95,6 +98,8 @@ pub async fn copy_hbone(
     let (mut ro, mut wo) = stream.split();
 
     let client_to_server = async {
+        let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
+        let mut wo = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wo);
         let res = tokio::io::copy(&mut ri, &mut wo).await;
         info!(?res, ?desc, "hbone -> tcp");
         res.expect("");
@@ -102,6 +107,8 @@ pub async fn copy_hbone(
     };
 
     let server_to_client = async {
+        let mut ro = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ro);
+        let mut wi = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wi);
         let res = tokio::io::copy(&mut ro, &mut wi).await;
         info!(?res, ?desc, "tcp -> hbone");
         wi.shutdown().await

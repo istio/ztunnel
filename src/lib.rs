@@ -7,5 +7,6 @@ pub mod signal;
 pub mod socket;
 pub mod telemetry;
 pub mod tls;
+pub mod version;
 pub mod workload;
 pub mod xds;

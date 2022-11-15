@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+use crate::signal;
+
 #[cfg(feature = "gperftools")]
 use gperftools::heap_profiler::HEAP_PROFILER;
 #[cfg(feature = "gperftools")]
@@ -24,7 +26,7 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
 use crate::workload::WorkloadInformation;
-use tracing::info;
+use tracing::{error, info};
 
 /// Supports configuring an admin server
 pub struct Builder {
@@ -79,19 +81,22 @@ impl Builder {
 }
 
 impl Server {
-    pub fn spawn(self) {
+    pub fn spawn(self, shutdown: &signal::Shutdown) {
         let ready = self.ready.clone();
         let workload_info = self.workload_info.clone();
+        let shutdown_trigger = shutdown.trigger();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
                 let ready = ready.clone();
                 let workload_info = workload_info.clone();
+                let shutdown_trigger = shutdown_trigger.clone();
                 async move {
                     let workload_info = workload_info.clone();
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
                         let ready = ready.clone();
                         let workload_info = workload_info.clone();
+                        let shutdown_trigger = shutdown_trigger.clone();
                         async move {
                             match req.uri().path() {
                                 "/healthz/ready" => {
@@ -106,6 +111,9 @@ impl Server {
                                 "/debug/gprof/heap" => {
                                     Ok::<_, hyper::Error>(handle_gprof_heap(req).await)
                                 }
+                                "/quitquitquit" => Ok::<_, hyper::Error>(
+                                    handle_server_shutdown(shutdown_trigger, req).await,
+                                ),
                                 "/config_dump" => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
@@ -121,9 +129,13 @@ impl Server {
                 }
             }));
 
+        let shutdown_trigger = shutdown.trigger();
         tokio::spawn(async move {
             info!("Serving admin server at {}", self.addr);
-            server.await
+            if let Err(err) = server.await {
+                error!("Serving admin start failed: {err}");
+                shutdown_trigger.shutdown_now().await;
+            }
         });
     }
 }
@@ -181,6 +193,26 @@ async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
             .header(hyper::header::CONTENT_TYPE, "text/plain")
             .body(format!("failed to build profile: {}", err).into())
+            .unwrap(),
+    }
+}
+
+async fn handle_server_shutdown(
+    shutdown_trigger: signal::ShutdownTrigger,
+    _req: Request<Body>,
+) -> Response<Body> {
+    match *_req.method() {
+        hyper::Method::POST => {
+            shutdown_trigger.shutdown_now().await;
+            Response::builder()
+                .status(hyper::StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "text/plain")
+                .body("shutdown now\n".into())
+                .unwrap()
+        }
+        _ => Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(Body::default())
             .unwrap(),
     }
 }

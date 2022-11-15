@@ -27,7 +27,12 @@ pub struct Config {
     pub auth: identity::AuthSource,
 
     pub termination_grace_period: time::Duration,
+
+    /// Specify the number of worker threads the Tokio Runtime will use.
+    pub num_worker_threads: usize,
 }
+
+const DEFAULT_WOKRER_THREADS: usize = 2;
 
 impl Default for Config {
     fn default() -> Config {
@@ -53,6 +58,16 @@ impl Default for Config {
             auth: identity::AuthSource::Token(PathBuf::from(
                 r"./var/run/secrets/tokens/istio-token",
             )),
+
+            num_worker_threads: std::env::var("ZTUNNEL_WOKRER_THREADS")
+                .ok()
+                .map(|v| {
+                    v.parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .unwrap_or(DEFAULT_WOKRER_THREADS)
+                })
+                .unwrap_or(DEFAULT_WOKRER_THREADS),
         }
     }
 }
