@@ -59,7 +59,7 @@ impl Outbound {
 
     pub(super) async fn run(self) {
         let addr = self.listener.local_addr().unwrap();
-        info!("outbound listener established {}", addr);
+        info!("outbound listener established {}", self.cfg.outbound_addr);
 
         let accept = async move {
             loop {
@@ -199,22 +199,10 @@ impl OutboundConnection {
                     "Proxying to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
+                // Create a TCP connection to upstream
                 let mut outbound = TcpStream::connect(req.gateway).await?;
-
-                let (mut ri, mut wi) = stream.split();
-                let (mut ro, mut wo) = outbound.split();
-
-                let client_to_server = async {
-                    tokio::io::copy(&mut ri, &mut wo).await?;
-                    wo.shutdown().await
-                };
-
-                let server_to_client = async {
-                    tokio::io::copy(&mut ro, &mut wi).await?;
-                    wi.shutdown().await
-                };
-
-                tokio::try_join!(client_to_server, server_to_client)?;
+                // Proxying data between downstrean and upstream
+                tokio::io::copy_bidirectional(&mut stream, &mut outbound).await?;
 
                 // TODO: metrics, time, more info, etc.
                 // Probably shouldn't log at start
@@ -222,7 +210,6 @@ impl OutboundConnection {
                     "Proxying DONE to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
-
                 Ok(())
             }
         }
