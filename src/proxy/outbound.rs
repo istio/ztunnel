@@ -92,7 +92,7 @@ pub struct OutboundConnection {
 }
 
 impl OutboundConnection {
-    async fn proxy(&self, stream: TcpStream) -> anyhow::Result<()> {
+    async fn proxy(&self, stream: TcpStream) -> Result<(), Error> {
         let remote_addr =
             super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
@@ -104,7 +104,7 @@ impl OutboundConnection {
         mut stream: TcpStream,
         remote_addr: IpAddr,
         orig: SocketAddr,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), Error> {
         let req = self.build_request(remote_addr, orig).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
@@ -218,10 +218,10 @@ impl OutboundConnection {
         &self,
         downstream: IpAddr,
         target: SocketAddr,
-    ) -> anyhow::Result<Request> {
+    ) -> Result<Request, Error> {
         let source_workload = match self.workloads.fetch_workload(&downstream).await {
             Some(wl) => wl,
-            None => anyhow::bail!("source not found"),
+            None => return Err(Error::UnknownSource(downstream)),
         };
 
         // TODO: we want a single lock for source and upstream probably...?
@@ -317,12 +317,12 @@ impl OutboundConnection {
 
 fn baggage(r: &Request) -> String {
     format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version}",
-        cluster="Kubernetes",// todo
-        namespace=r.source.namespace,
-        workload_type=r.source.workload_type,
-        workload_name=r.source.workload_name,
-        name=r.source.canonical_name,
-        version=r.source.canonical_revision,
+            cluster = "Kubernetes",// todo
+            namespace = r.source.namespace,
+            workload_type = r.source.workload_type,
+            workload_name = r.source.workload_name,
+            name = r.source.canonical_name,
+            version = r.source.canonical_revision,
     )
 }
 
@@ -379,6 +379,179 @@ mod tests {
     use crate::xds::istio::workload::Workload as XdsWorkload;
 
     use super::*;
+
+    async fn run_build_request(
+        from: &str,
+        to: &str,
+        xds: XdsWorkload,
+        expect: Option<ExpectedRequest<'_>>,
+    ) {
+        let cfg = Config {
+            local_node: Some("local-node".to_string()),
+            ..Default::default()
+        };
+        let source = XdsWorkload {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            address: Bytes::copy_from_slice(&[127, 0, 0, 1]),
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let wl = workload::WorkloadStore::test_store(vec![source, xds]).unwrap();
+
+        let wi = WorkloadInformation {
+            info: Arc::new(Mutex::new(wl)),
+            demand: None,
+        };
+        let outbound = OutboundConnection {
+            cert_manager: identity::SecretManager::new(cfg.clone()),
+            workloads: wi,
+            cfg,
+        };
+
+        let req = outbound
+            .build_request(from.parse().unwrap(), to.parse().unwrap())
+            .await
+            .ok();
+        if let Some(r) = req {
+            assert_eq!(
+                expect,
+                Some(ExpectedRequest {
+                    protocol: r.protocol,
+                    destination: &r.destination.to_string(),
+                    gateway: &r.gateway.to_string(),
+                    request_type: r.request_type,
+                })
+            );
+        } else {
+            assert_eq!(expect, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_request_unknown_dest() {
+        run_build_request(
+            "127.0.0.1",
+            "1.2.3.4:80",
+            XdsWorkload {
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                ..Default::default()
+            },
+            Some(ExpectedRequest {
+                protocol: Protocol::Tcp,
+                destination: "1.2.3.4:80",
+                gateway: "1.2.3.4:80",
+                request_type: RequestType::Passthrough,
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_known_dest_remote_node_tcp() {
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.2:80",
+            XdsWorkload {
+                name: "test-tcp".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                protocol: XdsProtocol::Direct as i32,
+                node: "remote-node".to_string(),
+                ..Default::default()
+            },
+            Some(ExpectedRequest {
+                protocol: Protocol::Tcp,
+                destination: "127.0.0.2:80",
+                gateway: "127.0.0.2:80",
+                request_type: RequestType::Direct,
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_known_dest_remote_node_hbone() {
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.2:80",
+            XdsWorkload {
+                name: "test-tcp".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                protocol: XdsProtocol::Http as i32,
+                node: "remote-node".to_string(),
+                ..Default::default()
+            },
+            Some(ExpectedRequest {
+                protocol: Protocol::Hbone,
+                destination: "127.0.0.2:80",
+                gateway: "127.0.0.2:15008",
+                request_type: RequestType::Direct,
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_known_dest_local_node_tcp() {
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.2:80",
+            XdsWorkload {
+                name: "test-tcp".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                protocol: XdsProtocol::Direct as i32,
+                node: "local-node".to_string(),
+                ..Default::default()
+            },
+            Some(ExpectedRequest {
+                protocol: Protocol::Tcp,
+                destination: "127.0.0.2:80",
+                gateway: "127.0.0.2:80",
+                request_type: RequestType::Direct,
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_known_dest_local_node_hbone() {
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.2:80",
+            XdsWorkload {
+                name: "test-tcp".to_string(),
+                namespace: "ns".to_string(),
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                protocol: XdsProtocol::Http as i32,
+                node: "local-node".to_string(),
+                ..Default::default()
+            },
+            Some(ExpectedRequest {
+                protocol: Protocol::Hbone,
+                destination: "127.0.0.2:80",
+                gateway: "127.0.0.2:15088",
+                request_type: RequestType::DirectLocal,
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_unknown_source() {
+        run_build_request(
+            "1.2.3.4",
+            "127.0.0.2:80",
+            XdsWorkload {
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+    }
 
     #[tokio::test]
     async fn build_request() {
