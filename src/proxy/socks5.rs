@@ -53,10 +53,8 @@ impl Socks5 {
                         cfg: self.cfg.clone(),
                     };
                     tokio::spawn(async move {
-
-                        match handle(oc, stream).await {
-                            Err(err) => log::error!("handshake error: {}", err),
-                            Ok(_) => {}
+                        if let Err(err) =  handle(oc, stream).await {
+                            log::error!("handshake error: {}", err);
                         }
                     });
                 }
@@ -170,6 +168,6 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
             Err(ref e) => warn!("outbound proxy failed: {}", e),
         };
     });
-    return Ok(());
+    Ok(());
 }
 

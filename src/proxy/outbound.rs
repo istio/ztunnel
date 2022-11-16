@@ -53,7 +53,6 @@ impl Outbound {
                 let socket = self.listener.accept().await;
                 match socket {
                     Ok((stream, remote)) => {
-                        info!("accepted outbound connection from {}", remote);
                         let cfg = self.cfg.clone();
                         let oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),
@@ -97,7 +96,7 @@ impl OutboundConnection {
         let remote_addr =
             super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
-        return self.proxy_to(stream, remote_addr, orig).await
+        self.proxy_to(stream, remote_addr, orig).await
     }
 
     pub async fn proxy_to(&self, mut stream: TcpStream, remote_addr: IpAddr, orig: SocketAddr) -> Result<(), Error> {
