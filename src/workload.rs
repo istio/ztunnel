@@ -48,7 +48,7 @@ pub struct Workload {
     #[serde(default)]
     pub waypoint_address: Option<IpAddr>,
     #[serde(default)]
-    pub gateway_ip: Option<SocketAddr>,
+    pub gateway_address: Option<SocketAddr>,
     #[serde(default)]
     pub protocol: Protocol,
 
@@ -93,7 +93,7 @@ impl fmt::Display for Workload {
             "Workload{{{} at {} via {} ({:?})}}",
             self.name,
             self.workload_ip,
-            self.gateway_ip
+            self.gateway_address
                 .map(|x| format!("{}", x))
                 .unwrap_or_else(|| "None".into()),
             self.protocol
@@ -116,7 +116,7 @@ impl fmt::Display for Upstream {
             self.workload.workload_ip,
             self.port,
             self.workload
-                .gateway_ip
+                .gateway_address
                 .map(|x| format!("{}", x))
                 .unwrap_or_else(|| "None".into()),
             self.workload.protocol
@@ -149,7 +149,7 @@ impl TryFrom<&XdsWorkload> for Workload {
         Ok(Workload {
             workload_ip: address,
             waypoint_address: waypoint,
-            gateway_ip: None,
+            gateway_address: None,
 
             protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
                 resource.protocol,
@@ -409,7 +409,7 @@ impl WorkloadStore {
             let us: &Upstream = upstream.iter().choose(&mut rand::thread_rng()).unwrap();
             // TODO: avoid clone
             let mut us: Upstream = us.clone();
-            Self::set_gateway_ip(&mut us);
+            Self::set_gateway_address(&mut us);
             debug!("found upstream from VIP: {}", us);
             return Some(us);
         }
@@ -418,16 +418,16 @@ impl WorkloadStore {
                 workload: wl.clone(),
                 port: addr.port(),
             };
-            Self::set_gateway_ip(&mut us);
+            Self::set_gateway_address(&mut us);
             debug!("found upstream: {}", us);
             return Some(us);
         }
         None
     }
 
-    fn set_gateway_ip(us: &mut Upstream) {
-        if us.workload.gateway_ip.is_none() {
-            us.workload.gateway_ip = Some(match us.workload.protocol {
+    fn set_gateway_address(us: &mut Upstream) {
+        if us.workload.gateway_address.is_none() {
+            us.workload.gateway_address = Some(match us.workload.protocol {
                 Protocol::Hbone => {
                     let mut ip = us.workload.workload_ip;
                     if let Some(addr) = us.workload.waypoint_address {
@@ -556,7 +556,7 @@ mod tests {
             workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
 
             waypoint_address: None,
-            gateway_ip: None,
+            gateway_address: None,
             protocol: Default::default(),
             name: "".to_string(),
             namespace: "".to_string(),
