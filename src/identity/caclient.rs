@@ -45,7 +45,7 @@ impl CaClient {
     }
 
     #[instrument(skip_all)]
-    pub async fn fetch_certificate(&mut self, id: Identity) -> Result<tls::Certs, Error> {
+    pub async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
         let cs = tls::CsrOptions {
             san: id.to_string(),
         }
