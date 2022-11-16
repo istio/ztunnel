@@ -6,7 +6,7 @@ test:
 build:
 	cargo build
 
-lint: lint-scripts lint-yaml lint-markdown lint-licenses
+lint: lint-scripts lint-yaml lint-markdown lint-licenses lint-copyright-banner
 	cargo clippy
 
 check:
