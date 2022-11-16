@@ -138,7 +138,7 @@ impl Inbound {
                                 }
                             }
                         });
-                        // Send back our 200. TODO: 503 on failure to connect
+                        // Send back our 200.
                         Ok(res)
                     }
                 }
