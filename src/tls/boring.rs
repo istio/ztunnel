@@ -40,10 +40,14 @@ use crate::identity::{self, Identity};
 
 use super::Error;
 
-pub fn cert_from(key: &[u8], cert: &[u8]) -> Certs {
-    let cert = x509::X509::from_pem(cert).unwrap();
+pub fn cert_from(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Certs {
     let key = pkey::PKey::private_key_from_pem(key).unwrap();
-    Certs { cert, key }
+    let cert = x509::X509::from_pem(cert).unwrap();
+    let chain = chain
+        .into_iter()
+        .map(|pem| x509::X509::from_pem(pem).unwrap())
+        .collect();
+    Certs { cert, chain, key }
 }
 
 pub struct CertSign {
@@ -85,9 +89,10 @@ impl CsrOptions {
 
 #[derive(Debug)]
 pub struct Certs {
-    // TODO: pretty sure this needs the full chain at some point
+    // the leaf cert
     cert: x509::X509,
-    // root: x509::X509,
+    // the remainder of the chain, not including the leaf cert
+    chain: Vec<x509::X509>,
     key: pkey::PKey<pkey::Private>,
 }
 
@@ -151,6 +156,7 @@ impl Certs {
         conn.check_private_key()?;
 
         // Ensure that client certificates are validated when present.
+        conn.set_verify_callback(Self::verify_mode(), Verifier::None.callback());
         conn.set_verify_callback(Self::verify_mode(), |_, _| {
             // TODO: this MUST verify before upstreaming
             true
@@ -164,7 +170,11 @@ impl Certs {
 
         conn.set_private_key(&self.key)?;
         conn.set_certificate(&self.cert)?;
-        conn.set_ca_file("./var/run/secrets/istio/root-cert.pem")?;
+        for chain_cert in self.chain.iter() {
+            // TODO avoid cloning even though this method requires owned X509
+            // conn.add_extra_chain_cert(chain_cert.clone())?;
+            conn.cert_store_mut().add_cert(chain_cert.clone())?;
+        }
         conn.check_private_key()?;
         conn.set_verify_callback(Self::verify_mode(), Verifier::San(id.clone()).callback());
         conn.set_alpn_protos(Alpn::H2.encode())?;
@@ -223,13 +233,12 @@ impl Verifier {
     }
 
     fn callback(self) -> impl Fn(bool, &mut X509StoreContextRef) -> bool {
-        move |verified, ctx| {
-            if let Err(e) = self.verifiy(verified, ctx) {
-                // this may be noisy, so only show when info is enabled
-                // TODO counters/stats
-                info!("failed verifying TLS: {e}")
-            };
-            true
+        move |verified, ctx| match self.verifiy(verified, ctx) {
+            Ok(_) => true,
+            Err(e) => {
+                info!("failed verifying TLS: {e}");
+                false
+            }
         }
     }
 }
