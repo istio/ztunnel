@@ -274,7 +274,7 @@ impl OutboundConnection {
                 // Instead, we send to the actual IP, but iptables in the pod ensures traffic is redirected to 15008.
                 gateway: SocketAddr::from((
                     us.workload
-                        .gateway_ip
+                        .gateway_address
                         .expect("todo: refactor gateway ip handling")
                         .ip(),
                     15088,
@@ -292,7 +292,7 @@ impl OutboundConnection {
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
             gateway: us
                 .workload
-                .gateway_ip
+                .gateway_address
                 .expect("todo: refactor gateway ip handling"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
