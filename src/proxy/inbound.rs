@@ -119,7 +119,7 @@ impl Inbound {
                     Err(err) => {
                         warn!("connect to {} failed: {}", addr, err);
                         *res.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                        return Ok(res);
+                        Ok(res)
                     }
                     Ok(stream) => {
                         let mut stream = stream;
