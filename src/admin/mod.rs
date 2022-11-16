@@ -14,11 +14,8 @@
 
 // Forked from https://github.com/olix0r/kubert/blob/main/kubert/src/admin.rs
 
-use hyper::{Body, Request, Response};
-use pprof::protos::Message;
-
 use std::{
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::SocketAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -26,21 +23,22 @@ use std::{
     time::Duration,
 };
 
-use crate::signal;
-
+use drain::Watch;
 #[cfg(feature = "gperftools")]
 use gperftools::heap_profiler::HEAP_PROFILER;
 #[cfg(feature = "gperftools")]
 use gperftools::profiler::PROFILER;
-
+use hyper::server::conn::AddrIncoming;
+use hyper::{Body, Request, Response};
+use pprof::protos::Message;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
-
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
+use tracing::{error, info};
 
 use crate::workload::WorkloadInformation;
-use tracing::{error, info};
+use crate::{config, signal};
 
 /// Supports configuring an admin server
 pub struct Builder {
@@ -60,9 +58,9 @@ pub struct Server {
 pub struct Readiness(Arc<AtomicBool>);
 
 impl Builder {
-    pub fn new(f: WorkloadInformation) -> Self {
+    pub fn new(config: config::Config, f: WorkloadInformation) -> Self {
         Self {
-            addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
+            addr: config.admin_addr,
             ready: Readiness(Arc::new(false.into())),
             workload_info: f,
         }
@@ -80,7 +78,9 @@ impl Builder {
             workload_info,
         } = self;
 
-        let server = hyper::server::Server::try_bind(&addr)?
+        let bind = AddrIncoming::bind(&addr)?;
+        let addr = bind.local_addr();
+        let server = hyper::Server::builder(bind)
             .http1_half_close(true)
             .http1_header_read_timeout(Duration::from_secs(2))
             .http1_max_buf_size(8 * 1024);
@@ -95,7 +95,12 @@ impl Builder {
 }
 
 impl Server {
-    pub fn spawn(self, shutdown: &signal::Shutdown) {
+    pub fn address(&self) -> SocketAddr {
+        self.addr
+    }
+
+    pub fn spawn(self, shutdown: &signal::Shutdown, drain_rx: Watch) {
+        let _dx = drain_rx.clone();
         let ready = self.ready.clone();
         let workload_info = self.workload_info.clone();
         let shutdown_trigger = shutdown.trigger();
@@ -141,7 +146,10 @@ impl Server {
                         }
                     }))
                 }
-            }));
+            }))
+            .with_graceful_shutdown(async {
+                drop(drain_rx.signaled().await);
+            });
 
         let shutdown_trigger = shutdown.trigger();
         tokio::spawn(async move {
@@ -149,6 +157,8 @@ impl Server {
             if let Err(err) = server.await {
                 error!("Serving admin start failed: {err}");
                 shutdown_trigger.shutdown_now().await;
+            } else {
+                info!("admin server terminated");
             }
         });
     }

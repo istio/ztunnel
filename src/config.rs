@@ -26,6 +26,7 @@ pub struct Config {
     pub connection_window_size: u32,
     pub frame_size: u32,
 
+    pub admin_addr: SocketAddr,
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
@@ -58,6 +59,7 @@ impl Default for Config {
 
             termination_grace_period: Duration::from_secs(5),
 
+            admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
             inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
             inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
             outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
