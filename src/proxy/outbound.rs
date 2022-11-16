@@ -58,7 +58,6 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
-        let addr = self.listener.local_addr().unwrap();
         info!("outbound listener established {}", self.cfg.outbound_addr);
 
         let accept = async move {
