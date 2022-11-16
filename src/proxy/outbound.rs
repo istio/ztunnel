@@ -294,7 +294,7 @@ impl OutboundConnection {
             && us.workload.protocol == Protocol::Hbone
         {
             return Ok(Request {
-                protocol: us.workload.protocol,
+                protocol: Protocol::Hbone,
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
                 // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
