@@ -93,11 +93,11 @@ struct OutboundConnection {
 }
 
 impl OutboundConnection {
-    async fn proxy(&self, mut stream: TcpStream) -> Result<(), Error> {
+    async fn proxy(&self, mut stream: TcpStream) -> anyhow::Result<()> {
         let remote_addr =
             super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
-        let req = self.build_request(remote_addr, orig).await;
+        let req = self.build_request(remote_addr, orig).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig, req.gateway, req.request_type, req.direction
@@ -199,32 +199,35 @@ impl OutboundConnection {
         }
     }
 
-    async fn build_request(&self, downstream: IpAddr, target: SocketAddr) -> Request {
-        let source_workload = self
-            .workloads
-            .fetch_workload(&downstream)
-            .await
-            .expect("todo: source must be found");
+    async fn build_request(
+        &self,
+        downstream: IpAddr,
+        target: SocketAddr,
+    ) -> anyhow::Result<Request> {
+        let source_workload = match self.workloads.fetch_workload(&downstream).await {
+            Some(wl) => wl,
+            None => anyhow::bail!("source not found"),
+        };
 
         // TODO: we want a single lock for source and upstream probably...?
         let us = self.workloads.find_upstream(target).await;
         if us.is_none() {
             // For case no upstream found, passthrough it
-            return Request {
+            return Ok(Request {
                 protocol: Protocol::Tcp,
                 source: source_workload,
                 destination: target,
                 gateway: target,
                 direction: Direction::Outbound,
                 request_type: RequestType::Passthrough,
-            };
+            });
         }
 
         let us = us.unwrap();
         // For case source client has enabled waypoint
         if source_workload.waypoint_address.is_some() {
             let waypoint_address = source_workload.waypoint_address.unwrap();
-            return Request {
+            return Ok(Request {
                 // Always use HBONE here
                 protocol: Protocol::Hbone,
                 source: source_workload,
@@ -238,13 +241,13 @@ impl OutboundConnection {
                 // Source has a remote proxy. We should delegate everything to that proxy - do not even resolve VIP.
                 // TODO: add client skipping
                 request_type: RequestType::ToClientWaypoint,
-            };
+            });
         }
         // For case upstream server has enabled waypoint
         if us.workload.waypoint_address.is_some() {
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-            return Request {
+            return Ok(Request {
                 // Always use HBONE here
                 protocol: Protocol::Hbone,
                 source: source_workload,
@@ -254,14 +257,14 @@ impl OutboundConnection {
                 // Let the client remote know we are on the inbound path.
                 direction: Direction::Inbound,
                 request_type: RequestType::ToServerWaypoint,
-            };
+            });
         }
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.cfg.local_node == Some(us.workload.node)
             && us.workload.protocol == Protocol::Hbone
         {
-            return Request {
+            return Ok(Request {
                 protocol: us.workload.protocol,
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
@@ -280,10 +283,10 @@ impl OutboundConnection {
                 // Sending to a node on the same node (ourselves).
                 // In the future this could be optimized to avoid a full network traversal.
                 request_type: RequestType::DirectLocal,
-            };
+            });
         }
         // For case no waypoint for both side and direct to remote node proxy
-        Request {
+        Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
@@ -293,7 +296,7 @@ impl OutboundConnection {
                 .expect("todo: refactor gateway ip handling"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
-        }
+        })
     }
 }
 
@@ -443,7 +446,9 @@ mod tests {
 
         compare(
             &outbound,
+            "127.0.0.1",
             "1.2.3.4:80",
+            false,
             ExpectedRequest {
                 protocol: Protocol::Tcp,
                 destination: "1.2.3.4:80",
@@ -456,7 +461,9 @@ mod tests {
 
         compare(
             &outbound,
+            "127.0.0.1",
             "127.0.0.2:80",
+            false,
             ExpectedRequest {
                 protocol: Protocol::Tcp,
                 destination: "127.0.0.2:80",
@@ -469,7 +476,9 @@ mod tests {
 
         compare(
             &outbound,
+            "127.0.0.1",
             "127.0.0.3:80",
+            false,
             ExpectedRequest {
                 protocol: Protocol::Hbone,
                 destination: "127.0.0.3:80",
@@ -482,7 +491,9 @@ mod tests {
 
         compare(
             &outbound,
+            "127.0.0.1",
             "127.0.0.4:80",
+            false,
             ExpectedRequest {
                 protocol: Protocol::Tcp,
                 destination: "127.0.0.4:80",
@@ -495,7 +506,9 @@ mod tests {
 
         compare(
             &outbound,
+            "127.0.0.1",
             "127.0.0.5:80",
+            false,
             ExpectedRequest {
                 protocol: Protocol::Hbone,
                 destination: "127.0.0.5:80",
@@ -508,11 +521,29 @@ mod tests {
 
         compare(
             &outbound,
+            "127.0.0.1",
             "127.0.1.1:80",
+            false,
             ExpectedRequest {
                 protocol: Protocol::Hbone,
                 destination: "127.0.0.6:8080",
                 gateway: "127.0.0.6:15088",
+                request_type: RequestType::DirectLocal,
+            },
+            "known dest, local node, HBONE",
+        )
+        .await;
+
+        // build_request fails
+        compare(
+            &outbound,
+            "127.0.1.1",
+            "127.0.0.5:80",
+            true,
+            ExpectedRequest {
+                protocol: Protocol::Hbone,
+                destination: "127.0.0.5:80",
+                gateway: "127.0.0.5:15088",
                 request_type: RequestType::DirectLocal,
             },
             "known dest, local node, HBONE",
@@ -530,19 +561,25 @@ mod tests {
 
     async fn compare(
         outbound: &OutboundConnection,
+        downstream: &str,
         to: &str,
+        expect_err: bool,
         exp: ExpectedRequest<'_>,
         name: &str,
     ) {
         let req = outbound
-            .build_request("127.0.0.1".parse().unwrap(), to.parse().unwrap())
+            .build_request(downstream.parse().unwrap(), to.parse().unwrap())
             .await;
-        let req = ExpectedRequest {
-            protocol: req.protocol,
-            destination: &req.destination.to_string(),
-            gateway: &req.gateway.to_string(),
-            request_type: req.request_type,
-        };
-        assert_eq!(exp, req, "{}", name);
+        if let Ok(req) = req {
+            let req = ExpectedRequest {
+                protocol: req.protocol,
+                destination: &req.destination.to_string(),
+                gateway: &req.gateway.to_string(),
+                request_type: req.request_type,
+            };
+            assert_eq!(exp, req, "{}", name);
+        } else {
+            assert!(expect_err)
+        }
     }
 }
