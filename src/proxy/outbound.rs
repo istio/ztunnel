@@ -52,7 +52,7 @@ impl Outbound {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 match socket {
-                    Ok((stream, remote)) => {
+                    Ok((stream, _remote)) => {
                         let cfg = self.cfg.clone();
                         let oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),

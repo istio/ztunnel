@@ -168,6 +168,6 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
             Err(ref e) => warn!("outbound proxy failed: {}", e),
         };
     });
-    Ok(());
+    Ok(())
 }
 
