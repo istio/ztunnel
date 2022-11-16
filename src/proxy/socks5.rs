@@ -15,6 +15,7 @@ pub struct Socks5 {
     cfg: Config,
     cert_manager: identity::SecretManager,
     workloads: WorkloadInformation,
+    hbone_port: u16,
     listener: TcpListener,
 }
 
@@ -22,6 +23,7 @@ impl Socks5 {
     pub async fn new(
         cfg: Config,
         cert_manager: identity::SecretManager,
+        hbone_port: u16,
         workloads: WorkloadInformation,
     ) -> Result<Socks5, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.socks5_addr)
@@ -32,13 +34,17 @@ impl Socks5 {
             cfg,
             cert_manager,
             workloads,
+            hbone_port,
             listener,
         })
     }
 
+    pub(super) fn address(&self) -> SocketAddr {
+        self.listener.local_addr().unwrap()
+    }
+
     pub async fn run(self) {
-        let addr = self.listener.local_addr().unwrap();
-        info!("socks5 listener established {}", addr);
+        info!("socks5 listener established {}", self.address());
 
         loop {
             // Asynchronously wait for an inbound socket.
@@ -51,6 +57,7 @@ impl Socks5 {
                         cert_manager: self.cert_manager.clone(),
                         workloads: self.workloads.clone(),
                         cfg: self.cfg.clone(),
+                        hbone_port: self.hbone_port,
                     };
                     tokio::spawn(async move {
                         if let Err(err) = handle(oc, stream).await {
@@ -159,6 +166,7 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
     ];
     stream.write_all(&buf).await?;
 
+    info!("accepted connection from {remote_addr} to {host}");
     tokio::spawn(async move {
         let res = oc.proxy_to(stream, remote_addr, host).await;
         match res {

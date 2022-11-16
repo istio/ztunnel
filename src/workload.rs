@@ -342,10 +342,10 @@ impl WorkloadInformation {
         wi.find_workload(addr).cloned()
     }
 
-    pub async fn find_upstream(&self, addr: SocketAddr) -> Option<Upstream> {
+    pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         let _ = self.fetch_workload(&addr.ip()).await;
         let wi = self.info.lock().unwrap();
-        wi.find_upstream(addr)
+        wi.find_upstream(addr, hbone_port)
     }
 }
 
@@ -426,14 +426,14 @@ impl WorkloadStore {
         self.workloads.get(addr)
     }
 
-    fn find_upstream(&self, addr: SocketAddr) -> Option<Upstream> {
+    fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         if let Some(upstream) = self.vips.get(&addr) {
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
             let us: &Upstream = upstream.iter().choose(&mut rand::thread_rng()).unwrap();
             // TODO: avoid clone
             let mut us: Upstream = us.clone();
-            Self::set_gateway_address(&mut us);
+            Self::set_gateway_address(&mut us, hbone_port);
             debug!("found upstream from VIP: {}", us);
             return Some(us);
         }
@@ -442,14 +442,14 @@ impl WorkloadStore {
                 workload: wl.clone(),
                 port: addr.port(),
             };
-            Self::set_gateway_address(&mut us);
+            Self::set_gateway_address(&mut us, hbone_port);
             debug!("found upstream: {}", us);
             return Some(us);
         }
         None
     }
 
-    fn set_gateway_address(us: &mut Upstream) {
+    fn set_gateway_address(us: &mut Upstream, hbone_port: u16) {
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
                 Protocol::Hbone => {
@@ -457,7 +457,7 @@ impl WorkloadStore {
                         .workload
                         .choose_waypoint_address()
                         .unwrap_or(us.workload.workload_ip);
-                    SocketAddr::from((ip, 15008))
+                    SocketAddr::from((ip, hbone_port))
                 }
                 Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),
             });
@@ -686,7 +686,7 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap()) {
+            if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap(), 15008) {
                 let n = us.workload.name.clone();
                 found.insert(n.clone());
                 wants.remove(&n);

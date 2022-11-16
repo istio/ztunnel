@@ -12,20 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hyper::{Body, Client, Method, Request, Response};
-use once_cell::sync::Lazy;
-use std::future::Future;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
+
+use hyper::{Body, Client, Method, Request};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use tokio::time;
 
-use helpers::*;
-use ztunnel::*;
+use ztunnel::test_helpers::app as testapp;
+use ztunnel::test_helpers::*;
 
-mod helpers;
+use ztunnel::*;
 
 fn test_config() -> config::Config {
     config::Config {
+        local_xds_path: Some("examples/localhost.yaml".to_string()),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -37,9 +40,9 @@ fn test_config() -> config::Config {
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
-    Lazy::force(&TRACING);
+    helpers::initialize_telemetry();
 
-    let app = app::build(test_config()).await.unwrap();
+    let app = ztunnel::app::build(test_config()).await.unwrap();
 
     let shutdown = app.shutdown.trigger().clone();
     let (app, _shutdown) = tokio::join!(
@@ -52,9 +55,9 @@ async fn test_shutdown_lifecycle() {
 
 #[tokio::test]
 async fn test_quit_lifecycle() {
-    Lazy::force(&TRACING);
+    helpers::initialize_telemetry();
 
-    let app = app::build(test_config()).await.unwrap();
+    let app = ztunnel::app::build(test_config()).await.unwrap();
     let addr = app.admin_address;
 
     let (app, _shutdown) = tokio::join!(
@@ -65,54 +68,36 @@ async fn test_quit_lifecycle() {
         .expect("app exits without error");
 }
 
-struct TestApp {
-    admin_address: SocketAddr,
-}
-
-async fn with_app<F, Fut, FO>(cfg: config::Config, f: F)
-where
-    F: Fn(TestApp) -> Fut,
-    Fut: Future<Output = FO>,
-{
-    Lazy::force(&TRACING);
-
-    let app = app::build(cfg).await.unwrap();
-    let shutdown = app.shutdown.trigger().clone();
-
-    let ta = TestApp {
-        admin_address: app.admin_address,
-    };
-    let run_and_shutdown = async {
-        f(ta).await;
-        shutdown.shutdown_now().await;
-    };
-    let (app, _shutdown) = tokio::join!(app.spawn(), run_and_shutdown);
-    app.expect("app exits without error");
-}
-
 #[tokio::test]
 async fn test_healthz() {
-    with_app(test_config(), |app| async move {
+    testapp::with_app(test_config(), |app| async move {
         let resp = app.admin_request("healthz/ready").await;
         assert_eq!(resp.status(), hyper::StatusCode::OK);
     })
     .await;
 }
 
-impl TestApp {
-    async fn admin_request(&self, path: &str) -> Response<Body> {
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri(format!(
-                "http://localhost:{}/{path}",
-                self.admin_address.port()
-            ))
-            .header("content-type", "application/json")
-            .body(Body::default())
-            .unwrap();
-        let client = Client::new();
-        client.request(req).await.expect("admin request")
-    }
+#[tokio::test]
+async fn test_request() {
+    // Test a round trip outbound call (via socks5)
+    let echo = echo::TestServer::new().await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    testapp::with_app(test_config(), |app| async move {
+        // We send to 127.0.0.2, configured with TCP
+        // TODO: also test HBONE (127.0.0.1); this is blocked on a fake CA.
+        let dst = helpers::with_ip(echo_addr, "127.0.0.2".parse().unwrap());
+        let mut stream = app.socks5_connect(dst).await;
+
+        const BODY: &[u8] = "hello world".as_bytes();
+        stream.write_all(BODY).await.unwrap();
+
+        // Echo server should reply back with the same data
+        let mut buf: [u8; BODY.len()] = [0; BODY.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(BODY, buf);
+    })
+    .await;
 }
 
 /// admin_shutdown triggers a shutdown - from the admin server

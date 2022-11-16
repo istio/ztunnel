@@ -37,7 +37,6 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         .expect("admin server starts");
     let admin_address = admin.address();
     admin.spawn(&shutdown, drain_rx.clone());
-
     let secrets = identity::SecretManager::new(config.clone());
     let proxy = proxy::Proxy::new(
         config.clone(),
@@ -46,6 +45,8 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         drain_rx.clone(),
     )
     .await?;
+
+    let proxy_addresses = proxy.addresses();
 
     tasks.push(tokio::spawn(async move {
         if let Err(e) = workload_manager.run().await {
@@ -59,12 +60,15 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         config,
         shutdown,
         admin_address,
+        proxy_addresses,
         tasks,
     })
 }
 
 pub struct Bound {
     pub admin_address: SocketAddr,
+    pub proxy_addresses: proxy::Addresses,
+
     pub shutdown: signal::Shutdown,
     tasks: Vec<JoinHandle<()>>,
     config: config::Config,

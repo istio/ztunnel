@@ -31,6 +31,7 @@ pub struct Outbound {
     workloads: WorkloadInformation,
     listener: TcpListener,
     drain: Watch,
+    hbone_port: u16,
 }
 
 impl Outbound {
@@ -38,6 +39,7 @@ impl Outbound {
         cfg: Config,
         cert_manager: identity::SecretManager,
         workloads: WorkloadInformation,
+        hbone_port: u16,
         drain: Watch,
     ) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
@@ -53,13 +55,17 @@ impl Outbound {
             cert_manager,
             workloads,
             listener,
+            hbone_port,
             drain,
         })
     }
 
+    pub(super) fn address(&self) -> SocketAddr {
+        self.listener.local_addr().unwrap()
+    }
+
     pub(super) async fn run(self) {
-        let addr = self.listener.local_addr().unwrap();
-        info!("outbound listener established {}", addr);
+        info!("outbound listener established {}", self.address());
 
         let accept = async move {
             loop {
@@ -72,6 +78,7 @@ impl Outbound {
                             cert_manager: self.cert_manager.clone(),
                             workloads: self.workloads.clone(),
                             cfg,
+                            hbone_port: self.hbone_port,
                         };
                         tokio::spawn(async move {
                             let res = oc.proxy(stream).await;
@@ -103,6 +110,7 @@ pub struct OutboundConnection {
     pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     pub cfg: Config,
+    pub hbone_port: u16,
 }
 
 impl OutboundConnection {
@@ -203,7 +211,7 @@ impl OutboundConnection {
                 Ok(())
             }
             Protocol::Tcp => {
-                debug!(
+                info!(
                     "Proxying to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
@@ -234,7 +242,7 @@ impl OutboundConnection {
         };
 
         // TODO: we want a single lock for source and upstream probably...?
-        let us = self.workloads.find_upstream(target).await;
+        let us = self.workloads.find_upstream(target, self.hbone_port).await;
         if us.is_none() {
             // For case no upstream found, passthrough it
             return Ok(Request {
@@ -423,6 +431,7 @@ mod tests {
         let outbound = OutboundConnection {
             cert_manager: identity::SecretManager::new(cfg.clone()),
             workloads: wi,
+            hbone_port: 15008,
             cfg,
         };
 
@@ -646,6 +655,7 @@ mod tests {
         let outbound = OutboundConnection {
             cert_manager: identity::SecretManager::new(cfg.clone()),
             workloads: wi,
+            hbone_port: 15008,
             cfg,
         };
 

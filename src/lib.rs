@@ -24,3 +24,5 @@ pub mod tls;
 pub mod version;
 pub mod workload;
 pub mod xds;
+
+pub mod test_helpers;
