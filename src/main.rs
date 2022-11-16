@@ -53,5 +53,5 @@ async fn version() -> anyhow::Result<()> {
 }
 
 async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
-    app::spawn(signal::Shutdown::new(), cfg).await
+    app::build(cfg).await?.spawn().await
 }
