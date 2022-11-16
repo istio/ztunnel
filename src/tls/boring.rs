@@ -243,6 +243,13 @@ where
 }
 
 #[test]
+#[cfg(feature = "fips")]
 fn is_fips_enabled() {
     assert!(boring::fips::enabled());
+}
+
+#[test]
+#[cfg(not(feature = "fips"))]
+fn is_fips_disabled() {
+    assert_eq!(false, boring::fips::enabled());
 }
