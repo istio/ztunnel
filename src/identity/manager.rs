@@ -212,6 +212,8 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
 
 #[cfg(test)]
 mod tests {
+    use std::time;
+
     use super::*;
     use crate::{
         identity::{self, *},
@@ -219,20 +221,22 @@ mod tests {
     };
 
     #[derive(Clone, Debug)]
-    struct MockCaClient;
+    struct MockCaClient {
+        cert_lifetime: Duration,
+    }
 
     #[async_trait]
     impl CertificateProvider for MockCaClient {
         async fn fetch_certificate(&mut self, _id: &Identity) -> Result<tls::Certs, Error> {
-            let certs: tls::Certs = generate_test_certs(Duration::from_secs(10));
+            let certs: tls::Certs = generate_test_certs(self.cert_lifetime);
             return Ok(certs);
         }
     }
 
     impl SecretManager<MockCaClient> {
-        pub fn new_mock() -> SecretManager<MockCaClient> {
+        pub fn new_mock(cert_lifetime: Duration) -> SecretManager<MockCaClient> {
             let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
-            let ca_client = MockCaClient;
+            let ca_client = MockCaClient { cert_lifetime };
             SecretManager {
                 client: ca_client,
                 cache: Arc::new(RwLock::new(cache)),
@@ -240,25 +244,114 @@ mod tests {
         }
     }
 
-    async fn stress(mut sm: SecretManager<MockCaClient>, iterations: u32) {
+    async fn stress_many_ids(mut sm: SecretManager<MockCaClient>, iterations: u32) {
         for i in 0..iterations {
             let id = identity::Identity::Spiffe {
                 trust_domain: "cluster.local".to_string(),
                 namespace: "istio-system".to_string(),
                 service_account: format!("ztunnel{}", i),
             };
-            sm.fetch_certificate(&id).await.unwrap();
+            sm.fetch_certificate(&id)
+                .await
+                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
         }
+    }
+
+    async fn stress_single_id(mut sm: SecretManager<MockCaClient>, id: Identity, dur: Duration) {
+        let start_time = time::Instant::now();
+        loop {
+            let current_time = time::Instant::now();
+            if current_time - start_time > dur {
+                break;
+            }
+            sm.fetch_certificate(&id)
+                .await
+                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+        }
+    }
+
+    async fn verify_cert_updates(mut sm: SecretManager<MockCaClient>, id: Identity, dur: Duration) {
+        let start_time = time::Instant::now();
+        let expected_update_interval = sm.client.cert_lifetime / 2;
+        let mut total_updates = 0;
+        let mut current_cert = sm
+            .fetch_certificate(&id)
+            .await
+            .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+        loop {
+            let current_time = time::Instant::now();
+            if current_time - start_time > dur {
+                break;
+            }
+            let new_cert = sm
+                .fetch_certificate(&id)
+                .await
+                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+            if current_cert != new_cert {
+                total_updates += 1;
+                current_cert = new_cert;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+        assert_eq!(
+            total_updates,
+            dur.as_secs() / expected_update_interval.as_secs() - 1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_stress_caching() {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        let secret_manager = SecretManager::new_mock();
+        let secret_manager = SecretManager::new_mock(Duration::from_secs(10));
         for _n in 0..8 {
-            tasks.push(tokio::spawn(stress(secret_manager.clone(), 5000)));
+            tasks.push(tokio::spawn(stress_many_ids(secret_manager.clone(), 5000)));
         }
-        futures::future::join_all(tasks).await;
+        let results = futures::future::join_all(tasks).await;
+        for result in results.iter() {
+            assert!(result.is_ok());
+        }
         assert_eq!(5000, secret_manager.cache.read().unwrap().len());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_cache_refresh() {
+        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let test_dur = Duration::from_secs(6);
+
+        let id = identity::Identity::Spiffe {
+            trust_domain: "cluster.local".to_string(),
+            namespace: "istio-system".to_string(),
+            service_account: format!("ztunnel"),
+        };
+
+        // Certs added to the cache should be refreshed every other second.
+        let mut secret_manager = SecretManager::new_mock(Duration::from_secs(4));
+
+        // Seed the cache.
+        secret_manager
+            .fetch_certificate(&id.clone())
+            .await
+            .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+
+        // Start spamming fetches for that cert.
+        for _n in 0..7 {
+            tasks.push(tokio::spawn(stress_single_id(
+                secret_manager.clone(),
+                id.clone(),
+                test_dur,
+            )));
+        }
+
+        // Spawn task that verifies cert updates.
+        tasks.push(tokio::spawn(verify_cert_updates(
+            secret_manager.clone(),
+            id.clone(),
+            test_dur,
+        )));
+
+        let results = futures::future::join_all(tasks).await;
+        for result in results.iter() {
+            assert!(result.is_ok());
+        }
     }
 }
