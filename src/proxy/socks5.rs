@@ -1,15 +1,15 @@
 use crate::config::Config;
+use crate::identity;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::Error;
+use crate::workload::WorkloadInformation;
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
-use crate::workload::WorkloadInformation;
-use crate::identity;
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
-use tokio::io::AsyncWriteExt;
 
 pub struct Socks5 {
     cfg: Config,
@@ -53,7 +53,7 @@ impl Socks5 {
                         cfg: self.cfg.clone(),
                     };
                     tokio::spawn(async move {
-                        if let Err(err) =  handle(oc, stream).await {
+                        if let Err(err) = handle(oc, stream).await {
                             log::error!("handshake error: {}", err);
                         }
                     });
@@ -69,7 +69,6 @@ impl Socks5 {
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
 async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
-
     // Version(5), Number of auth methods
     let mut version = [0u8; 2];
     stream.read_exact(&mut version).await?;
@@ -149,25 +148,23 @@ async fn handle(oc: OutboundConnection, mut stream: TcpStream) -> Result<(), any
 
     let host = SocketAddr::new(ip, port);
 
-    let remote_addr =
-        super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
+    let remote_addr = super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
 
     // Send dummy values - the client generally ignores it.
     let buf = [
         0x05u8, // versuib
         0x00, 0x00, // success, rsv
         0x01, 0x00, 0x00, 0x00, 0x00, // IPv4
-        0x00, 0x00 // port
+        0x00, 0x00, // port
     ];
     stream.write_all(&buf).await?;
 
     tokio::spawn(async move {
         let res = oc.proxy_to(stream, remote_addr, host).await;
         match res {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(ref e) => warn!("outbound proxy failed: {}", e),
         };
     });
     Ok(())
 }
-

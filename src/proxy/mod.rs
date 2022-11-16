@@ -10,9 +10,9 @@ use inbound::Inbound;
 
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
+use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
 use crate::{config, identity, tls};
-use crate::proxy::socks5::Socks5;
 
 mod inbound;
 mod inbound_passthrough;
@@ -36,13 +36,19 @@ impl Proxy {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound_passthrough = InboundPassthrough::new(cfg.clone());
         let inbound = Inbound::new(cfg.clone(), workloads.clone(), secret_manager.clone()).await?;
-        let outbound = Outbound::new(cfg.clone(), secret_manager.clone(), workloads.clone(), drain).await?;
+        let outbound = Outbound::new(
+            cfg.clone(),
+            secret_manager.clone(),
+            workloads.clone(),
+            drain,
+        )
+        .await?;
         let socks5 = Socks5::new(cfg.clone(), secret_manager.clone(), workloads.clone()).await?;
         Ok(Proxy {
             inbound,
             inbound_passthrough,
             outbound,
-            socks5
+            socks5,
         })
     }
 

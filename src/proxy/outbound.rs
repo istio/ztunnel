@@ -99,7 +99,12 @@ impl OutboundConnection {
         self.proxy_to(stream, remote_addr, orig).await
     }
 
-    pub async fn proxy_to(&self, mut stream: TcpStream, remote_addr: IpAddr, orig: SocketAddr) -> anyhow::Result<()> {
+    pub async fn proxy_to(
+        &self,
+        mut stream: TcpStream,
+        remote_addr: IpAddr,
+        orig: SocketAddr,
+    ) -> anyhow::Result<()> {
         let req = self.build_request(remote_addr, orig).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
