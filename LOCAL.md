@@ -61,3 +61,11 @@ redirect-run curl localhost:8080
 In the example request above, the request will go from `curl -> ztunnel (15001) --HBONE--> ztunnel (15008) -> localhost:8080`.
 
 If you wanted the same request to not go over HBONE, you could connect to/from another unknown IP like `127.0.0.2`.
+
+## Configuration
+
+Ztunnel behaves differently for requests to workloads on the same node vs other nodes.
+This can be utilized to test different things. For example:
+
+* `LOCAL_XDS_PATH=./examples/localhost.yaml cargo run` - request to localhost will use HBONE
+* `LOCAL_XDS_PATH=./examples/localhost.yaml NODE_NAME=local cargo run` - request to localhost will use in-memory fast path

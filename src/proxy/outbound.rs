@@ -7,6 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
+use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::Error;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
 use crate::{identity, socket};
@@ -52,7 +53,7 @@ impl Outbound {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 match socket {
-                    Ok((stream, _remote)) => {
+                    Ok((stream, remote)) => {
                         let cfg = self.cfg.clone();
                         let oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),
@@ -62,7 +63,7 @@ impl Outbound {
                         tokio::spawn(async move {
                             let res = oc.proxy(stream).await;
                             match res {
-                                Ok(_) => info!("outbound proxy complete"),
+                                Ok(_) => info!("outbound proxy from {remote} complete"),
                                 Err(ref e) => warn!("outbound proxy failed: {}", e),
                             };
                         });
@@ -110,6 +111,14 @@ impl OutboundConnection {
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig, req.gateway, req.request_type, req.direction
         );
+        if req.request_type == RequestType::DirectLocal {
+            // For same node, we just access it directly rather than making a full network connection.
+            // Pass our `stream` over to the inbound handler, which will process as usual
+            info!("Proxying to {} using node local fast path", req.destination);
+            return Inbound::handle_inbound(InboundConnect::DirectPath(stream), req.destination)
+                .await
+                .map_err(Error::Io);
+        }
         match req.protocol {
             Protocol::Hbone => {
                 info!(
@@ -205,7 +214,7 @@ impl OutboundConnection {
                 // TODO: metrics, time, more info, etc.
                 // Probably shouldn't log at start
                 info!(
-                    "Proxying DONE to {} using TCP via {} type {:?}",
+                    "Proxying complete to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
 
@@ -344,10 +353,15 @@ enum Direction {
 
 #[derive(PartialEq, Debug)]
 enum RequestType {
+    /// ToClientWaypoint refers to requests targeting a client waypoint proxy
     ToClientWaypoint,
+    /// ToServerWaypoint refers to requests targeting a server waypoint proxy
     ToServerWaypoint,
+    /// Direct requests are made directly to a intended backend pod
     Direct,
+    /// DirectLocal requests are made directly to an intended backend pod *on the same node*
     DirectLocal,
+    /// Passthrough refers to requests with an unknown target
     Passthrough,
 }
 
