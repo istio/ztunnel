@@ -1848,6 +1848,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "boring",
+ "byteorder",
  "bytes",
  "console-subscriber",
  "drain",

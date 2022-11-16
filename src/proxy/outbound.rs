@@ -52,8 +52,7 @@ impl Outbound {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 match socket {
-                    Ok((stream, remote)) => {
-                        info!("accepted outbound connection from {}", remote);
+                    Ok((stream, _remote)) => {
                         let cfg = self.cfg.clone();
                         let oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),
@@ -85,18 +84,27 @@ impl Outbound {
     }
 }
 
-struct OutboundConnection {
-    cert_manager: identity::SecretManager,
-    workloads: WorkloadInformation,
+pub struct OutboundConnection {
+    pub cert_manager: identity::SecretManager,
+    pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
-    cfg: Config,
+    pub cfg: Config,
 }
 
 impl OutboundConnection {
-    async fn proxy(&self, mut stream: TcpStream) -> anyhow::Result<()> {
+    async fn proxy(&self, stream: TcpStream) -> anyhow::Result<()> {
         let remote_addr =
             super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
+        self.proxy_to(stream, remote_addr, orig).await
+    }
+
+    pub async fn proxy_to(
+        &self,
+        mut stream: TcpStream,
+        remote_addr: IpAddr,
+        orig: SocketAddr,
+    ) -> anyhow::Result<()> {
         let req = self.build_request(remote_addr, orig).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
@@ -173,7 +181,7 @@ impl OutboundConnection {
                 Ok(())
             }
             Protocol::Tcp => {
-                info!(
+                debug!(
                     "Proxying to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
@@ -193,6 +201,13 @@ impl OutboundConnection {
                 };
 
                 tokio::try_join!(client_to_server, server_to_client)?;
+
+                // TODO: metrics, time, more info, etc.
+                // Probably shouldn't log at start
+                info!(
+                    "Proxying DONE to {} using TCP via {} type {:?}",
+                    req.destination, req.gateway, req.request_type
+                );
 
                 Ok(())
             }

@@ -10,17 +10,20 @@ use inbound::Inbound;
 
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
+use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
 use crate::{config, identity, tls};
 
 mod inbound;
 mod inbound_passthrough;
 mod outbound;
+mod socks5;
 
 pub struct Proxy {
     inbound: Inbound,
     inbound_passthrough: InboundPassthrough,
     outbound: Outbound,
+    socks5: Socks5,
 }
 
 impl Proxy {
@@ -33,11 +36,19 @@ impl Proxy {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound_passthrough = InboundPassthrough::new(cfg.clone());
         let inbound = Inbound::new(cfg.clone(), workloads.clone(), secret_manager.clone()).await?;
-        let outbound = Outbound::new(cfg.clone(), secret_manager, workloads, drain).await?;
+        let outbound = Outbound::new(
+            cfg.clone(),
+            secret_manager.clone(),
+            workloads.clone(),
+            drain,
+        )
+        .await?;
+        let socks5 = Socks5::new(cfg.clone(), secret_manager.clone(), workloads.clone()).await?;
         Ok(Proxy {
             inbound,
             inbound_passthrough,
             outbound,
+            socks5,
         })
     }
 
@@ -46,6 +57,7 @@ impl Proxy {
             tokio::spawn(self.inbound_passthrough.run()),
             tokio::spawn(self.inbound.run()),
             tokio::spawn(self.outbound.run()),
+            tokio::spawn(self.socks5.run()),
         ];
 
         futures::future::join_all(tasks).await;
