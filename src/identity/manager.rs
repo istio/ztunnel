@@ -73,33 +73,29 @@ impl<T: CertificateProvider> SecretManager<T> {
         id: Identity,
         cache: Arc<RwLock<HashMap<Identity, watch::Receiver<Option<tls::Certs>>>>>,
         mut ca_client: T,
-        initial_sleep_time: Duration,
+        mut sleep_dur: Duration,
         tx: watch::Sender<Option<tls::Certs>>,
     ) {
-        info!("refreshing certs for id {} in {:?}", id, initial_sleep_time);
-        sleep(initial_sleep_time).await;
+        info!("refreshing certs for id {} in {:?}", id, sleep_dur);
+        sleep(sleep_dur).await;
         loop {
-            let sleep_dur;
             match ca_client.fetch_certificate(&id).await {
                 Err(e) => {
-                    // Cert refresh has failed. Drop cert from the cache.
                     warn!("Failed cert refresh for id {:?}: {:?}", id, e);
                     let mut write_locked_cache = cache.write().unwrap();
-                    match write_locked_cache.get(&id) {
-                        Some(certs_rx) => {
-                            if certs_rx.borrow().clone().unwrap().is_expired() {
-                                write_locked_cache.remove(&id.clone());
-                            }
-                            sleep_dur = CERT_REFRESH_FAILURE_RETRY_DELAY;
-                        }
-                        None => {
-                            return;
-                        }
+                    let Some(certs_rx) = write_locked_cache.get(&id) else {
+                        // Should not be possible, but if there is no receiver
+                        // in the cache, then no one is using these certs that
+                        // are being refreshed, so let's stop refreshing them.
+                        return;
+                    };
+                    if certs_rx.borrow().clone().unwrap().is_expired() {
+                        // If the cert expired during the retry attempts, drop it.
+                        // Subsequent requests will try and fetch a new one.
+                        write_locked_cache.remove(&id.clone());
+                        return;
                     }
-                    {
-                        let mut locked_cache = cache.write().unwrap();
-                        locked_cache.remove(&id);
-                    }
+                    sleep_dur = CERT_REFRESH_FAILURE_RETRY_DELAY;
                 }
                 Ok(fetched_certs) => {
                     sleep_dur = fetched_certs.get_duration_until_refresh();
@@ -228,7 +224,7 @@ mod tests {
     #[async_trait]
     impl CertificateProvider for MockCaClient {
         async fn fetch_certificate(&mut self, _id: &Identity) -> Result<tls::Certs, Error> {
-            let certs: tls::Certs = generate_test_certs(10);
+            let certs: tls::Certs = generate_test_certs(Duration::from_secs(10));
             return Ok(certs);
         }
     }

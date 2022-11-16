@@ -384,16 +384,16 @@ pub mod tests {
     }
 
     // Creates an invalid dummy cert with overridden expire time
-    pub fn generate_test_certs(seconds_until_expiry: u64) -> Certs {
+    pub fn generate_test_certs(seconds_until_expiry: Duration) -> Certs {
         let mut tmp = x509::X509::builder().unwrap();
         let current = Asn1Time::days_from_now(0).unwrap();
         let expire_time: i64 = (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            + seconds_until_expiry)
-            .try_into()
-            .unwrap();
+            + seconds_until_expiry.as_secs())
+        .try_into()
+        .unwrap();
         tmp.set_not_before(&current)
             .expect("error setting cert 'not_before'");
         tmp.set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
