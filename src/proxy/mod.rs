@@ -89,6 +89,9 @@ pub enum Error {
 
     #[error("identity error: {0}")]
     Identity(#[from] identity::Error),
+
+    #[error("unknown source: {0}")]
+    UnknownSource(IpAddr),
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
