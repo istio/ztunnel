@@ -43,7 +43,7 @@ impl Inbound {
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
             .await
-            .map_err(Error::Bind)?;
+            .map_err(|e| Error::Bind(cfg.inbound_addr, e))?;
         match crate::socket::set_transparent(&listener) {
             Err(_e) => info!("running without transparent mode"),
             _ => info!("running with transparent mode"),
