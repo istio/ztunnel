@@ -19,7 +19,7 @@ lint: lint-scripts lint-yaml lint-markdown lint-licenses lint-copyright-banner
 check:
 	cargo check
 
-fix:
+fix: fix-copyright-banner
 	cargo clippy --fix --allow-staged --allow-dirty
 	cargo fmt
 
