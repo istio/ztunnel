@@ -25,7 +25,7 @@ use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey;
 use boring::pkey::PKey;
-use boring::ssl;
+use boring::ssl::{self, SslConnectorBuilder, SslContextBuilder};
 use boring::stack::Stack;
 use boring::x509::extension::SubjectAlternativeName;
 use boring::x509::{self, GeneralName, X509StoreContext, X509StoreContextRef, X509VerifyResult};
@@ -143,49 +143,43 @@ impl Certs {
         let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
         // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
         let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
-
-        // Force use of TLSv1.3.
-        conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
-        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
-        conn.set_cipher_list(
-            "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
-        )?;
-
-        conn.set_private_key(&self.key)?;
-        conn.set_certificate(&self.cert)?;
-        conn.check_private_key()?;
-
-        // Ensure that client certificates are validated when present.
-        conn.set_verify_callback(Self::verify_mode(), Verifier::None.callback());
-        conn.set_verify_callback(Self::verify_mode(), |_, _| {
-            // TODO: this MUST verify before upstreaming
-            true
-        });
-        conn.set_alpn_protos(Alpn::H2.encode())?;
+        self.setup_ctx(&mut conn)?;
 
         Ok(conn.build())
     }
     pub fn connector(&self, id: &Identity) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+        self.setup_ctx(&mut conn)?;
 
-        conn.set_private_key(&self.key)?;
-        conn.set_certificate(&self.cert)?;
-        for chain_cert in self.chain.iter() {
-            // TODO avoid cloning even though this method requires owned X509
-            // conn.add_extra_chain_cert(chain_cert.clone())?;
-            conn.cert_store_mut().add_cert(chain_cert.clone())?;
-        }
-        conn.check_private_key()?;
+        // client verifies SAN
         conn.set_verify_callback(Self::verify_mode(), Verifier::San(id.clone()).callback());
-        conn.set_alpn_protos(Alpn::H2.encode())?;
-        conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
-        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
 
         Ok(conn.build())
     }
+
+    fn setup_ctx(&self, conn: &mut SslContextBuilder) -> Result<(), Error> {
+        // general TLS options
+        conn.set_alpn_protos(Alpn::H2.encode())?;
+        conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+        conn.set_cipher_list(
+            "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+        )?;
+        // key and certs
+        conn.set_private_key(&self.key)?;
+        conn.set_certificate(&self.cert)?;
+        for chain_cert in self.chain.iter() {
+            conn.cert_store_mut().add_cert(chain_cert.clone())?;
+        }
+        conn.check_private_key()?;
+
+        // by default, allow boringssl to do standard validation
+        conn.set_verify_callback(Self::verify_mode(), Verifier::None.callback());
+
+        Ok(())
+    }
 }
 
-#[derive(Clone)]
 enum Verifier {
     // Does not verify an individual identity.
     None,
@@ -236,6 +230,7 @@ impl Verifier {
         move |verified, ctx| match self.verifiy(verified, ctx) {
             Ok(_) => true,
             Err(e) => {
+                // TODO metrics/counters; info would be too noisy
                 info!("failed verifying TLS: {e}");
                 false
             }

@@ -71,7 +71,10 @@ impl CaClient {
         Ok(tls::cert_from(
             &pkey,
             resp.cert_chain.first().unwrap().as_bytes(),
-            resp.cert_chain[1..].into_iter().map(|s| s.as_bytes()).collect(),
+            resp.cert_chain[1..]
+                .into_iter()
+                .map(|s| s.as_bytes())
+                .collect(),
         ))
     }
 }
