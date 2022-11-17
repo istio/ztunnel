@@ -209,7 +209,7 @@ impl Verifier {
 
         // internally, openssl tends to .expect the results of these methods.
         // TODO bubble up better error message
-        let ssl_idx = X509StoreContext::ssl_idx().map_err(|e| Error::SslError(e))?;
+        let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
         let cert = ctx
             .ex_data(ssl_idx)
             .ok_or(TlsError::SanError)?
@@ -218,7 +218,7 @@ impl Verifier {
 
         let want_san = format!("{identity}");
         cert.subject_alt_names()
-            .unwrap_or(boring::stack::Stack::<GeneralName>::new().map_err(|e| Error::SslError(e))?)
+            .unwrap_or(boring::stack::Stack::<GeneralName>::new().map_err(Error::SslError)?)
             .iter()
             .find(|san| san.uri().unwrap_or("<non-uri>") == want_san)
             .ok_or(TlsError::SanError)

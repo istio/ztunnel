@@ -70,10 +70,7 @@ impl CaClient {
 
         let leaf = resp.cert_chain.first().unwrap().as_bytes();
         let chain = if resp.cert_chain.len() > 1 {
-            resp.cert_chain[1..]
-                .into_iter()
-                .map(|s| s.as_bytes())
-                .collect()
+            resp.cert_chain[1..].iter().map(|s| s.as_bytes()).collect()
         } else {
             vec![]
         };
