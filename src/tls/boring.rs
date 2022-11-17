@@ -369,7 +369,6 @@ where
     }
 }
 
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -380,7 +379,12 @@ pub mod tests {
     pub fn test_certs() -> Certs {
         let cert = x509::X509::from_pem(CERT).unwrap();
         let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
-        Certs { cert, key, chain: unimplemented!() }
+        let chain = vec![cert.clone()];
+        Certs {
+            cert,
+            key,
+            chain: chain,
+        }
     }
 
     // Creates an invalid dummy cert with overridden expire time
@@ -401,7 +405,8 @@ pub mod tests {
 
         let cert = tmp.build();
         let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
-        Certs { cert, key, chain: unimplemented!() }
+        let chain = vec![cert.clone()];
+        Certs { cert, key, chain }
     }
 
     #[test]

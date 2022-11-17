@@ -23,8 +23,8 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::identity;
+use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
-use crate::identity::{CertificateProvider};
 use crate::tls::TlsError;
 use crate::workload::WorkloadInformation;
 

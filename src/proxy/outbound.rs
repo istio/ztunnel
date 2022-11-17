@@ -21,8 +21,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::identity::CertificateProvider;
+use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::Error;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
 use crate::{identity, socket};
@@ -176,7 +176,7 @@ impl OutboundConnection {
 
                 let mut request_sender = if self.cfg.tls {
                     let id = &req.source.identity();
-                    let cert = self.cert_manager.fetch_certificate(&id).await?;
+                    let cert = self.cert_manager.fetch_certificate(id).await?;
                     let connector = cert.connector(&req.destination_identity)?.configure()?;
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
