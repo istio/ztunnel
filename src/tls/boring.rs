@@ -103,7 +103,7 @@ pub struct TlsGrpcChannel {
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: &'static str) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_connector(uri: String) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
 
     conn.set_verify(ssl::SslVerifyMode::NONE);
@@ -129,7 +129,7 @@ pub fn grpc_connector(uri: &'static str) -> Result<TlsGrpcChannel, Error> {
     // correct https connector.
     let hyper = hyper::Client::builder().http2_only(true).build(https);
 
-    let uri = Uri::from_static(uri);
+    let uri = Uri::try_from(uri)?;
 
     Ok(TlsGrpcChannel { uri, client: hyper })
 }

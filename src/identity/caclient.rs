@@ -39,7 +39,7 @@ impl CaClient {
         } else {
             "https://localhost:15012"
         };
-        let svc = tls::grpc_connector(address).unwrap();
+        let svc = tls::grpc_connector(address.to_string()).unwrap();
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
         CaClient { client }
     }

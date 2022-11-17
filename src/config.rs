@@ -35,6 +35,8 @@ pub struct Config {
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
 
+    /// XDS address to use. If unset, XDS will not be used.
+    pub xds_address: Option<String>,
     /// Filepath to a local xds file for workloads, as YAML.
     pub local_xds_path: Option<String>,
     /// If true, on-demand XDS will be used
@@ -52,6 +54,12 @@ const DEFAULT_WOKRER_THREADS: usize = 2;
 
 impl Default for Config {
     fn default() -> Config {
+        // TODO: copy JWT auth logic from CA client and use TLS here (port 15012)
+        let xds_address = Some(if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
+            "http://istiod.istio-system:15010".to_string()
+        } else {
+            "http://localhost:15010".to_string()
+        });
         Config {
             tls: std::env::var("TLS").unwrap_or_else(|_| "".into()) != "off",
             window_size: 4 * 1024 * 1024,
@@ -69,6 +77,7 @@ impl Default for Config {
             local_node: Some(std::env::var("NODE_NAME").unwrap_or_else(|_| "".into()))
                 .filter(|s| !s.is_empty()),
 
+            xds_address,
             local_xds_path: Some(std::env::var("LOCAL_XDS_PATH").unwrap_or_else(|_| "".into()))
                 .filter(|s| !s.is_empty()),
             xds_on_demand: std::env::var("XDS_ON_DEMAND").unwrap_or_else(|_| "".into()) == "on",

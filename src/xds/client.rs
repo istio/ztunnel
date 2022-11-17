@@ -76,6 +76,7 @@ impl<T: prost::Message> Handler<T> for NopHandler {
 }
 
 pub struct Config {
+    address: String,
     workload_handler: Box<dyn Handler<Workload>>,
     initial_watches: Vec<String>,
     on_demand: bool,
@@ -84,6 +85,7 @@ pub struct Config {
 impl Config {
     pub fn new(config: crate::config::Config) -> Config {
         Config {
+            address: config.xds_address.clone().unwrap(),
             workload_handler: Box::new(NopHandler {}),
             initial_watches: Vec::new(),
             on_demand: config.xds_on_demand,
@@ -177,9 +179,13 @@ impl Demander {
 
 impl AdsClient {
     /// demander returns a Demander instance which can be used to request resources on-demand
-    pub fn demander(&self) -> Demander {
-        Demander {
-            demand: self.demand_tx.clone(),
+    pub fn demander(&self) -> Option<Demander> {
+        if self.config.on_demand {
+            Some(Demander {
+                demand: self.demand_tx.clone(),
+            })
+        } else {
+            None
         }
     }
 
@@ -219,17 +225,7 @@ impl AdsClient {
             n => info!("Starting ADS client with {n} workloads"),
         };
 
-        // TODO: copy JWT auth logic from CA client and use TLS here
-        let _address = if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "https://istiod.istio-system:15012"
-        } else {
-            "https://localhost:15012"
-        };
-        let address = if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "http://istiod.istio-system:15010"
-        } else {
-            "http://localhost:15010"
-        };
+        let address = self.config.address.clone();
         let svc = tls::grpc_connector(address).unwrap();
         let mut client = AggregatedDiscoveryServiceClient::new(svc);
         let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);
