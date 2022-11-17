@@ -150,7 +150,7 @@ impl OutboundConnection {
                 let mut request_sender = if self.cfg.tls {
                     let id = req.source.identity();
                     let cert = self.cert_manager.fetch_certificate(&id).await?;
-                    let connector = cert.connector(&id)?.configure()?;
+                    let connector = cert.connector(&req.destination_identity)?.configure()?;
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
@@ -338,9 +338,9 @@ struct Request {
     direction: Direction,
     source: Workload,
     destination: SocketAddr,
+    destination_identity: Option<identity::Identity>,
     gateway: SocketAddr,
     request_type: RequestType,
-    destination_identity: Option<identity::Identity>,
 }
 
 #[derive(Debug)]

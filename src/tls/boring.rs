@@ -25,7 +25,7 @@ use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey;
 use boring::pkey::PKey;
-use boring::ssl::{self, SslConnectorBuilder, SslContextBuilder};
+use boring::ssl::{self, SslContextBuilder};
 use boring::stack::Stack;
 use boring::x509::extension::SubjectAlternativeName;
 use boring::x509::{self, GeneralName, X509StoreContext, X509StoreContextRef, X509VerifyResult};
@@ -147,12 +147,17 @@ impl Certs {
 
         Ok(conn.build())
     }
-    pub fn connector(&self, id: &Identity) -> Result<ssl::SslConnector, Error> {
+    pub fn connector(&self, dest_id: &Option<Identity>) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
 
         // client verifies SAN
-        conn.set_verify_callback(Self::verify_mode(), Verifier::San(id.clone()).callback());
+        if let Some(dest_id) = dest_id {
+            conn.set_verify_callback(
+                Self::verify_mode(),
+                Verifier::San(dest_id.clone()).callback(),
+            );
+        }
 
         Ok(conn.build())
     }
