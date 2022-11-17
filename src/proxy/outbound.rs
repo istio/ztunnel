@@ -16,7 +16,6 @@ use std::net::{IpAddr, SocketAddr};
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
@@ -58,8 +57,7 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
-        let addr = self.listener.local_addr().unwrap();
-        info!("outbound listener established {}", addr);
+        info!("outbound listener established {}", self.cfg.outbound_addr);
 
         let accept = async move {
             loop {
@@ -199,22 +197,10 @@ impl OutboundConnection {
                     "Proxying to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
+                // Create a TCP connection to upstream
                 let mut outbound = TcpStream::connect(req.gateway).await?;
-
-                let (mut ri, mut wi) = stream.split();
-                let (mut ro, mut wo) = outbound.split();
-
-                let client_to_server = async {
-                    tokio::io::copy(&mut ri, &mut wo).await?;
-                    wo.shutdown().await
-                };
-
-                let server_to_client = async {
-                    tokio::io::copy(&mut ro, &mut wi).await?;
-                    wi.shutdown().await
-                };
-
-                tokio::try_join!(client_to_server, server_to_client)?;
+                // Proxying data between downstrean and upstream
+                tokio::io::copy_bidirectional(&mut stream, &mut outbound).await?;
 
                 // TODO: metrics, time, more info, etc.
                 // Probably shouldn't log at start
@@ -222,7 +208,6 @@ impl OutboundConnection {
                     "Proxying DONE to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
                 );
-
                 Ok(())
             }
         }
@@ -294,7 +279,7 @@ impl OutboundConnection {
             && us.workload.protocol == Protocol::Hbone
         {
             return Ok(Request {
-                protocol: us.workload.protocol,
+                protocol: Protocol::Hbone,
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
                 // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
