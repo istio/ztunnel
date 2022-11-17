@@ -12,58 +12,118 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use helpers::*;
-use hyper::{Body, Client, Method, Request};
+use hyper::{Body, Client, Method, Request, Response};
 use once_cell::sync::Lazy;
-use std::thread;
+use std::future::Future;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::time;
-use tracing::warn;
+
+use helpers::*;
 use ztunnel::*;
+
 mod helpers;
 
-#[tokio::test]
-async fn test_lifecycle() {
-    Lazy::force(&TRACING);
-    let config = config::Config {
+fn test_config() -> config::Config {
+    config::Config {
+        socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         ..Default::default()
-    };
-    let shutdown = signal::Shutdown::new();
+    }
+}
 
-    shutdown.trigger().shutdown_now().await;
+#[tokio::test]
+async fn test_shutdown_lifecycle() {
+    Lazy::force(&TRACING);
 
-    time::timeout(Duration::from_secs(1), app::spawn(shutdown, config))
-        .await
-        .expect("app shuts down")
+    let app = app::build(test_config()).await.unwrap();
+
+    let shutdown = app.shutdown.trigger().clone();
+    let (app, _shutdown) = tokio::join!(
+        time::timeout(Duration::from_secs(1), app.spawn()),
+        shutdown.shutdown_now()
+    );
+    app.expect("app shuts down")
         .expect("app exits without error")
 }
 
 #[tokio::test]
 async fn test_quit_lifecycle() {
-    // need to wait for the previous test release the port resource
-    thread::sleep(Duration::from_secs(1));
     Lazy::force(&TRACING);
-    let config = config::Config {
-        ..Default::default()
+
+    let app = app::build(test_config()).await.unwrap();
+    let addr = app.admin_address;
+
+    let (app, _shutdown) = tokio::join!(
+        time::timeout(Duration::from_secs(1), app.spawn()),
+        admin_shutdown(addr)
+    );
+    app.expect("app shuts down")
+        .expect("app exits without error");
+}
+
+struct TestApp {
+    admin_address: SocketAddr,
+}
+
+async fn with_app<F, Fut, FO>(cfg: config::Config, f: F)
+where
+    F: Fn(TestApp) -> Fut,
+    Fut: Future<Output = FO>,
+{
+    Lazy::force(&TRACING);
+
+    let app = app::build(cfg).await.unwrap();
+    let shutdown = app.shutdown.trigger().clone();
+
+    let ta = TestApp {
+        admin_address: app.admin_address,
     };
+    let run_and_shutdown = async {
+        f(ta).await;
+        shutdown.shutdown_now().await;
+    };
+    let (app, _shutdown) = tokio::join!(app.spawn(), run_and_shutdown);
+    app.expect("app exits without error");
+}
 
-    let shutdown = signal::Shutdown::new();
-    time::timeout(Duration::from_secs(1), app::spawn(shutdown, config))
-        .await
-        .ok();
+#[tokio::test]
+async fn test_healthz() {
+    with_app(test_config(), |app| async move {
+        let resp = app.admin_request("healthz/ready").await;
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+    })
+    .await;
+}
 
-    thread::sleep(Duration::from_secs(1));
+impl TestApp {
+    async fn admin_request(&self, path: &str) -> Response<Body> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "http://localhost:{}/{path}",
+                self.admin_address.port()
+            ))
+            .header("content-type", "application/json")
+            .body(Body::default())
+            .unwrap();
+        let client = Client::new();
+        client.request(req).await.expect("admin request")
+    }
+}
 
+/// admin_shutdown triggers a shutdown - from the admin server
+async fn admin_shutdown(addr: SocketAddr) {
     let req = Request::builder()
         .method(Method::POST)
-        .uri("http://localhost:15021/quitquitquit")
+        .uri(format!("http://localhost:{}/quitquitquit", addr.port()))
         .header("content-type", "application/json")
         .body(Body::default())
         .unwrap();
     let client = Client::new();
-    let resp = client.request(req).await;
-    match resp {
-        Ok(resbody) => assert_eq!(resbody.status(), hyper::StatusCode::OK),
-        Err(ref e) => warn!("request get error info: {}", e),
-    };
+    let resp = client.request(req).await.expect("admin shutdown request");
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
 }

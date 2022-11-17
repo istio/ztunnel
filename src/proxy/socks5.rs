@@ -24,9 +24,9 @@ impl Socks5 {
         cert_manager: identity::SecretManager,
         workloads: WorkloadInformation,
     ) -> Result<Socks5, Error> {
-        let listener: TcpListener = TcpListener::bind("127.0.0.1:15080")
+        let listener: TcpListener = TcpListener::bind(cfg.socks5_addr)
             .await
-            .map_err(Error::Bind)?;
+            .map_err(|e| Error::Bind(cfg.socks5_addr, e))?;
 
         Ok(Socks5 {
             cfg,
@@ -38,7 +38,7 @@ impl Socks5 {
 
     pub async fn run(self) {
         let addr = self.listener.local_addr().unwrap();
-        info!("outbound listener established {}", addr);
+        info!("socks5 listener established {}", addr);
 
         loop {
             // Asynchronously wait for an inbound socket.

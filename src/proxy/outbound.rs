@@ -41,7 +41,7 @@ impl Outbound {
     ) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
             .await
-            .map_err(Error::Bind)?;
+            .map_err(|e| Error::Bind(cfg.outbound_addr, e))?;
         match socket::set_transparent(&listener) {
             Err(_e) => info!("running without transparent mode"),
             _ => info!("running with transparent mode"),
@@ -57,7 +57,8 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
-        info!("outbound listener established {}", self.cfg.outbound_addr);
+        let addr = self.listener.local_addr().unwrap();
+        info!("outbound listener established {}", addr);
 
         let accept = async move {
             loop {

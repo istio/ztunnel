@@ -81,7 +81,7 @@ impl Proxy {
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("failed to bind to address: {0}")]
-    Bind(#[source] io::Error),
+    Bind(SocketAddr, io::Error),
 
     #[error("io error: {0}")]
     Io(#[from] io::Error),
