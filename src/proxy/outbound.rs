@@ -239,8 +239,8 @@ impl OutboundConnection {
 
         let us = us.unwrap();
         // For case source client has enabled waypoint
-        if source_workload.waypoint_address.is_some() {
-            let waypoint_address = source_workload.waypoint_address.unwrap();
+        if !source_workload.waypoint_addresses.is_empty() {
+            let waypoint_address = source_workload.choose_waypoint_address().unwrap();
             return Ok(Request {
                 // Always use HBONE here
                 protocol: Protocol::Hbone,
@@ -258,7 +258,8 @@ impl OutboundConnection {
             });
         }
         // For case upstream server has enabled waypoint
-        if us.workload.waypoint_address.is_some() {
+        if !us.workload.waypoint_addresses.is_empty() {
+            let waypoint_address = source_workload.choose_waypoint_address().unwrap();
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
             return Ok(Request {
@@ -267,7 +268,7 @@ impl OutboundConnection {
                 source: source_workload,
                 // Use the original VIP, not translated
                 destination: target,
-                gateway: SocketAddr::from((us.workload.waypoint_address.unwrap(), 15006)),
+                gateway: SocketAddr::from((waypoint_address, 15006)),
                 // Let the client remote know we are on the inbound path.
                 direction: Direction::Inbound,
                 request_type: RequestType::ToServerWaypoint,
