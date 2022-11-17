@@ -166,13 +166,13 @@ impl TryFrom<&XdsWorkload> for Workload {
 
         let mut waypoint_addresses: Vec<IpAddr> = Vec::new();
         for addr in &resource.waypoint_addresses {
-            waypoint_addresses.push(byte_to_ip(&addr)?.ok_or(WorkloadError::ByteAddressParse(0))?)
+            waypoint_addresses.push(byte_to_ip(addr)?.ok_or(WorkloadError::ByteAddressParse(0))?)
         }
         let address = byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
-            waypoint_addresses: waypoint_addresses,
+            waypoint_addresses,
             gateway_address: None,
 
             protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
@@ -456,8 +456,7 @@ impl WorkloadStore {
                     let ip = us
                         .workload
                         .choose_waypoint_address()
-                        .or_else(|| Some(us.workload.workload_ip))
-                        .unwrap();
+                        .unwrap_or(us.workload.workload_ip);
                     SocketAddr::from((ip, 15008))
                 }
                 Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),

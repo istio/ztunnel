@@ -239,7 +239,7 @@ impl OutboundConnection {
 
         let us = us.unwrap();
         // For case source client has enabled waypoint
-        if source_workload.waypoint_addresses.len() > 0 {
+        if !source_workload.waypoint_addresses.is_empty() {
             let waypoint_address = source_workload.choose_waypoint_address().unwrap();
             return Ok(Request {
                 // Always use HBONE here
@@ -258,7 +258,7 @@ impl OutboundConnection {
             });
         }
         // For case upstream server has enabled waypoint
-        if us.workload.waypoint_addresses.len() > 0 {
+        if !us.workload.waypoint_addresses.is_empty() {
             let waypoint_address = source_workload.choose_waypoint_address().unwrap();
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
