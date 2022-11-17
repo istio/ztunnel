@@ -103,7 +103,7 @@ impl TestApp {
     async fn admin_request(&self, path: &str) -> Response<Body> {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!("http://{}/{path}", self.admin_address))
+            .uri(format!("http://localhost:{}/{path}", self.admin_address.port()))
             .header("content-type", "application/json")
             .body(Body::default())
             .unwrap();
@@ -116,7 +116,7 @@ impl TestApp {
 async fn admin_shutdown(addr: SocketAddr) {
     let req = Request::builder()
         .method(Method::POST)
-        .uri(format!("http://{}/quitquitquit", addr))
+        .uri(format!("http://localhost:{}/quitquitquit", addr.port()))
         .header("content-type", "application/json")
         .body(Body::default())
         .unwrap();
