@@ -108,7 +108,7 @@ impl TestApp {
             .body(Body::default())
             .unwrap();
         let client = Client::new();
-        client.request(req).await.unwrap()
+        client.request(req).await.expect("admin request")
     }
 }
 
@@ -121,6 +121,6 @@ async fn admin_shutdown(addr: SocketAddr) {
         .body(Body::default())
         .unwrap();
     let client = Client::new();
-    let resp = client.request(req).await;
-    assert_eq!(resp.unwrap().status(), hyper::StatusCode::OK);
+    let resp = client.request(req).await.expect("admin shutdown request");
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
 }

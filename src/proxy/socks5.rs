@@ -38,7 +38,7 @@ impl Socks5 {
 
     pub async fn run(self) {
         let addr = self.listener.local_addr().unwrap();
-        info!("outbound listener established {}", addr);
+        info!("socks5 listener established {}", addr);
 
         loop {
             // Asynchronously wait for an inbound socket.
