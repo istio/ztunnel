@@ -6,7 +6,12 @@ test:
 build:
 	cargo build
 
-lint: lint-scripts lint-yaml lint-markdown lint-licenses
+# override target in common/Makefile.common.mk, only check golang and rust codes
+lint-copyright-banner:
+	@${FINDFILES} \( -name '*.go' -o -name '*.rs' \) \( ! \( -name '*.gen.go' -o -name '*.pb.go' -o -name '*_pb2.py' \) \) -print0 |\
+		${XARGS} common/scripts/lint_copyright_banner.sh
+
+lint: lint-scripts lint-yaml lint-markdown lint-licenses lint-copyright-banner
 	cargo clippy
 
 check:
