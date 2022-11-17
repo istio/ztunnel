@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hyper::{Body, Client, Method, Request, Response};
+use once_cell::sync::Lazy;
 use std::future::Future;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
-use hyper::{Body, Client, Method, Request, Response};
-use once_cell::sync::Lazy;
 use tokio::time;
 
 use helpers::*;
