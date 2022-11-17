@@ -103,7 +103,10 @@ impl TestApp {
     async fn admin_request(&self, path: &str) -> Response<Body> {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!("http://localhost:{}/{path}", self.admin_address.port()))
+            .uri(format!(
+                "http://localhost:{}/{path}",
+                self.admin_address.port()
+            ))
             .header("content-type", "application/json")
             .body(Body::default())
             .unwrap();
