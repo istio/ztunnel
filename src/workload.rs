@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt, net};
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::{fmt, net};
 
 use futures::future::TryFutureExt;
 use rand::prelude::IteratorRandom;
@@ -26,10 +26,10 @@ use tracing::{debug, error, info, warn};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
-use crate::{config, xds};
 use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
+use crate::{config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -244,19 +244,19 @@ impl WorkloadManager {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
-            Some(xds::Config::new(config.clone())
-                .with_workload_handler(xds_workloads)
-                .watch(xds::WORKLOAD_TYPE.into())
-                .build())
+            Some(
+                xds::Config::new(config.clone())
+                    .with_workload_handler(xds_workloads)
+                    .watch(xds::WORKLOAD_TYPE.into())
+                    .build(),
+            )
         } else {
             None
         };
         let local_workloads = workloads.clone();
-        let local_client = config.local_xds_path.map(|path| {
-            LocalClient {
-                path,
-                workloads: local_workloads,
-            }
+        let local_client = config.local_xds_path.map(|path| LocalClient {
+            path,
+            workloads: local_workloads,
         });
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         let workloads = WorkloadInformation {
@@ -271,21 +271,21 @@ impl WorkloadManager {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let xds = self.xds_client.map(|c| {
-            c.run().map_err(|e| anyhow::anyhow!(e))
-        });
+        let xds = self
+            .xds_client
+            .map(|c| c.run().map_err(|e| anyhow::anyhow!(e)));
         let local = self.local_client.map(|c| c.run());
 
         match (xds, local) {
             (Some(x), Some(l)) => {
                 tokio::try_join!(x, l)?;
-            },
+            }
             (Some(x), _) => {
                 x.await?;
-            },
+            }
             (_, Some(l)) => {
                 l.await?;
-            },
+            }
             _ => {}
         }
         Ok(())
@@ -616,7 +616,7 @@ mod tests {
             name: "some name".to_string(),
             ..Default::default()
         })
-            .unwrap();
+        .unwrap();
         assert_eq!((wi.workloads.len()), 1);
         assert_eq!(
             wi.find_workload(&ip1),
@@ -666,7 +666,7 @@ mod tests {
             )]),
             ..Default::default()
         })
-            .unwrap();
+        .unwrap();
         wi.insert_xds_workload(XdsWorkload {
             address: xds_ip2,
             name: "some name2".to_string(),
@@ -681,7 +681,7 @@ mod tests {
             )]),
             ..Default::default()
         })
-            .unwrap();
+        .unwrap();
 
         assert_vips(&wi, vec!["some name", "some name2"]);
         wi.remove("127.0.0.2".to_string());

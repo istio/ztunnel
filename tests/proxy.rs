@@ -28,6 +28,7 @@ use ztunnel::*;
 
 fn test_config() -> config::Config {
     config::Config {
+        xds_address: None,
         local_xds_path: Some("examples/localhost.yaml".to_string()),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),

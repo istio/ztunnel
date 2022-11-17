@@ -24,5 +24,5 @@ pub enum Error {
     SslError(#[from] ErrorStack),
 
     #[error("invalid uri: {0}")]
-    InvalidUri(#[from] InvalidUri)
+    InvalidUri(#[from] InvalidUri),
 }
