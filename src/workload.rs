@@ -60,7 +60,7 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
 pub struct Workload {
     pub workload_ip: IpAddr,
     #[serde(default)]
-    pub waypoint_address: Option<IpAddr>,
+    pub waypoint_addresses: Vec<IpAddr>,
     #[serde(default)]
     pub gateway_address: Option<SocketAddr>,
     #[serde(default)]
@@ -97,6 +97,12 @@ impl Workload {
             namespace: self.namespace.clone(),
             service_account: self.service_account.clone(),
         }
+    }
+    pub fn choose_waypoint_address(&self) -> Option<IpAddr> {
+        self.waypoint_addresses
+            .iter()
+            .choose(&mut rand::thread_rng())
+            .copied()
     }
 }
 
@@ -157,12 +163,16 @@ impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource: XdsWorkload = resource.to_owned();
-        let waypoint = byte_to_ip(&resource.waypoint_address)?;
+
+        let mut waypoint_addresses: Vec<IpAddr> = Vec::new();
+        for addr in &resource.waypoint_addresses {
+            waypoint_addresses.push(byte_to_ip(&addr)?.ok_or(WorkloadError::ByteAddressParse(0))?)
+        }
         let address = byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
-            waypoint_address: waypoint,
+            waypoint_addresses: waypoint_addresses,
             gateway_address: None,
 
             protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
@@ -443,10 +453,11 @@ impl WorkloadStore {
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
                 Protocol::Hbone => {
-                    let mut ip = us.workload.workload_ip;
-                    if let Some(addr) = us.workload.waypoint_address {
-                        ip = addr;
-                    }
+                    let ip = us
+                        .workload
+                        .choose_waypoint_address()
+                        .or_else(|| Some(us.workload.workload_ip))
+                        .unwrap();
                     SocketAddr::from((ip, 15008))
                 }
                 Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),
@@ -568,8 +579,7 @@ mod tests {
     fn workload_information() {
         let default = Workload {
             workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-
-            waypoint_address: None,
+            waypoint_addresses: Vec::new(),
             gateway_address: None,
             protocol: Default::default(),
             name: "".to_string(),
