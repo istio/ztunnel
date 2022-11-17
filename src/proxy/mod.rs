@@ -18,7 +18,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use tokio::net::TcpStream;
-use tracing::info;
+use tracing::{error, info};
 
 use inbound::Inbound;
 
@@ -54,10 +54,17 @@ impl Proxy {
             cfg.clone(),
             secret_manager.clone(),
             workloads.clone(),
+            inbound.address().port(),
             drain,
         )
         .await?;
-        let socks5 = Socks5::new(cfg.clone(), secret_manager.clone(), workloads.clone()).await?;
+        let socks5 = Socks5::new(
+            cfg.clone(),
+            secret_manager.clone(),
+            inbound.address().port(),
+            workloads.clone(),
+        )
+        .await?;
         Ok(Proxy {
             inbound,
             inbound_passthrough,
@@ -76,6 +83,21 @@ impl Proxy {
 
         futures::future::join_all(tasks).await;
     }
+
+    pub fn addresses(&self) -> Addresses {
+        Addresses {
+            outbound: self.outbound.address(),
+            inbound: self.inbound.address(),
+            socks5: self.socks5.address(),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct Addresses {
+    pub outbound: SocketAddr,
+    pub inbound: SocketAddr,
+    pub socks5: SocketAddr,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -162,7 +184,7 @@ pub async fn copy_hbone(
     // tokio::try_join!(client_to_server, server_to_client).map(|_| ())
 }
 
-fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
+pub fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
     // another match has to be used for IPv4 and IPv6 support
     // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
     match ip.ip() {

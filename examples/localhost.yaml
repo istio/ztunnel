@@ -6,3 +6,10 @@
   workload_ip: "127.0.0.1"
   protocol: Hbone
   node: local
+# Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
+- name: local-tcp
+  namespace: default
+  service_account: default
+  workload_ip: "127.0.0.2"
+  protocol: Tcp
+  node: local

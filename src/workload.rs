@@ -28,7 +28,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
-use crate::xds::{Demander, HandlerContext, XdsUpdate};
+use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
 use crate::{config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -203,8 +203,8 @@ impl TryFrom<&XdsWorkload> for Workload {
 
 pub struct WorkloadManager {
     workloads: WorkloadInformation,
-    xds_client: xds::AdsClient,
-    local_client: LocalClient,
+    xds_client: Option<xds::AdsClient>,
+    local_client: Option<LocalClient>,
 }
 
 fn handle_xds<F: FnOnce() -> anyhow::Result<()>>(ctx: &mut HandlerContext, name: String, f: F) {
@@ -243,20 +243,22 @@ impl WorkloadManager {
     pub fn new(config: config::Config) -> WorkloadManager {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
-        let xds_client = xds::Config::new(config.clone())
-            .with_workload_handler(xds_workloads)
-            .watch(xds::WORKLOAD_TYPE.into())
-            .build();
-        let local_workloads = workloads.clone();
-        let local_client = LocalClient {
-            path: config.local_xds_path,
-            workloads: local_workloads,
-        };
-        let demand = if config.xds_on_demand {
-            Some(xds_client.demander())
+        let xds_client = if config.xds_address.is_some() {
+            Some(
+                xds::Config::new(config.clone())
+                    .with_workload_handler(xds_workloads)
+                    .watch(xds::WORKLOAD_TYPE.into())
+                    .build(),
+            )
         } else {
             None
         };
+        let local_workloads = workloads.clone();
+        let local_client = config.local_xds_path.map(|path| LocalClient {
+            path,
+            workloads: local_workloads,
+        });
+        let demand = xds_client.as_ref().and_then(AdsClient::demander);
         let workloads = WorkloadInformation {
             info: workloads,
             demand,
@@ -269,10 +271,23 @@ impl WorkloadManager {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        tokio::try_join!(
-            self.xds_client.run().map_err(|e| anyhow::anyhow!(e)),
-            self.local_client.run()
-        )?;
+        let xds = self
+            .xds_client
+            .map(|c| c.run().map_err(|e| anyhow::anyhow!(e)));
+        let local = self.local_client.map(|c| c.run());
+
+        match (xds, local) {
+            (Some(x), Some(l)) => {
+                tokio::try_join!(x, l)?;
+            }
+            (Some(x), _) => {
+                x.await?;
+            }
+            (_, Some(l)) => {
+                l.await?;
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -283,19 +298,15 @@ impl WorkloadManager {
 
 /// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
 struct LocalClient {
-    path: Option<String>,
+    path: String,
     workloads: Arc<Mutex<WorkloadStore>>,
 }
 
 impl LocalClient {
     async fn run(self) -> Result<(), anyhow::Error> {
-        let path = match self.path {
-            Some(p) => p,
-            None => return Ok(()),
-        };
         info!("running local client");
         // Currently, we just load the file once. In the future, we could dynamically reload.
-        let data = tokio::fs::read_to_string(path).await?;
+        let data = tokio::fs::read_to_string(self.path).await?;
         let r: Vec<Workload> = serde_yaml::from_str(&data)?;
         let mut wli = self.workloads.lock().unwrap();
         for wl in r {
@@ -342,10 +353,10 @@ impl WorkloadInformation {
         wi.find_workload(addr).cloned()
     }
 
-    pub async fn find_upstream(&self, addr: SocketAddr) -> Option<Upstream> {
+    pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         let _ = self.fetch_workload(&addr.ip()).await;
         let wi = self.info.lock().unwrap();
-        wi.find_upstream(addr)
+        wi.find_upstream(addr, hbone_port)
     }
 }
 
@@ -426,14 +437,14 @@ impl WorkloadStore {
         self.workloads.get(addr)
     }
 
-    fn find_upstream(&self, addr: SocketAddr) -> Option<Upstream> {
+    fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         if let Some(upstream) = self.vips.get(&addr) {
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
             let us: &Upstream = upstream.iter().choose(&mut rand::thread_rng()).unwrap();
             // TODO: avoid clone
             let mut us: Upstream = us.clone();
-            Self::set_gateway_address(&mut us);
+            Self::set_gateway_address(&mut us, hbone_port);
             debug!("found upstream from VIP: {}", us);
             return Some(us);
         }
@@ -442,14 +453,14 @@ impl WorkloadStore {
                 workload: wl.clone(),
                 port: addr.port(),
             };
-            Self::set_gateway_address(&mut us);
+            Self::set_gateway_address(&mut us, hbone_port);
             debug!("found upstream: {}", us);
             return Some(us);
         }
         None
     }
 
-    fn set_gateway_address(us: &mut Upstream) {
+    fn set_gateway_address(us: &mut Upstream, hbone_port: u16) {
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
                 Protocol::Hbone => {
@@ -457,7 +468,7 @@ impl WorkloadStore {
                         .workload
                         .choose_waypoint_address()
                         .unwrap_or(us.workload.workload_ip);
-                    SocketAddr::from((ip, 15008))
+                    SocketAddr::from((ip, hbone_port))
                 }
                 Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),
             });
@@ -686,7 +697,7 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap()) {
+            if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap(), 15008) {
                 let n = us.workload.name.clone();
                 found.insert(n.clone());
                 wants.remove(&n);
@@ -710,7 +721,7 @@ mod tests {
             .to_string();
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let local_client = LocalClient {
-            path: Some(dir),
+            path: dir,
             workloads: workloads.clone(),
         };
         local_client.run().await.expect("client should run");

@@ -57,6 +57,10 @@ impl Inbound {
         })
     }
 
+    pub(super) fn address(&self) -> SocketAddr {
+        self.listener.local_addr().unwrap()
+    }
+
     pub(super) async fn run(self) {
         let addr = self.listener.local_addr().unwrap();
         if self.cfg.tls {

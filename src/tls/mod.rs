@@ -16,9 +16,13 @@ pub mod boring;
 
 pub use crate::tls::boring::*;
 use ::boring::error::ErrorStack;
+use hyper::http::uri::InvalidUri;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("invalid operation: {0}")]
     SslError(#[from] ErrorStack),
+
+    #[error("invalid uri: {0}")]
+    InvalidUri(#[from] InvalidUri),
 }
