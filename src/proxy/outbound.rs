@@ -150,8 +150,8 @@ impl OutboundConnection {
 
                 let mut request_sender = if self.cfg.tls {
                     let id = req.source.identity();
-                    let cert = self.cert_manager.fetch_certificate(id).await?;
-                    let connector = cert.connector()?.configure()?;
+                    let cert = self.cert_manager.fetch_certificate(&id).await?;
+                    let connector = cert.connector(&req.destination_identity)?.configure()?;
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
@@ -232,6 +232,7 @@ impl OutboundConnection {
                 protocol: Protocol::Tcp,
                 source: source_workload,
                 destination: target,
+                destination_identity: None,
                 gateway: target,
                 direction: Direction::Outbound,
                 request_type: RequestType::Passthrough,
@@ -242,12 +243,14 @@ impl OutboundConnection {
         // For case source client has enabled waypoint
         if !source_workload.waypoint_addresses.is_empty() {
             let waypoint_address = source_workload.choose_waypoint_address().unwrap();
+            let destination_identity = Some(source_workload.identity());
             return Ok(Request {
                 // Always use HBONE here
                 protocol: Protocol::Hbone,
                 source: source_workload,
                 // Load balancing decision is deferred to remote proxy
                 destination: target,
+                destination_identity,
                 // Send to the remote proxy
                 gateway: SocketAddr::from((waypoint_address, 15001)),
                 // Let the client remote know we are on the outbound path. The remote proxy should strictly
@@ -270,6 +273,7 @@ impl OutboundConnection {
                 // Use the original VIP, not translated
                 destination: target,
                 gateway: SocketAddr::from((waypoint_address, 15006)),
+                destination_identity: us.workload.identity().into(),
                 // Let the client remote know we are on the inbound path.
                 direction: Direction::Inbound,
                 request_type: RequestType::ToServerWaypoint,
@@ -277,13 +281,14 @@ impl OutboundConnection {
         }
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
-            && self.cfg.local_node == Some(us.workload.node)
+            && self.cfg.local_node == Some(us.workload.node.clone())
             && us.workload.protocol == Protocol::Hbone
         {
             return Ok(Request {
                 protocol: Protocol::Hbone,
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
+                destination_identity: us.workload.identity().into(),
                 // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
                 // expects to lookup the desired certificate based on the destination IP. If we send directly,
                 // we would try to lookup an IP for 127.0.0.1.
@@ -306,6 +311,7 @@ impl OutboundConnection {
             protocol: us.workload.protocol,
             source: source_workload,
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
+            destination_identity: us.workload.identity().into(),
             gateway: us
                 .workload
                 .gateway_address
@@ -333,6 +339,7 @@ struct Request {
     direction: Direction,
     source: Workload,
     destination: SocketAddr,
+    destination_identity: Option<identity::Identity>,
     gateway: SocketAddr,
     request_type: RequestType,
 }
@@ -358,11 +365,6 @@ async fn connect_tls(
 ) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
     connector.set_verify_hostname(false);
     connector.set_use_server_name_indication(false);
-    let addr = stream.local_addr();
-    connector.set_verify_callback(boring::ssl::SslVerifyMode::PEER, move |_, x509| {
-        info!("TLS callback for {:?}: {:?}", addr, x509.error());
-        true
-    });
     tokio_boring::connect(connector, "", stream).await
 }
 

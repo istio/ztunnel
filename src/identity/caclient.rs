@@ -45,7 +45,7 @@ impl CaClient {
     }
 
     #[instrument(skip_all)]
-    pub async fn fetch_certificate(&mut self, id: Identity) -> Result<tls::Certs, Error> {
+    pub async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
         let cs = tls::CsrOptions {
             san: id.to_string(),
         }
@@ -66,11 +66,14 @@ impl CaClient {
                 )]),
             }),
         };
-        let resp = self.client.create_certificate(req).await?;
-        let resp = resp.into_inner();
-        Ok(tls::cert_from(
-            &pkey,
-            resp.cert_chain.first().unwrap().as_bytes(),
-        ))
+        let resp = self.client.create_certificate(req).await?.into_inner();
+
+        let leaf = resp.cert_chain.first().unwrap().as_bytes();
+        let chain = if resp.cert_chain.len() > 1 {
+            resp.cert_chain[1..].iter().map(|s| s.as_bytes()).collect()
+        } else {
+            vec![]
+        };
+        Ok(tls::cert_from(&pkey, leaf, chain))
     }
 }

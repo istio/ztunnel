@@ -186,7 +186,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
                 .identity()
         };
         info!("tls: accepting connection to {:?} ({})", orig, identity);
-        let cert = self.cert_manager.fetch_certificate(identity).await?;
+        let cert = self.cert_manager.fetch_certificate(&identity).await?;
         let acc = cert.acceptor()?;
         Ok(acc)
     }

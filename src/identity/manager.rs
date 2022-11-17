@@ -55,7 +55,7 @@ impl SecretManager {
     }
 
     #[instrument(skip_all, fields(%id))]
-    pub async fn fetch_certificate(&self, id: Identity) -> Result<tls::Certs, Error> {
+    pub async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
         self.client.clone().fetch_certificate(id).await
     }
 }

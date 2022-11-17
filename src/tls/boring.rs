@@ -25,10 +25,10 @@ use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey;
 use boring::pkey::PKey;
-use boring::ssl;
+use boring::ssl::{self, SslContextBuilder};
 use boring::stack::Stack;
-use boring::x509;
 use boring::x509::extension::SubjectAlternativeName;
+use boring::x509::{self, GeneralName, X509StoreContext, X509StoreContextRef, X509VerifyResult};
 use hyper::client::ResponseFuture;
 use hyper::{Request, Uri};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -36,14 +36,18 @@ use tonic::body::BoxBody;
 use tower::Service;
 use tracing::{error, info};
 
-use crate::identity;
+use crate::identity::{self, Identity};
 
 use super::Error;
 
-pub fn cert_from(key: &[u8], cert: &[u8]) -> Certs {
-    let cert = x509::X509::from_pem(cert).unwrap();
+pub fn cert_from(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Certs {
     let key = pkey::PKey::private_key_from_pem(key).unwrap();
-    Certs { cert, key }
+    let cert = x509::X509::from_pem(cert).unwrap();
+    let chain = chain
+        .into_iter()
+        .map(|pem| x509::X509::from_pem(pem).unwrap())
+        .collect();
+    Certs { cert, chain, key }
 }
 
 pub struct CertSign {
@@ -85,8 +89,10 @@ impl CsrOptions {
 
 #[derive(Debug)]
 pub struct Certs {
-    // TODO: pretty sure this needs the full chain at some point
+    // the leaf cert
     cert: x509::X509,
+    // the remainder of the chain, not including the leaf cert
+    chain: Vec<x509::X509>,
     key: pkey::PKey<pkey::Private>,
 }
 
@@ -129,50 +135,111 @@ pub fn grpc_connector(uri: &'static str) -> Result<TlsGrpcChannel, Error> {
 }
 
 impl Certs {
+    fn verify_mode() -> ssl::SslVerifyMode {
+        ssl::SslVerifyMode::PEER | ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT
+    }
+
     pub fn acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
         let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
         // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
         let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
+        self.setup_ctx(&mut conn)?;
 
-        // Force use of TLSv1.3.
+        Ok(conn.build())
+    }
+    pub fn connector(&self, dest_id: &Option<Identity>) -> Result<ssl::SslConnector, Error> {
+        let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+        self.setup_ctx(&mut conn)?;
+
+        // client verifies SAN
+        if let Some(dest_id) = dest_id {
+            conn.set_verify_callback(
+                Self::verify_mode(),
+                Verifier::San(dest_id.clone()).callback(),
+            );
+        }
+
+        Ok(conn.build())
+    }
+
+    fn setup_ctx(&self, conn: &mut SslContextBuilder) -> Result<(), Error> {
+        // general TLS options
+        conn.set_alpn_protos(Alpn::H2.encode())?;
         conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
         conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
         conn.set_cipher_list(
             "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
         )?;
-
+        // key and certs
         conn.set_private_key(&self.key)?;
         conn.set_certificate(&self.cert)?;
+        for chain_cert in self.chain.iter() {
+            conn.cert_store_mut().add_cert(chain_cert.clone())?;
+        }
         conn.check_private_key()?;
 
-        // Ensure that client certificates are validated when present.
-        conn.set_verify(ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-        conn.set_verify_callback(ssl::SslVerifyMode::PEER, |_, _| {
-            // TODO: this MUST verify before upstreaming
-            true
-        });
-        conn.set_alpn_protos(Alpn::H2.encode())?;
+        // by default, allow boringssl to do standard validation
+        conn.set_verify_callback(Self::verify_mode(), Verifier::None.callback());
 
-        Ok(conn.build())
+        Ok(())
     }
-    pub fn connector(&self) -> Result<ssl::SslConnector, Error> {
-        let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+}
 
-        conn.set_private_key(&self.key)?;
-        conn.set_certificate(&self.cert)?;
-        conn.check_private_key()?;
+enum Verifier {
+    // Does not verify an individual identity.
+    None,
 
-        conn.set_verify(ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-        conn.set_verify_callback(ssl::SslVerifyMode::PEER, |_, _| {
-            // TODO: this MUST verify before upstreaming
-            true
-        });
+    // Allows exactly one identity, making sure at least one of the presented certs
+    San(Identity),
+}
 
-        conn.set_alpn_protos(Alpn::H2.encode())?;
-        conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
-        conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+impl Verifier {
+    fn base_verifier(verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+        if !verified {
+            return Err(TlsError::Verification(ctx.error()));
+        };
+        Ok(())
+    }
 
-        Ok(conn.build())
+    fn verifiy_san(&self, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+        let Self::San(identity) = self else {
+            // not verifying san
+            return Ok(());
+        };
+
+        // internally, openssl tends to .expect the results of these methods.
+        // TODO bubble up better error message
+        let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
+        let cert = ctx
+            .ex_data(ssl_idx)
+            .ok_or(TlsError::SanError)?
+            .peer_certificate()
+            .ok_or(TlsError::SanError)?;
+
+        let want_san = format!("{identity}");
+        cert.subject_alt_names()
+            .unwrap_or(boring::stack::Stack::<GeneralName>::new().map_err(Error::SslError)?)
+            .iter()
+            .find(|san| san.uri().unwrap_or("<non-uri>") == want_san)
+            .ok_or(TlsError::SanError)
+            .map(|_| ())
+    }
+
+    fn verifiy(&self, verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+        Self::base_verifier(verified, ctx)?;
+        self.verifiy_san(ctx)?;
+        Ok(())
+    }
+
+    fn callback(self) -> impl Fn(bool, &mut X509StoreContextRef) -> bool {
+        move |verified, ctx| match self.verifiy(verified, ctx) {
+            Ok(_) => true,
+            Err(e) => {
+                // TODO metrics/counters; info would be too noisy
+                info!("failed verifying TLS: {e}");
+                false
+            }
+        }
     }
 }
 
@@ -225,12 +292,16 @@ pub struct BoringTlsAcceptor<F: CertProvider> {
 pub enum TlsError {
     #[error("tls handshake error")]
     Handshake,
+    #[error("tls verification error: {0}")]
+    Verification(X509VerifyResult),
     #[error("certificate lookup error: {0} is not a known destination")]
     CertificateLookup(IpAddr),
     #[error("destination lookup error")]
     DestinationLookup(#[source] io::Error),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
+    #[error("san verification error: remote did not present the expected SAN")]
+    SanError,
     #[error("ssl error: {0}")]
     SslError(#[from] Error),
 }
