@@ -17,12 +17,13 @@ use std::os::unix::io::RawFd;
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::identity;
+use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::tls::TlsError;
 use crate::workload::WorkloadInformation;
 
@@ -121,41 +122,61 @@ impl Inbound {
             }
         }
     }
+
+    /// handle_inbound serves an inbound connection with a target address `addr`.
+    pub(super) async fn handle_inbound(
+        request_type: InboundConnect,
+        addr: SocketAddr,
+    ) -> Result<(), std::io::Error> {
+        let stream = tokio::net::TcpStream::connect(addr).await;
+        match stream {
+            Err(err) => {
+                warn!("connect to {} failed: {}", addr, err);
+                Err(err)
+            }
+            Ok(stream) => {
+                let mut stream = stream;
+                tokio::task::spawn(async move {
+                    match request_type {
+                        InboundConnect::DirectPath(mut incoming) => {
+                            tokio::io::copy_bidirectional(&mut incoming, &mut stream)
+                                .await
+                                .expect("internal server copy");
+                        }
+                        Hbone(req) => match hyper::upgrade::on(req).await {
+                            Ok(mut upgraded) => {
+                                super::copy_hbone("hbone server", &mut upgraded, &mut stream)
+                                    .await
+                                    .expect("hbone server copy");
+                            }
+                            Err(e) => {
+                                // Not sure if this can even happen
+                                error!("No upgrade {e}");
+                            }
+                        },
+                    }
+                });
+                // Send back our 200. We do this regardless of if our spawned task copies the data;
+                // we need to respond with headers immediately once connection is established for the
+                // stream of bytes to begin.
+                Ok(())
+            }
+        }
+    }
+
     async fn serve_connect(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
         let mut res = Response::new(Body::empty());
         match req.method() {
             &Method::CONNECT => {
-                // TODO: uri or host?
                 let uri = req.uri();
+                info!("Got {} request to {}", req.method(), uri);
                 let addr: SocketAddr = uri.to_string().as_str().parse().expect("must be an addr");
-                let stream = tokio::net::TcpStream::connect(addr).await;
-                match stream {
-                    Err(err) => {
-                        warn!("connect to {} failed: {}", addr, err);
-                        *res.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                        Ok(res)
-                    }
-                    Ok(stream) => {
-                        let mut stream = stream;
-                        info!("Got {} request to {}", req.method(), uri);
-                        *res.status_mut() = StatusCode::OK;
-                        tokio::task::spawn(async move {
-                            match hyper::upgrade::on(req).await {
-                                Ok(mut upgraded) => {
-                                    super::copy_hbone("hbone server", &mut upgraded, &mut stream)
-                                        .await
-                                        .expect("hbone server copy");
-                                }
-                                Err(e) => {
-                                    // Not sure if this can even happen
-                                    error!("No upgrade {e}");
-                                }
-                            }
-                        });
-                        // Send back our 200.
-                        Ok(res)
-                    }
-                }
+                *res.status_mut() =
+                    match Self::handle_inbound(InboundConnect::Hbone(req), addr).await {
+                        Ok(_) => StatusCode::OK,
+                        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+                    };
+                Ok(res)
             }
             // Return the 404 Not Found for other routes.
             method => {
@@ -166,6 +187,15 @@ impl Inbound {
             }
         }
     }
+}
+
+pub(super) enum InboundConnect {
+    /// DirectPath is an optimization when we are connecting to an endpoint on the same node.
+    /// Rather than doing a full HBONE connection over the localhost network, we just pass the outbound
+    /// context directly to the inbound handling in memory.
+    DirectPath(TcpStream),
+    /// Hbone is a standard HBONE request coming from the network.
+    Hbone(Request<Body>),
 }
 
 #[derive(Clone)]
