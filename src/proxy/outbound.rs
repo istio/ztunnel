@@ -16,7 +16,6 @@ use std::net::{IpAddr, SocketAddr};
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
