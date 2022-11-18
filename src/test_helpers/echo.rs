@@ -15,7 +15,7 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, trace};
 
 pub struct TestServer {
     listener: TcpListener,
@@ -37,7 +37,7 @@ impl TestServer {
             let (mut socket, _) = self.listener.accept().await.unwrap();
 
             tokio::spawn(async move {
-                let mut buf = vec![0; 1024];
+                let mut buf = vec![0; 2*1024*1024];
 
                 // In a loop, read data from the socket and write the data back.
                 loop {
@@ -46,7 +46,7 @@ impl TestServer {
                         .await
                         .expect("failed to read data from socket");
 
-                    info!("echo received {n}: {:?}", &buf[0..n]);
+                    trace!("echo received {n}: {:?}", &buf[0..n]);
                     if n == 0 {
                         return;
                     }

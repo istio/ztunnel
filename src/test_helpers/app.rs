@@ -91,6 +91,7 @@ impl TestApp {
         );
 
         let mut stream = TcpStream::connect(socks_addr).await.expect("must connect");
+        stream.set_nodelay(true).unwrap();
 
         let addr_type = if addr.ip().is_ipv4() { 0x01u8 } else { 0x04u8 };
         stream
