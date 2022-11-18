@@ -19,7 +19,9 @@ use std::net::IpAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::task::Poll;
+use std::time::Duration;
 
+use boring::asn1::{Asn1Time, Asn1TimeRef};
 use boring::ec::{EcGroup, EcKey};
 use boring::hash::MessageDigest;
 use boring::nid::Nid;
@@ -87,13 +89,53 @@ impl CsrOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Certs {
     // the leaf cert
     cert: x509::X509,
     // the remainder of the chain, not including the leaf cert
     chain: Vec<x509::X509>,
     key: pkey::PKey<pkey::Private>,
+}
+
+impl PartialEq for Certs {
+    fn eq(&self, other: &Self) -> bool {
+        self.cert.to_der().iter().eq(other.cert.to_der().iter())
+            && self
+                .key
+                .private_key_to_der()
+                .iter()
+                .eq(other.key.private_key_to_der().iter())
+    }
+}
+
+impl Certs {
+    pub fn is_expired(&self) -> bool {
+        let current = Asn1Time::days_from_now(0).unwrap();
+        let end: &Asn1TimeRef = self.cert.not_after();
+        let time_until_expired = current.diff(end).unwrap();
+        if time_until_expired.secs > 0 {
+            return false;
+        }
+        true
+    }
+
+    pub fn get_duration_until_refresh(&self) -> Duration {
+        let current = Asn1Time::days_from_now(0).unwrap();
+        let start: &Asn1TimeRef = self.cert.not_before();
+        let end: &Asn1TimeRef = self.cert.not_after();
+
+        let total_lifetime = start.diff(end).unwrap();
+        let total_lifetime_secs = total_lifetime.days * 86400 + total_lifetime.secs;
+        let halflife = total_lifetime_secs / 2;
+        let elapsed = start.diff(&current).unwrap();
+        let elapsed_secs = elapsed.days * 86400 + elapsed.secs; // 86400 secs/day
+        let returnval: i32 = halflife - elapsed_secs;
+        if returnval < 0 {
+            return Duration::from_secs(0);
+        }
+        Duration::from_secs(u64::try_from(returnval).unwrap())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -276,7 +318,7 @@ impl Alpn {
 
 #[async_trait::async_trait]
 pub trait CertProvider: Send + Sync + Clone {
-    async fn fetch_cert(&self, fd: RawFd) -> Result<ssl::SslAcceptor, TlsError>;
+    async fn fetch_cert(&mut self, fd: RawFd) -> Result<ssl::SslAcceptor, TlsError>;
 }
 
 #[derive(Clone)]
@@ -315,7 +357,7 @@ where
 
     fn accept(&self, conn: C) -> Self::AcceptFuture {
         let fd = conn.as_raw_fd();
-        let acceptor = self.acceptor.clone();
+        let mut acceptor = self.acceptor.clone();
         Box::pin(async move {
             let tls = acceptor.fetch_cert(fd).await?;
             tokio_boring::accept(&tls, conn)
@@ -325,10 +367,50 @@ where
     }
 }
 
-#[test]
-#[cfg(feature = "fips")]
-fn is_fips_enabled() {
-    assert!(boring::fips::enabled());
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    const CERT: &[u8] = include_bytes!("cert.crt");
+    const PKEY: &[u8] = include_bytes!("cert.key");
+
+    pub fn test_certs() -> Certs {
+        let cert = x509::X509::from_pem(CERT).unwrap();
+        let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
+        let chain = vec![cert.clone()];
+        Certs {
+            cert,
+            key,
+            chain: chain,
+        }
+    }
+
+    // Creates an invalid dummy cert with overridden expire time
+    pub fn generate_test_certs(seconds_until_expiry: Duration) -> Certs {
+        let mut tmp = x509::X509::builder().unwrap();
+        let current = Asn1Time::days_from_now(0).unwrap();
+        let expire_time: i64 = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + seconds_until_expiry.as_secs())
+        .try_into()
+        .unwrap();
+        tmp.set_not_before(&current)
+            .expect("error setting cert 'not_before'");
+        tmp.set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
+            .expect("error setting cert 'not_after'");
+
+        let cert = tmp.build();
+        let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
+        let chain = vec![cert.clone()];
+        Certs { cert, key, chain }
+    }
+
+    #[test]
+    fn is_fips_enabled() {
+        assert!(boring::fips::enabled());
+    }
 }
 
 #[test]

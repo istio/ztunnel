@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
+use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
@@ -20,6 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
+use crate::identity::CertificateProvider;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::Error;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
@@ -27,7 +29,7 @@ use crate::{identity, socket};
 
 pub struct Outbound {
     cfg: Config,
-    cert_manager: identity::SecretManager,
+    cert_manager: identity::SecretManager<identity::CaClient>,
     workloads: WorkloadInformation,
     listener: TcpListener,
     drain: Watch,
@@ -37,7 +39,7 @@ pub struct Outbound {
 impl Outbound {
     pub async fn new(
         cfg: Config,
-        cert_manager: identity::SecretManager,
+        cert_manager: identity::SecretManager<identity::CaClient>,
         workloads: WorkloadInformation,
         hbone_port: u16,
         drain: Watch,
@@ -66,15 +68,15 @@ impl Outbound {
 
     pub(super) async fn run(self) {
         info!("outbound listener established {}", self.address());
-
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
+                let start_outbound_instant = Instant::now();
                 match socket {
-                    Ok((stream, remote)) => {
+                    Ok((stream, _remote)) => {
                         let cfg = self.cfg.clone();
-                        let oc = OutboundConnection {
+                        let mut oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),
                             workloads: self.workloads.clone(),
                             cfg,
@@ -83,8 +85,15 @@ impl Outbound {
                         tokio::spawn(async move {
                             let res = oc.proxy(stream).await;
                             match res {
-                                Ok(_) => info!("outbound proxy from {remote} complete"),
-                                Err(ref e) => warn!("outbound proxy failed: {}", e),
+                                Ok(_) => info!(
+                                    "outbound proxy complete ({:?})",
+                                    start_outbound_instant.elapsed()
+                                ),
+                                Err(ref e) => warn!(
+                                    "outbound proxy failed: {} ({:?})",
+                                    e,
+                                    start_outbound_instant.elapsed()
+                                ),
                             };
                         });
                     }
@@ -106,7 +115,7 @@ impl Outbound {
 }
 
 pub struct OutboundConnection {
-    pub cert_manager: identity::SecretManager,
+    pub cert_manager: identity::SecretManager<identity::CaClient>,
     pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     pub cfg: Config,
@@ -114,7 +123,7 @@ pub struct OutboundConnection {
 }
 
 impl OutboundConnection {
-    async fn proxy(&self, stream: TcpStream) -> Result<(), Error> {
+    async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
         let remote_addr =
             super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
         let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
@@ -122,7 +131,7 @@ impl OutboundConnection {
     }
 
     pub async fn proxy_to(
-        &self,
+        &mut self,
         mut stream: TcpStream,
         remote_addr: IpAddr,
         orig: SocketAddr,
@@ -166,8 +175,8 @@ impl OutboundConnection {
                     .unwrap();
 
                 let mut request_sender = if self.cfg.tls {
-                    let id = req.source.identity();
-                    let cert = self.cert_manager.fetch_certificate(&id).await?;
+                    let id = &req.source.identity();
+                    let cert = self.cert_manager.fetch_certificate(id).await?;
                     let connector = cert.connector(&req.destination_identity)?.configure()?;
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;

@@ -37,11 +37,12 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         .expect("admin server starts");
     let admin_address = admin.address();
     admin.spawn(&shutdown, drain_rx.clone());
-    let secrets = identity::SecretManager::new(config.clone());
+
+    let cert_manager = identity::SecretManager::new(config.clone());
     let proxy = proxy::Proxy::new(
         config.clone(),
         workload_manager.workloads(),
-        secrets,
+        cert_manager,
         drain_rx.clone(),
     )
     .await?;

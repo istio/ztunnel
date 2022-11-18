@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::identity;
+use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::tls::TlsError;
 use crate::workload::WorkloadInformation;
@@ -32,7 +33,7 @@ use super::Error;
 pub struct Inbound {
     cfg: Config,
     listener: TcpListener,
-    cert_manager: identity::SecretManager,
+    cert_manager: identity::SecretManager<identity::CaClient>,
     workloads: WorkloadInformation,
 }
 
@@ -40,7 +41,7 @@ impl Inbound {
     pub async fn new(
         cfg: Config,
         workloads: WorkloadInformation,
-        cert_manager: identity::SecretManager,
+        cert_manager: identity::SecretManager<identity::CaClient>,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
             .await
@@ -204,13 +205,13 @@ pub(super) enum InboundConnect {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: identity::SecretManager,
+    cert_manager: identity::SecretManager<identity::CaClient>,
     workloads: WorkloadInformation,
 }
 
 #[async_trait::async_trait]
 impl crate::tls::CertProvider for InboundCertProvider {
-    async fn fetch_cert(&self, fd: RawFd) -> Result<boring::ssl::SslAcceptor, TlsError> {
+    async fn fetch_cert(&mut self, fd: RawFd) -> Result<boring::ssl::SslAcceptor, TlsError> {
         let orig = crate::socket::orig_dst_addr_fd(fd).map_err(TlsError::DestinationLookup)?;
         let identity = {
             let remote_addr = super::to_canonical_ip(orig);
