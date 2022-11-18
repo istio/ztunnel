@@ -17,6 +17,7 @@ use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+
 use std::{fmt, net};
 
 use futures::future::TryFutureExt;
@@ -29,7 +30,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
-use crate::{config, xds};
+use crate::{admin, config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -240,7 +241,7 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 }
 
 impl WorkloadManager {
-    pub fn new(config: config::Config) -> WorkloadManager {
+    pub fn new(config: config::Config, awaiting_ready: admin::BlockReady) -> WorkloadManager {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
@@ -257,6 +258,7 @@ impl WorkloadManager {
         let local_client = config.local_xds_path.map(|path| LocalClient {
             path,
             workloads: local_workloads,
+            block_ready: awaiting_ready,
         });
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         let workloads = WorkloadInformation {
@@ -300,6 +302,7 @@ impl WorkloadManager {
 struct LocalClient {
     path: String,
     workloads: Arc<Mutex<WorkloadStore>>,
+    block_ready: admin::BlockReady,
 }
 
 impl LocalClient {
@@ -308,11 +311,14 @@ impl LocalClient {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = tokio::fs::read_to_string(self.path).await?;
         let r: Vec<Workload> = serde_yaml::from_str(&data)?;
-        let mut wli = self.workloads.lock().unwrap();
-        for wl in r {
-            info!("inserting local workloads {wl}");
-            wli.insert(wl);
+        {
+            let mut wli = self.workloads.lock().unwrap();
+            for wl in r {
+                info!("inserting local workloads {wl}");
+                wli.insert(wl);
+            }
         }
+        drop(self.block_ready);
         Ok(())
     }
 }
@@ -720,9 +726,11 @@ mod tests {
             .unwrap()
             .to_string();
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+
         let local_client = LocalClient {
             path: dir,
             workloads: workloads.clone(),
+            block_ready: admin::Ready::new().register_task("workload"),
         };
         local_client.run().await.expect("client should run");
         let store = workloads.lock().unwrap();

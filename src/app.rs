@@ -19,7 +19,6 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::identity::CertificateProvider;
-
 use crate::{admin, config, identity, proxy, signal, workload};
 
 pub async fn build_with_cert(
@@ -35,10 +34,13 @@ pub async fn build_with_cert(
 
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
-    let workload_manager = workload::WorkloadManager::new(config.clone());
+    let ready = admin::Ready::new();
+    let proxy_task = ready.register_task("proxy listeners");
 
-    let admin = admin::Builder::new(config.clone(), workload_manager.workloads())
-        .set_ready()
+    let workload_manager =
+        workload::WorkloadManager::new(config.clone(), ready.register_task("workload manage"));
+
+    let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
         .bind()
         .expect("admin server starts");
     let admin_address = admin.address();
@@ -51,6 +53,7 @@ pub async fn build_with_cert(
         drain_rx.clone(),
     )
     .await?;
+    drop(proxy_task);
 
     let proxy_addresses = proxy.addresses();
 

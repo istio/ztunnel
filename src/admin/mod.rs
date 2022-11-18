@@ -14,14 +14,9 @@
 
 // Forked from https://github.com/olix0r/kubert/blob/main/kubert/src/admin.rs
 
-use std::{
-    net::SocketAddr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::collections::HashSet;
+use std::sync::Mutex;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use drain::Watch;
 #[cfg(feature = "gperftools")]
@@ -44,31 +39,71 @@ use crate::{config, signal};
 pub struct Builder {
     addr: SocketAddr,
     workload_info: WorkloadInformation,
-    ready: Readiness,
+    ready: Ready,
 }
 
 pub struct Server {
     addr: SocketAddr,
-    ready: Readiness,
+    ready: Ready,
     server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
     workload_info: WorkloadInformation,
 }
 
-#[derive(Clone, Debug)]
-pub struct Readiness(Arc<AtomicBool>);
+/// Ready tracks whether the process is ready.
+#[derive(Clone, Debug, Default)]
+pub struct Ready(Arc<Mutex<HashSet<String>>>);
 
-impl Builder {
-    pub fn new(config: config::Config, f: WorkloadInformation) -> Self {
-        Self {
-            addr: config.admin_addr,
-            ready: Readiness(Arc::new(false.into())),
-            workload_info: f,
+impl Ready {
+    pub fn new() -> Ready {
+        Ready(Default::default())
+    }
+
+    /// register_task allows a caller to add a dependency to be marked "ready".
+    pub fn register_task(&self, name: &str) -> BlockReady {
+        self.0.lock().unwrap().insert(name.to_string());
+        BlockReady {
+            parent: self.clone(),
+            name: name.to_string(),
         }
     }
 
-    pub fn set_ready(self) -> Self {
-        self.ready.set(true);
-        self
+    pub fn is_ready(&self) -> bool {
+        self.0.lock().unwrap().len() == 0
+    }
+}
+
+/// BlockReady blocks readiness until it is dropped.
+pub struct BlockReady {
+    parent: Ready,
+    name: String,
+}
+
+impl BlockReady {
+    pub fn subtask(&self, name: &str) -> BlockReady {
+        self.parent.register_task(name)
+    }
+}
+
+impl Drop for BlockReady {
+    fn drop(&mut self) {
+        let mut pending = self.parent.0.lock().unwrap();
+        debug_assert!(pending.remove(&self.name));
+        let left = pending.len();
+        if left == 0 {
+            info!("Task '{}' complete, marking server ready", self.name);
+        } else {
+            info!("Task '{}' complete, still awaiting {left} tasks", self.name);
+        }
+    }
+}
+
+impl Builder {
+    pub fn new(config: config::Config, workload_info: WorkloadInformation, ready: Ready) -> Self {
+        Self {
+            addr: config.admin_addr,
+            ready,
+            workload_info,
+        }
     }
 
     pub fn bind(self) -> hyper::Result<Server> {
@@ -164,16 +199,10 @@ impl Server {
     }
 }
 
-impl Readiness {
-    pub fn set(&self, ready: bool) {
-        self.0.store(ready, Ordering::Release);
-    }
-}
-
-async fn handle_ready(Readiness(ready): &Readiness, req: Request<Body>) -> Response<Body> {
+async fn handle_ready(ready: &Ready, req: Request<Body>) -> Response<Body> {
     match *req.method() {
         hyper::Method::GET | hyper::Method::HEAD => {
-            if ready.load(Ordering::Acquire) {
+            if ready.is_ready() {
                 return Response::builder()
                     .status(hyper::StatusCode::OK)
                     .header(hyper::header::CONTENT_TYPE, "text/plain")

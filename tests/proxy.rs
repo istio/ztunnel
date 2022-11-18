@@ -66,15 +66,6 @@ async fn test_quit_lifecycle() {
         .expect("app exits without error");
 }
 
-#[tokio::test]
-async fn test_healthz() {
-    testapp::with_app(test_config(), |app| async move {
-        let resp = app.admin_request("healthz/ready").await;
-        assert_eq!(resp.status(), hyper::StatusCode::OK);
-    })
-    .await;
-}
-
 #[track_caller]
 async fn run_request_test(target: &str) {
     // Test a round trip outbound call (via socks5)
@@ -82,8 +73,6 @@ async fn run_request_test(target: &str) {
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
-        // TODO: add readiness and remove this
-        tokio::time::sleep(Duration::from_secs(1)).await;
         let dst = helpers::with_ip(echo_addr, target.parse().unwrap());
         let mut stream = app.socks5_connect(dst).await;
 
