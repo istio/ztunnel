@@ -167,9 +167,7 @@ impl Certs {
         conn.set_alpn_protos(Alpn::H2.encode())?;
         conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
         conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
-        conn.set_cipher_list(
-            "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
-        )?;
+
         // key and certs
         conn.set_private_key(&self.key)?;
         conn.set_certificate(&self.cert)?;
