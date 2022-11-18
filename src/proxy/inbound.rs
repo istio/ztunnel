@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::clone::Clone;
+use std::marker::Send;
 use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
 
+use hyper::server::{accept::Accept, Builder};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
@@ -57,6 +61,29 @@ impl Inbound {
         })
     }
 
+    pub(super) async fn start<I>(&self, builder: Builder<I>)
+    where
+        I: Accept,
+        <I as Accept>::Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        <I as Accept>::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let addr = self.listener.local_addr().unwrap();
+        let service =
+            make_service_fn(|_| async { Ok::<_, hyper::Error>(service_fn(Self::serve_connect)) });
+
+        let server = builder
+            .http2_only(true)
+            .http2_initial_stream_window_size(self.cfg.window_size)
+            .http2_initial_connection_window_size(self.cfg.connection_window_size)
+            .http2_max_frame_size(self.cfg.frame_size)
+            .serve(service);
+
+        info!("HBONE listener established {}", addr);
+        if let Err(e) = server.await {
+            error!("server error: {}", e);
+        }
+    }
+
     pub(super) fn address(&self) -> SocketAddr {
         self.listener.local_addr().unwrap()
     }
@@ -64,18 +91,15 @@ impl Inbound {
     pub(super) async fn run(self) {
         let addr = self.listener.local_addr().unwrap();
         if self.cfg.tls {
-            // TODO avoid duplication here
-            let service = make_service_fn(|_| async {
-                Ok::<_, hyper::Error>(service_fn(Self::serve_connect))
-            });
             let boring_acceptor = crate::tls::BoringTlsAcceptor {
                 acceptor: InboundCertProvider {
                     workloads: self.workloads.clone(),
                     cert_manager: self.cert_manager.clone(),
                 },
             };
-            let mut listener = hyper::server::conn::AddrIncoming::from_listener(self.listener)
-                .expect("hbone bind");
+            let listener = TcpListener::bind(addr).await.unwrap();
+            let mut listener =
+                hyper::server::conn::AddrIncoming::from_listener(listener).expect("hbone bind");
             listener.set_nodelay(true);
             let incoming = hyper::server::accept::from_stream(
                 tls_listener::builder(boring_acceptor)
@@ -91,39 +115,14 @@ impl Inbound {
                         }
                     }),
             );
-
-            let server = Server::builder(incoming)
-                .http2_only(true)
-                .http2_initial_stream_window_size(self.cfg.window_size)
-                .http2_initial_connection_window_size(self.cfg.connection_window_size)
-                .http2_max_frame_size(self.cfg.frame_size)
-                .serve(service);
-
-            info!("HBONE listener established {}", addr);
-
-            if let Err(e) = server.await {
-                error!("server error: {}", e);
-            }
+            let builder = Server::builder(incoming);
+            self.start(builder).await
         } else {
-            warn!("TLS disabled");
-            let service = make_service_fn(|_| async {
-                Ok::<_, hyper::Error>(service_fn(Self::serve_connect))
-            });
-
-            let server = hyper::server::conn::AddrIncoming::from_listener(self.listener)
+            let listener = TcpListener::bind(addr).await.unwrap();
+            let builder = hyper::server::conn::AddrIncoming::from_listener(listener)
                 .map(Server::builder)
-                .expect("hbone bind")
-                .http2_only(true)
-                .http2_initial_stream_window_size(self.cfg.window_size)
-                .http2_initial_connection_window_size(self.cfg.connection_window_size)
-                .http2_max_frame_size(self.cfg.frame_size)
-                .serve(service);
-
-            info!("HBONE listener established {}", addr);
-
-            if let Err(e) = server.await {
-                error!("server error: {}", e);
-            }
+                .expect("hbone bind");
+            self.start(builder).await
         }
     }
 
