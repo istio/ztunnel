@@ -19,17 +19,20 @@ use std::net::IpAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use boring::asn1::{Asn1Time, Asn1TimeRef};
+use boring::bn::BigNum;
 use boring::ec::{EcGroup, EcKey};
 use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey;
-use boring::pkey::PKey;
+use boring::pkey::{PKey, Private};
 use boring::ssl::{self, SslContextBuilder};
 use boring::stack::Stack;
-use boring::x509::extension::SubjectAlternativeName;
+use boring::x509::extension::{
+    AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
+};
 use boring::x509::{self, GeneralName, X509StoreContext, X509StoreContextRef, X509VerifyResult};
 use hyper::client::ResponseFuture;
 use hyper::{Request, Uri};
@@ -265,14 +268,14 @@ impl Verifier {
             .map(|_| ())
     }
 
-    fn verifiy(&self, verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+    fn verify(&self, verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         Self::base_verifier(verified, ctx)?;
         self.verifiy_san(ctx)?;
         Ok(())
     }
 
     fn callback(self) -> impl Fn(bool, &mut X509StoreContextRef) -> bool {
-        move |verified, ctx| match self.verifiy(verified, ctx) {
+        move |verified, ctx| match self.verify(verified, ctx) {
             Ok(_) => true,
             Err(e) => {
                 // TODO metrics/counters; info would be too noisy
@@ -317,7 +320,7 @@ impl Alpn {
 }
 
 #[async_trait::async_trait]
-pub trait CertProvider: Send + Sync + Clone {
+pub trait CertProvider: Send + Sync {
     async fn fetch_cert(&mut self, fd: RawFd) -> Result<ssl::SslAcceptor, TlsError>;
 }
 
@@ -349,7 +352,7 @@ pub enum TlsError {
 impl<C, F> tls_listener::AsyncTls<C> for BoringTlsAcceptor<F>
 where
     C: AsRawFd + AsyncRead + AsyncWrite + Unpin + Send + fmt::Debug + 'static,
-    F: CertProvider + 'static,
+    F: CertProvider + Clone + 'static,
 {
     type Stream = tokio_boring::SslStream<C>;
     type Error = TlsError;
@@ -367,42 +370,103 @@ where
     }
 }
 
+const TEST_CERT: &[u8] = include_bytes!("cert-chain.pem");
+const TEST_PKEY: &[u8] = include_bytes!("key.pem");
+const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
+const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
+
+// Creates an invalid dummy cert with overridden expire time
+pub fn generate_test_certs(id: &Identity, seconds_until_expiry: Duration) -> Certs {
+    let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
+    let (ca_cert, ca_key) = test_ca().unwrap();
+    let mut builder = x509::X509::builder().unwrap();
+    let current = Asn1Time::days_from_now(0).unwrap();
+    let expire_time: i64 = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + seconds_until_expiry.as_secs())
+    .try_into()
+    .unwrap();
+    builder.set_not_before(&current).unwrap();
+    builder
+        .set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
+        .unwrap();
+
+    builder.set_pubkey(&key).unwrap();
+    builder.set_version(2).unwrap();
+    let serial_number = {
+        let mut serial = BigNum::new().unwrap();
+        serial
+            .rand(159, boring::bn::MsbOption::MAYBE_ZERO, false)
+            .unwrap();
+        serial.to_asn1_integer().unwrap()
+    };
+    builder.set_serial_number(&serial_number).unwrap();
+
+    let mut names = boring::x509::X509NameBuilder::new().unwrap();
+    names.append_entry_by_text("O", "cluster.local").unwrap();
+    let names = names.build();
+    builder.set_issuer_name(&names).unwrap();
+
+    let basic_constraints = BasicConstraints::new().critical().build().unwrap();
+    let key_usage = KeyUsage::new()
+        .critical()
+        .digital_signature()
+        .key_encipherment()
+        .build()
+        .unwrap();
+    let ext_key_usage = ExtendedKeyUsage::new()
+        .client_auth()
+        .server_auth()
+        .build()
+        .unwrap();
+    let authority_key_identifier = AuthorityKeyIdentifier::new()
+        .keyid(false)
+        .issuer(false)
+        .build(&builder.x509v3_context(Some(&ca_cert), None))
+        .unwrap();
+    let subject_alternative_name = SubjectAlternativeName::new()
+        .uri(&id.to_string())
+        .critical()
+        .build(&builder.x509v3_context(Some(&ca_cert), None))
+        .unwrap();
+    builder.append_extension(key_usage).unwrap();
+    builder.append_extension(ext_key_usage).unwrap();
+    builder.append_extension(basic_constraints).unwrap();
+    builder.append_extension(authority_key_identifier).unwrap();
+    builder.append_extension(subject_alternative_name).unwrap();
+
+    builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
+
+    let cert = builder.build();
+    Certs {
+        cert,
+        key,
+        chain: vec![ca_cert],
+    }
+}
+
+fn test_ca() -> Result<(x509::X509, PKey<Private>), Error> {
+    let cert = x509::X509::from_pem(TEST_ROOT)?;
+    let key = pkey::PKey::private_key_from_pem(TEST_ROOT_KEY)?;
+    Ok((cert, key))
+}
+
+pub fn test_certs() -> Certs {
+    let cert = x509::X509::from_pem(TEST_CERT).unwrap();
+    let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
+    let chain = vec![cert.clone()];
+    Certs { cert, key, chain }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    const CERT: &[u8] = include_bytes!("cert.crt");
-    const PKEY: &[u8] = include_bytes!("cert.key");
 
     pub fn test_certs() -> Certs {
-        let cert = x509::X509::from_pem(CERT).unwrap();
-        let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
-        let chain = vec![cert.clone()];
-        Certs {
-            cert,
-            key,
-            chain: chain,
-        }
-    }
-
-    // Creates an invalid dummy cert with overridden expire time
-    pub fn generate_test_certs(seconds_until_expiry: Duration) -> Certs {
-        let mut tmp = x509::X509::builder().unwrap();
-        let current = Asn1Time::days_from_now(0).unwrap();
-        let expire_time: i64 = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + seconds_until_expiry.as_secs())
-        .try_into()
-        .unwrap();
-        tmp.set_not_before(&current)
-            .expect("error setting cert 'not_before'");
-        tmp.set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
-            .expect("error setting cert 'not_after'");
-
-        let cert = tmp.build();
-        let key = pkey::PKey::private_key_from_pem(PKEY).unwrap();
+        let cert = x509::X509::from_pem(TEST_CERT).unwrap();
+        let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
         let chain = vec![cert.clone()];
         Certs { cert, key, chain }
     }

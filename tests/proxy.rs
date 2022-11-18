@@ -16,14 +16,11 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request};
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
 use tokio::time;
 
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::*;
-
 use ztunnel::*;
 
 fn test_config() -> config::Config {
@@ -78,16 +75,14 @@ async fn test_healthz() {
     .await;
 }
 
-#[tokio::test]
-async fn test_request() {
+#[track_caller]
+async fn run_request_test(target: &str) {
     // Test a round trip outbound call (via socks5)
     let echo = echo::TestServer::new().await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
-        // We send to 127.0.0.2, configured with TCP
-        // TODO: also test HBONE (127.0.0.1); this is blocked on a fake CA.
-        let dst = helpers::with_ip(echo_addr, "127.0.0.2".parse().unwrap());
+        let dst = helpers::with_ip(echo_addr, target.parse().unwrap());
         let mut stream = app.socks5_connect(dst).await;
 
         const BODY: &[u8] = "hello world".as_bytes();
@@ -99,6 +94,17 @@ async fn test_request() {
         assert_eq!(BODY, buf);
     })
     .await;
+}
+
+#[ignore] // TODO: re-enable it when CI passes; for some reason it only works locally
+#[tokio::test]
+async fn test_hbone_request() {
+    run_request_test("127.0.0.1").await;
+}
+
+#[tokio::test]
+async fn test_tcp_request() {
+    run_request_test("127.0.0.2").await;
 }
 
 /// admin_shutdown triggers a shutdown - from the admin server

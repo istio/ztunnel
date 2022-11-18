@@ -32,11 +32,13 @@ use crate::xds::istio::ca::IstioCertificateRequest;
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
 }
-
+use dyn_clone::DynClone;
 #[async_trait]
-pub trait CertificateProvider {
+pub trait CertificateProvider: DynClone + Send + Sync + 'static {
     async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error>;
 }
+
+dyn_clone::clone_trait_object!(CertificateProvider);
 
 impl CaClient {
     pub fn new(auth: AuthSource) -> CaClient {

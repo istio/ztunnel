@@ -52,8 +52,11 @@ impl fmt::Display for Identity {
 }
 
 #[derive(Clone)]
-pub struct SecretManager<T: CertificateProvider> {
-    client: T,
+pub struct SecretManager<C: CertificateProvider>
+where
+    C: Clone,
+{
+    client: C,
     cache: Arc<RwLock<HashMap<Identity, watch::Receiver<Option<tls::Certs>>>>>,
 }
 
@@ -68,7 +71,7 @@ impl SecretManager<CaClient> {
     }
 }
 
-impl<T: CertificateProvider> SecretManager<T> {
+impl<T: CertificateProvider + Clone> SecretManager<T> {
     pub async fn refresh_handler(
         id: Identity,
         cache: Arc<RwLock<HashMap<Identity, watch::Receiver<Option<tls::Certs>>>>>,
@@ -210,32 +213,32 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time;
-
+pub mod mock {
     use super::*;
-    use crate::{
-        identity::{self, *},
-        tls::tests::generate_test_certs,
-    };
+    use crate::identity::{CertificateProvider, Identity, SecretManager};
+    use crate::tls::{generate_test_certs, Certs};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+    use tokio::sync::watch;
 
     #[derive(Clone, Debug)]
-    struct MockCaClient {
-        cert_lifetime: Duration,
+    pub struct MockCaClient {
+        pub cert_lifetime: Duration,
     }
 
     #[async_trait]
     impl CertificateProvider for MockCaClient {
-        async fn fetch_certificate(&mut self, _id: &Identity) -> Result<tls::Certs, Error> {
-            let certs: tls::Certs = generate_test_certs(self.cert_lifetime);
+        async fn fetch_certificate(&mut self, id: &Identity) -> Result<Certs, Error> {
+            let certs = generate_test_certs(id, self.cert_lifetime);
             return Ok(certs);
         }
     }
 
-    impl SecretManager<MockCaClient> {
-        pub fn new_mock(cert_lifetime: Duration) -> SecretManager<MockCaClient> {
-            let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
+    impl MockCaClient {
+        pub fn new(cert_lifetime: Duration) -> SecretManager<MockCaClient> {
+            let cache: HashMap<Identity, watch::Receiver<Option<Certs>>> = Default::default();
             let ca_client = MockCaClient { cert_lifetime };
             SecretManager {
                 client: ca_client,
@@ -243,8 +246,16 @@ mod tests {
             }
         }
     }
+}
 
-    async fn stress_many_ids(mut sm: SecretManager<MockCaClient>, iterations: u32) {
+#[cfg(test)]
+mod tests {
+    use std::time;
+
+    use super::*;
+    use crate::identity::{self, *};
+
+    async fn stress_many_ids(mut sm: SecretManager<mock::MockCaClient>, iterations: u32) {
         for i in 0..iterations {
             let id = identity::Identity::Spiffe {
                 trust_domain: "cluster.local".to_string(),
@@ -257,7 +268,11 @@ mod tests {
         }
     }
 
-    async fn stress_single_id(mut sm: SecretManager<MockCaClient>, id: Identity, dur: Duration) {
+    async fn stress_single_id(
+        mut sm: SecretManager<mock::MockCaClient>,
+        id: Identity,
+        dur: Duration,
+    ) {
         let start_time = time::Instant::now();
         loop {
             let current_time = time::Instant::now();
@@ -270,7 +285,11 @@ mod tests {
         }
     }
 
-    async fn verify_cert_updates(mut sm: SecretManager<MockCaClient>, id: Identity, dur: Duration) {
+    async fn verify_cert_updates(
+        mut sm: SecretManager<mock::MockCaClient>,
+        id: Identity,
+        dur: Duration,
+    ) {
         let start_time = time::Instant::now();
         let expected_update_interval = sm.client.cert_lifetime / 2;
         let mut total_updates = 0;
@@ -302,7 +321,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_stress_caching() {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        let secret_manager = SecretManager::new_mock(Duration::from_secs(10));
+        let secret_manager = mock::MockCaClient::new(Duration::from_secs(10));
         for _n in 0..8 {
             tasks.push(tokio::spawn(stress_many_ids(secret_manager.clone(), 5000)));
         }
@@ -321,11 +340,11 @@ mod tests {
         let id = identity::Identity::Spiffe {
             trust_domain: "cluster.local".to_string(),
             namespace: "istio-system".to_string(),
-            service_account: format!("ztunnel"),
+            service_account: "ztunnel".to_string(),
         };
 
         // Certs added to the cache should be refreshed every other second.
-        let mut secret_manager = SecretManager::new_mock(Duration::from_secs(4));
+        let mut secret_manager = mock::MockCaClient::new(Duration::from_secs(4));
 
         // Seed the cache.
         secret_manager

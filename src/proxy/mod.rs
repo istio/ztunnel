@@ -21,6 +21,7 @@ use inbound::Inbound;
 use tokio::net::TcpStream;
 use tracing::{error, info};
 
+use crate::identity::CertificateProvider;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
@@ -43,7 +44,7 @@ impl Proxy {
     pub async fn new(
         cfg: config::Config,
         workloads: WorkloadInformation,
-        cert_manager: identity::SecretManager<identity::CaClient>,
+        cert_manager: Box<dyn CertificateProvider>,
         drain: Watch,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
@@ -107,7 +108,7 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 
-    #[error("tls handshake failed: {0}")]
+    #[error("tls handshake failed: {0:?}")]
     TlsHandshake(#[from] tokio_boring::HandshakeError<TcpStream>),
 
     #[error("http handshake failed: {0}")]
