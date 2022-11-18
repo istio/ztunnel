@@ -17,6 +17,7 @@ use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+
 use std::{fmt, net};
 
 use futures::future::TryFutureExt;
@@ -310,10 +311,12 @@ impl LocalClient {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = tokio::fs::read_to_string(self.path).await?;
         let r: Vec<Workload> = serde_yaml::from_str(&data)?;
-        let mut wli = self.workloads.lock().unwrap();
-        for wl in r {
-            info!("inserting local workloads {wl}");
-            wli.insert(wl);
+        {
+            let mut wli = self.workloads.lock().unwrap();
+            for wl in r {
+                info!("inserting local workloads {wl}");
+                wli.insert(wl);
+            }
         }
         drop(self.block_ready);
         Ok(())
