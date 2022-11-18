@@ -14,6 +14,7 @@
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request, Response};
 
@@ -35,7 +36,8 @@ where
 {
     initialize_telemetry();
 
-    let app = app::build(cfg).await.unwrap();
+    let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
+    let app = app::build_with_cert(cfg, cert_manager).await.unwrap();
     let shutdown = app.shutdown.trigger().clone();
 
     let ta = TestApp {

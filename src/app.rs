@@ -13,13 +13,19 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, info, warn};
 
+use crate::identity::CertificateProvider;
+
 use crate::{admin, config, identity, proxy, signal, workload};
 
-pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
+pub async fn build_with_cert(
+    config: config::Config,
+    cert_manager: impl CertificateProvider,
+) -> anyhow::Result<Bound> {
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
     // once all drain_rx handlers are dropped.
@@ -38,11 +44,10 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
     let admin_address = admin.address();
     admin.spawn(&shutdown, drain_rx.clone());
 
-    let cert_manager = identity::SecretManager::new(config.clone());
     let proxy = proxy::Proxy::new(
         config.clone(),
         workload_manager.workloads(),
-        cert_manager,
+        Box::new(cert_manager),
         drain_rx.clone(),
     )
     .await?;
@@ -64,6 +69,11 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         proxy_addresses,
         tasks,
     })
+}
+
+pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
+    let cert_manager = identity::SecretManager::new(config.clone());
+    build_with_cert(config, cert_manager).await
 }
 
 pub struct Bound {

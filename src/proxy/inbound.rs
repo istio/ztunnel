@@ -22,7 +22,7 @@ use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-use crate::identity;
+
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::tls::TlsError;
@@ -33,7 +33,7 @@ use super::Error;
 pub struct Inbound {
     cfg: Config,
     listener: TcpListener,
-    cert_manager: identity::SecretManager<identity::CaClient>,
+    cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
 }
 
@@ -41,7 +41,7 @@ impl Inbound {
     pub async fn new(
         cfg: Config,
         workloads: WorkloadInformation,
-        cert_manager: identity::SecretManager<identity::CaClient>,
+        cert_manager: Box<dyn CertificateProvider>,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
             .await
@@ -205,7 +205,7 @@ pub(super) enum InboundConnect {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: identity::SecretManager<identity::CaClient>,
+    cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
 }
 

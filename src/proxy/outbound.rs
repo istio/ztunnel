@@ -29,7 +29,7 @@ use crate::{identity, socket};
 
 pub struct Outbound {
     cfg: Config,
-    cert_manager: identity::SecretManager<identity::CaClient>,
+    cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
     listener: TcpListener,
     drain: Watch,
@@ -39,7 +39,7 @@ pub struct Outbound {
 impl Outbound {
     pub async fn new(
         cfg: Config,
-        cert_manager: identity::SecretManager<identity::CaClient>,
+        cert_manager: Box<dyn CertificateProvider>,
         workloads: WorkloadInformation,
         hbone_port: u16,
         drain: Watch,
@@ -115,7 +115,7 @@ impl Outbound {
 }
 
 pub struct OutboundConnection {
-    pub cert_manager: identity::SecretManager<identity::CaClient>,
+    pub cert_manager: Box<dyn CertificateProvider>,
     pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     pub cfg: Config,
@@ -177,7 +177,10 @@ impl OutboundConnection {
                 let mut request_sender = if self.cfg.tls {
                     let id = &req.source.identity();
                     let cert = self.cert_manager.fetch_certificate(id).await?;
-                    let connector = cert.connector(&req.destination_identity)?.configure()?;
+                    let connector = cert
+                        .connector(&req.destination_identity)?
+                        .configure()
+                        .expect("configure");
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
@@ -438,7 +441,7 @@ mod tests {
             demand: None,
         };
         let outbound = OutboundConnection {
-            cert_manager: identity::SecretManager::new(cfg.clone()),
+            cert_manager: Box::new(identity::SecretManager::new(cfg.clone())),
             workloads: wi,
             hbone_port: 15008,
             cfg,
@@ -662,7 +665,7 @@ mod tests {
             demand: None,
         };
         let outbound = OutboundConnection {
-            cert_manager: identity::SecretManager::new(cfg.clone()),
+            cert_manager: Box::new(identity::SecretManager::new(cfg.clone())),
             workloads: wi,
             hbone_port: 15008,
             cfg,

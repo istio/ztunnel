@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::config::Config;
-use crate::identity;
+
+use crate::identity::CertificateProvider;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::Error;
 use crate::workload::WorkloadInformation;
@@ -27,7 +28,7 @@ use tracing::{error, info, warn};
 
 pub struct Socks5 {
     cfg: Config,
-    cert_manager: identity::SecretManager<identity::CaClient>,
+    cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
     hbone_port: u16,
     listener: TcpListener,
@@ -36,7 +37,7 @@ pub struct Socks5 {
 impl Socks5 {
     pub async fn new(
         cfg: Config,
-        cert_manager: identity::SecretManager<identity::CaClient>,
+        cert_manager: Box<dyn CertificateProvider>,
         hbone_port: u16,
         workloads: WorkloadInformation,
     ) -> Result<Socks5, Error> {
