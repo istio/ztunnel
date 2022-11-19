@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod admin;
-pub mod app;
-pub mod config;
-pub mod identity;
-pub mod monitoring;
-pub mod proxy;
-pub mod signal;
-pub mod socket;
-pub mod telemetry;
-pub mod tls;
-pub mod version;
-pub mod workload;
-pub mod xds;
+use lazy_static::lazy_static;
+use prometheus::{register_int_gauge_vec, IntGaugeVec};
+lazy_static! {
+    static ref ISTIO_BUILD_GAUGE: IntGaugeVec = register_int_gauge_vec!(
+        "istio_build",
+        "Istio component build info.",
+        &["component", "tag"]
+    )
+    .unwrap();
+}
 
-pub mod test_helpers;
+#[cfg(not(feature = "console"))]
+pub fn setup_metric() {
+    let tag = env!("ZTUNNEL_BUILD_buildTag");
+    ISTIO_BUILD_GAUGE
+        .with_label_values(&["ztunnel", tag])
+        .set(1);
+}

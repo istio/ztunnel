@@ -27,6 +27,7 @@ use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
 
 use pprof::protos::Message;
+use prometheus::{Encoder, TextEncoder};
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
@@ -180,6 +181,7 @@ impl Server {
                                 "/config_dump" => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
+                                "/metrics" => Ok::<_, hyper::Error>(handle_metrics(req).await),
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
@@ -284,6 +286,19 @@ async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> R
     Response::builder()
         .status(hyper::StatusCode::OK)
         .body(vec.into())
+        .unwrap()
+}
+
+async fn handle_metrics(_req: Request<Body>) -> Response<Body> {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = vec![];
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+
+    Response::builder()
+        .status(200)
+        .header("Content-Type", encoder.format_type())
+        .body(Body::from(buffer))
         .unwrap()
 }
 
