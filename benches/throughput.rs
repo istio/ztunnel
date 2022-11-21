@@ -16,7 +16,7 @@ use std::future::Future;
 use std::time::Duration;
 use std::{env, thread};
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput, SamplingMode};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
 use pprof::criterion::{Output, PProfProfiler};
 use tokio::net::TcpStream;
 use tokio::runtime::{Handle, Runtime};
@@ -48,7 +48,6 @@ pub fn tcp(c: &mut Criterion) {
     // We take longer than default 5s to get appropriate results
     c.measurement_time(Duration::from_secs(5));
 
-
     // Global setup: spin up an echo server and ztunnel instance
     let (echo_addr, test_app) = async_global_setup(|| async move {
         let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
@@ -74,7 +73,7 @@ pub fn tcp(c: &mut Criterion) {
     c.bench_function("direct", |b| {
         b.to_async(Runtime::new().unwrap()).iter_batched(
             async_setup(move || async move { TcpStream::connect(echo_addr).await.unwrap() }),
-            |s| async move { tcp::run(s, size as usize).await },
+            |s| async move { tcp::run_client_throughput(s, size as usize).await },
             BatchSize::PerIteration,
         )
     });
@@ -86,7 +85,7 @@ pub fn tcp(c: &mut Criterion) {
 
                 test_app.socks5_connect(dst).await
             }),
-            |s| async move { tcp::run(s, size as usize).await },
+            |s| async move { tcp::run_client_throughput(s, size as usize).await },
             BatchSize::PerIteration,
         )
     });
@@ -98,7 +97,7 @@ pub fn tcp(c: &mut Criterion) {
 
                 test_app.socks5_connect(dst).await
             }),
-            |s| async move { tcp::run(s, size as usize).await },
+            |s| async move { tcp::run_client_throughput(s, size as usize).await },
             BatchSize::PerIteration,
         )
     });

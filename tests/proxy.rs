@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
 use tokio::time;
 
 use ztunnel::test_helpers::app as testapp;

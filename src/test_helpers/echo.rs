@@ -43,13 +43,15 @@ impl TestServer {
                 let (mut r, mut w) = socket.split();
 
                 // read data from the socket and write the data back.
-                // io::copy(&mut r, &mut w).await.expect("copy");
-                copy_tcp(&mut r, &mut w).await.expect("splice");
+                copy_tcp(&mut r, &mut w).await.expect("tcp copy");
             });
         }
     }
 }
 
+/// copy_tcp splices between two sockets
+/// Copied from https://github.com/Soniccube/realm/blob/f8ab5549fc9be1f0237b8721073a7fa83dc630e8/src/zero_copy.rs for now;
+/// we should scrutinize the implementation more closely when we use outside of tests
 #[cfg(target_os = "linux")]
 pub async fn copy_tcp(r: &mut ReadHalf<'_>, w: &mut WriteHalf<'_>) -> io::Result<u64> {
     use libc::{c_int, O_NONBLOCK};

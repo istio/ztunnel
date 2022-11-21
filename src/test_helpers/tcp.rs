@@ -19,7 +19,9 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tracing::info;
 
-pub async fn run(mut stream: TcpStream, target: usize) -> Result<f64, io::Error> {
+/// run_client_throughput reads and writes as much data as possible as fast as possible, until `target`
+/// bytes are read+written.
+pub async fn run_client_throughput(mut stream: TcpStream, target: usize) -> Result<f64, io::Error> {
     let start = Instant::now();
     let (mut r, mut w) = stream.split();
     let writer = async move {
