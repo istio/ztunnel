@@ -51,6 +51,7 @@ pub struct Server {
     server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
     workload_info: WorkloadInformation,
     registry: Arc<Mutex<Registry>>,
+    shutdown_trigger: signal::ShutdownTrigger,
 }
 
 /// Ready tracks whether the process is ready.
@@ -118,7 +119,11 @@ impl Builder {
         }
     }
 
-    pub fn bind(self, registry: Registry) -> hyper::Result<Server> {
+    pub fn bind(
+        self,
+        registry: Registry,
+        shutdown_trigger: signal::ShutdownTrigger,
+    ) -> hyper::Result<Server> {
         let Self {
             addr,
             ready,
@@ -139,6 +144,7 @@ impl Builder {
             server,
             workload_info,
             registry,
+            shutdown_trigger,
         })
     }
 }
@@ -152,12 +158,12 @@ impl Server {
         self.addr
     }
 
-    pub fn spawn(self, shutdown: &signal::Shutdown, drain_rx: Watch) {
+    pub fn spawn(self, drain_rx: Watch) {
         let _dx = drain_rx.clone();
         let ready = self.ready.clone();
         let workload_info = self.workload_info.clone();
-        let shutdown_trigger = shutdown.trigger();
         let registry = self.registry();
+        let shutdown_trigger = self.shutdown_trigger.clone();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
@@ -209,8 +215,7 @@ impl Server {
             .with_graceful_shutdown(async {
                 drop(drain_rx.signaled().await);
             });
-
-        let shutdown_trigger = shutdown.trigger();
+        let shutdown_trigger = self.shutdown_trigger;
         tokio::spawn(async move {
             info!("Serving admin server at {}", self.addr);
             if let Err(err) = server.await {

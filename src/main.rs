@@ -16,7 +16,6 @@ extern crate core;
 #[cfg(feature = "gperftools")]
 extern crate gperftools;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::info;
 use ztunnel::*;
 
@@ -40,13 +39,7 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.num_worker_threads)
-        .thread_name_fn(|| {
-            static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-            let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-            format!("proxy-{}", id)
-        })
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
