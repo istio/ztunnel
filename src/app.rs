@@ -38,7 +38,7 @@ pub async fn build_with_cert(
     let proxy_task = ready.register_task("proxy listeners");
 
     let workload_manager =
-        workload::WorkloadManager::new(config.clone(), ready.register_task("workload manage"));
+        workload::WorkloadManager::new(config.clone(), ready.register_task("workload manager"));
 
     let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
         .bind()
