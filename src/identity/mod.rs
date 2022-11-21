@@ -31,4 +31,6 @@ pub enum Error {
     SigningRequest(#[from] tonic::Status),
     #[error("failed to process string: {0}")]
     Utf8(#[from] Utf8Error),
+    #[error("did not find expected SAN: {0}")]
+    SanError(Identity),
 }

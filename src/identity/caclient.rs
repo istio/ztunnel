@@ -18,13 +18,13 @@ use async_trait::*;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::codegen::InterceptedService;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
 use crate::identity::Error;
-use crate::tls;
 use crate::tls::TlsGrpcChannel;
+use crate::tls::{self, SanChecker};
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 use crate::xds::istio::ca::IstioCertificateRequest;
 
@@ -83,8 +83,13 @@ impl CertificateProvider for CaClient {
         let chain = if resp.cert_chain.len() > 1 {
             resp.cert_chain[1..].iter().map(|s| s.as_bytes()).collect()
         } else {
+            warn!("no chain certs for: {}", id);
             vec![]
         };
-        Ok(tls::cert_from(&pkey, leaf, chain))
+        let certs = tls::cert_from(&pkey, leaf, chain);
+        certs
+            .verify_san(id)
+            .map_err(|_| Error::SanError(id.clone()))?;
+        Ok(certs)
     }
 }

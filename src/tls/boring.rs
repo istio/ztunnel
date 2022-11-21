@@ -39,7 +39,7 @@ use hyper::{Request, Uri};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tonic::body::BoxBody;
 use tower::Service;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::identity::{self, Identity};
 
@@ -255,17 +255,11 @@ impl Verifier {
         let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
         let cert = ctx
             .ex_data(ssl_idx)
-            .ok_or(TlsError::SanError)?
+            .ok_or(TlsError::ExDataError)?
             .peer_certificate()
-            .ok_or(TlsError::SanError)?;
+            .ok_or(TlsError::PeerCertError)?;
 
-        let want_san = format!("{identity}");
-        cert.subject_alt_names()
-            .unwrap_or(boring::stack::Stack::<GeneralName>::new().map_err(Error::SslError)?)
-            .iter()
-            .find(|san| san.uri().unwrap_or("<non-uri>") == want_san)
-            .ok_or(TlsError::SanError)
-            .map(|_| ())
+        cert.verify_san(identity)
     }
 
     fn verify(&self, verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
@@ -283,6 +277,28 @@ impl Verifier {
                 false
             }
         }
+    }
+}
+
+pub trait SanChecker {
+    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError>;
+}
+
+impl SanChecker for Certs {
+    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
+        self.cert.verify_san(identity)
+    }
+}
+
+impl SanChecker for x509::X509 {
+    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
+        let want_san = format!("{identity}");
+        self.subject_alt_names()
+            .ok_or(TlsError::SanError)?
+            .iter()
+            .find(|san| san.uri().unwrap_or("<non-uri>") == want_san)
+            .ok_or(TlsError::SanError)
+            .map(|_| ())
     }
 }
 
@@ -345,6 +361,10 @@ pub enum TlsError {
     SigningError(#[from] identity::Error),
     #[error("san verification error: remote did not present the expected SAN")]
     SanError,
+    #[error("failed getting ex data")]
+    ExDataError,
+    #[error("failed getting peer cert")]
+    PeerCertError,
     #[error("ssl error: {0}")]
     SslError(#[from] Error),
 }
