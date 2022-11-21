@@ -1,8 +1,22 @@
+// Copyright Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::future::Future;
 use std::time::Duration;
 use std::{env, thread};
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput, SamplingMode};
 use pprof::criterion::{Output, PProfProfiler};
 use tokio::net::TcpStream;
 use tokio::runtime::{Handle, Runtime};
@@ -16,6 +30,7 @@ const KB: u64 = 1024;
 const MB: u64 = 1024 * KB;
 
 /// tcp tests throughput of TCP
+/// Warning: Criterion reports throughput in **Bytes**. Other tools like iperf3 are in **Bits**.
 pub fn tcp(c: &mut Criterion) {
     if env::var("RUST_LOG").is_err() {
         env::set_var("RUST_LOG", "error")
@@ -27,8 +42,12 @@ pub fn tcp(c: &mut Criterion) {
     let size = 100 * MB;
     c.throughput(Throughput::Bytes(size));
     c.sample_size(10);
+    c.warm_up_time(Duration::from_secs(1));
+    // Designed for longer running benchmarks
+    c.sampling_mode(SamplingMode::Flat);
     // We take longer than default 5s to get appropriate results
-    c.measurement_time(Duration::from_secs(30));
+    c.measurement_time(Duration::from_secs(5));
+
 
     // Global setup: spin up an echo server and ztunnel instance
     let (echo_addr, test_app) = async_global_setup(|| async move {

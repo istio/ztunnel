@@ -19,6 +19,10 @@ name = "ztunnel"
 path = "src/main.rs"
 bench = false
 
+[[bench]]
+name = "throughput"
+harness = false
+
 [dependencies]
 #tikv-jemallocator = { version = "0.5", features = ["profiling", "stats"]}
 anyhow = "1.0.65"
@@ -63,21 +67,18 @@ prost-build = "0.11"
 anyhow = "1.0.65"
 rustc_version = "0.4.0"
 
-[profile.fastrelease]
-opt-level = 3
-lto = false
-inherits = "release"
-
 [profile.release]
 opt-level = 3
 codegen-units = 1
 lto = true
 
+# Release optimized but without as many dependencies, suitable for incremental development
+[profile.quick-release]
+inherits = "release"
+codegen-units = 16
+lto = false
+incremental = true
+
 [dev-dependencies]
 criterion = { version = "0.4.0", features = ["async", "async_tokio"] }
 #debug = true
-
-
-[[bench]]
-name = "throughput"
-harness = false
