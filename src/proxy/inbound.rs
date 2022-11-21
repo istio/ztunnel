@@ -32,7 +32,6 @@ use super::Error;
 
 pub struct Inbound {
     cfg: Config,
-    listener: TcpListener,
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
 }
@@ -53,17 +52,16 @@ impl Inbound {
         Ok(Inbound {
             cfg,
             workloads,
-            listener,
             cert_manager,
         })
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().unwrap()
+        self.cfg.inbound_addr
     }
 
     pub(super) async fn run(self) {
-        let addr = self.listener.local_addr().unwrap();
+        let addr = self.address();
         if self.cfg.tls {
             // TODO avoid duplication here
             let service = make_service_fn(|_| async {
@@ -75,12 +73,12 @@ impl Inbound {
                     cert_manager: self.cert_manager.clone(),
                 },
             };
-            let mut listener = hyper::server::conn::AddrIncoming::from_listener(self.listener)
+            let mut incoming_listener = hyper::server::conn::AddrIncoming::bind(&addr)
                 .expect("hbone bind");
-            listener.set_nodelay(true);
+            incoming_listener.set_nodelay(true);
             let incoming = hyper::server::accept::from_stream(
                 tls_listener::builder(boring_acceptor)
-                    .listen(listener)
+                    .listen(incoming_listener)
                     .filter(|conn| {
                         // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
                         if let Err(err) = conn {
@@ -111,7 +109,7 @@ impl Inbound {
                 Ok::<_, hyper::Error>(service_fn(Self::serve_connect))
             });
 
-            let server = hyper::server::conn::AddrIncoming::from_listener(self.listener)
+            let server = hyper::server::conn::AddrIncoming::bind(&addr)
                 .map(Server::builder)
                 .expect("hbone bind")
                 .http2_only(true)
