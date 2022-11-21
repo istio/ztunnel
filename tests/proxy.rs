@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+
 use tokio::time;
 
 use ztunnel::test_helpers::app as testapp;
@@ -86,51 +86,6 @@ async fn run_request_test(target: &str) {
         assert_eq!(BODY, buf);
     })
     .await;
-}
-
-const KB: usize = 1024;
-const MB: usize = 1024*KB;
-const GB: usize = 1024*MB;
-
-#[tokio::test]
-async fn bench() {
-    // Test a round trip outbound call (via socks5)
-    let echo = echo::TestServer::new().await;
-    let echo_addr = echo.address();
-    tokio::spawn(echo.run());
-    testapp::with_app(test_config(), |app| async move {
-        let dst = helpers::with_ip(echo_addr, "127.0.0.2".parse().unwrap());
-        let mut stream = app.socks5_connect(dst).await;
-
-        tcp::run(stream, 10 * GB).await.unwrap();
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn bench_hbone() {
-    // Test a round trip outbound call (via socks5)
-    let echo = echo::TestServer::new().await;
-    let echo_addr = echo.address();
-    tokio::spawn(echo.run());
-    testapp::with_app(test_config(), |app| async move {
-        let dst = helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap());
-        let mut stream = app.socks5_connect(dst).await;
-
-        tcp::run(stream, 1 * GB).await.unwrap();
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_direct() {
-    helpers::initialize_telemetry();
-    let echo = echo::TestServer::new().await;
-    let echo_addr = echo.address();
-    tokio::spawn(echo.run());
-    let s = TcpStream::connect(echo_addr).await.unwrap();
-    s.set_nodelay(true).unwrap();
-    tcp::run(s, 10 * GB).await.unwrap();
 }
 
 #[ignore] // TODO: re-enable it when CI passes; for some reason it only works locally

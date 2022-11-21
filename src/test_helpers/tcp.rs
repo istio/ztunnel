@@ -17,14 +17,14 @@ use std::{cmp, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tracing::error;
+use tracing::info;
 
 pub async fn run(mut stream: TcpStream, target: usize) -> Result<f64, io::Error> {
     let start = Instant::now();
     let (mut r, mut w) = stream.split();
     let writer = async move {
         let mut wrote = 0;
-        let mut buffer = vec![0; 2 * 1024 * 1024];
+        let buffer = vec![0; 200 * 1024 * 1024];
         while wrote < target {
             let length = cmp::min(buffer.len(), target - wrote);
             wrote += w.write(&buffer[..length]).await?;
@@ -33,7 +33,7 @@ pub async fn run(mut stream: TcpStream, target: usize) -> Result<f64, io::Error>
     };
     let reader = async move {
         let mut read = 0;
-        let mut buffer = vec![0; 2 * 1024 * 1024];
+        let mut buffer = vec![0; 200 * 1024 * 1024];
         while read < target {
             let length = cmp::min(buffer.len(), target - read);
             read += r.read(&mut buffer[..length]).await?;
@@ -43,7 +43,7 @@ pub async fn run(mut stream: TcpStream, target: usize) -> Result<f64, io::Error>
     let (wrote, _read) = tokio::try_join!(writer, reader)?;
     let elapsed = start.elapsed().as_micros() as f64 / 1_000_000.0;
     let throughput = wrote as f64 / elapsed / 0.125e9;
-    error!(
+    info!(
         "throughput: {:.3} Gb/s, wrote {wrote} in {:?}",
         throughput,
         start.elapsed()

@@ -1,7 +1,7 @@
 include common/Makefile.common.mk
 
 test:
-	cargo test
+	cargo test --benches --tests --bins
 
 build:
 	cargo build
