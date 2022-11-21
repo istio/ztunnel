@@ -1,77 +1,123 @@
-// #[tokio::test]
-// async fn test_direct() {
-//     helpers::initialize_telemetry();
-//     let echo = echo::TestServer::new().await;
-//     let echo_addr = echo.address();
-//     tokio::spawn(echo.run());
-//     let s = TcpStream::connect(echo_addr).await.unwrap();
-//     s.set_nodelay(true).unwrap();
-//     tcp::run(s, 10 * GB).await.unwrap();
-// }
-
-use std::net::SocketAddr;
+use std::future::Future;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::thread;
 use std::time::Duration;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use futures_util::SinkExt;
 use pprof::criterion::{Output, PProfProfiler};
-use tokio::runtime::Runtime;
+use tokio::net::TcpStream;
+use tokio::runtime::{Handle, Runtime};
+use tokio::task::JoinHandle;
 
-use ztunnel::test_helpers::echo;
+use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::{echo, helpers, tcp};
+use ztunnel::{app, config, identity};
 
 const KB: u64 = 1024;
 const MB: u64 = 1024 * KB;
 const GB: u64 = 1024 * MB;
 
-async fn do_test(addr: SocketAddr) {
-    tokio::time::sleep(Duration::from_millis(10)).await;
+async fn do_test(stream: TcpStream, size: usize) {
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 pub fn tcp_direct(c: &mut Criterion) {
+    helpers::initialize_telemetry();
     let mut c = c.benchmark_group("tcp");
-    c.throughput(Throughput::Bytes(10 * MB));
-    let (mut tx, rx) = std::sync::mpsc::channel();
-    thread::spawn(|| {
-        println!("in thread");
-        let server_rt = Runtime::new().unwrap().block_on(async move {
-            println!("in rt");
-            let echo = echo::TestServer::new().await;
-            println!("in echo");
-            let echo_addr = echo.address();
-            let t=tokio::spawn(echo.run());
-            println!("in running");
-            tx.send(echo_addr).unwrap();
-            tx.send(echo_addr).unwrap();
-            tx.send(echo_addr).unwrap();
-            println!("sent");
-            t.await.unwrap();
-            println!("comlpete");
+    let size = 100 * MB;
+    c.throughput(Throughput::Bytes(size));
+    let (echo_addr, test_app) = async_global_setup(|| async move {
+        let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
+        let app = app::build_with_cert(test_config(), cert_manager).await.unwrap();
+        let shutdown = app.shutdown.trigger().clone();
 
+        let ta = TestApp {
+            admin_address: app.admin_address,
+            proxy_addresses: app.proxy_addresses,
+        };
+        let echo = echo::TestServer::new().await;
+        let echo_addr = echo.address();
+        let t = tokio::spawn(async move {
+            ta.ready().await;
+            let t = tokio::join!(app.spawn(), echo.run());
+                ()
         });
+        ((echo_addr, ta), t)
     });
-
-    let a = rx.recv().unwrap();
-    c.bench_function(BenchmarkId::new("tcp_direct", ""), |b| {
+    c.bench_function("direct", |b| {
         b.to_async(Runtime::new().unwrap()).iter_batched(
-            || {
-                a
-            },
-            do_test,
+            async_setup(
+                move || async move { TcpStream::connect(echo_addr.clone()).await.unwrap() },
+            ),
+            |s| async move { tcp::run(s, size as usize).await },
             BatchSize::PerIteration,
         )
     });
-    // let rt = Runtime::new().unwrap();
-    // rt.spawn()
-    // let size = 10*MB;
-    // c.bench_with_input(
-    //     BenchmarkId::new("tcp_direct", size),
-    //     &size,
-    //     |b, &s| {
-    //         b.to_async(rt).iter(|| do_test(s));
-    //     }
-    // );
-    // c.bench_function("direct", |b| b.iter(|| {}));
+    c.bench_function("socks5", |b| {
+        b.to_async(Runtime::new().unwrap()).iter_batched(
+            async_setup(move || async move {
+                let dst = helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap());
+                let mut stream = test_app.socks5_connect(dst).await;
+
+                stream
+            }),
+            |s| async move { tcp::run(s, size as usize).await },
+            BatchSize::PerIteration,
+        )
+    });
+}
+
+fn test_config() -> config::Config {
+    config::Config {
+        xds_address: None,
+        local_xds_path: Some("examples/localhost.yaml".to_string()),
+        socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        ..Default::default()
+    }
+}
+
+/// async_setup allows handling async tasks in criterion 'iter' functions, which do not allow async
+pub fn async_setup<I, S, F>(mut setup: S) -> impl FnMut() -> I
+where
+    S: FnMut() -> F + Send + 'static + Clone,
+    F: Future<Output = I> + Send,
+    I: Send + 'static,
+{
+    move || {
+        let mut s = setup.clone();
+        let (mut tx, rx) = std::sync::mpsc::channel();
+        let s = Handle::current().spawn(async move {
+            let sa = s();
+            let input = sa.await;
+            tx.send(input).unwrap();
+        });
+        let v = rx.recv().unwrap();
+        v
+    }
+}
+
+pub fn async_global_setup<I, S, F>(mut setup: S) -> I
+where
+    S: Fn() -> F + Send + 'static,
+    F: Future<Output = (I, JoinHandle<()>)> + Send,
+    I: Send + 'static,
+{
+    let (mut tx, rx) = std::sync::mpsc::channel();
+    let s = thread::spawn(|| {
+        Runtime::new().unwrap().block_on(async move {
+            let sa = setup();
+            let (input, jh) = sa.await;
+            tx.send(input).unwrap();
+            jh.await.unwrap()
+        });
+    });
+    let v = rx.recv().unwrap();
+    v
 }
 
 criterion_group! {

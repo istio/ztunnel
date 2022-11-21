@@ -63,6 +63,11 @@ prost-build = "0.11"
 anyhow = "1.0.65"
 rustc_version = "0.4.0"
 
+[profile.fastrelease]
+opt-level = 3
+lto = false
+inherits = "release"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

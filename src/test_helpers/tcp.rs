@@ -19,7 +19,7 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tracing::error;
 
-pub async fn run(mut stream: TcpStream, target: usize) -> Result<(), io::Error> {
+pub async fn run(mut stream: TcpStream, target: usize) -> Result<f64, io::Error> {
     let start = Instant::now();
     let (mut r, mut w) = stream.split();
     let writer = async move {
@@ -48,5 +48,5 @@ pub async fn run(mut stream: TcpStream, target: usize) -> Result<(), io::Error> 
         throughput,
         start.elapsed()
     );
-    Ok(())
+    Ok(throughput)
 }
