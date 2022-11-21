@@ -73,8 +73,8 @@ impl Inbound {
                     cert_manager: self.cert_manager.clone(),
                 },
             };
-            let mut incoming_listener = hyper::server::conn::AddrIncoming::bind(&addr)
-                .expect("hbone bind");
+            let mut incoming_listener =
+                hyper::server::conn::AddrIncoming::bind(&addr).expect("hbone bind");
             incoming_listener.set_nodelay(true);
             let incoming = hyper::server::accept::from_stream(
                 tls_listener::builder(boring_acceptor)
