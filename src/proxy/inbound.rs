@@ -175,7 +175,15 @@ impl Inbound {
             &Method::CONNECT => {
                 let uri = req.uri();
                 info!("Got {} request to {}", req.method(), uri);
-                let addr: SocketAddr = uri.to_string().as_str().parse().expect("must be an addr");
+                let addr: Result<SocketAddr, _> = uri.to_string().as_str().parse();
+                if addr.is_err() {
+                    info!("Sending 400, {:?}", addr.err());
+                    let mut bad_request = Response::default();
+                    *bad_request.status_mut() = StatusCode::BAD_REQUEST;
+                    return Ok(bad_request);
+                }
+
+                let addr: SocketAddr = addr.unwrap();
                 *res.status_mut() =
                     match Self::handle_inbound(InboundConnect::Hbone(req), addr).await {
                         Ok(_) => StatusCode::OK,
