@@ -25,6 +25,7 @@ use gperftools::heap_profiler::HEAP_PROFILER;
 use gperftools::profiler::PROFILER;
 use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
+
 use pprof::protos::Message;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
@@ -33,7 +34,7 @@ use tokio::io::AsyncReadExt;
 use tracing::{error, info};
 
 use crate::workload::WorkloadInformation;
-use crate::{config, signal};
+use crate::{config, signal, telemetry};
 
 /// Supports configuring an admin server
 pub struct Builder {
@@ -87,12 +88,20 @@ impl BlockReady {
 impl Drop for BlockReady {
     fn drop(&mut self) {
         let mut pending = self.parent.0.lock().unwrap();
-        debug_assert!(pending.remove(&self.name));
+        let removed = pending.remove(&self.name);
+        debug_assert!(removed); // It is a bug to somehow remove something twice
         let left = pending.len();
+        let dur = telemetry::APPLICATION_START_TIME.elapsed();
         if left == 0 {
-            info!("Task '{}' complete, marking server ready", self.name);
+            info!(
+                "Task '{}' complete ({dur:?}), marking server ready",
+                self.name
+            );
         } else {
-            info!("Task '{}' complete, still awaiting {left} tasks", self.name);
+            info!(
+                "Task '{}' complete ({dur:?}), still awaiting {left} tasks",
+                self.name
+            );
         }
     }
 }
