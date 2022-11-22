@@ -45,6 +45,7 @@ where
         proxy_addresses: app.proxy_addresses,
     };
     let run_and_shutdown = async {
+        ta.ready().await;
         f(ta).await;
         shutdown.shutdown_now().await;
     };
@@ -53,7 +54,7 @@ where
 }
 
 impl TestApp {
-    pub async fn admin_request(&self, path: &str) -> Response<Body> {
+    pub async fn admin_request(&self, path: &str) -> hyper::Result<Response<Body>> {
         let req = Request::builder()
             .method(Method::GET)
             .uri(format!(
@@ -64,7 +65,16 @@ impl TestApp {
             .body(Body::default())
             .unwrap();
         let client = Client::new();
-        client.request(req).await.expect("admin request")
+        client.request(req).await
+    }
+
+    async fn ready(&self) {
+        for _ in 0..100 {
+            if self.admin_request("healthz/ready").await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     pub async fn socks5_connect(&self, addr: SocketAddr) -> TcpStream {

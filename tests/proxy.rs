@@ -66,15 +66,6 @@ async fn test_quit_lifecycle() {
         .expect("app exits without error");
 }
 
-#[tokio::test]
-async fn test_healthz() {
-    testapp::with_app(test_config(), |app| async move {
-        let resp = app.admin_request("healthz/ready").await;
-        assert_eq!(resp.status(), hyper::StatusCode::OK);
-    })
-    .await;
-}
-
 #[track_caller]
 async fn run_request_test(target: &str) {
     // Test a round trip outbound call (via socks5)

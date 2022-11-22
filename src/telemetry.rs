@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use once_cell::sync::Lazy;
+use std::time::Instant;
 use tracing_subscriber::prelude::*;
+
+pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 #[cfg(feature = "console")]
 pub fn setup_logging() {
+    Lazy::force(&APPLICATION_START_TIME);
     let console_layer = console_subscriber::spawn();
 
     let filter_layer = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -30,6 +35,7 @@ pub fn setup_logging() {
 
 #[cfg(not(feature = "console"))]
 pub fn setup_logging() {
+    Lazy::force(&APPLICATION_START_TIME);
     let filter_layer = tracing_subscriber::EnvFilter::try_from_default_env()
         .or_else(|_| tracing_subscriber::EnvFilter::try_new("info"))
         .unwrap();
