@@ -369,7 +369,9 @@ pub struct WorkloadStore {
     workloads: HashMap<IpAddr, Workload>,
     // workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
     workload_to_vip: HashMap<IpAddr, HashSet<(SocketAddr, u16)>>,
-    vips: HashMap<SocketAddr, HashSet<Upstream>>,
+    // vips maintains a mapping of socket address with service port to workload ip and socket address
+    // with target ports in hashset.
+    vips: HashMap<SocketAddr, HashSet<(IpAddr, u16)>>,
 }
 
 impl WorkloadStore {
@@ -385,20 +387,19 @@ impl WorkloadStore {
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
         let wip = workload.workload_ip;
-        self.insert(workload.clone());
+        self.insert(workload);
         for (vip, pl) in &w.virtual_ips {
             let ip = vip.parse::<IpAddr>()?;
             for port in &pl.ports {
-                let addr = SocketAddr::from((ip, port.service_port as u16));
-                let us = Upstream {
-                    workload: workload.clone(), // TODO avoid clones
-                    port: port.target_port as u16,
-                };
-                self.vips.entry(addr).or_default().insert(us);
+                let service_sock_addr = SocketAddr::from((ip, port.service_port as u16));
+                self.vips
+                    .entry(service_sock_addr)
+                    .or_default()
+                    .insert((wip, port.target_port as u16));
                 self.workload_to_vip
                     .entry(wip)
                     .or_default()
-                    .insert((addr, port.target_port as u16));
+                    .insert((service_sock_addr, port.target_port as u16));
             }
         }
         Ok(())
@@ -421,12 +422,9 @@ impl WorkloadStore {
         if let Some(prev) = self.workloads.remove(&ip) {
             if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
                 for (vip, target_port) in vips {
-                    let us = Upstream {
-                        workload: prev.clone(),
-                        port: target_port,
-                    };
                     if let Some(wls) = self.vips.get_mut(&vip) {
-                        wls.remove(&us);
+                        let vip_hash_entry = (prev.workload_ip, target_port);
+                        wls.remove(&vip_hash_entry);
                         if wls.is_empty() {
                             self.vips.remove(&vip);
                         }
@@ -441,15 +439,20 @@ impl WorkloadStore {
     }
 
     fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
-        if let Some(upstream) = self.vips.get(&addr) {
+        if let Some(wl_vips) = self.vips.get(&addr) {
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
-            let us: &Upstream = upstream.iter().choose(&mut rand::thread_rng()).unwrap();
-            // TODO: avoid clone
-            let mut us: Upstream = us.clone();
-            Self::set_gateway_address(&mut us, hbone_port);
-            debug!("found upstream from VIP: {}", us);
-            return Some(us);
+            let (workload_ip, target_port) =
+                wl_vips.iter().choose(&mut rand::thread_rng()).unwrap();
+            if let Some(wl) = self.workloads.get(workload_ip) {
+                let mut us = Upstream {
+                    workload: wl.clone(),
+                    port: *target_port,
+                };
+                Self::set_gateway_address(&mut us, hbone_port);
+                debug!("found upstream from VIP: {}", us);
+                return Some(us);
+            }
         }
         if let Some(wl) = self.workloads.get(&addr.ip()) {
             let mut us = Upstream {
