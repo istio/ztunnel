@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
+use realm_io::bidi_zero_copy;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
@@ -232,7 +233,7 @@ impl OutboundConnection {
                 // Create a TCP connection to upstream
                 let mut outbound = TcpStream::connect(req.gateway).await?;
                 // Proxying data between downstrean and upstream
-                tokio::io::copy_bidirectional(&mut stream, &mut outbound).await?;
+                bidi_zero_copy(&mut stream, &mut outbound).await?;
 
                 // TODO: metrics, time, more info, etc.
                 // Probably shouldn't log at start
