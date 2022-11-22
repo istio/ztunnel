@@ -32,6 +32,7 @@ use super::Error;
 
 pub struct Inbound {
     cfg: Config,
+    sock_addr: SocketAddr,
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
 }
@@ -49,15 +50,17 @@ impl Inbound {
             Err(_e) => info!("running without transparent mode"),
             _ => info!("running with transparent mode"),
         };
+        let sock_addr = listener.local_addr().unwrap();
         Ok(Inbound {
             cfg,
+            sock_addr,
             workloads,
             cert_manager,
         })
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.cfg.inbound_addr
+        self.sock_addr
     }
 
     pub(super) async fn run(self) {
