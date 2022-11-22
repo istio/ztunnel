@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Error;
-
 use tokio::io;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -21,6 +19,8 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::socket;
+
+use super::Error;
 
 pub struct InboundPassthrough {
     cfg: Config,
@@ -62,7 +62,7 @@ impl InboundPassthrough {
     }
 
     async fn proxy_inbound_plaintext(inbound: &mut TcpStream) -> Result<(), Error> {
-        let orig = socket::orig_dst_addr(inbound).expect("must have original dst enabled");
+        let orig = socket::orig_dst_addr_or_default(inbound);
         let mut outbound = TcpStream::connect(orig).await?;
 
         let (mut ri, mut wi) = inbound.split();

@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::fmt;
 use std::future::Future;
-use std::io;
+
 use std::net::IpAddr;
-use std::os::unix::io::{AsRawFd, RawFd};
+
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,8 +34,10 @@ use boring::x509::extension::{
 };
 use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyResult};
 use hyper::client::ResponseFuture;
+use hyper::server::conn::AddrStream;
 use hyper::{Request, Uri};
-use tokio::io::{AsyncRead, AsyncWrite};
+
+use tokio::net::TcpStream;
 use tonic::body::BoxBody;
 use tower::Service;
 use tracing::{error, info};
@@ -337,7 +338,7 @@ impl Alpn {
 
 #[async_trait::async_trait]
 pub trait CertProvider: Send + Sync {
-    async fn fetch_cert(&mut self, fd: RawFd) -> Result<ssl::SslAcceptor, TlsError>;
+    async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<ssl::SslAcceptor, TlsError>;
 }
 
 #[derive(Clone)]
@@ -355,8 +356,6 @@ pub enum TlsError {
     Verification(X509VerifyResult),
     #[error("certificate lookup error: {0} is not a known destination")]
     CertificateLookup(IpAddr),
-    #[error("destination lookup error")]
-    DestinationLookup(#[source] io::Error),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
     #[error("san verification error: remote did not present the expected SAN")]
@@ -369,21 +368,20 @@ pub enum TlsError {
     SslError(#[from] Error),
 }
 
-impl<C, F> tls_listener::AsyncTls<C> for BoringTlsAcceptor<F>
+impl<F> tls_listener::AsyncTls<AddrStream> for BoringTlsAcceptor<F>
 where
-    C: AsRawFd + AsyncRead + AsyncWrite + Unpin + Send + fmt::Debug + 'static,
     F: CertProvider + Clone + 'static,
 {
-    type Stream = tokio_boring::SslStream<C>;
+    type Stream = tokio_boring::SslStream<TcpStream>;
     type Error = TlsError;
     type AcceptFuture = Pin<Box<dyn Future<Output = Result<Self::Stream, Self::Error>> + Send>>;
 
-    fn accept(&self, conn: C) -> Self::AcceptFuture {
-        let fd = conn.as_raw_fd();
+    fn accept(&self, conn: AddrStream) -> Self::AcceptFuture {
+        let inner = conn.into_inner();
         let mut acceptor = self.acceptor.clone();
         Box::pin(async move {
-            let tls = acceptor.fetch_cert(fd).await?;
-            tokio_boring::accept(&tls, conn)
+            let tls = acceptor.fetch_cert(&inner).await?;
+            tokio_boring::accept(&tls, inner)
                 .await
                 .map_err(|_| TlsError::Handshake)
         })

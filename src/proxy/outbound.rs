@@ -124,9 +124,9 @@ pub struct OutboundConnection {
 
 impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
-        let remote_addr =
-            super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
-        let orig = socket::orig_dst_addr(&stream).expect("must have original dst enabled");
+        let peer = stream.peer_addr().expect("must receive peer addr");
+        let remote_addr = super::to_canonical_ip(peer);
+        let orig = socket::orig_dst_addr_or_default(&stream);
         self.proxy_to(stream, remote_addr, orig).await
     }
 

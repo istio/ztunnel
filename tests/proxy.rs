@@ -87,7 +87,6 @@ async fn run_request_test(target: &str) {
     .await;
 }
 
-#[ignore] // TODO: re-enable it when CI passes; for some reason it only works locally
 #[tokio::test]
 async fn test_hbone_request() {
     run_request_test("127.0.0.1").await;

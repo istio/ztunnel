@@ -39,20 +39,8 @@ pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-pub fn orig_dst_addr_fd<T: AsRawFd>(sock: T) -> io::Result<SocketAddr> {
-    let fd = sock.as_raw_fd();
-
-    unsafe { linux::so_original_dst(fd) }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn orig_dst_addr_fd<T: AsRawFd>(_: T) -> io::Result<SocketAddr> {
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        "SO_ORIGINAL_DST not supported on this operating system",
-    ))
+pub fn orig_dst_addr_or_default(sock: &tokio::net::TcpStream) -> SocketAddr {
+    orig_dst_addr(sock).unwrap_or_else(|_| sock.peer_addr().expect("must get peer address"))
 }
 
 #[cfg(target_os = "linux")]
