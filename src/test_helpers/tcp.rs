@@ -62,13 +62,3 @@ pub async fn run_latency(stream: &mut TcpStream, amt: usize) -> Result<(), io::E
     info!("latency: wrote {amt} in {:?}", start.elapsed());
     Ok(())
 }
-
-/// run_auto auto runs latency or throughput mode automatically based on the input size
-/// large inputs use the throughput mode
-pub async fn run_auto(stream: &mut TcpStream, amt: usize) -> Result<(), io::Error> {
-    if amt > 1024 {
-        run_throughput(stream, amt).await
-    } else {
-        run_latency(stream, amt).await
-    }
-}
