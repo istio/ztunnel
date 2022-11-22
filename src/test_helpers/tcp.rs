@@ -21,7 +21,7 @@ use tracing::info;
 
 /// run_client_throughput reads and writes as much data as possible as fast as possible, until `target`
 /// bytes are read+written.
-pub async fn run_client_throughput(mut stream: TcpStream, target: usize) -> Result<f64, io::Error> {
+pub async fn run_throughput(stream: &mut TcpStream, target: usize) -> Result<(), io::Error> {
     let start = Instant::now();
     let (mut r, mut w) = stream.split();
     let writer = async move {
@@ -50,5 +50,25 @@ pub async fn run_client_throughput(mut stream: TcpStream, target: usize) -> Resu
         throughput,
         start.elapsed()
     );
-    Ok(throughput)
+    Ok(())
+}
+
+pub async fn run_latency(stream: &mut TcpStream, amt: usize) -> Result<(), io::Error> {
+    let start = Instant::now();
+    let (mut r, mut w) = stream.split();
+    let mut buffer = vec![0; amt];
+    w.write_all(&buffer).await?;
+    r.read_exact(&mut buffer).await?;
+    info!("latency: wrote {amt} in {:?}", start.elapsed());
+    Ok(())
+}
+
+/// run_auto auto runs latency or throughput mode automatically based on the input size
+/// large inputs use the throughput mode
+pub async fn run_auto(stream: &mut TcpStream, amt: usize) -> Result<(), io::Error> {
+    if amt > 1024 {
+        run_throughput(stream, amt).await
+    } else {
+        run_latency(stream, amt).await
+    }
 }

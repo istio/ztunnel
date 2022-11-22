@@ -133,7 +133,7 @@ impl Inbound {
         request_type: InboundConnect,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
-        let stream = tokio::net::TcpStream::connect(addr).await;
+        let stream = TcpStream::connect(addr).await;
         match stream {
             Err(err) => {
                 warn!("connect to {} failed: {}", addr, err);
@@ -141,6 +141,7 @@ impl Inbound {
             }
             Ok(stream) => {
                 let mut stream = stream;
+                stream.set_nodelay(true)?;
                 tokio::task::spawn(async move {
                     match request_type {
                         InboundConnect::DirectPath(mut incoming) => {
