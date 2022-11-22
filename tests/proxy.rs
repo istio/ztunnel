@@ -44,7 +44,7 @@ async fn test_shutdown_lifecycle() {
 
     let shutdown = app.shutdown.trigger().clone();
     let (app, _shutdown) = tokio::join!(
-        time::timeout(Duration::from_secs(1), app.spawn()),
+        time::timeout(Duration::from_secs(5), app.spawn()),
         shutdown.shutdown_now()
     );
     app.expect("app shuts down")
@@ -59,7 +59,7 @@ async fn test_quit_lifecycle() {
     let addr = app.admin_address;
 
     let (app, _shutdown) = tokio::join!(
-        time::timeout(Duration::from_secs(1), app.spawn()),
+        time::timeout(Duration::from_secs(5), app.spawn()),
         admin_shutdown(addr)
     );
     app.expect("app shuts down")
