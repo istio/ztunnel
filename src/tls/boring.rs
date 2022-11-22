@@ -33,13 +33,13 @@ use boring::stack::Stack;
 use boring::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
-use boring::x509::{self, GeneralName, X509StoreContext, X509StoreContextRef, X509VerifyResult};
+use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyResult};
 use hyper::client::ResponseFuture;
 use hyper::{Request, Uri};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tonic::body::BoxBody;
 use tower::Service;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::identity::{self, Identity};
 
