@@ -24,9 +24,10 @@ use tokio::net::TcpStream;
 use super::helpers::*;
 use crate::*;
 
+#[derive(Clone, Copy)]
 pub struct TestApp {
-    admin_address: SocketAddr,
-    proxy_addresses: proxy::Addresses,
+    pub admin_address: SocketAddr,
+    pub proxy_addresses: proxy::Addresses,
 }
 
 pub async fn with_app<F, Fut, FO>(cfg: config::Config, f: F)
@@ -68,7 +69,7 @@ impl TestApp {
         client.request(req).await
     }
 
-    async fn ready(&self) {
+    pub async fn ready(&self) {
         for _ in 0..100 {
             if self.admin_request("healthz/ready").await.is_ok() {
                 return;
@@ -91,6 +92,7 @@ impl TestApp {
         );
 
         let mut stream = TcpStream::connect(socks_addr).await.expect("must connect");
+        stream.set_nodelay(true).unwrap();
 
         let addr_type = if addr.ip().is_ipv4() { 0x01u8 } else { 0x04u8 };
         stream

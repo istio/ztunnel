@@ -182,6 +182,7 @@ impl OutboundConnection {
                         .configure()
                         .expect("configure");
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
+                    tcp_stream.set_nodelay(true)?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
                         .handshake(tls_stream)
@@ -196,6 +197,7 @@ impl OutboundConnection {
                     request_sender
                 } else {
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
+                    tcp_stream.set_nodelay(true)?;
                     let (request_sender, connection) = builder
                         .handshake::<TcpStream, hyper::Body>(tcp_stream)
                         .await?;

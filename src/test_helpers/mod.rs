@@ -12,6 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::config;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
 pub mod app;
 pub mod echo;
 pub mod helpers;
+pub mod tcp;
+
+pub fn test_config() -> config::Config {
+    config::Config {
+        xds_address: None,
+        local_xds_path: Some("examples/localhost.yaml".to_string()),
+        socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        ..Default::default()
+    }
+}
