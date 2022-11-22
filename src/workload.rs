@@ -368,7 +368,7 @@ pub struct WorkloadStore {
     workload_to_vip: HashMap<IpAddr, HashSet<(SocketAddr, u16)>>,
     // vips maintains a mapping of socket address with service port to workload ip and socket address
     // with target ports in hashset.
-    vips: HashMap<SocketAddr, HashSet<(u16, IpAddr)>>,
+    vips: HashMap<SocketAddr, HashSet<(IpAddr, u16)>>,
 }
 
 impl WorkloadStore {
@@ -392,7 +392,7 @@ impl WorkloadStore {
                 self.vips
                     .entry(service_sock_addr)
                     .or_default()
-                    .insert((port.target_port as u16, wip));
+                    .insert((wip, port.target_port as u16));
                 self.workload_to_vip
                     .entry(wip)
                     .or_default()
@@ -420,7 +420,7 @@ impl WorkloadStore {
             if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
                 for (vip, target_port) in vips {
                     if let Some(wls) = self.vips.get_mut(&vip) {
-                        let vip_hash_entry = (target_port, prev.workload_ip);
+                        let vip_hash_entry = (prev.workload_ip, target_port);
                         wls.remove(&vip_hash_entry);
                         if wls.is_empty() {
                             self.vips.remove(&vip);
@@ -439,7 +439,7 @@ impl WorkloadStore {
         if let Some(wl_vips) = self.vips.get(&addr) {
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
-            let (target_port, workload_ip) =
+            let (workload_ip, target_port) =
                 wl_vips.iter().choose(&mut rand::thread_rng()).unwrap();
             if let Some(wl) = self.workloads.get(workload_ip) {
                 let mut us = Upstream {
