@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
-use std::os::unix::io::RawFd;
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
@@ -219,8 +218,8 @@ struct InboundCertProvider {
 
 #[async_trait::async_trait]
 impl crate::tls::CertProvider for InboundCertProvider {
-    async fn fetch_cert(&mut self, fd: RawFd) -> Result<boring::ssl::SslAcceptor, TlsError> {
-        let orig = crate::socket::orig_dst_addr_fd(fd).map_err(TlsError::DestinationLookup)?;
+    async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
+        let orig = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
             let remote_addr = super::to_canonical_ip(orig);
             self.workloads
