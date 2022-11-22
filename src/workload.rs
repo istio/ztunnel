@@ -368,7 +368,7 @@ pub struct WorkloadStore {
     workload_to_vip: HashMap<IpAddr, HashSet<(SocketAddr, u16)>>,
     // vips maintains a mapping of socket address with service port to workload ip and socket address
     // with target ports in hashset.
-    vips: HashMap<SocketAddr, HashSet<(IpAddr, SocketAddr)>>,
+    vips: HashMap<SocketAddr, HashSet<(u16, IpAddr)>>,
 }
 
 impl WorkloadStore {
@@ -389,11 +389,10 @@ impl WorkloadStore {
             let ip = vip.parse::<IpAddr>()?;
             for port in &pl.ports {
                 let service_sock_addr = SocketAddr::from((ip, port.service_port as u16));
-                let target_sock_addr = SocketAddr::from((ip, port.target_port as u16));
                 self.vips
                     .entry(service_sock_addr)
                     .or_default()
-                    .insert((wip, target_sock_addr));
+                    .insert((port.target_port as u16, wip));
                 self.workload_to_vip
                     .entry(wip)
                     .or_default()
@@ -420,9 +419,8 @@ impl WorkloadStore {
         if let Some(prev) = self.workloads.remove(&ip) {
             if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
                 for (vip, target_port) in vips {
-                    let target_sock_addr = SocketAddr::from((prev.workload_ip, target_port));
                     if let Some(wls) = self.vips.get_mut(&vip) {
-                        let vip_hash_entry = (ip, target_sock_addr);
+                        let vip_hash_entry = (target_port, prev.workload_ip);
                         wls.remove(&vip_hash_entry);
                         if wls.is_empty() {
                             self.vips.remove(&vip);
@@ -441,12 +439,12 @@ impl WorkloadStore {
         if let Some(wl_vips) = self.vips.get(&addr) {
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
-            let (workload_ip, target_sock_addr) =
+            let (target_port, workload_ip) =
                 wl_vips.iter().choose(&mut rand::thread_rng()).unwrap();
             if let Some(wl) = self.workloads.get(workload_ip) {
                 let mut us = Upstream {
                     workload: wl.clone(),
-                    port: target_sock_addr.port(),
+                    port: *target_port,
                 };
                 Self::set_gateway_address(&mut us, hbone_port);
                 debug!("found upstream from VIP: {}", us);
