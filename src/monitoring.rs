@@ -14,6 +14,9 @@
 
 use lazy_static::lazy_static;
 use prometheus::{register_int_gauge_vec, IntGaugeVec};
+
+use crate::version;
+
 lazy_static! {
     static ref ISTIO_BUILD_GAUGE: IntGaugeVec = register_int_gauge_vec!(
         "istio_build",
@@ -23,10 +26,9 @@ lazy_static! {
     .unwrap();
 }
 
-#[cfg(not(feature = "console"))]
 pub fn setup_metric() {
-    let tag = env!("ZTUNNEL_BUILD_buildTag");
+    let tag = version::BuildInfo::new().git_tag;
     ISTIO_BUILD_GAUGE
-        .with_label_values(&["ztunnel", tag])
+        .with_label_values(&["ztunnel", &tag])
         .set(1);
 }
