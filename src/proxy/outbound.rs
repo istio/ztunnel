@@ -17,7 +17,6 @@ use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
-use realm_io::bidi_zero_copy;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
@@ -25,6 +24,7 @@ use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::Error;
+use crate::socket::relay;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
 use crate::{identity, socket};
 
@@ -233,7 +233,7 @@ impl OutboundConnection {
                 // Create a TCP connection to upstream
                 let mut outbound = TcpStream::connect(req.gateway).await?;
                 // Proxying data between downstrean and upstream
-                bidi_zero_copy(&mut stream, &mut outbound).await?;
+                relay(&mut stream, &mut outbound).await?;
 
                 // TODO: metrics, time, more info, etc.
                 // Probably shouldn't log at start

@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Error;
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 
+use realm_io;
 use tokio::io;
 use tokio::net::TcpListener;
 
@@ -164,5 +166,33 @@ mod linux {
 
     fn ntoh32(i: u32) -> u32 {
         <u32>::from_be(i)
+    }
+}
+
+const EINVAL: i32 = 22;
+pub async fn relay(
+    downstream: &mut tokio::net::TcpStream,
+    upstream: &mut tokio::net::TcpStream,
+) -> Result<(), Error> {
+    #[cfg(all(target_os = "linux"))]
+    {
+        match realm_io::bidi_zero_copy(downstream, upstream).await {
+            Ok(()) => Ok(()),
+            Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
+                match tokio::io::copy_bidirectional(downstream, upstream).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        match tokio::io::copy_bidirectional(downstream, upstream).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }

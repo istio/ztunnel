@@ -16,7 +16,6 @@ use std::net::SocketAddr;
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use realm_io::bidi_zero_copy;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
@@ -25,6 +24,7 @@ use crate::config::Config;
 
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
+use crate::socket::relay;
 use crate::tls::TlsError;
 use crate::workload::WorkloadInformation;
 
@@ -145,11 +145,9 @@ impl Inbound {
                 tokio::task::spawn(async move {
                     match request_type {
                         InboundConnect::DirectPath(mut incoming) => {
-                            match bidi_zero_copy(&mut incoming, &mut stream).await {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    warn!("internal server copy failed: {}", err)
-                                }
+                            let res = relay(&mut incoming, &mut stream).await;
+                            if res.is_err() {
+                                error!("internal server copy {:?}", res);
                             }
                         }
                         Hbone(req) => match hyper::upgrade::on(req).await {
