@@ -69,7 +69,7 @@ async fn test_quit_lifecycle() {
 #[track_caller]
 async fn run_request_test(target: &str) {
     // Test a round trip outbound call (via socks5)
-    let echo = echo::TestServer::new().await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
