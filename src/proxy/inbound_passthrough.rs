@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use tokio::io;
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::socket;
+use crate::socket::relay;
 
 use super::Error;
 
@@ -64,22 +63,7 @@ impl InboundPassthrough {
     async fn proxy_inbound_plaintext(inbound: &mut TcpStream) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(inbound);
         let mut outbound = TcpStream::connect(orig).await?;
-
-        let (mut ri, mut wi) = inbound.split();
-        let (mut ro, mut wo) = outbound.split();
-
-        let client_to_server = async {
-            io::copy(&mut ri, &mut wo).await?;
-            wo.shutdown().await
-        };
-
-        let server_to_client = async {
-            io::copy(&mut ro, &mut wi).await?;
-            wi.shutdown().await
-        };
-
-        tokio::try_join!(client_to_server, server_to_client)?;
-
+        relay(inbound, &mut outbound).await?;
         info!("proxy inbound plaintext complete");
         Ok(())
     }
