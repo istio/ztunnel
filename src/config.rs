@@ -54,9 +54,9 @@ impl Default for Config {
     fn default() -> Config {
         // TODO: copy JWT auth logic from CA client and use TLS here (port 15012)
         let xds_address = Some(if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "http://istiod.istio-system:15010".to_string()
+            "https://istiod.istio-system:15012".to_string()
         } else {
-            "http://localhost:15010".to_string()
+            "https://localhost:15012".to_string()
         });
         Config {
             window_size: 4 * 1024 * 1024,
