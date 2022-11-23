@@ -25,7 +25,7 @@ use crate::xds::istio::workload::Workload;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{tls, xds};
+use crate::{identity, tls, xds};
 
 use super::Error;
 
@@ -77,6 +77,7 @@ impl<T: prost::Message> Handler<T> for NopHandler {
 
 pub struct Config {
     address: String,
+    auth: identity::AuthSource,
     workload_handler: Box<dyn Handler<Workload>>,
     initial_watches: Vec<String>,
     on_demand: bool,
@@ -86,6 +87,7 @@ impl Config {
     pub fn new(config: crate::config::Config) -> Config {
         Config {
             address: config.xds_address.clone().unwrap(),
+            auth: config.auth,
             workload_handler: Box::new(NopHandler {}),
             initial_watches: Vec::new(),
             on_demand: config.xds_on_demand,
@@ -110,19 +112,8 @@ impl Config {
             pending: Default::default(),
             demand: rx,
             demand_tx: tx,
-            node_id: generate_node_id(),
         }
     }
-}
-
-fn generate_node_id() -> String {
-    // TODO: may add new type, but this requires changing together with pilot-discovery
-    let node_type = "sidecar";
-    let ip = std::env::var("INSTANCE_IP").unwrap_or_else(|_| "1.1.1.1".to_string());
-    let pod_name = std::env::var("POD_NAME").unwrap_or_else(|_| "test".to_string());
-    let ns = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "test".to_string());
-    let dns_domain = format!("{}.{}", ns, "svc.cluster.local");
-    format!("{}~{}~{}.{}~{}", node_type, ip, pod_name, ns, dns_domain)
 }
 
 pub struct AdsClient {
@@ -135,8 +126,6 @@ pub struct AdsClient {
 
     demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
     demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
-
-    node_id: String,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
@@ -216,10 +205,22 @@ impl AdsClient {
         }
     }
 
+    fn node(&self) -> Node {
+        let ip = std::env::var("INSTANCE_IP");
+        let ip = ip.as_deref().unwrap_or("1.1.1.1");
+        let pod_name = std::env::var("POD_NAME");
+        let pod_name = pod_name.as_deref().unwrap_or("");
+        let ns = std::env::var("POD_NAMESPACE");
+        let ns = ns.as_deref().unwrap_or("");
+        Node {
+            id: format!("sidecar~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
+            ..Default::default()
+        }
+    }
+
     async fn run_internal(&mut self) -> Result<(), Error> {
         let initial_watches = &self.config.initial_watches;
         let workloads = &mut self.workloads;
-        let node_id = self.node_id.clone();
         match workloads.len() {
             0 => info!("Starting initial ADS client"),
             n => info!("Starting ADS client with {n} workloads"),
@@ -227,7 +228,8 @@ impl AdsClient {
 
         let address = self.config.address.clone();
         let svc = tls::grpc_connector(address).unwrap();
-        let mut client = AggregatedDiscoveryServiceClient::new(svc);
+        let mut client =
+            AggregatedDiscoveryServiceClient::with_interceptor(svc, self.config.auth.clone());
         let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);
         let watches = initial_watches.clone();
         let irv: HashMap<String, String> = workloads
@@ -242,15 +244,13 @@ impl AdsClient {
         } else {
             (vec![], vec![])
         };
+        let node = self.node();
         let outbound = async_stream::stream! {
             for request_type in watches {
                 let irv = irv.clone();
                 let initial = DeltaDiscoveryRequest {
                     type_url: request_type.clone(),
-                    node: Some(Node{
-                        id: node_id.clone(),
-                        ..Default::default()
-                    }),
+                    node: Some(node.clone()),
                     initial_resource_versions: irv,
                     resource_names_subscribe: sub.clone(),
                     resource_names_unsubscribe: unsub.clone(),
@@ -371,10 +371,6 @@ impl AdsClient {
         );
         send.send(DeltaDiscoveryRequest {
             type_url: type_url.clone(),
-            node: Some(Node {
-                id: self.node_id.clone(),
-                ..Default::default()
-            }),
             response_nonce: response.nonce.clone(),
             error_detail: error_detail.map(|msg| Status {
                 message: msg,
@@ -399,10 +395,6 @@ impl AdsClient {
         self.pending.insert(demand_event, tx);
         send.send(DeltaDiscoveryRequest {
             type_url,
-            node: Some(Node {
-                id: self.node_id.clone(),
-                ..Default::default()
-            }),
             resource_names_subscribe: vec![name],
             ..Default::default()
         })
