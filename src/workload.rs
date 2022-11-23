@@ -29,7 +29,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
-use crate::{config, xds};
+use crate::{admin, config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -242,6 +242,7 @@ impl WorkloadManager {
     pub async fn new(
         config: config::Config,
         registry: &mut Registry,
+        awaiting_ready: admin::BlockReady
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
@@ -250,7 +251,7 @@ impl WorkloadManager {
                 xds::Config::new(config.clone())
                     .with_workload_handler(xds_workloads)
                     .watch(xds::WORKLOAD_TYPE.into())
-                    .build(registry),
+                    .build(registry, awaiting_ready.subtask("ads client")),
             )
         } else {
             None
