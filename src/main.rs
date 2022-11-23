@@ -16,6 +16,7 @@ extern crate core;
 #[cfg(feature = "gperftools")]
 extern crate gperftools;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use ztunnel::*;
 
 // #[global_allocator]
@@ -29,6 +30,11 @@ fn main() -> anyhow::Result<()> {
     let config: config::Config = Default::default();
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.num_worker_threads)
+        .thread_name_fn(|| {
+            static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+            let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+            format!("proxy-{}", id)
+        })
         .enable_all()
         .build()
         .unwrap()
