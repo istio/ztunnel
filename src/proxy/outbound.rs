@@ -175,41 +175,25 @@ impl OutboundConnection {
                     .body(hyper::Body::empty())
                     .unwrap();
 
-                let mut request_sender = if self.cfg.tls {
-                    let id = &req.source.identity();
-                    let cert = self.cert_manager.fetch_certificate(id).await?;
-                    let connector = cert
-                        .connector(&req.destination_identity)?
-                        .configure()
-                        .expect("configure");
-                    let tcp_stream = TcpStream::connect(req.gateway).await?;
-                    tcp_stream.set_nodelay(true)?;
-                    let tls_stream = connect_tls(connector, tcp_stream).await?;
-                    let (request_sender, connection) = builder
-                        .handshake(tls_stream)
-                        .await
-                        .map_err(Error::HttpHandshake)?;
-                    // spawn a task to poll the connection and drive the HTTP state
-                    tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            error!("Error in HBONE connection handshake: {:?}", e);
-                        }
-                    });
-                    request_sender
-                } else {
-                    let tcp_stream = TcpStream::connect(req.gateway).await?;
-                    tcp_stream.set_nodelay(true)?;
-                    let (request_sender, connection) = builder
-                        .handshake::<TcpStream, hyper::Body>(tcp_stream)
-                        .await?;
-                    // spawn a task to poll the connection and drive the HTTP state
-                    tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            error!("Error in connection: {}", e);
-                        }
-                    });
-                    request_sender
-                };
+                let id = &req.source.identity();
+                let cert = self.cert_manager.fetch_certificate(id).await?;
+                let connector = cert
+                    .connector(&req.destination_identity)?
+                    .configure()
+                    .expect("configure");
+                let tcp_stream = TcpStream::connect(req.gateway).await?;
+                tcp_stream.set_nodelay(true)?;
+                let tls_stream = connect_tls(connector, tcp_stream).await?;
+                let (mut request_sender, connection) = builder
+                    .handshake(tls_stream)
+                    .await
+                    .map_err(Error::HttpHandshake)?;
+                // spawn a task to poll the connection and drive the HTTP state
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        error!("Error in HBONE connection handshake: {:?}", e);
+                    }
+                });
 
                 let response = request_sender.send_request(request).await?;
 

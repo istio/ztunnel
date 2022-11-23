@@ -21,7 +21,6 @@ use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::socket::relay;
@@ -64,67 +63,43 @@ impl Inbound {
 
     pub(super) async fn run(self) {
         let addr = self.listener.local_addr().unwrap();
-        if self.cfg.tls {
-            // TODO avoid duplication here
-            let service = make_service_fn(|_| async {
-                Ok::<_, hyper::Error>(service_fn(Self::serve_connect))
-            });
-            let boring_acceptor = crate::tls::BoringTlsAcceptor {
-                acceptor: InboundCertProvider {
-                    workloads: self.workloads.clone(),
-                    cert_manager: self.cert_manager.clone(),
-                },
-            };
-            let mut listener = hyper::server::conn::AddrIncoming::from_listener(self.listener)
-                .expect("hbone bind");
-            listener.set_nodelay(true);
-            let incoming = hyper::server::accept::from_stream(
-                tls_listener::builder(boring_acceptor)
-                    .listen(listener)
-                    .filter(|conn| {
-                        // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
-                        if let Err(err) = conn {
-                            warn!("TLS handshake error: {}", err);
-                            false
-                        } else {
-                            info!("TLS handshake succeeded");
-                            true
-                        }
-                    }),
-            );
+        let service =
+            make_service_fn(|_| async { Ok::<_, hyper::Error>(service_fn(Self::serve_connect)) });
+        let boring_acceptor = crate::tls::BoringTlsAcceptor {
+            acceptor: InboundCertProvider {
+                workloads: self.workloads.clone(),
+                cert_manager: self.cert_manager.clone(),
+            },
+        };
+        let mut listener =
+            hyper::server::conn::AddrIncoming::from_listener(self.listener).expect("hbone bind");
+        listener.set_nodelay(true);
+        let incoming = hyper::server::accept::from_stream(
+            tls_listener::builder(boring_acceptor)
+                .listen(listener)
+                .filter(|conn| {
+                    // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
+                    if let Err(err) = conn {
+                        warn!("TLS handshake error: {}", err);
+                        false
+                    } else {
+                        info!("TLS handshake succeeded");
+                        true
+                    }
+                }),
+        );
 
-            let server = Server::builder(incoming)
-                .http2_only(true)
-                .http2_initial_stream_window_size(self.cfg.window_size)
-                .http2_initial_connection_window_size(self.cfg.connection_window_size)
-                .http2_max_frame_size(self.cfg.frame_size)
-                .serve(service);
+        let server = Server::builder(incoming)
+            .http2_only(true)
+            .http2_initial_stream_window_size(self.cfg.window_size)
+            .http2_initial_connection_window_size(self.cfg.connection_window_size)
+            .http2_max_frame_size(self.cfg.frame_size)
+            .serve(service);
 
-            info!("HBONE listener established {}", addr);
+        info!("HBONE listener established {}", addr);
 
-            if let Err(e) = server.await {
-                error!("server error: {}", e);
-            }
-        } else {
-            warn!("TLS disabled");
-            let service = make_service_fn(|_| async {
-                Ok::<_, hyper::Error>(service_fn(Self::serve_connect))
-            });
-
-            let server = hyper::server::conn::AddrIncoming::from_listener(self.listener)
-                .map(Server::builder)
-                .expect("hbone bind")
-                .http2_only(true)
-                .http2_initial_stream_window_size(self.cfg.window_size)
-                .http2_initial_connection_window_size(self.cfg.connection_window_size)
-                .http2_max_frame_size(self.cfg.frame_size)
-                .serve(service);
-
-            info!("HBONE listener established {}", addr);
-
-            if let Err(e) = server.await {
-                error!("server error: {}", e);
-            }
+        if let Err(e) = server.await {
+            error!("server error: {}", e);
         }
     }
 
