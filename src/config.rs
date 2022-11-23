@@ -20,8 +20,6 @@ use tokio::time;
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub tls: bool,
-
     pub window_size: u32,
     pub connection_window_size: u32,
     pub frame_size: u32,
@@ -50,7 +48,7 @@ pub struct Config {
     pub num_worker_threads: usize,
 }
 
-const DEFAULT_WOKRER_THREADS: usize = 2;
+const DEFAULT_WORKER_THREADS: usize = 2;
 
 impl Default for Config {
     fn default() -> Config {
@@ -61,8 +59,6 @@ impl Default for Config {
             "http://localhost:15010".to_string()
         });
         Config {
-            tls: std::env::var("TLS").ok().as_deref() != Some("off"),
-
             window_size: 4 * 1024 * 1024,
             connection_window_size: 4 * 1024 * 1024,
             frame_size: 1024 * 1024,
@@ -91,9 +87,9 @@ impl Default for Config {
                     v.parse::<usize>()
                         .ok()
                         .filter(|n| *n > 0)
-                        .unwrap_or(DEFAULT_WOKRER_THREADS)
+                        .unwrap_or(DEFAULT_WORKER_THREADS)
                 })
-                .unwrap_or(DEFAULT_WOKRER_THREADS),
+                .unwrap_or(DEFAULT_WORKER_THREADS),
         }
     }
 }
