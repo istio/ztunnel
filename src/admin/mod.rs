@@ -296,8 +296,8 @@ async fn handle_metrics(_req: Request<Body>) -> Response<Body> {
     encoder.encode(&metric_families, &mut buffer).unwrap();
 
     Response::builder()
-        .status(200)
-        .header("Content-Type", encoder.format_type())
+        .status(hyper::StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, encoder.format_type())
         .body(Body::from(buffer))
         .unwrap()
 }
