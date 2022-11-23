@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use realm_io::bidi_zero_copy;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
@@ -144,9 +145,12 @@ impl Inbound {
                 tokio::task::spawn(async move {
                     match request_type {
                         InboundConnect::DirectPath(mut incoming) => {
-                            tokio::io::copy_bidirectional(&mut incoming, &mut stream)
-                                .await
-                                .expect("internal server copy");
+                            match bidi_zero_copy(&mut incoming, &mut stream).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    warn!("internal server copy failed: {}", err)
+                                }
+                            }
                         }
                         Hbone(req) => match hyper::upgrade::on(req).await {
                             Ok(mut upgraded) => {
