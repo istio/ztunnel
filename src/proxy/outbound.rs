@@ -271,7 +271,6 @@ impl OutboundConnection {
             });
         }
 
-        let us = us.unwrap();
         // For case source client has enabled waypoint
         if !source_workload.waypoint_addresses.is_empty() {
             let waypoint_address = source_workload.choose_waypoint_address().unwrap();
@@ -293,9 +292,11 @@ impl OutboundConnection {
                 request_type: RequestType::ToClientWaypoint,
             });
         }
+        
+        let us = us.unwrap();
         // For case upstream server has enabled waypoint
         if !us.workload.waypoint_addresses.is_empty() {
-            let waypoint_address = source_workload.choose_waypoint_address().unwrap();
+            let waypoint_address = us.workload.choose_waypoint_address().unwrap();
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
             return Ok(Request {
