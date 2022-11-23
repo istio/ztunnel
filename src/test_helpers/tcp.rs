@@ -12,53 +12,116 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::{cmp, io};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{debug, info};
 
-/// run_client_throughput reads and writes as much data as possible as fast as possible, until `target`
-/// bytes are read+written.
-pub async fn run_throughput(stream: &mut TcpStream, target: usize) -> Result<(), io::Error> {
+#[derive(Copy, Clone, Debug)]
+pub enum Mode {
+    ReadWrite,
+    Write,
+    Read,
+}
+
+/// run_client reads and/or writes data as fast as possible
+pub async fn run_client(
+    stream: &mut TcpStream,
+    target: usize,
+    mode: Mode,
+) -> Result<(), io::Error> {
+    let mut buf = vec![0; cmp::min(BUFFER_SIZE, target)];
     let start = Instant::now();
     let (mut r, mut w) = stream.split();
-    let writer = async move {
-        let mut wrote = 0;
-        let buffer = vec![0; 200 * 1024 * 1024];
-        while wrote < target {
-            let length = cmp::min(buffer.len(), target - wrote);
-            wrote += w.write(&buffer[..length]).await?;
+    let mut transferred = 0;
+    while transferred < target {
+        let length = cmp::min(buf.len(), target - transferred);
+        match mode {
+            Mode::ReadWrite => {
+                let written = w.write(&buf[..length]).await?;
+                transferred += written;
+                r.read_exact(&mut buf[..written]).await?;
+            }
+            Mode::Write => {
+                transferred += w.write(&buf[..length]).await?;
+            }
+            Mode::Read => {
+                transferred += r.read(&mut buf[..length]).await?;
+            }
         }
-        Ok::<usize, io::Error>(wrote)
-    };
-    let reader = async move {
-        let mut read = 0;
-        let mut buffer = vec![0; 200 * 1024 * 1024];
-        while read < target {
-            let length = cmp::min(buffer.len(), target - read);
-            read += r.read(&mut buffer[..length]).await?;
-        }
-        Ok::<usize, io::Error>(read)
-    };
-    let (wrote, _read) = tokio::try_join!(writer, reader)?;
+        debug!(
+            "throughput: {:.3} Gb/s, transferred {} Gb ({:.3}%) in {:?} ({:?})",
+            transferred as f64 / (start.elapsed().as_micros() as f64 / 1_000_000.0) / 0.125e9,
+            transferred as f64 / 0.125e9,
+            100.0 * transferred as f64 / target as f64,
+            start.elapsed(),
+            mode
+        );
+    }
     let elapsed = start.elapsed().as_micros() as f64 / 1_000_000.0;
-    let throughput = wrote as f64 / elapsed / 0.125e9;
+    let throughput = transferred as f64 / elapsed / 0.125e9;
     info!(
-        "throughput: {:.3} Gb/s, wrote {wrote} in {:?}",
+        "throughput: {:.3} Gb/s, transferred {transferred} in {:?} ({:?})",
         throughput,
-        start.elapsed()
+        start.elapsed(),
+        mode
     );
     Ok(())
 }
 
-pub async fn run_latency(stream: &mut TcpStream, amt: usize) -> Result<(), io::Error> {
-    let start = Instant::now();
-    let (mut r, mut w) = stream.split();
-    let mut buffer = vec![0; amt];
-    w.write_all(&buffer).await?;
-    r.read_exact(&mut buffer).await?;
-    info!("latency: wrote {amt} in {:?}", start.elapsed());
-    Ok(())
+pub struct TestServer {
+    listener: TcpListener,
+    mode: Mode,
+}
+
+static BUFFER_SIZE: usize = 2 * 1024 * 1024;
+
+impl TestServer {
+    pub async fn new(mode: Mode) -> TestServer {
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        let listener = TcpListener::bind(addr).await.unwrap();
+        TestServer { listener, mode }
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.listener.local_addr().unwrap()
+    }
+
+    pub async fn run(self) {
+        loop {
+            let (mut socket, _) = self.listener.accept().await.unwrap();
+
+            tokio::spawn(async move {
+                match self.mode {
+                    Mode::ReadWrite => {
+                        let (mut r, mut w) = socket.split();
+                        let mut r = tokio::io::BufReader::with_capacity(BUFFER_SIZE, &mut r);
+                        tokio::io::copy_buf(&mut r, &mut w).await.expect("tcp copy");
+                    }
+                    Mode::Write => {
+                        let buffer = vec![0; BUFFER_SIZE];
+                        loop {
+                            let read = socket.write(&buffer).await.expect("tcp ready");
+                            if read == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    Mode::Read => {
+                        let mut buffer = vec![0; BUFFER_SIZE];
+                        loop {
+                            let read = socket.read(&mut buffer).await.expect("tcp ready");
+                            if read == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
 }
