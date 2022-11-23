@@ -61,7 +61,8 @@ impl Default for Config {
             "http://localhost:15010".to_string()
         });
         Config {
-            tls: std::env::var("TLS").unwrap_or_else(|_| "".into()) != "off",
+            tls: std::env::var("TLS").ok().as_deref() != Some("off"),
+
             window_size: 4 * 1024 * 1024,
             connection_window_size: 4 * 1024 * 1024,
             frame_size: 1024 * 1024,
@@ -74,13 +75,11 @@ impl Default for Config {
             inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
             outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
-            local_node: Some(std::env::var("NODE_NAME").unwrap_or_else(|_| "".into()))
-                .filter(|s| !s.is_empty()),
+            local_node: std::env::var("NODE_NAME").ok(),
 
             xds_address,
-            local_xds_path: Some(std::env::var("LOCAL_XDS_PATH").unwrap_or_else(|_| "".into()))
-                .filter(|s| !s.is_empty()),
-            xds_on_demand: std::env::var("XDS_ON_DEMAND").unwrap_or_else(|_| "".into()) == "on",
+            local_xds_path: std::env::var("LOCAL_XDS_PATH").ok(),
+            xds_on_demand: std::env::var("XDS_ON_DEMAND").ok().as_deref() == Some("on"),
 
             auth: identity::AuthSource::Token(PathBuf::from(
                 r"./var/run/secrets/tokens/istio-token",
