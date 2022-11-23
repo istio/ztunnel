@@ -292,7 +292,7 @@ impl OutboundConnection {
                 request_type: RequestType::ToClientWaypoint,
             });
         }
-        
+
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
         if !us.workload.waypoint_addresses.is_empty() {
