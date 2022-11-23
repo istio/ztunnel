@@ -179,10 +179,9 @@ pub async fn relay(
         match realm_io::bidi_zero_copy(downstream, upstream).await {
             Ok(()) => Ok(()),
             Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
-                match tokio::io::copy_bidirectional(downstream, upstream).await {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e),
-                }
+                tokio::io::copy_bidirectional(downstream, upstream)
+                    .await
+                    .map(|_| ())
             }
             Err(e) => Err(e),
         }
@@ -190,9 +189,8 @@ pub async fn relay(
 
     #[cfg(not(target_os = "linux"))]
     {
-        match tokio::io::copy_bidirectional(downstream, upstream).await {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        tokio::io::copy_bidirectional(downstream, upstream)
+            .await
+            .map(|_| ())
     }
 }
