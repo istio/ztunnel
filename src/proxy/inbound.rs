@@ -107,7 +107,7 @@ impl Inbound {
                 // There should be a way to notify the server not accept any new connection,
                 // and wait for the existing ones gracefully shutdown.
                 if let Err(_) = tx.send(shutdown) {
-                    error!("the receiver dropped")
+                    error!("HBONE receiver dropped")
                 }
                 info!("drain end");
             });
@@ -116,6 +116,10 @@ impl Inbound {
 
         if let Err(e) = server.await {
             error!("server error: {}", e);
+        }
+        match rx.await {
+            Ok(shutdown) => drop(shutdown),
+            Err(_) => info!("HBONE sender dropped"),
         }
     }
 
