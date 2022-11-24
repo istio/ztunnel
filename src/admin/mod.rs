@@ -180,10 +180,11 @@ impl Server {
                                 "/config_dump" => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
+                                "/help" => Ok::<_, hyper::Error>(handle_help(req).await),
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
-                                        .body(Body::default())
+                                        .body("Invalid command.\nPlease use /help to get the command list\n".into())
                                         .unwrap(),
                                 ),
                             }
@@ -284,6 +285,13 @@ async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> R
     Response::builder()
         .status(hyper::StatusCode::OK)
         .body(vec.into())
+        .unwrap()
+}
+
+async fn handle_help(_req: Request<Body>) -> Response<Body> {
+    Response::builder()
+        .status(hyper::StatusCode::OK)
+        .body("/healths/ready\t\t\tprint server state\n/debug/pprof/profile\t\tprint the profile data\n/debug/gprof/profile\t\tprint the gprof\n/debug/gprof/heap\t\tprint the heap profile\n/quitquitquit\t\t\texit the ztunnel\n/config_dump\t\t\tprint the workload information\n/help\t\t\t\tprint the command list\n".into())
         .unwrap()
 }
 
