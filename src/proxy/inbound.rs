@@ -105,7 +105,7 @@ impl Inbound {
                 let shutdown = self.drain.signaled().await;
                 // There should be a way to notify the server not accept any new connection,
                 // and wait for the existing ones gracefully shutdown.
-                if let Err(_) = tx.send(shutdown) {
+                if tx.send(shutdown).is_err() {
                     error!("HBONE receiver dropped")
                 }
                 info!("drain end");
