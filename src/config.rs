@@ -81,7 +81,7 @@ impl Default for Config {
                 r"./var/run/secrets/tokens/istio-token",
             )),
 
-            num_worker_threads: std::env::var("ZTUNNEL_WOKRER_THREADS")
+            num_worker_threads: std::env::var("ZTUNNEL_WORKER_THREADS")
                 .ok()
                 .map(|v| {
                     v.parse::<usize>()
