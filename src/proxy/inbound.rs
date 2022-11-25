@@ -161,7 +161,6 @@ impl Inbound {
                 }
 
                 let addr: SocketAddr = addr.unwrap();
-                // let mut res = Response::new(Body::empty());
                 let status_code = match Self::handle_inbound(InboundConnect::Hbone(req), addr).await
                 {
                     Ok(_) => StatusCode::OK,
