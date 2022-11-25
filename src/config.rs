@@ -53,11 +53,17 @@ const DEFAULT_WORKER_THREADS: usize = 2;
 impl Default for Config {
     fn default() -> Config {
         // TODO: copy JWT auth logic from CA client and use TLS here (port 15012)
-        let xds_address = Some(if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "https://istiod.istio-system:15012".to_string()
-        } else {
-            "https://localhost:15012".to_string()
-        });
+        let xds_address = match std::env::var("XDS_ADDRESS").ok() {
+            Some(xds) if xds.as_str() == "" => None,
+            Some(xds) => Some(xds),
+            None => {
+                if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
+                    Some("https://istiod.istio-system:15012".to_string())
+                } else {
+                    Some("https://localhost:15012".to_string())
+                }
+            }
+        };
         Config {
             window_size: 4 * 1024 * 1024,
             connection_window_size: 4 * 1024 * 1024,
