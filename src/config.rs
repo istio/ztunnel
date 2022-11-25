@@ -40,6 +40,8 @@ pub struct Config {
     /// If true, on-demand XDS will be used
     pub xds_on_demand: bool,
 
+    /// If true, then use builtin fake CA with self-signed certificates.
+    pub fake_ca: bool,
     pub auth: identity::AuthSource,
 
     pub termination_grace_period: time::Duration,
@@ -83,6 +85,7 @@ impl Default for Config {
             local_xds_path: std::env::var("LOCAL_XDS_PATH").ok(),
             xds_on_demand: std::env::var("XDS_ON_DEMAND").ok().as_deref() == Some("on"),
 
+            fake_ca: std::env::var("FAKE_CA").ok().as_deref() == Some("on"),
             auth: identity::AuthSource::Token(PathBuf::from(
                 r"./var/run/secrets/tokens/istio-token",
             )),

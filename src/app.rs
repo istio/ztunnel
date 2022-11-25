@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -74,8 +75,13 @@ pub async fn build_with_cert(
 }
 
 pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
-    let cert_manager = identity::SecretManager::new(config.clone());
-    build_with_cert(config, cert_manager).await
+    if config.fake_ca {
+        let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(86400));
+        build_with_cert(config, cert_manager).await
+    } else {
+        let cert_manager = identity::SecretManager::new(config.clone());
+        build_with_cert(config, cert_manager).await
+    }
 }
 
 pub struct Bound {
