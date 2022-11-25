@@ -53,17 +53,17 @@ pub struct Server {
 const HEALTHZ_URI: &str = "/healthz/ready";
 const HEALTHZ_EXP: &str = "print server state";
 
-const PPROF_URI: &str   = "/debug/pprof/profile";
-const PPROF_EXP: &str   = "print the pprof data";
+const PPROF_URI: &str = "/debug/pprof/profile";
+const PPROF_EXP: &str = "print the pprof data";
 
-const GPROF_URI: &str   = "/debug/gprof/profile";
-const GPROF_EXP: &str   = "print the gprof data";
+const GPROF_URI: &str = "/debug/gprof/profile";
+const GPROF_EXP: &str = "print the gprof data";
 
-const HEAP_URI: &str    = "/debug/gprof/heap";
-const HEAP_EXP: &str    = "print the heap data";
+const HEAP_URI: &str = "/debug/gprof/heap";
+const HEAP_EXP: &str = "print the heap data";
 
-const QUIT_URI: &str    = "/quitquitquit";
-const QUIT_EXP: &str    = "exit the server";
+const QUIT_URI: &str = "/quitquitquit";
+const QUIT_EXP: &str = "exit the server";
 
 const CFGDUMP_URI: &str = "/config_dump";
 const CFGDUMP_EXP: &str = "print the workload information";
@@ -78,7 +78,13 @@ pub struct CliCommand {
 
 pub struct CliCmds(Vec<CliCommand>);
 
-impl CliCmds{
+impl Default for CliCmds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CliCmds {
     pub fn new() -> CliCmds {
         CliCmds(vec![
             CliCommand {
@@ -108,7 +114,7 @@ impl CliCmds{
             CliCommand {
                 uri: CMDLSIT_URI.to_string(),
                 exp: CMDLSIT_EXP.to_string(),
-            }
+            },
         ])
     }
 }
