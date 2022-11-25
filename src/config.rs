@@ -53,7 +53,7 @@ const DEFAULT_WORKER_THREADS: usize = 2;
 impl Default for Config {
     fn default() -> Config {
         // TODO: copy JWT auth logic from CA client and use TLS here (port 15012)
-        let xds_address = match std::env::var("XDS").ok() {
+        let xds_address = match std::env::var("XDS_ADDRESS").ok() {
             Some(xds) if xds.as_str() == "" => None,
             Some(xds) => Some(xds),
             None => {
