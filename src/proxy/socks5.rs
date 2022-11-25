@@ -21,13 +21,14 @@ use crate::workload::WorkloadInformation;
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 pub struct Socks5 {
-    cfg: Config,
+    cfg: Arc<Config>,
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
     hbone_port: u16,
@@ -36,7 +37,7 @@ pub struct Socks5 {
 
 impl Socks5 {
     pub async fn new(
-        cfg: Config,
+        cfg: Arc<Config>,
         cert_manager: Box<dyn CertificateProvider>,
         hbone_port: u16,
         workloads: WorkloadInformation,

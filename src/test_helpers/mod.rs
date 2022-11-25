@@ -14,13 +14,14 @@
 
 use crate::config;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 pub mod app;
 pub mod helpers;
 pub mod tcp;
 
-pub fn test_config() -> config::Config {
-    config::Config {
+pub fn test_config() -> Arc<config::Config> {
+    Arc::new(config::Config {
         xds_address: None,
         local_xds_path: Some("examples/localhost.yaml".to_string()),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -29,5 +30,5 @@ pub fn test_config() -> config::Config {
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         ..Default::default()
-    }
+    })
 }

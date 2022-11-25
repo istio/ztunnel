@@ -16,6 +16,7 @@ use boring::error::ErrorStack;
 use drain::Watch;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
 use inbound::Inbound;
 use tokio::net::TcpStream;
@@ -42,7 +43,7 @@ pub struct Proxy {
 
 impl Proxy {
     pub async fn new(
-        cfg: config::Config,
+        cfg: Arc<config::Config>,
         workloads: WorkloadInformation,
         cert_manager: Box<dyn CertificateProvider>,
         drain: Watch,

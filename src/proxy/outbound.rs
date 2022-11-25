@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -29,7 +30,7 @@ use crate::workload::{Protocol, Workload, WorkloadInformation};
 use crate::{identity, socket};
 
 pub struct Outbound {
-    cfg: Config,
+    cfg: Arc<Config>,
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
     listener: TcpListener,
@@ -39,7 +40,7 @@ pub struct Outbound {
 
 impl Outbound {
     pub async fn new(
-        cfg: Config,
+        cfg: Arc<Config>,
         cert_manager: Box<dyn CertificateProvider>,
         workloads: WorkloadInformation,
         hbone_port: u16,
@@ -119,7 +120,7 @@ pub struct OutboundConnection {
     pub cert_manager: Box<dyn CertificateProvider>,
     pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
-    pub cfg: Config,
+    pub cfg: Arc<Config>,
     pub hbone_port: u16,
 }
 
@@ -410,10 +411,10 @@ mod tests {
         xds: XdsWorkload,
         expect: Option<ExpectedRequest<'_>>,
     ) {
-        let cfg = Config {
+        let cfg = Arc::new(Config {
             local_node: Some("local-node".to_string()),
             ..Default::default()
-        };
+        });
         let source = XdsWorkload {
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),

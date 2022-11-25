@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request};
@@ -23,8 +24,8 @@ use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::*;
 use ztunnel::*;
 
-fn test_config() -> config::Config {
-    config::Config {
+fn test_config() -> Arc<config::Config> {
+    Arc::new(config::Config {
         xds_address: None,
         local_xds_path: Some("examples/localhost.yaml".to_string()),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -33,7 +34,7 @@ fn test_config() -> config::Config {
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         ..Default::default()
-    }
+    })
 }
 
 #[tokio::test]

@@ -61,8 +61,8 @@ where
 }
 
 impl SecretManager<CaClient> {
-    pub fn new(cfg: crate::config::Config) -> SecretManager<CaClient> {
-        let caclient = CaClient::new(cfg.auth);
+    pub fn new(cfg: Arc<crate::config::Config>) -> SecretManager<CaClient> {
+        let caclient = CaClient::new(cfg.auth.clone());
         let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
         SecretManager {
             client: caclient,

@@ -240,7 +240,7 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 }
 
 impl WorkloadManager {
-    pub fn new(config: config::Config, awaiting_ready: admin::BlockReady) -> WorkloadManager {
+    pub fn new(config: Arc<config::Config>, awaiting_ready: admin::BlockReady) -> WorkloadManager {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
@@ -254,11 +254,20 @@ impl WorkloadManager {
             None
         };
         let local_workloads = workloads.clone();
-        let local_client = config.local_xds_path.map(|path| LocalClient {
-            path,
-            workloads: local_workloads,
-            block_ready: awaiting_ready,
-        });
+        let local_xds_path = config.local_xds_path.clone();
+        let path = match local_xds_path {
+            Some(path) => path,
+            None => "".to_string(),
+        };
+        let local_client = if !path.is_empty() {
+            Some(LocalClient {
+                path,
+                workloads: local_workloads,
+                block_ready: awaiting_ready,
+            })
+        } else {
+            None
+        };
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         let workloads = WorkloadInformation {
             info: workloads,

@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
@@ -84,10 +85,10 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(config: crate::config::Config) -> Config {
+    pub fn new(config: Arc<crate::config::Config>) -> Config {
         Config {
             address: config.xds_address.clone().unwrap(),
-            auth: config.auth,
+            auth: config.auth.clone(),
             workload_handler: Box::new(NopHandler {}),
             initial_watches: Vec::new(),
             on_demand: config.xds_on_demand,

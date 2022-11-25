@@ -107,7 +107,11 @@ impl Drop for BlockReady {
 }
 
 impl Builder {
-    pub fn new(config: config::Config, workload_info: WorkloadInformation, ready: Ready) -> Self {
+    pub fn new(
+        config: Arc<config::Config>,
+        workload_info: WorkloadInformation,
+        ready: Ready,
+    ) -> Self {
         Self {
             addr: config.admin_addr,
             ready,

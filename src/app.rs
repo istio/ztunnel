@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -22,7 +23,7 @@ use crate::identity::CertificateProvider;
 use crate::{admin, config, identity, proxy, signal, workload};
 
 pub async fn build_with_cert(
-    config: config::Config,
+    config: Arc<config::Config>,
     cert_manager: impl CertificateProvider,
 ) -> anyhow::Result<Bound> {
     let shutdown = signal::Shutdown::new();
@@ -74,7 +75,7 @@ pub async fn build_with_cert(
     })
 }
 
-pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
+pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
     let cert_manager = identity::SecretManager::new(config.clone());
     build_with_cert(config, cert_manager).await
 }
@@ -85,7 +86,7 @@ pub struct Bound {
 
     pub shutdown: signal::Shutdown,
     tasks: Vec<JoinHandle<()>>,
-    config: config::Config,
+    config: Arc<config::Config>,
     drain_tx: drain::Signal,
 }
 

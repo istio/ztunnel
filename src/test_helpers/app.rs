@@ -14,6 +14,7 @@
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request, Response};
@@ -30,7 +31,7 @@ pub struct TestApp {
     pub proxy_addresses: proxy::Addresses,
 }
 
-pub async fn with_app<F, Fut, FO>(cfg: config::Config, f: F)
+pub async fn with_app<F, Fut, FO>(cfg: Arc<config::Config>, f: F)
 where
     F: Fn(TestApp) -> Fut,
     Fut: Future<Output = FO>,

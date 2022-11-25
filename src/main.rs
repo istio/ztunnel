@@ -17,6 +17,7 @@ extern crate core;
 extern crate gperftools;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use ztunnel::*;
 
 // #[global_allocator]
@@ -27,7 +28,7 @@ use ztunnel::*;
 
 fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
-    let config: config::Config = Default::default();
+    let config: Arc<config::Config> = Arc::new(Default::default());
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.num_worker_threads)
         .thread_name_fn(|| {
@@ -41,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         .block_on(async move { run(config).await })
 }
 
-async fn run(cfg: config::Config) -> anyhow::Result<()> {
+async fn run(cfg: Arc<config::Config>) -> anyhow::Result<()> {
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
     match std::env::args().nth(1).as_deref() {
         None | Some("proxy") => proxy(cfg).await,
@@ -58,6 +59,6 @@ async fn version() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
+async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
     app::build(cfg).await?.spawn().await
 }
