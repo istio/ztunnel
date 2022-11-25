@@ -19,7 +19,6 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
-use futures::future::TryFutureExt;
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -29,7 +28,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
-use crate::{admin, config, xds};
+use crate::{config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -204,7 +203,6 @@ impl TryFrom<&XdsWorkload> for Workload {
 pub struct WorkloadManager {
     workloads: WorkloadInformation,
     xds_client: Option<xds::AdsClient>,
-    local_client: Option<LocalClient>,
 }
 
 fn handle_xds<F: FnOnce() -> anyhow::Result<()>>(ctx: &mut HandlerContext, name: String, f: F) {
@@ -240,7 +238,7 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 }
 
 impl WorkloadManager {
-    pub fn new(config: config::Config, awaiting_ready: admin::BlockReady) -> WorkloadManager {
+    pub async fn new(config: config::Config) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
@@ -253,43 +251,29 @@ impl WorkloadManager {
         } else {
             None
         };
-        let local_workloads = workloads.clone();
-        let local_client = config.local_xds_path.map(|path| LocalClient {
-            path,
-            workloads: local_workloads,
-            block_ready: awaiting_ready,
-        });
+        if let Some(path) = config.local_xds_path {
+            let local_client = LocalClient {
+                path,
+                workloads: workloads.clone(),
+            };
+            local_client.run().await?;
+        }
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         let workloads = WorkloadInformation {
             info: workloads,
             demand,
         };
-        WorkloadManager {
+        Ok(WorkloadManager {
             xds_client,
             workloads,
-            local_client,
-        }
+        })
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let xds = self
-            .xds_client
-            .map(|c| c.run().map_err(|e| anyhow::anyhow!(e)));
-        let local = self.local_client.map(|c| c.run());
-
-        match (xds, local) {
-            (Some(x), Some(l)) => {
-                tokio::try_join!(x, l)?;
-            }
-            (Some(x), _) => {
-                x.await?;
-            }
-            (_, Some(l)) => {
-                l.await?;
-            }
-            _ => {}
+        match self.xds_client {
+            Some(xds) => xds.run().await.map_err(|e| anyhow::anyhow!(e)),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     pub fn workloads(&self) -> WorkloadInformation {
@@ -301,7 +285,6 @@ impl WorkloadManager {
 struct LocalClient {
     path: String,
     workloads: Arc<Mutex<WorkloadStore>>,
-    block_ready: admin::BlockReady,
 }
 
 impl LocalClient {
@@ -315,7 +298,6 @@ impl LocalClient {
             info!("inserting local workloads {wl}");
             wli.insert(wl);
         }
-        drop(self.block_ready);
         Ok(())
     }
 }
@@ -721,7 +703,6 @@ mod tests {
         let local_client = LocalClient {
             path: dir,
             workloads: workloads.clone(),
-            block_ready: admin::Ready::new().register_task("workload"),
         };
         local_client.run().await.expect("client should run");
         let store = workloads.lock().unwrap();
