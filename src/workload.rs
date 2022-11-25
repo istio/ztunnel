@@ -144,19 +144,19 @@ impl fmt::Display for Upstream {
     }
 }
 
-fn byte_to_ip(b: &bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
-    Ok(match b.len() {
-        0 => None,
+fn byte_to_ip(b: &bytes::Bytes) -> Result<IpAddr, WorkloadError> {
+    match b.len() {
+        0 => Err(WorkloadError::ByteAddressParse(0)),
         4 => {
             let v: [u8; 4] = b.deref().try_into().expect("size already proven");
-            Some(IpAddr::from(v))
+            Ok(IpAddr::from(v))
         }
         16 => {
             let v: [u8; 16] = b.deref().try_into().expect("size already proven");
-            Some(IpAddr::from(v))
+            Ok(IpAddr::from(v))
         }
-        n => return Err(WorkloadError::ByteAddressParse(n)),
-    })
+        n => Err(WorkloadError::ByteAddressParse(n)),
+    }
 }
 
 impl TryFrom<&XdsWorkload> for Workload {
@@ -166,9 +166,9 @@ impl TryFrom<&XdsWorkload> for Workload {
 
         let mut waypoint_addresses: Vec<IpAddr> = Vec::new();
         for addr in &resource.waypoint_addresses {
-            waypoint_addresses.push(byte_to_ip(addr)?.ok_or(WorkloadError::ByteAddressParse(0))?)
+            waypoint_addresses.push(byte_to_ip(addr)?)
         }
-        let address = byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
+        let address = byte_to_ip(&resource.address)?;
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
@@ -520,9 +520,8 @@ mod tests {
         let empty = "";
         let bytes = Bytes::from(empty);
         let result = byte_to_ip(&bytes);
-        assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_none());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), WorkloadError::ByteAddressParse(0));
     }
 
     #[test]
@@ -531,9 +530,7 @@ mod tests {
         let bytes = Bytes::from(unspecified);
         let result = byte_to_ip(&bytes);
         assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_some());
-        let ip_addr = maybe_ip_addr.unwrap();
+        let ip_addr = result.unwrap();
         assert!(ip_addr.is_unspecified(), "was not unspecified")
     }
 
@@ -544,8 +541,7 @@ mod tests {
         let result = byte_to_ip(&bytes);
         assert!(result.is_ok());
         let maybe_loopback_ip = result.unwrap();
-        assert!(maybe_loopback_ip.is_some());
-        assert_eq!(maybe_loopback_ip.unwrap().to_string(), "127.0.0.1");
+        assert_eq!(maybe_loopback_ip.to_string(), "127.0.0.1");
     }
 
     #[test]
@@ -554,9 +550,7 @@ mod tests {
         let bytes = &Bytes::from(addr_vec);
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_some());
-        let ip_addr = maybe_ip_addr.unwrap();
+        let ip_addr = result.unwrap();
         assert!(ip_addr.is_ipv4(), "was not ipv4");
         assert!(!ip_addr.is_ipv6(), "was ipv6");
         assert!(!ip_addr.is_unspecified(), "was unspecified");
@@ -571,9 +565,7 @@ mod tests {
         let bytes = &Bytes::from(addr);
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_some());
-        let ip_addr = maybe_ip_addr.unwrap();
+        let ip_addr = result.unwrap();
         assert!(ip_addr.is_ipv6(), "was not ipv6");
         assert!(!ip_addr.is_ipv4(), "was ipv4");
         assert!(!ip_addr.is_unspecified());
@@ -587,8 +579,7 @@ mod tests {
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
         let maybe_loopback_ip = result.unwrap();
-        assert!(maybe_loopback_ip.is_some());
-        assert_eq!(maybe_loopback_ip.unwrap().to_string(), "::1");
+        assert_eq!(maybe_loopback_ip.to_string(), "::1");
     }
 
     #[test]
