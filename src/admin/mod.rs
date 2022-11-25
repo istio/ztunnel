@@ -53,6 +53,76 @@ pub struct Server {
     registry: Arc<Mutex<Registry>>,
 }
 
+const HEALTHZ_URI: &str = "/healthz/ready";
+const HEALTHZ_EXP: &str = "print server state";
+
+const PPROF_URI: &str   = "/debug/pprof/profile";
+const PPROF_EXP: &str   = "print the pprof data";
+
+const GPROF_URI: &str   = "/debug/gprof/profile";
+const GPROF_EXP: &str   = "print the gprof data";
+
+const HEAP_URI: &str    = "/debug/gprof/heap";
+const HEAP_EXP: &str    = "print the heap data";
+
+const QUIT_URI: &str    = "/quitquitquit";
+const QUIT_EXP: &str    = "exit the server";
+
+const CFGDUMP_URI: &str = "/config_dump";
+const CFGDUMP_EXP: &str = "print the workload information";
+
+const CMDLSIT_URI: &str = "/";
+const CMDLSIT_EXP: &str = "list all the commands";
+
+const METRICS_URI: &str = "/metrics";
+const METRICS_EXP: &str = "list all the metrics";
+
+pub struct CliCommand {
+    uri: String,
+    exp: String,
+}
+
+pub struct CliCmds(Vec<CliCommand>);
+
+impl CliCmds{
+    pub fn new() -> CliCmds {
+        CliCmds(vec![
+            CliCommand {
+                uri: HEALTHZ_URI.to_string(),
+                exp: HEALTHZ_EXP.to_string(),
+            },
+            CliCommand {
+                uri: PPROF_URI.to_string(),
+                exp: PPROF_EXP.to_string(),
+            },
+            CliCommand {
+                uri: GPROF_URI.to_string(),
+                exp: GPROF_EXP.to_string(),
+            },
+            CliCommand {
+                uri: HEAP_URI.to_string(),
+                exp: HEAP_EXP.to_string(),
+            },
+            CliCommand {
+                uri: QUIT_URI.to_string(),
+                exp: QUIT_EXP.to_string(),
+            },
+            CliCommand {
+                uri: CFGDUMP_URI.to_string(),
+                exp: CFGDUMP_EXP.to_string(),
+            },
+            CliCommand {
+                uri: CMDLSIT_URI.to_string(),
+                exp: CMDLSIT_EXP.to_string(),
+            },
+            CliCommand {
+                uri: METRICS_URI.to_string(),
+                exp: METRICS_EXP.to_string(),
+            },
+        ])
+    }
+}
+
 /// Ready tracks whether the process is ready.
 #[derive(Clone, Debug, Default)]
 pub struct Ready(Arc<Mutex<HashSet<String>>>);
@@ -172,34 +242,36 @@ impl Server {
                         let workload_info = workload_info.clone();
                         let registry = Arc::clone(&registry);
                         let shutdown_trigger = shutdown_trigger.clone();
+                        let cmdlist = CliCmds::new();
                         async move {
                             match req.uri().path() {
-                                "/healthz/ready" => {
+                                HEALTHZ_URI => {
                                     Ok::<_, hyper::Error>(handle_ready(&ready, req).await)
                                 }
-                                "/debug/pprof/profile" => {
+                                PPROF_URI => {
                                     Ok::<_, hyper::Error>(handle_pprof(req).await)
                                 }
-                                "/debug/gprof/profile" => {
+                                GPROF_URI => {
                                     Ok::<_, hyper::Error>(handle_gprof(req).await)
                                 }
-                                "/debug/gprof/heap" => {
+                                HEAP_URI => {
                                     Ok::<_, hyper::Error>(handle_gprof_heap(req).await)
                                 }
-                                "/quitquitquit" => Ok::<_, hyper::Error>(
+                                QUIT_URI => Ok::<_, hyper::Error>(
                                     handle_server_shutdown(shutdown_trigger, req).await,
                                 ),
-                                "/config_dump" => Ok::<_, hyper::Error>(
+                                CFGDUMP_URI => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
-                                "/help" => Ok::<_, hyper::Error>(handle_help(req).await),
-                                "/metrics" => {
-                                    Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
-                                }
+                                METRICS_URI => 
+                                    Ok::<_, hyper::Error>(
+                                        handle_metrics(registry, req).await,
+                                    ),
+                                CMDLSIT_URI => Ok::<_, hyper::Error>(handle_help(cmdlist, req).await),
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
-                                        .body("Invalid command.\nPlease use /help to get the command list\n".into())
+                                        .body("Invalid command.\nPlease goto / to get the command list\n".into())
                                         .unwrap(),
                                 ),
                             }
@@ -303,10 +375,19 @@ async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> R
         .unwrap()
 }
 
-async fn handle_help(_req: Request<Body>) -> Response<Body> {
+async fn handle_help(cmds: CliCmds, _req: Request<Body>) -> Response<Body> {
+    let mut output_string = String::new();
+    for cmd in &cmds.0[0..cmds.0.len()] {
+        output_string.push_str(&format!(
+            "{:<32}{:<48}\n",
+            cmd.uri.to_owned(),
+            cmd.exp.to_owned()
+        ));
+    }
+
     Response::builder()
         .status(hyper::StatusCode::OK)
-        .body("/healths/ready\t\t\tprint server state\n/debug/pprof/profile\t\tprint the profile data\n/debug/gprof/profile\t\tprint the gprof\n/debug/gprof/heap\t\tprint the heap profile\n/quitquitquit\t\t\texit the ztunnel\n/config_dump\t\t\tprint the workload information\n/help\t\t\t\tprint the command list\n".into())
+        .body(output_string.into())
         .unwrap()
 }
 
@@ -379,6 +460,6 @@ async fn handle_gprof_heap(_req: Request<Body>) -> Response<Body> {
 async fn handle_gprof_heap(_req: Request<Body>) -> Response<Body> {
     Response::builder()
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-        .body("gperftools not enabled".into())
+        .body("gperftools heap not enabled".into())
         .unwrap()
 }
