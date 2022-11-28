@@ -18,6 +18,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time;
 
+const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
+const NODE_NAME: &str = "NODE_NAME";
+const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
+const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
+const FAKE_CA: &str = "FAKE_CA";
+const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub window_size: u32,
@@ -59,7 +66,7 @@ impl Default for Config {
             Some(xds) if xds.as_str() == "" => None,
             Some(xds) => Some(xds),
             None => {
-                if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
+                if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
                     Some("https://istiod.istio-system:15012".to_string())
                 } else {
                     Some("https://localhost:15012".to_string())
@@ -79,18 +86,18 @@ impl Default for Config {
             inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
             outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
-            local_node: std::env::var("NODE_NAME").ok(),
+            local_node: std::env::var(NODE_NAME).ok(),
 
             xds_address,
-            local_xds_path: std::env::var("LOCAL_XDS_PATH").ok(),
-            xds_on_demand: std::env::var("XDS_ON_DEMAND").ok().as_deref() == Some("on"),
+            local_xds_path: std::env::var(LOCAL_XDS_PATH).ok(),
+            xds_on_demand: std::env::var(XDS_ON_DEMAND).ok().as_deref() == Some("on"),
 
-            fake_ca: std::env::var("FAKE_CA").ok().as_deref() == Some("on"),
+            fake_ca: std::env::var(FAKE_CA).ok().as_deref() == Some("on"),
             auth: identity::AuthSource::Token(PathBuf::from(
                 r"./var/run/secrets/tokens/istio-token",
             )),
 
-            num_worker_threads: std::env::var("ZTUNNEL_WORKER_THREADS")
+            num_worker_threads: std::env::var(ZTUNNEL_WORKER_THREADS)
                 .ok()
                 .map(|v| {
                     v.parse::<usize>()
