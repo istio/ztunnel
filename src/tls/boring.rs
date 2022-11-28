@@ -151,11 +151,7 @@ impl PartialEq for Certs {
 
 impl Certs {
     pub fn is_expired(&self) -> bool {
-        // duration_since returns an error if now() is later than not_after
-        self.cert
-            .not_after
-            .duration_since(SystemTime::now())
-            .is_err()
+        SystemTime::now() > self.cert.not_after
     }
 
     pub fn get_duration_until_refresh(&self) -> Duration {
@@ -165,9 +161,10 @@ impl Certs {
             .duration_since(self.cert.not_before)
             .unwrap()
             / 2;
+        // If now() is earlier than not_before, we need to refresh ASAP, so return 0.
         let elapsed = SystemTime::now()
             .duration_since(self.cert.not_before)
-            .unwrap();
+            .unwrap_or_else(|_| halflife);
         halflife
             .checked_sub(elapsed)
             .unwrap_or_else(|| Duration::from_secs(0))
@@ -425,19 +422,17 @@ const TEST_PKEY: &[u8] = include_bytes!("key.pem");
 const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
 const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
 
-// Creates an invalid dummy cert with overridden expire time
-// If duration is less than a second, Asn1Time will round to nearest second.
-pub fn generate_test_certs(id: &Identity, duration_until_expiry: Duration) -> Certs {
+pub fn generate_test_certs(id: &Identity, duration_until_valid: Duration, duration_until_expiry: Duration) -> Certs {
     let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
     let (ca_cert, ca_key) = test_ca().unwrap();
     let mut builder = x509::X509::builder().unwrap();
-    let current = Asn1Time::days_from_now(0).unwrap();
-    let now = SystemTime::now();
-    let expire_time: i64 = (now.duration_since(UNIX_EPOCH).unwrap().as_secs()
+    let not_before_asn = Asn1Time::days_from_now((duration_until_valid.as_secs()/60/24).try_into().unwrap()).unwrap();
+    let not_before_systime = SystemTime::now() + duration_until_valid;
+    let expire_time: i64 = (not_before_systime.duration_since(UNIX_EPOCH).unwrap().as_secs()
         + duration_until_expiry.as_secs())
     .try_into()
     .unwrap();
-    builder.set_not_before(&current).unwrap();
+    builder.set_not_before(&not_before_asn).unwrap();
     builder
         .set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
         .unwrap();
@@ -490,8 +485,8 @@ pub fn generate_test_certs(id: &Identity, duration_until_expiry: Duration) -> Ce
 
     let mut cert = ZtunnelCert::new(builder.build());
     // For sub-second granularity
-    cert.not_before = now;
-    cert.not_after = now + duration_until_expiry;
+    cert.not_before = not_before_systime;
+    cert.not_after = not_before_systime + duration_until_expiry;
     Certs {
         cert,
         key,
@@ -514,8 +509,41 @@ pub fn test_certs() -> Certs {
 
 #[cfg(test)]
 pub mod tests {
+    use crate::identity::Identity;
+
+    use super::generate_test_certs;
+    use std::time::Duration;
+
     #[test]
     fn is_fips_enabled() {
         assert!(boring::fips::enabled());
     }
+
+
+    #[test]
+    fn cert_expiration() {
+        let expiry_seconds = 1000;
+        let id: Identity = Default::default();
+        let zero_dur = Duration::from_secs(0);
+        let certs_not_expired = generate_test_certs(&id, Duration::from_secs(0), Duration::from_secs(expiry_seconds));
+        assert!(!certs_not_expired.is_expired());
+        let seconds_until_refresh = certs_not_expired.get_duration_until_refresh().as_secs();
+        // Give a couple second window to avoid flakiness in the test.
+        assert!(seconds_until_refresh <= expiry_seconds/2 && seconds_until_refresh >= expiry_seconds/2 - 1);
+
+        let certs_expired = generate_test_certs(&id, zero_dur, zero_dur);
+        assert!(certs_expired.is_expired());
+        assert_eq!(certs_expired.get_duration_until_refresh(), zero_dur);
+
+        let future_certs = generate_test_certs(&id, Duration::from_secs(1000), Duration::from_secs(expiry_seconds));
+        assert!(!future_certs.is_expired());
+        assert_eq!(future_certs.get_duration_until_refresh(), zero_dur);
+    }
+
+    #[test]
+    #[cfg(not(feature = "fips"))]
+    fn is_fips_disabled() {
+        assert_eq!(false, boring::fips::enabled());
+    }
+
 }

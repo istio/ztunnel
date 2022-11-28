@@ -51,6 +51,16 @@ impl fmt::Display for Identity {
     }
 }
 
+impl Default for Identity {
+    fn default() -> Self {
+        Identity::Spiffe {
+            trust_domain: "cluster.local".to_string(),
+            namespace: "istio-system".to_string(),
+            service_account: "ztunnel".to_string(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SecretManager<C: CertificateProvider>
 where
@@ -79,8 +89,7 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
         tx: watch::Sender<Option<tls::Certs>>,
     ) {
         loop {
-            let sleep_dur;
-            match ca_client.fetch_certificate(&id).await {
+            let sleep_dur = match ca_client.fetch_certificate(&id).await {
                 Err(e) => {
                     warn!("Failed cert refresh for id {:?}: {:?}", id, e);
                     let mut write_locked_cache = cache.write().unwrap();
@@ -96,10 +105,9 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
                         write_locked_cache.remove(&id);
                         return;
                     }
-                    sleep_dur = CERT_REFRESH_FAILURE_RETRY_DELAY;
+                    CERT_REFRESH_FAILURE_RETRY_DELAY
                 }
                 Ok(fetched_certs) => {
-                    sleep_dur = fetched_certs.get_duration_until_refresh();
                     match tx.send(Some(fetched_certs.clone())) {
                         Err(_) => {
                             // This means no receivers left. Should not be possible.
@@ -111,9 +119,9 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
                             info!("refreshed certs for id: {:?}", id);
                         }
                     }
-                    info!("refreshing certs for id {} in {:?}", id, sleep_dur);
+                    fetched_certs.get_duration_until_refresh()
                 }
-            }
+            };
             sleep(sleep_dur).await;
         }
     }
@@ -197,7 +205,7 @@ pub mod mock {
     #[async_trait]
     impl CertificateProvider for MockCaClient {
         async fn fetch_certificate(&mut self, id: &Identity) -> Result<Certs, Error> {
-            let certs = generate_test_certs(id, self.cert_lifetime);
+            let certs = generate_test_certs(id, Duration::from_secs(0), self.cert_lifetime);
             return Ok(certs);
         }
     }
@@ -302,11 +310,7 @@ mod tests {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         let test_dur = Duration::from_millis(200);
 
-        let id = identity::Identity::Spiffe {
-            trust_domain: "cluster.local".to_string(),
-            namespace: "istio-system".to_string(),
-            service_account: "ztunnel".to_string(),
-        };
+        let id: Identity = Default::default();
 
         // Certs added to the cache should be refreshed every 80 millis
         let secret_manager = mock::MockCaClient::new(Duration::from_millis(160));
