@@ -28,8 +28,7 @@ pub fn setup_logging() {
         .unwrap();
     tracing_subscriber::registry()
         .with(console_layer)
-        .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_filter(filter_layer))
         .init();
 }
 
@@ -40,7 +39,6 @@ pub fn setup_logging() {
         .or_else(|_| tracing_subscriber::EnvFilter::try_new("info"))
         .unwrap();
     tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_filter(filter_layer))
         .init();
 }

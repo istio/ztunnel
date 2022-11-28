@@ -40,6 +40,8 @@ pub struct Config {
     /// If true, on-demand XDS will be used
     pub xds_on_demand: bool,
 
+    /// If true, then use builtin fake CA with self-signed certificates.
+    pub fake_ca: bool,
     pub auth: identity::AuthSource,
 
     pub termination_grace_period: time::Duration,
@@ -53,11 +55,17 @@ const DEFAULT_WORKER_THREADS: usize = 2;
 impl Default for Config {
     fn default() -> Config {
         // TODO: copy JWT auth logic from CA client and use TLS here (port 15012)
-        let xds_address = Some(if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "https://istiod.istio-system:15012".to_string()
-        } else {
-            "https://localhost:15012".to_string()
-        });
+        let xds_address = match std::env::var("XDS_ADDRESS").ok() {
+            Some(xds) if xds.as_str() == "" => None,
+            Some(xds) => Some(xds),
+            None => {
+                if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
+                    Some("https://istiod.istio-system:15012".to_string())
+                } else {
+                    Some("https://localhost:15012".to_string())
+                }
+            }
+        };
         Config {
             window_size: 4 * 1024 * 1024,
             connection_window_size: 4 * 1024 * 1024,
@@ -77,6 +85,7 @@ impl Default for Config {
             local_xds_path: std::env::var("LOCAL_XDS_PATH").ok(),
             xds_on_demand: std::env::var("XDS_ON_DEMAND").ok().as_deref() == Some("on"),
 
+            fake_ca: std::env::var("FAKE_CA").ok().as_deref() == Some("on"),
             auth: identity::AuthSource::Token(PathBuf::from(
                 r"./var/run/secrets/tokens/istio-token",
             )),

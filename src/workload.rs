@@ -19,7 +19,6 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
-use futures::future::TryFutureExt;
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -29,7 +28,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 use crate::identity::Identity;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
-use crate::{admin, config, xds};
+use crate::{config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -144,19 +143,19 @@ impl fmt::Display for Upstream {
     }
 }
 
-fn byte_to_ip(b: &bytes::Bytes) -> Result<Option<IpAddr>, WorkloadError> {
-    Ok(match b.len() {
-        0 => None,
+fn byte_to_ip(b: &bytes::Bytes) -> Result<IpAddr, WorkloadError> {
+    match b.len() {
+        0 => Err(WorkloadError::ByteAddressParse(0)),
         4 => {
             let v: [u8; 4] = b.deref().try_into().expect("size already proven");
-            Some(IpAddr::from(v))
+            Ok(IpAddr::from(v))
         }
         16 => {
             let v: [u8; 16] = b.deref().try_into().expect("size already proven");
-            Some(IpAddr::from(v))
+            Ok(IpAddr::from(v))
         }
-        n => return Err(WorkloadError::ByteAddressParse(n)),
-    })
+        n => Err(WorkloadError::ByteAddressParse(n)),
+    }
 }
 
 impl TryFrom<&XdsWorkload> for Workload {
@@ -166,9 +165,9 @@ impl TryFrom<&XdsWorkload> for Workload {
 
         let mut waypoint_addresses: Vec<IpAddr> = Vec::new();
         for addr in &resource.waypoint_addresses {
-            waypoint_addresses.push(byte_to_ip(addr)?.ok_or(WorkloadError::ByteAddressParse(0))?)
+            waypoint_addresses.push(byte_to_ip(addr)?)
         }
-        let address = byte_to_ip(&resource.address)?.ok_or(WorkloadError::ByteAddressParse(0))?;
+        let address = byte_to_ip(&resource.address)?;
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
@@ -204,7 +203,6 @@ impl TryFrom<&XdsWorkload> for Workload {
 pub struct WorkloadManager {
     workloads: WorkloadInformation,
     xds_client: Option<xds::AdsClient>,
-    local_client: Option<LocalClient>,
 }
 
 fn handle_xds<F: FnOnce() -> anyhow::Result<()>>(ctx: &mut HandlerContext, name: String, f: F) {
@@ -240,7 +238,7 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 }
 
 impl WorkloadManager {
-    pub fn new(config: Arc<config::Config>, awaiting_ready: admin::BlockReady) -> WorkloadManager {
+    pub async fn new(config: Arc<config::Config>) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
@@ -253,52 +251,29 @@ impl WorkloadManager {
         } else {
             None
         };
-        let local_workloads = workloads.clone();
-        let local_xds_path = config.local_xds_path.clone();
-        let path = match local_xds_path {
-            Some(path) => path,
-            None => "".to_string(),
-        };
-        let local_client = if !path.is_empty() {
-            Some(LocalClient {
-                path,
-                workloads: local_workloads,
-                block_ready: awaiting_ready,
-            })
-        } else {
-            None
-        };
+        if let Some(path) = &config.local_xds_path {
+            let local_client = LocalClient {
+                path: path.to_string(),
+                workloads: workloads.clone(),
+            };
+            local_client.run().await?;
+        }
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         let workloads = WorkloadInformation {
             info: workloads,
             demand,
         };
-        WorkloadManager {
+        Ok(WorkloadManager {
             xds_client,
             workloads,
-            local_client,
-        }
+        })
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let xds = self
-            .xds_client
-            .map(|c| c.run().map_err(|e| anyhow::anyhow!(e)));
-        let local = self.local_client.map(|c| c.run());
-
-        match (xds, local) {
-            (Some(x), Some(l)) => {
-                tokio::try_join!(x, l)?;
-            }
-            (Some(x), _) => {
-                x.await?;
-            }
-            (_, Some(l)) => {
-                l.await?;
-            }
-            _ => {}
+        match self.xds_client {
+            Some(xds) => xds.run().await.map_err(|e| anyhow::anyhow!(e)),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     pub fn workloads(&self) -> WorkloadInformation {
@@ -310,7 +285,6 @@ impl WorkloadManager {
 struct LocalClient {
     path: String,
     workloads: Arc<Mutex<WorkloadStore>>,
-    block_ready: admin::BlockReady,
 }
 
 impl LocalClient {
@@ -324,7 +298,6 @@ impl LocalClient {
             info!("inserting local workloads {wl}");
             wli.insert(wl);
         }
-        drop(self.block_ready);
         Ok(())
     }
 }
@@ -529,9 +502,8 @@ mod tests {
         let empty = "";
         let bytes = Bytes::from(empty);
         let result = byte_to_ip(&bytes);
-        assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_none());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), WorkloadError::ByteAddressParse(0));
     }
 
     #[test]
@@ -540,9 +512,7 @@ mod tests {
         let bytes = Bytes::from(unspecified);
         let result = byte_to_ip(&bytes);
         assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_some());
-        let ip_addr = maybe_ip_addr.unwrap();
+        let ip_addr = result.unwrap();
         assert!(ip_addr.is_unspecified(), "was not unspecified")
     }
 
@@ -553,8 +523,7 @@ mod tests {
         let result = byte_to_ip(&bytes);
         assert!(result.is_ok());
         let maybe_loopback_ip = result.unwrap();
-        assert!(maybe_loopback_ip.is_some());
-        assert_eq!(maybe_loopback_ip.unwrap().to_string(), "127.0.0.1");
+        assert_eq!(maybe_loopback_ip.to_string(), "127.0.0.1");
     }
 
     #[test]
@@ -563,9 +532,7 @@ mod tests {
         let bytes = &Bytes::from(addr_vec);
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_some());
-        let ip_addr = maybe_ip_addr.unwrap();
+        let ip_addr = result.unwrap();
         assert!(ip_addr.is_ipv4(), "was not ipv4");
         assert!(!ip_addr.is_ipv6(), "was ipv6");
         assert!(!ip_addr.is_unspecified(), "was unspecified");
@@ -580,9 +547,7 @@ mod tests {
         let bytes = &Bytes::from(addr);
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
-        let maybe_ip_addr = result.unwrap();
-        assert!(maybe_ip_addr.is_some());
-        let ip_addr = maybe_ip_addr.unwrap();
+        let ip_addr = result.unwrap();
         assert!(ip_addr.is_ipv6(), "was not ipv6");
         assert!(!ip_addr.is_ipv4(), "was ipv4");
         assert!(!ip_addr.is_unspecified());
@@ -596,8 +561,7 @@ mod tests {
         let result = byte_to_ip(bytes);
         assert!(result.is_ok());
         let maybe_loopback_ip = result.unwrap();
-        assert!(maybe_loopback_ip.is_some());
-        assert_eq!(maybe_loopback_ip.unwrap().to_string(), "::1");
+        assert_eq!(maybe_loopback_ip.to_string(), "::1");
     }
 
     #[test]
@@ -739,7 +703,6 @@ mod tests {
         let local_client = LocalClient {
             path: dir,
             workloads: workloads.clone(),
-            block_ready: admin::Ready::new().register_task("workload"),
         };
         local_client.run().await.expect("client should run");
         let store = workloads.lock().unwrap();

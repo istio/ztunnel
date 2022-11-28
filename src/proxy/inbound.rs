@@ -148,7 +148,6 @@ impl Inbound {
     }
 
     async fn serve_connect(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        let mut res = Response::new(Body::empty());
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
@@ -156,25 +155,31 @@ impl Inbound {
                 let addr: Result<SocketAddr, _> = uri.to_string().as_str().parse();
                 if addr.is_err() {
                     info!("Sending 400, {:?}", addr.err());
-                    let mut bad_request = Response::default();
-                    *bad_request.status_mut() = StatusCode::BAD_REQUEST;
-                    return Ok(bad_request);
+                    return Ok(Response::builder()
+                        .status(hyper::StatusCode::BAD_REQUEST)
+                        .body(Body::empty())
+                        .unwrap());
                 }
 
                 let addr: SocketAddr = addr.unwrap();
-                *res.status_mut() =
-                    match Self::handle_inbound(InboundConnect::Hbone(req), addr).await {
-                        Ok(_) => StatusCode::OK,
-                        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
-                    };
-                Ok(res)
+                let status_code = match Self::handle_inbound(InboundConnect::Hbone(req), addr).await
+                {
+                    Ok(_) => StatusCode::OK,
+                    Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+                };
+
+                Ok(Response::builder()
+                    .status(status_code)
+                    .body(Body::empty())
+                    .unwrap())
             }
             // Return the 404 Not Found for other routes.
             method => {
                 info!("Sending 404, got {method}");
-                let mut not_found = Response::default();
-                *not_found.status_mut() = StatusCode::NOT_FOUND;
-                Ok(not_found)
+                Ok(Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .unwrap())
             }
         }
     }

@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -38,8 +39,7 @@ pub async fn build_with_cert(
     let ready = admin::Ready::new();
     let proxy_task = ready.register_task("proxy listeners");
 
-    let workload_manager =
-        workload::WorkloadManager::new(config.clone(), ready.register_task("workload manager"));
+    let workload_manager = workload::WorkloadManager::new(config.clone()).await?;
 
     let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
         .bind()
@@ -76,8 +76,13 @@ pub async fn build_with_cert(
 }
 
 pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
-    let cert_manager = identity::SecretManager::new(config.clone());
-    build_with_cert(config, cert_manager).await
+    if config.fake_ca {
+        let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(86400));
+        build_with_cert(config, cert_manager).await
+    } else {
+        let cert_manager = identity::SecretManager::new(config.clone());
+        build_with_cert(config, cert_manager).await
+    }
 }
 
 pub struct Bound {
