@@ -242,7 +242,7 @@ impl WorkloadManager {
     pub async fn new(
         config: config::Config,
         registry: &mut Registry,
-        awaiting_ready: admin::BlockReady
+        awaiting_ready: admin::BlockReady,
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
