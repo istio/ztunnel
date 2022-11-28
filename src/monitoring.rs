@@ -12,23 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use lazy_static::lazy_static;
-use prometheus::{register_int_gauge_vec, IntGaugeVec};
+use prometheus_client::{
+    encoding::text::Encode, metrics::family::Family, metrics::gauge::Gauge, registry::Registry,
+};
 
 use crate::version;
 
-lazy_static! {
-    static ref ISTIO_BUILD_GAUGE: IntGaugeVec = register_int_gauge_vec!(
-        "istio_build",
-        "Istio component build info.",
-        &["component", "tag"]
-    )
-    .unwrap();
+#[derive(Clone, Hash, PartialEq, Eq, Encode)]
+pub struct IstioBuildLabel {
+    component: String,
+    tag: String,
 }
 
-pub fn setup_metric() {
-    let tag = version::BuildInfo::new().git_tag;
-    ISTIO_BUILD_GAUGE
-        .with_label_values(&["ztunnel", &tag])
-        .set(1);
+pub struct BuildMetrics {}
+
+impl BuildMetrics {
+    pub fn register(registry: &mut Registry) {
+        let build_gauge: Family<IstioBuildLabel, Gauge> = Default::default();
+        registry.register(
+            "build",
+            "Istio component build info.",
+            Box::new(build_gauge.clone()),
+        );
+
+        let git_tag = version::BuildInfo::new().git_tag;
+        build_gauge
+            .get_or_create(&IstioBuildLabel {
+                component: "ztunnel".to_string(),
+                tag: git_tag,
+            })
+            .set(1);
+    }
 }

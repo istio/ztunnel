@@ -36,7 +36,6 @@ where
     Fut: Future<Output = FO>,
 {
     initialize_telemetry();
-
     let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
     let app = app::build_with_cert(cfg, cert_manager).await.unwrap();
     let shutdown = app.shutdown.trigger().clone();
