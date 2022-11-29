@@ -25,6 +25,7 @@ pub struct ConnectionTerminationLabel {
 pub enum ConnectionTerminationReason {
     ConnectionError,
     Error,
+    Complete,
 }
 
 #[derive(Default, Clone)]
@@ -37,7 +38,7 @@ impl XdsMetrics {
         let sub_registry = registry.sub_registry_with_prefix("xds");
         sub_registry.register(
             "connection_terminations",
-            "The total number of connection failures to xds server.",
+            "The total number of completed connections to xds server",
             Box::new(self.connection_terminations.clone()),
         );
     }

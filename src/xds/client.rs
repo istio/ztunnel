@@ -211,6 +211,8 @@ impl AdsClient {
                     backoff = Duration::from_millis(10);
                 }
                 Ok(_) => {
+                    self.metrics
+                        .inc_connection_terminations(ConnectionTerminationReason::Complete);
                     warn!("XDS client complete");
                     backoff = Duration::from_millis(10);
                 }
