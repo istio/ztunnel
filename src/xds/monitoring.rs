@@ -25,6 +25,7 @@ pub struct ConnectionTerminationLabel {
 pub enum ConnectionTerminationReason {
     ConnectionError,
     Error,
+    Complete,
 }
 
 #[derive(Default, Clone)]
