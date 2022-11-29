@@ -412,7 +412,7 @@ mod tests {
     ) {
         let cfg = Config {
             local_node: Some("local-node".to_string()),
-            ..Default::default()
+            ..crate::config::parse_config().unwrap()
         };
         let source = XdsWorkload {
             name: "source-workload".to_string(),

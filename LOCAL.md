@@ -5,13 +5,24 @@ Along with running in a Kubernetes, ztunnel can be run locally for development p
 This doc covers ztunnel specifically, for general Istio local development see
 [Local Istio Development](https://github.com/howardjohn/local-istio-development).
 
-## Workloads
+## Local overrides
 
-A local file can configure workloads: `LOCAL_XDS_PATH=./examples/localhost.yaml cargo run`.
+There are a variety of config options that can be used to replace components with mocked ones:
 
-This example adds a workload for `127.0.0.1`, allowing us to send requests to/from localhost.
+* `FAKE_CA="true"` - this will use self-signed fake certificates, eliminating a dependency on a CA
+* `XDS_ADDRESS=""` - disables XDS client completely
+* `LOCAL_XDS_PATH=./examples/localhost.yaml` - read XDS config from a file.
+  This example adds a workload for `127.0.0.1`, allowing us to send requests to/from localhost.
+* `NODE_NAME=local` - configures which node the ztunnel is running as. 
+  This impacts the networking path of requests. In the `localhost.yaml` example, `NODE_NAME=local` would make localhost use the in-memory fast path; without it HBONE would be used.
 
-## Authentication
+Together, `FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run` can be used to run entirely locally, without a Kubernetes or Istiod dependency.
+
+## Real Istiod
+
+`ztunnel` can also be run locally but connected to a real Istiod instance.
+
+### Authentication
 
 Ztunnel authentication for CA requires a pod-bound Service Account token.
 This makes local running a bit more complex than normally.
@@ -27,7 +38,7 @@ source ./scripts/local.sh
 ztunnel-local-bootstrap
 ```
 
-## XDS and CA
+### XDS and CA
 
 While XDS is not a hard requirement due to the static config file, the CA is.
 When running locally, ztunnel will automatically connect to an Istiod running on localhost.
