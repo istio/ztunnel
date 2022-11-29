@@ -102,13 +102,15 @@ impl Inbound {
             .http2_max_frame_size(self.cfg.frame_size)
             .serve(service)
             .with_graceful_shutdown(async {
+                // Wait until the drain is signaled
                 let shutdown = self.drain.signaled().await;
-                // There should be a way to notify the server not accept any new connection,
-                // and wait for the existing ones gracefully shutdown.
+                // Once `shutdown` is dropped, we are declaring the drain is complete. Hyper will start draining
+                // once with_graceful_shutdown function exists, so we need to exit the function but later
+                // drop `shutdown`.
                 if tx.send(shutdown).is_err() {
                     error!("HBONE receiver dropped")
                 }
-                info!("drain end");
+                info!("starting drain of inbound connections");
             });
 
         info!("HBONE listener established {}", addr);
@@ -116,6 +118,7 @@ impl Inbound {
         if let Err(e) = server.await {
             error!("server error: {}", e);
         }
+        // Now that the server has gracefully exited, drop `shutdown` to allow draining to proceed
         match rx.await {
             Ok(shutdown) => drop(shutdown),
             Err(_) => info!("HBONE sender dropped"),
