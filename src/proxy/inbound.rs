@@ -14,9 +14,11 @@
 
 use std::net::SocketAddr;
 
+use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 
@@ -34,6 +36,7 @@ pub struct Inbound {
     listener: TcpListener,
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
+    drain: Watch,
 }
 
 impl Inbound {
@@ -41,6 +44,7 @@ impl Inbound {
         cfg: Config,
         workloads: WorkloadInformation,
         cert_manager: Box<dyn CertificateProvider>,
+        drain: Watch,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
             .await
@@ -54,6 +58,7 @@ impl Inbound {
             workloads,
             listener,
             cert_manager,
+            drain,
         })
     }
 
@@ -62,6 +67,7 @@ impl Inbound {
     }
 
     pub(super) async fn run(self) {
+        let (tx, rx) = oneshot::channel();
         let addr = self.listener.local_addr().unwrap();
         let service =
             make_service_fn(|_| async { Ok::<_, hyper::Error>(service_fn(Self::serve_connect)) });
@@ -94,12 +100,25 @@ impl Inbound {
             .http2_initial_stream_window_size(self.cfg.window_size)
             .http2_initial_connection_window_size(self.cfg.connection_window_size)
             .http2_max_frame_size(self.cfg.frame_size)
-            .serve(service);
+            .serve(service)
+            .with_graceful_shutdown(async {
+                let shutdown = self.drain.signaled().await;
+                // There should be a way to notify the server not accept any new connection,
+                // and wait for the existing ones gracefully shutdown.
+                if tx.send(shutdown).is_err() {
+                    error!("HBONE receiver dropped")
+                }
+                info!("drain end");
+            });
 
         info!("HBONE listener established {}", addr);
 
         if let Err(e) = server.await {
             error!("server error: {}", e);
+        }
+        match rx.await {
+            Ok(shutdown) => drop(shutdown),
+            Err(_) => info!("HBONE sender dropped"),
         }
     }
 
