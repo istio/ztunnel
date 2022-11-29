@@ -29,7 +29,7 @@ pub struct BuildInfo {
     git_revision: String,
     rust_version: String,
     build_status: String,
-    git_tag: String,
+    pub git_tag: String,
 }
 
 impl BuildInfo {

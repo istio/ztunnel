@@ -19,6 +19,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
+use prometheus_client::registry::Registry;
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -238,7 +239,10 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 }
 
 impl WorkloadManager {
-    pub async fn new(config: Arc<config::Config>) -> anyhow::Result<WorkloadManager> {
+    pub async fn new(
+        config: Arc<config::Config>,
+        registry: &mut Registry,
+    ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
@@ -246,7 +250,7 @@ impl WorkloadManager {
                 xds::Config::new(config.clone())
                     .with_workload_handler(xds_workloads)
                     .watch(xds::WORKLOAD_TYPE.into())
-                    .build(),
+                    .build(registry),
             )
         } else {
             None

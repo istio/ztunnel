@@ -16,17 +16,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use prometheus_client::registry::Registry;
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::identity::CertificateProvider;
+use crate::monitoring::BuildMetrics;
 use crate::{admin, config, identity, proxy, signal, workload};
 
 pub async fn build_with_cert(
     config: Arc<config::Config>,
     cert_manager: impl CertificateProvider,
 ) -> anyhow::Result<Bound> {
+    let mut registry = Registry::default();
+    let ztunnel_registry = registry.sub_registry_with_prefix("istio");
+    BuildMetrics::register(ztunnel_registry);
+
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
     // once all drain_rx handlers are dropped.
@@ -39,10 +45,10 @@ pub async fn build_with_cert(
     let ready = admin::Ready::new();
     let proxy_task = ready.register_task("proxy listeners");
 
-    let workload_manager = workload::WorkloadManager::new(config.clone()).await?;
+    let workload_manager = workload::WorkloadManager::new(config.clone(), ztunnel_registry).await?;
 
     let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
-        .bind()
+        .bind(registry)
         .expect("admin server starts");
     let admin_address = admin.address();
     admin.spawn(&shutdown, drain_rx.clone());

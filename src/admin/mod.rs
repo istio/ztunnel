@@ -27,6 +27,8 @@ use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
 
 use pprof::protos::Message;
+use prometheus_client::encoding::text::encode;
+use prometheus_client::registry::Registry;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
@@ -48,6 +50,7 @@ pub struct Server {
     ready: Ready,
     server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
     workload_info: WorkloadInformation,
+    registry: Arc<Mutex<Registry>>,
 }
 
 /// Ready tracks whether the process is ready.
@@ -119,7 +122,7 @@ impl Builder {
         }
     }
 
-    pub fn bind(self) -> hyper::Result<Server> {
+    pub fn bind(self, registry: Registry) -> hyper::Result<Server> {
         let Self {
             addr,
             ready,
@@ -132,17 +135,23 @@ impl Builder {
             .http1_half_close(true)
             .http1_header_read_timeout(Duration::from_secs(2))
             .http1_max_buf_size(8 * 1024);
+        let registry = Arc::new(Mutex::new(registry));
 
         Ok(Server {
             addr,
             ready,
             server,
             workload_info,
+            registry,
         })
     }
 }
 
 impl Server {
+    pub fn registry(&self) -> Arc<Mutex<Registry>> {
+        Arc::clone(&self.registry)
+    }
+
     pub fn address(&self) -> SocketAddr {
         self.addr
     }
@@ -152,17 +161,20 @@ impl Server {
         let ready = self.ready.clone();
         let workload_info = self.workload_info.clone();
         let shutdown_trigger = shutdown.trigger();
+        let registry = self.registry();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
                 let ready = ready.clone();
                 let workload_info = workload_info.clone();
+                let registry = Arc::clone(&registry);
                 let shutdown_trigger = shutdown_trigger.clone();
                 async move {
                     let workload_info = workload_info.clone();
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
                         let ready = ready.clone();
                         let workload_info = workload_info.clone();
+                        let registry = Arc::clone(&registry);
                         let shutdown_trigger = shutdown_trigger.clone();
                         async move {
                             match req.uri().path() {
@@ -184,6 +196,9 @@ impl Server {
                                 "/config_dump" => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
+                                "/metrics" => {
+                                    Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
+                                }
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
@@ -288,6 +303,21 @@ async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> R
     Response::builder()
         .status(hyper::StatusCode::OK)
         .body(vec.into())
+        .unwrap()
+}
+
+async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Response<Body> {
+    let mut buf: Vec<u8> = Vec::new();
+    let reg = reg.lock().unwrap();
+    encode(&mut buf, &reg).unwrap();
+
+    Response::builder()
+        .status(hyper::StatusCode::OK)
+        .header(
+            hyper::header::CONTENT_TYPE,
+            "application/openmetrics-text;charset=utf-8;version=1.0.0",
+        )
+        .body(Body::from(buf))
         .unwrap()
 }
 
