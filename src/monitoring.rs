@@ -31,7 +31,7 @@ impl BuildMetrics {
         let build_gauge: Family<IstioBuildLabel, Gauge> = Default::default();
         registry.register(
             "build",
-            "Istio component build info.",
+            "Istio component build info",
             Box::new(build_gauge.clone()),
         );
 
