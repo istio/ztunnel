@@ -13,7 +13,7 @@ There are a variety of config options that can be used to replace components wit
 * `XDS_ADDRESS=""` - disables XDS client completely
 * `LOCAL_XDS_PATH=./examples/localhost.yaml` - read XDS config from a file.
   This example adds a workload for `127.0.0.1`, allowing us to send requests to/from localhost.
-* `NODE_NAME=local` - configures which node the ztunnel is running as. 
+* `NODE_NAME=local` - configures which node the ztunnel is running as.
   This impacts the networking path of requests. In the `localhost.yaml` example, `NODE_NAME=local` would make localhost use the in-memory fast path; without it HBONE would be used.
 
 Together, `FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run` can be used to run entirely locally, without a Kubernetes or Istiod dependency.
