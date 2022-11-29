@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -22,6 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
+use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::Error;
 use crate::socket::relay;
@@ -34,6 +36,7 @@ pub struct Outbound {
     workloads: WorkloadInformation,
     listener: TcpListener,
     drain: Watch,
+    metrics: Arc<Metrics>,
     hbone_port: u16,
 }
 
@@ -43,6 +46,7 @@ impl Outbound {
         cert_manager: Box<dyn CertificateProvider>,
         workloads: WorkloadInformation,
         hbone_port: u16,
+        metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
@@ -59,6 +63,7 @@ impl Outbound {
             workloads,
             listener,
             hbone_port,
+            metrics,
             drain,
         })
     }
@@ -83,6 +88,7 @@ impl Outbound {
                             cfg,
                             hbone_port: self.hbone_port,
                         };
+                        self.metrics.record(&traffic::ConnectionOpen {});
                         tokio::spawn(async move {
                             let res = oc.proxy(stream).await;
                             match res {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use prometheus_client::registry::Registry;
@@ -21,7 +22,7 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::identity::CertificateProvider;
-use crate::monitoring::BuildMetrics;
+use crate::metrics::Metrics;
 use crate::{admin, config, identity, proxy, signal, workload};
 
 pub async fn build_with_cert(
@@ -29,8 +30,7 @@ pub async fn build_with_cert(
     cert_manager: impl CertificateProvider,
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
-    let ztunnel_registry = registry.sub_registry_with_prefix("istio");
-    BuildMetrics::register(ztunnel_registry);
+    let metrics = Arc::new(Metrics::new(registry.sub_registry_with_prefix("istio")));
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
@@ -46,7 +46,7 @@ pub async fn build_with_cert(
 
     let workload_manager = workload::WorkloadManager::new(
         config.clone(),
-        ztunnel_registry,
+        metrics.clone(),
         ready.register_task("workload manager"),
     )
     .await?;
@@ -61,6 +61,7 @@ pub async fn build_with_cert(
         config.clone(),
         workload_manager.workloads(),
         Box::new(cert_manager),
+        metrics.clone(),
         drain_rx.clone(),
     )
     .await?;

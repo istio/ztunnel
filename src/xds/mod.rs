@@ -19,7 +19,6 @@ use tokio::sync::mpsc;
 mod types;
 use self::service::discovery::v3::DeltaDiscoveryRequest;
 pub use types::*;
-mod monitoring;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

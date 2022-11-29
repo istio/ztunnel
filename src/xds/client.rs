@@ -17,15 +17,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
 
-use prometheus_client::registry::Registry;
 use prost::Message;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
+use crate::metrics::xds::*;
+use crate::metrics::{Metrics, Recorder};
 use crate::xds::istio::workload::Workload;
-use crate::xds::monitoring::ConnectionTerminationReason;
-use crate::xds::monitoring::XdsMetrics;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
@@ -108,10 +107,8 @@ impl Config {
         self
     }
 
-    pub fn build(self, registry: &mut Registry, block_ready: admin::BlockReady) -> AdsClient {
+    pub fn build(self, metrics: Arc<Metrics>, block_ready: admin::BlockReady) -> AdsClient {
         let (tx, rx) = mpsc::channel(100);
-        let metrics: Arc<XdsMetrics> = Default::default();
-        metrics.register(registry);
         AdsClient {
             config: self,
             workloads: HashSet::new(),
@@ -135,7 +132,7 @@ pub struct AdsClient {
     demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
     demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 
-    pub(crate) metrics: Arc<XdsMetrics>,
+    pub(crate) metrics: Arc<Metrics>,
     block_ready: Option<admin::BlockReady>,
 }
 
@@ -206,7 +203,7 @@ impl AdsClient {
                     backoff = std::cmp::min(max_backoff, backoff * 2);
                     warn!("XDS client error: {}, retrying in {:?}", e, backoff);
                     self.metrics
-                        .inc_connection_terminations(ConnectionTerminationReason::ConnectionError);
+                        .record(&ConnectionTerminationReason::ConnectionError);
                     tokio::time::sleep(backoff).await;
                 }
                 Err(e) => {
@@ -214,13 +211,11 @@ impl AdsClient {
                     // TODO: we may need more nuance here; if we fail due to invalid initial request we may overload
                     // But we want to reconnect from MaxConnectionAge immediately.
                     warn!("XDS client error: {}, retrying", e);
-                    self.metrics
-                        .inc_connection_terminations(ConnectionTerminationReason::Error);
+                    self.metrics.record(&ConnectionTerminationReason::Error);
                     backoff = Duration::from_millis(10);
                 }
                 Ok(_) => {
-                    self.metrics
-                        .inc_connection_terminations(ConnectionTerminationReason::Complete);
+                    self.metrics.record(&ConnectionTerminationReason::Complete);
                     warn!("XDS client complete");
                     backoff = Duration::from_millis(10);
                 }
