@@ -269,7 +269,7 @@ impl Server {
                                 CFGDUMP_URI => Ok::<_, hyper::Error>(
                                     handle_config_dump(workload_info, req).await,
                                 ),
-                                METRICS_URI => 
+                                METRICS_URI =>
                                     Ok::<_, hyper::Error>(
                                         handle_metrics(registry, req).await,
                                     ),
