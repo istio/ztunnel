@@ -18,14 +18,17 @@ use std::time::Duration;
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time;
+use tokio::time::timeout;
 
 use ztunnel::test_helpers::app as testapp;
+use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::*;
 use ztunnel::*;
 
 fn test_config() -> config::Config {
     config::Config {
         xds_address: None,
+        fake_ca: true,
         local_xds_path: Some("examples/localhost.yaml".to_string()),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -49,6 +52,51 @@ async fn test_shutdown_lifecycle() {
     );
     app.expect("app shuts down")
         .expect("app exits without error")
+}
+
+#[tokio::test]
+async fn test_shutdown_drain() {
+    helpers::initialize_telemetry();
+
+    let app = ztunnel::app::build(test_config()).await.unwrap();
+    let ta = TestApp {
+        admin_address: app.admin_address,
+        proxy_addresses: app.proxy_addresses,
+    };
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    let shutdown = app.shutdown.trigger().clone();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        app.spawn().await.unwrap();
+        // Notify we shut down
+        shutdown_tx.send(()).unwrap();
+    });
+    // we shouldn't be shutdown yet
+    assert!(shutdown_rx.try_recv().is_err());
+    let dst = helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap());
+    let mut stream = ta.socks5_connect(dst).await;
+
+    const BODY: &[u8] = "hello world".as_bytes();
+    stream.write_all(BODY).await.unwrap();
+    // Echo server should reply back with the same data
+    let mut buf: [u8; BODY.len()] = [0; BODY.len()];
+    stream.read_exact(&mut buf).await.unwrap();
+    assert_eq!(BODY, buf);
+    // Since we are connected, the app shouldn't shutdown
+    shutdown.shutdown_now().await;
+    assert!(shutdown_rx.try_recv().is_err());
+    // Give it some time, make sure we still aren't shut down
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(shutdown_rx.try_recv().is_err());
+
+    // Now close the stream, we should shutdown
+    drop(stream);
+    timeout(Duration::from_secs(1), shutdown_rx)
+        .await
+        .expect("app should shutdown")
+        .unwrap();
 }
 
 #[tokio::test]
