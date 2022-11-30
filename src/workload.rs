@@ -56,7 +56,7 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields, )]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
     pub workload_ip: IpAddr,
     #[serde(default)]
