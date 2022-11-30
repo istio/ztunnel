@@ -17,6 +17,7 @@ extern crate core;
 extern crate gperftools;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::info;
 use ztunnel::*;
 
 // #[global_allocator]
@@ -27,7 +28,7 @@ use ztunnel::*;
 
 fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
-    let config: config::Config = Default::default();
+    let config: config::Config = config::parse_config()?;
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
     match std::env::args().nth(1).as_deref() {
@@ -58,5 +59,6 @@ fn version() -> anyhow::Result<()> {
 }
 
 async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
+    info!("running with config {cfg:?}");
     app::build(cfg).await?.spawn().await
 }

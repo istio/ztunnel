@@ -12,18 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::identity;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
+
 use tokio::time;
+
+use crate::identity;
 
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
+const XDS_ADDRESS: &str = "XDS_ADDRESS";
+const TERMINATION_GRACE_PERIOD: &str = "TERMINATION_GRACE_PERIOD";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+
+const DEFAULT_WORKER_THREADS: usize = 2;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -57,55 +64,71 @@ pub struct Config {
     pub num_worker_threads: usize,
 }
 
-const DEFAULT_WORKER_THREADS: usize = 2;
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("invalid env var {0}={1}")]
+    RequestFailure(String, String),
+}
 
-impl Default for Config {
-    fn default() -> Config {
-        // TODO: copy JWT auth logic from CA client and use TLS here (port 15012)
-        let xds_address = match std::env::var("XDS_ADDRESS").ok() {
-            Some(xds) if xds.as_str() == "" => None,
-            Some(xds) => Some(xds),
-            None => {
-                if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
-                    Some("https://istiod.istio-system:15012".to_string())
-                } else {
-                    Some("https://localhost:15012".to_string())
-                }
-            }
-        };
-        Config {
-            window_size: 4 * 1024 * 1024,
-            connection_window_size: 4 * 1024 * 1024,
-            frame_size: 1024 * 1024,
+/// GoDuration wraps a Duration to implement golang Duration parsing semantics
+struct GoDuration(Duration);
 
-            termination_grace_period: Duration::from_secs(5),
+impl FromStr for GoDuration {
+    type Err = go_parse_duration::Error;
 
-            admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
-            socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
-            inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
-            inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
-            outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
-
-            local_node: std::env::var(NODE_NAME).ok(),
-
-            xds_address,
-            local_xds_path: std::env::var(LOCAL_XDS_PATH).ok(),
-            xds_on_demand: std::env::var(XDS_ON_DEMAND).ok().as_deref() == Some("on"),
-
-            fake_ca: std::env::var(FAKE_CA).ok().as_deref() == Some("on"),
-            auth: identity::AuthSource::Token(PathBuf::from(
-                r"./var/run/secrets/tokens/istio-token",
-            )),
-
-            num_worker_threads: std::env::var(ZTUNNEL_WORKER_THREADS)
-                .ok()
-                .map(|v| {
-                    v.parse::<usize>()
-                        .ok()
-                        .filter(|n| *n > 0)
-                        .unwrap_or(DEFAULT_WORKER_THREADS)
-                })
-                .unwrap_or(DEFAULT_WORKER_THREADS),
-        }
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        go_parse_duration::parse_duration(s).map(|ns| GoDuration(Duration::from_nanos(ns as u64)))
     }
+}
+
+fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
+    match std::env::var(env) {
+        Ok(val) => val
+            .parse()
+            .map(|v| Some(v))
+            .map_err(|_| Error::RequestFailure(env.to_string(), val)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
+    parse(env).map(|v| v.unwrap_or(default))
+}
+
+pub fn parse_config() -> Result<Config, Error> {
+    let default_xds_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
+        "https://istiod.istio-system:15012".to_string()
+    } else {
+        "https://localhost:15012".to_string()
+    };
+    let xds_address =
+        Some(parse_default(XDS_ADDRESS, default_xds_address)?).filter(|s| !s.is_empty());
+    Ok(Config {
+        window_size: 4 * 1024 * 1024,
+        connection_window_size: 4 * 1024 * 1024,
+        frame_size: 1024 * 1024,
+
+        termination_grace_period: parse_default(
+            TERMINATION_GRACE_PERIOD,
+            GoDuration(Duration::from_secs(5)),
+        )?
+        .0,
+
+        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
+        socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
+        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
+        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
+        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
+
+        local_node: parse(NODE_NAME)?,
+
+        xds_address,
+        local_xds_path: parse(LOCAL_XDS_PATH)?,
+        xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
+
+        fake_ca: parse_default(FAKE_CA, false)?,
+        auth: identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token")),
+
+        num_worker_threads: parse_default(ZTUNNEL_WORKER_THREADS, DEFAULT_WORKER_THREADS)?,
+    })
 }

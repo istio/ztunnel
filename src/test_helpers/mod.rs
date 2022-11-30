@@ -28,6 +28,6 @@ pub fn test_config() -> config::Config {
         admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        ..Default::default()
+        ..config::parse_config().unwrap()
     }
 }
