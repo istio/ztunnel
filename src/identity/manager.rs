@@ -252,9 +252,9 @@ mod tests {
             if current_time - start_time > dur {
                 break;
             }
-            sm.fetch_certificate(&id).await.unwrap_or_else(|_| {
-                panic!("Didn't get a cert as expected.");
-            });
+            sm.fetch_certificate(&id)
+                .await
+                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
             sleep(Duration::from_micros(500)).await;
         }
     }
