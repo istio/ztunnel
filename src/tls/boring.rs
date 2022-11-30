@@ -169,10 +169,6 @@ impl Certs {
             .checked_sub(elapsed)
             .unwrap_or_else(|| Duration::from_secs(0))
     }
-
-    pub fn x509(&self) -> &x509::X509 {
-        &self.cert.x509
-    }
 }
 
 #[derive(Clone, Debug)]

@@ -33,6 +33,4 @@ pub enum Error {
     Utf8(#[from] Utf8Error),
     #[error("did not find expected SAN: {0}")]
     SanError(Identity),
-    #[error("chain returned from CA is empty for: {0}")]
-    EmptyResponse(Identity),
 }
