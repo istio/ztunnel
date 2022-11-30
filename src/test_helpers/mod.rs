@@ -16,6 +16,7 @@ use crate::config;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 pub mod app;
+pub mod ca;
 pub mod helpers;
 pub mod tcp;
 

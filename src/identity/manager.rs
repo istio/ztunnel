@@ -72,7 +72,7 @@ where
 
 impl SecretManager<CaClient> {
     pub fn new(cfg: crate::config::Config) -> SecretManager<CaClient> {
-        let caclient = CaClient::new(cfg.auth);
+        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.auth);
         let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
         SecretManager {
             client: caclient,

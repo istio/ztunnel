@@ -19,7 +19,6 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -71,29 +70,13 @@ impl Inbound {
         let addr = self.listener.local_addr().unwrap();
         let service =
             make_service_fn(|_| async { Ok::<_, hyper::Error>(service_fn(Self::serve_connect)) });
-        let boring_acceptor = crate::tls::BoringTlsAcceptor {
-            acceptor: InboundCertProvider {
-                workloads: self.workloads.clone(),
-                cert_manager: self.cert_manager.clone(),
-            },
+
+        let acceptor = InboundCertProvider {
+            workloads: self.workloads.clone(),
+            cert_manager: self.cert_manager.clone(),
         };
-        let mut listener =
-            hyper::server::conn::AddrIncoming::from_listener(self.listener).expect("hbone bind");
-        listener.set_nodelay(true);
-        let incoming = hyper::server::accept::from_stream(
-            tls_listener::builder(boring_acceptor)
-                .listen(listener)
-                .filter(|conn| {
-                    // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
-                    if let Err(err) = conn {
-                        warn!("TLS handshake error: {}", err);
-                        false
-                    } else {
-                        info!("TLS handshake succeeded");
-                        true
-                    }
-                }),
-        );
+        let tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
+        let incoming = hyper::server::accept::from_stream(tls_stream);
 
         let server = Server::builder(incoming)
             .http2_only(true)
@@ -234,7 +217,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
         };
         info!("tls: accepting connection to {:?} ({})", orig, identity);
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
-        let acc = cert.acceptor()?;
+        let acc = cert.mtls_acceptor()?;
         Ok(acc)
     }
 }
