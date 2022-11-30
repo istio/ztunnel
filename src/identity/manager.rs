@@ -164,23 +164,20 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
             }
         }
 
-        loop {
-            // We have a channel receiver, so use it to get the cert.
-            let current_cert = cache_rx.borrow_and_update().clone();
-            if let Some(cert) = current_cert {
-                info!("Got cached cert.");
-                return Ok(cert);
+        // We have a channel receiver, so use it to get the cert.
+        match cache_rx.changed().await {
+            Err(_) => {
+                // CA request failed or other error.
+                warn!("Cert sender has been dropped.");
+                return Err(Error::EmptyResponse(id.clone()));
             }
-            // "None" means CA request in progress.  Wait for it.
-            match cache_rx.changed().await {
-                Err(_) => {
-                    // CA request failed or other error.
-                    warn!("Cert sender has been dropped.");
-                    return Err(Error::EmptyResponse(id.clone()));
+            Ok(_) => {
+                let current_cert = cache_rx.borrow_and_update().clone();
+                if let Some(cert) = current_cert {
+                    info!("Got cached cert.");
+                    return Ok(cert);
                 }
-                Ok(_) => {
-                    continue;
-                }
+                return Err(Error::EmptyResponse(id.clone()));
             }
         }
     }
