@@ -25,6 +25,7 @@ use gperftools::heap_profiler::HEAP_PROFILER;
 use gperftools::profiler::PROFILER;
 use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
+use tokio::sync::oneshot;
 
 use pprof::protos::Message;
 use prometheus_client::encoding::text::encode;
@@ -161,6 +162,7 @@ impl Server {
     pub fn spawn(self, drain_rx: Watch) {
         let _dx = drain_rx.clone();
         let ready = self.ready.clone();
+        let (tx, rx) = oneshot::channel();
         let workload_info = self.workload_info.clone();
         let registry = self.registry();
         let shutdown_trigger = self.shutdown_trigger.clone();
@@ -213,15 +215,28 @@ impl Server {
                 }
             }))
             .with_graceful_shutdown(async {
-                drop(drain_rx.signaled().await);
+                // Wait until the drain is signaled
+                let shutdown = drain_rx.signaled().await;
+                // Once `shutdown` is dropped, we are declaring the drain is complete. Hyper will start draining
+                // once with_graceful_shutdown function exists, so we need to exit the function but later
+                // drop `shutdown`.
+                if tx.send(shutdown).is_err() {
+                    error!("admin receiver dropped")
+                }
+                info!("starting drain of admin server");
             });
+        info!("Serving admin server at {}", self.addr);
         let shutdown_trigger = self.shutdown_trigger;
         tokio::spawn(async move {
-            info!("Serving admin server at {}", self.addr);
             if let Err(err) = server.await {
                 error!("Serving admin start failed: {err}");
                 shutdown_trigger.shutdown_now().await;
             } else {
+                // Now that the server has gracefully exited, drop `shutdown` to allow draining to proceed
+                match rx.await {
+                    Ok(shutdown) => drop(shutdown),
+                    Err(_) => info!("admin sender dropped"),
+                }
                 info!("admin server terminated");
             }
         });
