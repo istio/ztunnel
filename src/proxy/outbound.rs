@@ -151,7 +151,7 @@ impl OutboundConnection {
                 .map_err(Error::Io);
         }
         match req.protocol {
-            Protocol::Hbone => {
+            Protocol::HBONE => {
                 info!(
                     "Proxying to {} using HBONE via {} type {:#?}",
                     req.destination, req.gateway, req.request_type
@@ -209,7 +209,7 @@ impl OutboundConnection {
                 info!("request complete");
                 Ok(())
             }
-            Protocol::Tcp => {
+            Protocol::TCP => {
                 info!(
                     "Proxying to {} using TCP via {} type {:?}",
                     req.destination, req.gateway, req.request_type
@@ -245,7 +245,7 @@ impl OutboundConnection {
         if us.is_none() {
             // For case no upstream found, passthrough it
             return Ok(Request {
-                protocol: Protocol::Tcp,
+                protocol: Protocol::TCP,
                 source: source_workload,
                 destination: target,
                 destination_identity: None,
@@ -261,7 +261,7 @@ impl OutboundConnection {
             let destination_identity = Some(source_workload.identity());
             return Ok(Request {
                 // Always use HBONE here
-                protocol: Protocol::Hbone,
+                protocol: Protocol::HBONE,
                 source: source_workload,
                 // Load balancing decision is deferred to remote proxy
                 destination: target,
@@ -285,7 +285,7 @@ impl OutboundConnection {
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
             return Ok(Request {
                 // Always use HBONE here
-                protocol: Protocol::Hbone,
+                protocol: Protocol::HBONE,
                 source: source_workload,
                 // Use the original VIP, not translated
                 destination: target,
@@ -299,10 +299,10 @@ impl OutboundConnection {
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.cfg.local_node == Some(us.workload.node.clone())
-            && us.workload.protocol == Protocol::Hbone
+            && us.workload.protocol == Protocol::HBONE
         {
             return Ok(Request {
-                protocol: Protocol::Hbone,
+                protocol: Protocol::HBONE,
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
                 destination_identity: us.workload.identity().into(),
@@ -463,7 +463,7 @@ mod tests {
                 ..Default::default()
             },
             Some(ExpectedRequest {
-                protocol: Protocol::Tcp,
+                protocol: Protocol::TCP,
                 destination: "1.2.3.4:80",
                 gateway: "1.2.3.4:80",
                 request_type: RequestType::Passthrough,
@@ -486,7 +486,7 @@ mod tests {
                 ..Default::default()
             },
             Some(ExpectedRequest {
-                protocol: Protocol::Tcp,
+                protocol: Protocol::TCP,
                 destination: "127.0.0.2:80",
                 gateway: "127.0.0.2:80",
                 request_type: RequestType::Direct,
@@ -509,7 +509,7 @@ mod tests {
                 ..Default::default()
             },
             Some(ExpectedRequest {
-                protocol: Protocol::Hbone,
+                protocol: Protocol::HBONE,
                 destination: "127.0.0.2:80",
                 gateway: "127.0.0.2:15008",
                 request_type: RequestType::Direct,
@@ -532,7 +532,7 @@ mod tests {
                 ..Default::default()
             },
             Some(ExpectedRequest {
-                protocol: Protocol::Tcp,
+                protocol: Protocol::TCP,
                 destination: "127.0.0.2:80",
                 gateway: "127.0.0.2:80",
                 request_type: RequestType::Direct,
@@ -555,7 +555,7 @@ mod tests {
                 ..Default::default()
             },
             Some(ExpectedRequest {
-                protocol: Protocol::Hbone,
+                protocol: Protocol::HBONE,
                 destination: "127.0.0.2:80",
                 gateway: "127.0.0.2:15088",
                 request_type: RequestType::DirectLocal,

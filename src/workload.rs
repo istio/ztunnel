@@ -33,13 +33,13 @@ use crate::{admin, config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
-    Tcp,
-    Hbone,
+    TCP,
+    HBONE,
 }
 
 impl Default for Protocol {
     fn default() -> Self {
-        Protocol::Tcp
+        Protocol::TCP
     }
 }
 
@@ -48,15 +48,15 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
 
     fn try_from(value: Option<xds::istio::workload::Protocol>) -> Result<Self, Self::Error> {
         match value {
-            Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::Hbone),
-            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::Tcp),
+            Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::HBONE),
+            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::TCP),
             None => Err(ProtocolParse("unknown type".into())),
         }
     }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, )]
 pub struct Workload {
     pub workload_ip: IpAddr,
     #[serde(default)]
@@ -456,14 +456,14 @@ impl WorkloadStore {
     fn set_gateway_address(us: &mut Upstream, hbone_port: u16) {
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
-                Protocol::Hbone => {
+                Protocol::HBONE => {
                     let ip = us
                         .workload
                         .choose_waypoint_address()
                         .unwrap_or(us.workload.workload_ip);
                     SocketAddr::from((ip, hbone_port))
                 }
-                Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),
+                Protocol::TCP => SocketAddr::from((us.workload.workload_ip, us.port)),
             });
         }
     }
