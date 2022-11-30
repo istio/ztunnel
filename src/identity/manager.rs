@@ -176,7 +176,7 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
                 Err(_) => {
                     // CA request failed or other error.
                     warn!("Cert sender has been dropped.");
-                    return current_cert.ok_or(Error::EmptyResponse(id.clone()));
+                    return Error::EmptyResponse(id.clone());
                 }
                 Ok(_) => {
                     continue;
