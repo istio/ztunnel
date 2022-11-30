@@ -56,7 +56,7 @@ pub async fn build_with_cert(
         .expect("admin server starts");
     let admin_address = admin.address();
 
-    let drain_rx_amdin = drain_rx.clone();
+    let drain_rx_admin = drain_rx.clone();
     let proxy = proxy::Proxy::new(
         config.clone(),
         workload_manager.workloads(),
@@ -68,7 +68,7 @@ pub async fn build_with_cert(
     drop(proxy_task);
 
     // spawn admin task and xds client task
-    admin.spawn(drain_rx_amdin);
+    admin.spawn(drain_rx_admin);
     tokio::spawn(async move {
         if let Err(e) = workload_manager.run().await {
             error!("workload manager: {}", e);
