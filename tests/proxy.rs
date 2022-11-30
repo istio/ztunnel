@@ -145,6 +145,22 @@ async fn test_tcp_request() {
     run_request_test("127.0.0.2").await;
 }
 
+#[tokio::test]
+async fn test_stats() {
+    testapp::with_app(test_config(), |app| async move {
+        let body = app.admin_request_string("metrics").await;
+        for (metric, t) in &[
+            ("istio_build", "gauge"),
+            ("istio_connection_terminations", "counter"),
+            ("istio_connections_opened", "counter"),
+        ] {
+            let exp = format!("# TYPE {metric} {t}\n");
+            assert!(body.contains(&exp), "expected '{}' in:\n{}", exp, body);
+        }
+    })
+    .await;
+}
+
 /// admin_shutdown triggers a shutdown - from the admin server
 async fn admin_shutdown(addr: SocketAddr) {
     let req = Request::builder()

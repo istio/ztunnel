@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use prometheus_client::{
-    encoding::text::Encode, metrics::family::Family, metrics::gauge::Gauge, registry::Registry,
-};
+use prometheus_client::encoding::text::Encode;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::registry::Registry;
 
 use crate::version;
+
+pub(super) struct Metrics {}
 
 #[derive(Clone, Hash, PartialEq, Eq, Encode)]
 pub struct IstioBuildLabel {
@@ -24,10 +27,8 @@ pub struct IstioBuildLabel {
     tag: String,
 }
 
-pub struct BuildMetrics {}
-
-impl BuildMetrics {
-    pub fn register(registry: &mut Registry) {
+impl Metrics {
+    pub fn new(registry: &mut Registry) -> Self {
         let build_gauge: Family<IstioBuildLabel, Gauge> = Default::default();
         registry.register(
             "build",
@@ -42,5 +43,7 @@ impl BuildMetrics {
                 tag: git_tag,
             })
             .set(1);
+
+        Self {}
     }
 }

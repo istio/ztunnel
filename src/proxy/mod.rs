@@ -16,12 +16,14 @@ use boring::error::ErrorStack;
 use drain::Watch;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
 use inbound::Inbound;
 use tokio::net::TcpStream;
 use tracing::{error, info};
 
 use crate::identity::CertificateProvider;
+use crate::metrics::Metrics;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
@@ -45,6 +47,7 @@ impl Proxy {
         cfg: config::Config,
         workloads: WorkloadInformation,
         cert_manager: Box<dyn CertificateProvider>,
+        metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
@@ -61,6 +64,7 @@ impl Proxy {
             cert_manager.clone(),
             workloads.clone(),
             inbound.address().port(),
+            metrics,
             drain,
         )
         .await?;

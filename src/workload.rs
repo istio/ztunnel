@@ -19,7 +19,6 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
-use prometheus_client::registry::Registry;
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -27,6 +26,7 @@ use tracing::{debug, error, info, warn};
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::identity::Identity;
+use crate::metrics::Metrics;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
 use crate::{admin, config, xds};
@@ -241,7 +241,7 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 impl WorkloadManager {
     pub async fn new(
         config: config::Config,
-        registry: &mut Registry,
+        metrics: Arc<Metrics>,
         awaiting_ready: admin::BlockReady,
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
@@ -251,7 +251,7 @@ impl WorkloadManager {
                 xds::Config::new(config.clone())
                     .with_workload_handler(xds_workloads)
                     .watch(xds::WORKLOAD_TYPE.into())
-                    .build(registry, awaiting_ready.subtask("ads client")),
+                    .build(metrics, awaiting_ready.subtask("ads client")),
             )
         } else {
             None
