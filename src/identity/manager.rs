@@ -131,56 +131,55 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
 impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for SecretManager<T> {
     #[instrument(skip_all, fields(%id))]
     async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
-        loop {
-            let mut cache_rx;
-            {
-                let read_locked_cache = self.cache.read().unwrap();
-                match read_locked_cache.get(id) {
-                    None => {
-                        drop(read_locked_cache);
-                        let mut write_locked_cache = self.cache.write().unwrap();
-                        match write_locked_cache.get(id) {
-                            Some(cert_rx) => {
-                                // A different thread got here before us and is handling the fetch.
-                                // Take a copy of the receiver.
-                                cache_rx = cert_rx.clone();
-                            }
-                            None => {
-                                let (tx, rx) = watch::channel(None);
-                                write_locked_cache.insert(id.clone(), rx.clone());
-                                tokio::spawn(SecretManager::refresh_handler(
-                                    id.clone(),
-                                    self.cache.clone(),
-                                    self.client.clone(),
-                                    tx,
-                                ));
-                                cache_rx = rx;
-                            }
-                        };
-                    }
-                    Some(cert_rcvr) => {
-                        cache_rx = cert_rcvr.clone();
-                    }
+        let mut cache_rx;
+        {
+            let read_locked_cache = self.cache.read().unwrap();
+            match read_locked_cache.get(id) {
+                None => {
+                    drop(read_locked_cache);
+                    let mut write_locked_cache = self.cache.write().unwrap();
+                    match write_locked_cache.get(id) {
+                        Some(cert_rx) => {
+                            // A different thread got here before us and is handling the fetch.
+                            // Take a copy of the receiver.
+                            cache_rx = cert_rx.clone();
+                        }
+                        None => {
+                            let (tx, rx) = watch::channel(None);
+                            write_locked_cache.insert(id.clone(), rx.clone());
+                            drop(write_locked_cache);
+                            tokio::spawn(SecretManager::refresh_handler(
+                                id.clone(),
+                                self.cache.clone(),
+                                self.client.clone(),
+                                tx,
+                            ));
+                            cache_rx = rx;
+                        }
+                    };
+                }
+                Some(cert_rcvr) => {
+                    cache_rx = cert_rcvr.clone();
                 }
             }
+        }
 
+        loop {
             // We have a channel receiver, so use it to get the cert.
-            loop {
-                let current_cert = cache_rx.borrow_and_update().clone();
-                if let Some(cert) = current_cert.clone() {
-                    info!("Got cached cert.");
-                    return Ok(cert);
+            let current_cert = cache_rx.borrow_and_update().clone();
+            if let Some(cert) = current_cert {
+                info!("Got cached cert.");
+                return Ok(cert);
+            }
+            // "None" means CA request in progress.  Wait for it.
+            match cache_rx.changed().await {
+                Err(_) => {
+                    // CA request failed or other error.
+                    warn!("Cert sender has been dropped.");
+                    return current_cert.ok_or(Error::EmptyResponse(id.clone()));
                 }
-                // "None" means CA request in progress.  Wait for it.
-                match cache_rx.changed().await {
-                    Err(_) => {
-                        // CA request failed or other error.
-                        warn!("Cert sender has been dropped.");
-                        break;
-                    }
-                    Ok(_) => {
-                        continue;
-                    }
+                Ok(_) => {
+                    continue;
                 }
             }
         }
@@ -253,9 +252,9 @@ mod tests {
             if current_time - start_time > dur {
                 break;
             }
-            sm.fetch_certificate(&id)
-                .await
-                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+            sm.fetch_certificate(&id).await.unwrap_or_else(|_| {
+                panic!("Didn't get a cert as expected.");
+            });
             sleep(Duration::from_micros(500)).await;
         }
     }
