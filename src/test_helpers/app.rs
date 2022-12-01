@@ -49,7 +49,7 @@ where
         f(ta).await;
         shutdown.shutdown_now().await;
     };
-    let (app, _shutdown) = tokio::join!(app.spawn(), run_and_shutdown);
+    let (app, _shutdown) = tokio::join!(app.wait_termination(), run_and_shutdown);
     app.expect("app exits without error");
 }
 
