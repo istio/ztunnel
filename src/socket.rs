@@ -26,19 +26,19 @@ pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
 }
 
 pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
-    let sock = SockRef::from(stream);
-    match orig_dst_addr(&sock) {
+    match orig_dst_addr(stream) {
         Ok(Some(addr)) => addr,
         _ => stream.local_addr().expect("must get local address"),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn orig_dst_addr(sock: &SockRef) -> io::Result<Option<SocketAddr>> {
+fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr>> {
+    let sock = SockRef::from(stream);
     // Dual-stack IPv4/IPv6 sockets require us to check both options.
-    match linux::original_dst(sock) {
+    match linux::original_dst(&sock) {
         Ok(Some(addr)) => Ok(addr.as_socket()),
-        _ => match linux::original_dst_ipv6(sock) {
+        _ => match linux::original_dst_ipv6(&sock) {
             Ok(Some(addr)) => Ok(addr.as_socket()),
             Ok(None) => Ok(None),
             Err(e) => Err(e),
