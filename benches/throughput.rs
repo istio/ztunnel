@@ -68,7 +68,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
         let echo = tcp::TestServer::new(mode).await;
         let echo_addr = helpers::with_ip(echo.address(), "127.0.0.1".parse().unwrap());
         let t = tokio::spawn(async move {
-            let _ = tokio::join!(app.spawn(), echo.run());
+            let _ = tokio::join!(app.wait_termination(), echo.run());
         });
         let mut hbone = ta
             .socks5_connect(helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap()))
