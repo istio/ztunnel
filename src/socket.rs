@@ -19,6 +19,7 @@ use realm_io;
 use socket2::SockRef;
 use tokio::io;
 use tokio::net::TcpListener;
+use tracing::warn;
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
@@ -40,8 +41,14 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr
         Ok(Some(addr)) => Ok(addr.as_socket()),
         _ => match linux::original_dst_ipv6(&sock) {
             Ok(Some(addr)) => Ok(addr.as_socket()),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
+            Ok(None) => {
+                warn!("failed to read SO_ORIGINAL_DST");
+                Ok(None)
+            }
+            Err(e) => {
+                warn!("failed to read SO_ORIGINAL_DST: {:?}", e);
+                Err(e)
+            }
         },
     }
 }
