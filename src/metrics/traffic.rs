@@ -117,7 +117,7 @@ pub struct DerivedWorkload {
     pub cluster_id: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ConnectionOpen {
     pub reporter: Reporter,
     pub source: Option<Workload>,

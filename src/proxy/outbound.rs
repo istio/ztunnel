@@ -29,6 +29,7 @@ use crate::identity::Identity;
 use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
+use crate::proxy::metadata::{handle_metadata_lookup, ConnectionTuple, METADATA_SERVER_IP};
 use crate::proxy::pool;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::workload::{NetworkAddress, Protocol, Workload};
@@ -121,22 +122,31 @@ impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
         let peer = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
         let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
-        self.proxy_to(stream, peer.ip(), orig_dst_addr, false).await
+        self.proxy_to(stream, peer, orig_dst_addr, false).await
     }
 
     pub async fn proxy_to(
         &mut self,
         mut stream: TcpStream,
-        remote_addr: IpAddr,
+        remote_addr: SocketAddr,
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
     ) -> Result<(), Error> {
+        let remote_ip = remote_addr.ip();
+        if orig_dst_addr.ip() == METADATA_SERVER_IP {
+            return handle_metadata_lookup(
+                &self.pi.connection_tracker.clone(),
+                stream,
+                remote_addr,
+            )
+            .await;
+        }
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip
         {
             return Err(Error::SelfCall);
         }
-        let req = self.build_request(remote_addr, orig_dst_addr).await?;
+        let req = self.build_request(remote_ip, orig_dst_addr).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig_dst_addr, req.gateway, req.request_type, req.direction
@@ -181,7 +191,7 @@ impl OutboundConnection {
             };
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
-                src_ip: remote_addr,
+                src_ip: remote_ip,
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
@@ -192,7 +202,10 @@ impl OutboundConnection {
             // same as above but inverted, this is the "inbound" metric
             let inbound_connection_metrics = traffic::ConnectionOpen {
                 reporter: Reporter::destination,
-                derived_source: None,
+                derived_source: Some(traffic::DerivedWorkload {
+                    identity: conn.src_identity,
+                    ..Default::default()
+                }),
                 source: Some(req.source.clone()),
                 destination: req.destination_workload.clone(),
                 connection_security_policy: if req.protocol == Protocol::HBONE {
@@ -208,21 +221,23 @@ impl OutboundConnection {
                 InboundConnect::DirectPath(stream),
                 origin_src,
                 req.destination,
-                self.pi.metrics.to_owned(), // self is a borrow so this clone is to return an owned
+                self.pi.metrics.clone(),
                 connection_metrics,
                 Some(inbound_connection_metrics),
+                self.pi.connection_tracker.clone(),
             )
             .await
             .map_err(Error::Io);
         }
+        let ct = ConnectionTuple {
+            src: remote_addr,
+            dst: req.destination,
+        };
 
         let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
 
         // _connection_close will record once dropped
-        let _connection_close = self
-            .pi
-            .metrics
-            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+        let _connection_close = self.pi.connection_tracker.track(ct, &connection_metrics);
         match req.protocol {
             Protocol::HBONE => {
                 info!(
@@ -256,7 +271,7 @@ impl OutboundConnection {
                         .cfg
                         .enable_original_source
                         .unwrap_or_default()
-                        .then_some(remote_addr);
+                        .then_some(remote_ip);
                     let id = &req.source.identity();
                     let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                     let connector = cert
@@ -513,6 +528,7 @@ mod tests {
     use bytes::Bytes;
 
     use crate::config::Config;
+    use crate::proxy::metadata::ConnectionTracker;
     use crate::workload::WorkloadInformation;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
@@ -557,7 +573,8 @@ mod tests {
                 workloads: wi,
                 hbone_port: 15008,
                 cfg,
-                metrics: Arc::new(Default::default()),
+                metrics: Default::default(),
+                connection_tracker: ConnectionTracker::new(Default::default()),
                 pool: pool::Pool::new(),
             },
             id: TraceParent::new(),

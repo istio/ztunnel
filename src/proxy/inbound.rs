@@ -30,10 +30,12 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use crate::baggage::parse_baggage_header;
 use crate::config::Config;
+
 use crate::identity::SecretManager;
 use crate::metrics::traffic::{ConnectionOpen, Reporter};
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::metadata::ConnectionTuple;
 use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
@@ -41,8 +43,9 @@ use crate::tls::TlsError;
 use crate::workload::{
     address, gatewayaddress, GatewayAddress, NetworkAddress, Workload, WorkloadInformation,
 };
-use crate::{proxy, rbac};
+use crate::{proxy, rbac, socket};
 
+use super::metadata::ConnectionTracker;
 use super::Error;
 
 pub(super) struct Inbound {
@@ -52,6 +55,7 @@ pub(super) struct Inbound {
     workloads: WorkloadInformation,
     drain: Watch,
     metrics: Arc<Metrics>,
+    connection_tracker: ConnectionTracker,
 }
 
 impl Inbound {
@@ -75,6 +79,7 @@ impl Inbound {
             cert_manager: pi.cert_manager,
             metrics: pi.metrics,
             drain,
+            connection_tracker: pi.connection_tracker,
         })
     }
 
@@ -83,7 +88,6 @@ impl Inbound {
     }
 
     pub(super) async fn run(self) {
-        // let (tx, rx) = oneshot::channel();
         let acceptor = InboundCertProvider {
             workloads: self.workloads.clone(),
             cert_manager: self.cert_manager.clone(),
@@ -97,6 +101,7 @@ impl Inbound {
             let workloads = workloads.clone();
             let metrics = self.metrics.clone();
             let drain = self.drain.clone();
+            let ct = self.connection_tracker.clone();
             let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
@@ -124,12 +129,13 @@ impl Inbound {
                                 enable_original_source.unwrap_or_default(),
                                 req,
                                 metrics.clone(),
+                                ct.clone(),
                             )
                         }),
                     );
                 // Wait for drain to signal or connection serving to complete
                 match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
-                    // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
+                    // We got a shutdown request. Start graceful shutdown and wait for the pending requests to complete.
                     futures_util::future::Either::Left((_shutdown, mut server)) => {
                         let drain = std::pin::Pin::new(&mut server);
                         drain.graceful_shutdown();
@@ -151,6 +157,7 @@ impl Inbound {
         metrics: Arc<Metrics>,
         connection_metrics: ConnectionOpen,
         extra_connection_metrics: Option<ConnectionOpen>,
+        connection_tracker: ConnectionTracker,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr).await;
@@ -161,16 +168,21 @@ impl Inbound {
             }
             Ok(stream) => {
                 let mut stream = stream;
+                let local_addr = stream.local_addr().unwrap();
+                let remote_addr = stream.peer_addr().unwrap();
+                let ct = ConnectionTuple {
+                    src: socket::to_canonical(local_addr),
+                    dst: socket::to_canonical(remote_addr),
+                };
                 stream.set_nodelay(true)?;
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
-                        let _connection_close = metrics
-                            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+                        let _connection_close = connection_tracker.track(ct, &connection_metrics);
 
                         let _extra_conn_close = extra_connection_metrics
                             .as_ref()
-                            .map(|co| metrics.increment_defer::<_, traffic::ConnectionClose>(co));
+                            .map(|co| connection_tracker.track(ct, co));
 
                         let transferred_bytes =
                             traffic::BytesTransferred::from(&connection_metrics);
@@ -247,6 +259,7 @@ impl Inbound {
         enable_original_source: bool,
         req: Request<Incoming>,
         metrics: Arc<Metrics>,
+        ct: ConnectionTracker,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
@@ -360,6 +373,7 @@ impl Inbound {
                     metrics,
                     connection_metrics,
                     None,
+                    ct,
                 )
                 .in_current_span()
                 .await

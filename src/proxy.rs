@@ -37,8 +37,11 @@ use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
 use crate::{config, identity, socket, tls};
 
+use self::metadata::ConnectionTracker;
+
 mod inbound;
 mod inbound_passthrough;
+mod metadata;
 mod outbound;
 mod pool;
 mod socks5;
@@ -58,6 +61,7 @@ pub(super) struct ProxyInputs {
     hbone_port: u16,
     workloads: WorkloadInformation,
     metrics: Arc<Metrics>,
+    connection_tracker: ConnectionTracker,
     pool: pool::Pool,
 }
 
@@ -73,9 +77,10 @@ impl Proxy {
             cfg,
             workloads,
             cert_manager,
-            metrics,
+            metrics: metrics.clone(),
             pool: pool::Pool::new(),
             hbone_port: 0,
+            connection_tracker: ConnectionTracker::new(metrics),
         };
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
