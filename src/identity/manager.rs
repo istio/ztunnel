@@ -172,7 +172,7 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
                 return Err(Error::EmptyResponse(id.clone()));
             }
             Ok(_) => {
-                let current_cert = cache_rx.borrow_and_update().clone();
+                let current_cert = cache_rx.borrow().clone();
                 if let Some(cert) = current_cert {
                     info!("Got cached cert.");
                     return Ok(cert);
