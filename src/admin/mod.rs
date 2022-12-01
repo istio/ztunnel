@@ -25,6 +25,7 @@ use gperftools::heap_profiler::HEAP_PROFILER;
 use gperftools::profiler::PROFILER;
 use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
+use tokio::sync::oneshot;
 
 use pprof::protos::Message;
 use prometheus_client::encoding::text::encode;
@@ -51,6 +52,7 @@ pub struct Server {
     server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
     workload_info: WorkloadInformation,
     registry: Arc<Mutex<Registry>>,
+    shutdown_trigger: signal::ShutdownTrigger,
 }
 
 /// Ready tracks whether the process is ready.
@@ -118,7 +120,11 @@ impl Builder {
         }
     }
 
-    pub fn bind(self, registry: Registry) -> hyper::Result<Server> {
+    pub fn bind(
+        self,
+        registry: Registry,
+        shutdown_trigger: signal::ShutdownTrigger,
+    ) -> hyper::Result<Server> {
         let Self {
             addr,
             ready,
@@ -139,6 +145,7 @@ impl Builder {
             server,
             workload_info,
             registry,
+            shutdown_trigger,
         })
     }
 }
@@ -152,12 +159,13 @@ impl Server {
         self.addr
     }
 
-    pub fn spawn(self, shutdown: &signal::Shutdown, drain_rx: Watch) {
+    pub fn spawn(self, drain_rx: Watch) {
         let _dx = drain_rx.clone();
         let ready = self.ready.clone();
+        let (tx, rx) = oneshot::channel();
         let workload_info = self.workload_info.clone();
-        let shutdown_trigger = shutdown.trigger();
         let registry = self.registry();
+        let shutdown_trigger = self.shutdown_trigger.clone();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
@@ -207,16 +215,28 @@ impl Server {
                 }
             }))
             .with_graceful_shutdown(async {
-                drop(drain_rx.signaled().await);
+                // Wait until the drain is signaled
+                let shutdown = drain_rx.signaled().await;
+                // Once `shutdown` is dropped, we are declaring the drain is complete. Hyper will start draining
+                // once with_graceful_shutdown function exists, so we need to exit the function but later
+                // drop `shutdown`.
+                if tx.send(shutdown).is_err() {
+                    error!("admin receiver dropped")
+                }
+                info!("starting drain of admin server");
             });
-
-        let shutdown_trigger = shutdown.trigger();
+        info!("Serving admin server at {}", self.addr);
+        let shutdown_trigger = self.shutdown_trigger;
         tokio::spawn(async move {
-            info!("Serving admin server at {}", self.addr);
             if let Err(err) = server.await {
                 error!("Serving admin start failed: {err}");
                 shutdown_trigger.shutdown_now().await;
             } else {
+                // Now that the server has gracefully exited, drop `shutdown` to allow draining to proceed
+                match rx.await {
+                    Ok(shutdown) => drop(shutdown),
+                    Err(_) => info!("admin sender dropped"),
+                }
                 info!("admin server terminated");
             }
         });
