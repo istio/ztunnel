@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -35,6 +36,8 @@ const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
 struct TestEnv {
+    ta: TestApp,
+    echo_addr: SocketAddr,
     direct: TcpStream,
     tcp: TcpStream,
     hbone: TcpStream,
@@ -91,7 +94,16 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
         tcp::run_client(&mut direct, 1, client_mode).await.unwrap();
         info!("warmup complete");
 
-        (Arc::new(Mutex::new(TestEnv { hbone, tcp, direct })), t)
+        (
+            Arc::new(Mutex::new(TestEnv {
+                hbone,
+                tcp,
+                direct,
+                ta,
+                echo_addr,
+            })),
+            t,
+        )
     });
     (env, rt)
 }
@@ -145,11 +157,44 @@ pub fn throughput(c: &mut Criterion) {
     });
 }
 
+pub fn connections(c: &mut Criterion) {
+    let (env, rt) = initialize_environment(Mode::ReadWrite);
+    let mut c = c.benchmark_group("connections");
+    c.bench_function("direct", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s = TcpStream::connect(e.echo_addr).await.unwrap();
+            s.set_nodelay(true).unwrap();
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    c.bench_function("tcp", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(e.echo_addr, "127.0.0.2".parse().unwrap()))
+                    .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    // TODO(https://github.com/istio/ztunnel/issues/15): when we have pooling, split this into "new hbone connection"
+    // and "new connection on existing HBONE connection"
+    c.bench_function("hbone", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(e.echo_addr, "127.0.0.1".parse().unwrap()))
+                    .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = latency, throughput
+    targets = latency, throughput, connections
 }
 criterion_main!(benches);
