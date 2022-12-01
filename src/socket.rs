@@ -42,7 +42,7 @@ pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
 }
 
 pub fn orig_dst_addr_or_default(sock: &tokio::net::TcpStream) -> SocketAddr {
-    orig_dst_addr(sock).unwrap_or_else(|_| sock.peer_addr().expect("must get peer address"))
+    orig_dst_addr(sock).unwrap_or_else(|_| sock.local_addr().expect("must get local address"))
 }
 
 #[cfg(target_os = "linux")]
