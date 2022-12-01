@@ -125,9 +125,8 @@ impl Inbound {
                 tokio::task::spawn(async move {
                     match request_type {
                         InboundConnect::DirectPath(mut incoming) => {
-                            let res = relay(&mut incoming, &mut stream).await;
-                            if res.is_err() {
-                                error!("internal server copy {:?}", res);
+                            if let Err(e) = relay(&mut incoming, &mut stream).await {
+                                error!("internal server copy: {}", e);
                             }
                         }
                         Hbone(req) => match hyper::upgrade::on(req).await {
