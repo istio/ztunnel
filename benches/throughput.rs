@@ -16,17 +16,20 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use pprof::criterion::{Output, PProfProfiler};
+use prometheus_client::registry::Registry;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
-
+use tokio::sync::Mutex;
 use tracing::info;
 
+use ztunnel::metrics::traffic::ConnectionOpen;
+use ztunnel::metrics::Metrics;
+use ztunnel::metrics::Recorder;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::{helpers, tcp};
@@ -190,11 +193,25 @@ pub fn connections(c: &mut Criterion) {
     });
 }
 
+pub fn metrics(c: &mut Criterion) {
+    let mut registry = Registry::default();
+    let metrics = Metrics::new(registry.sub_registry_with_prefix("istio"));
+
+    let mut c = c.benchmark_group("metrics");
+    c.bench_function("write", |b| b.iter(|| metrics.record(&ConnectionOpen {})));
+    c.bench_function("encode", |b| {
+        b.iter(|| {
+            let mut buf: Vec<u8> = Vec::new();
+            prometheus_client::encoding::text::encode(&mut buf, &registry).unwrap();
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = latency, throughput, connections
+    targets = latency, throughput, connections, metrics
 }
 criterion_main!(benches);
