@@ -121,7 +121,7 @@ pub struct Bound {
 }
 
 impl Bound {
-    pub async fn spawn(self) -> anyhow::Result<()> {
+    pub async fn wait_termination(self) -> anyhow::Result<()> {
         // Wait for a signal to shutdown from explicit admin shutdown or signal
         self.shutdown.wait().await;
 

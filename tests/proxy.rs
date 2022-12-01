@@ -47,7 +47,7 @@ async fn test_shutdown_lifecycle() {
 
     let shutdown = app.shutdown.trigger().clone();
     let (app, _shutdown) = tokio::join!(
-        time::timeout(Duration::from_secs(5), app.spawn()),
+        time::timeout(Duration::from_secs(5), app.wait_termination()),
         shutdown.shutdown_now()
     );
     app.expect("app shuts down")
@@ -69,7 +69,7 @@ async fn test_shutdown_drain() {
     let shutdown = app.shutdown.trigger().clone();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        app.spawn().await.unwrap();
+        app.wait_termination().await.unwrap();
         // Notify we shut down
         shutdown_tx.send(()).unwrap();
     });
@@ -107,7 +107,7 @@ async fn test_quit_lifecycle() {
     let addr = app.admin_address;
 
     let (app, _shutdown) = tokio::join!(
-        time::timeout(Duration::from_secs(5), app.spawn()),
+        time::timeout(Duration::from_secs(5), app.wait_termination()),
         admin_shutdown(addr)
     );
     app.expect("app shuts down")
