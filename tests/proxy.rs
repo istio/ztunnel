@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::time;
 use tokio::time::timeout;
 
@@ -52,6 +53,17 @@ async fn test_shutdown_lifecycle() {
     );
     app.expect("app shuts down")
         .expect("app exits without error")
+}
+
+#[tokio::test]
+async fn test_conflicting_bind_error() {
+    helpers::initialize_telemetry();
+
+    let mut test_config_with_port = test_config();
+    let inbound_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
+    test_config_with_port.inbound_addr = inbound_addr;
+    let _listener = TcpListener::bind(inbound_addr).await.unwrap();
+    assert!(ztunnel::app::build(test_config_with_port).await.is_err());
 }
 
 #[tokio::test]
