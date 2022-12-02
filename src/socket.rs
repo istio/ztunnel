@@ -28,23 +28,19 @@ pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
 
 pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
     match orig_dst_addr(stream) {
-        Ok(Some(addr)) => addr,
+        Ok(addr) => addr,
         _ => stream.local_addr().expect("must get local address"),
     }
 }
 
 #[cfg(target_os = "linux")]
-pub fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr>> {
+pub fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     let sock = SockRef::from(stream);
     // Dual-stack IPv4/IPv6 sockets require us to check both options.
     match linux::original_dst(&sock) {
-        Ok(Some(addr)) => Ok(addr.as_socket()),
+        Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
         _ => match linux::original_dst_ipv6(&sock) {
-            Ok(Some(addr)) => Ok(addr.as_socket()),
-            Ok(None) => {
-                warn!("failed to read SO_ORIGINAL_DST");
-                Ok(None)
-            }
+            Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
             Err(e) => {
                 warn!("failed to read SO_ORIGINAL_DST: {:?}", e);
                 Err(e)
@@ -54,7 +50,7 @@ pub fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<Option<Socket
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr>> {
+pub fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     Err(io::Error::new(
         io::ErrorKind::Other,
         "SO_ORIGINAL_DST not supported on this operating system",
@@ -79,7 +75,7 @@ mod linux {
 
     // Replace with socket2's version once there is a release that contains
     // https://github.com/rust-lang/socket2/pull/360
-    pub fn original_dst(sock: &SockRef) -> io::Result<Option<SockAddr>> {
+    pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
         // Safety: `getsockopt` initialises the `SockAddr` for us.
         unsafe {
             SockAddr::init(|storage, len| {
@@ -95,18 +91,12 @@ mod linux {
                 }
             })
         }
-        .map_or_else(
-            |e| match e.raw_os_error() {
-                Some(libc::ENOENT) => Ok(None),
-                _ => Err(e),
-            },
-            |(_, addr)| Ok(Some(addr)),
-        )
+        .map(|(_, addr)| addr)
     }
 
     // Replace with socket2's version once there is a release that contains
     // https://github.com/rust-lang/socket2/pull/360
-    pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<Option<SockAddr>> {
+    pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
         // Safety: `getsockopt` initialises the `SockAddr` for us.
         unsafe {
             SockAddr::init(|storage, len| {
@@ -122,13 +112,7 @@ mod linux {
                 }
             })
         }
-        .map_or_else(
-            |e| match e.raw_os_error() {
-                Some(libc::ENOENT) => Ok(None),
-                _ => Err(e),
-            },
-            |(_, addr)| Ok(Some(addr)),
-        )
+        .map(|(_, addr)| addr)
     }
 }
 
