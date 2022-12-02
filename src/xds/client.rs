@@ -13,23 +13,22 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fmt, mem};
 
-use prometheus_client::registry::Registry;
 use prost::Message;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
+use crate::metrics::xds::*;
+use crate::metrics::{Metrics, Recorder};
 use crate::xds::istio::workload::Workload;
-use crate::xds::monitoring::ConnectionTerminationReason;
-use crate::xds::monitoring::XdsMetrics;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{identity, tls, xds};
+use crate::{admin, identity, tls, xds};
 
 use super::Error;
 
@@ -108,10 +107,8 @@ impl Config {
         self
     }
 
-    pub fn build(self, registry: &mut Registry) -> AdsClient {
+    pub fn build(self, metrics: Arc<Metrics>, block_ready: admin::BlockReady) -> AdsClient {
         let (tx, rx) = mpsc::channel(100);
-        let metrics: Arc<XdsMetrics> = Default::default();
-        metrics.register(registry);
         AdsClient {
             config: self,
             workloads: HashSet::new(),
@@ -119,6 +116,7 @@ impl Config {
             demand: rx,
             demand_tx: tx,
             metrics,
+            block_ready: Some(block_ready),
         }
     }
 }
@@ -134,7 +132,8 @@ pub struct AdsClient {
     demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
     demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 
-    pub(crate) metrics: Arc<XdsMetrics>,
+    pub(crate) metrics: Arc<Metrics>,
+    block_ready: Option<admin::BlockReady>,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
@@ -155,6 +154,12 @@ impl Demanded {
 #[derive(Debug, Clone)]
 pub struct Demander {
     demand: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
+}
+
+enum XdsSignal {
+    None,
+    Ack,
+    Nack,
 }
 
 impl Demander {
@@ -198,7 +203,7 @@ impl AdsClient {
                     backoff = std::cmp::min(max_backoff, backoff * 2);
                     warn!("XDS client error: {}, retrying in {:?}", e, backoff);
                     self.metrics
-                        .inc_connection_terminations(ConnectionTerminationReason::ConnectionError);
+                        .record(&ConnectionTerminationReason::ConnectionError);
                     tokio::time::sleep(backoff).await;
                 }
                 Err(e) => {
@@ -206,11 +211,11 @@ impl AdsClient {
                     // TODO: we may need more nuance here; if we fail due to invalid initial request we may overload
                     // But we want to reconnect from MaxConnectionAge immediately.
                     warn!("XDS client error: {}, retrying", e);
-                    self.metrics
-                        .inc_connection_terminations(ConnectionTerminationReason::Error);
+                    self.metrics.record(&ConnectionTerminationReason::Error);
                     backoff = Duration::from_millis(10);
                 }
                 Ok(_) => {
+                    self.metrics.record(&ConnectionTerminationReason::Complete);
                     warn!("XDS client complete");
                     backoff = Duration::from_millis(10);
                 }
@@ -287,16 +292,34 @@ impl AdsClient {
             .into_inner();
 
         info!("Stream established");
+        // Create a oneshot channel to
+        let (tx, initial_xds_rx) = oneshot::channel();
+        let mut initial_xds_tx = Some(tx);
+        let ready = mem::take(&mut self.block_ready);
+        tokio::spawn(async move {
+            match initial_xds_rx.await {
+                Ok(_) => drop(ready),
+                Err(_) => {
+                    debug!("sender was dropped before initial xds sync event was received");
+                }
+            }
+        });
 
         loop {
             tokio::select! {
                 _demand_event = self.demand.recv() => {
-                    self.handle_demand_event(None, &discovery_req_tx).await?;
+                    self.handle_demand_event(_demand_event, &discovery_req_tx).await?;
                 }
-                msg = response_stream.message() =>{
-                    self.handle_stream_event(msg?, &discovery_req_tx).await?;
+                msg = response_stream.message() => {
+                    if let XdsSignal::Ack = self.handle_stream_event(msg?, &discovery_req_tx).await? {
+                        let val = mem::take(&mut initial_xds_tx);
+                        if let Some(tx) = val {
+                            if let Err(err) = tx.send(()) {
+                                warn!("initial xds sync signal send failed: {:?}", err)
+                            }
+                        }
+                    };
                 }
-
             }
         }
     }
@@ -305,9 +328,10 @@ impl AdsClient {
         &mut self,
         stream_event: Option<DeltaDiscoveryResponse>,
         send: &mpsc::Sender<DeltaDiscoveryRequest>,
-    ) -> Result<(), Error> {
+    ) -> Result<XdsSignal, Error> {
+        let mut xds_signal = XdsSignal::None;
         let Some(response) = stream_event else {
-            return Ok(());
+            return Ok(xds_signal);
         };
         let type_url = response.type_url;
         info!(
@@ -372,13 +396,16 @@ impl AdsClient {
                     .join("; "),
             ),
         };
+
         info!(
             type_url = type_url.clone(),
             none = response.nonce,
             "sending {}",
             if error_detail.is_some() {
+                xds_signal = XdsSignal::Nack;
                 "NACK"
             } else {
+                xds_signal = XdsSignal::Ack;
                 "ACK"
             }
         );
@@ -393,6 +420,7 @@ impl AdsClient {
         })
         .await
         .map_err(|e| Error::RequestFailure(Box::new(e)))
+        .map(|_| xds_signal)
     }
 
     async fn handle_demand_event(

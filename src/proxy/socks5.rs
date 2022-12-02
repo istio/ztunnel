@@ -20,6 +20,7 @@ use crate::proxy::Error;
 use crate::workload::WorkloadInformation;
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
+use drain::Watch;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -33,6 +34,7 @@ pub struct Socks5 {
     workloads: WorkloadInformation,
     hbone_port: u16,
     listener: TcpListener,
+    drain: Watch,
 }
 
 impl Socks5 {
@@ -41,6 +43,7 @@ impl Socks5 {
         cert_manager: Box<dyn CertificateProvider>,
         hbone_port: u16,
         workloads: WorkloadInformation,
+        drain: Watch,
     ) -> Result<Socks5, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.socks5_addr)
             .await
@@ -52,6 +55,7 @@ impl Socks5 {
             workloads,
             hbone_port,
             listener,
+            drain,
         })
     }
 
@@ -62,26 +66,35 @@ impl Socks5 {
     pub async fn run(self) {
         info!("socks5 listener established {}", self.address());
 
-        loop {
-            // Asynchronously wait for an inbound socket.
-            let socket = self.listener.accept().await;
-            match socket {
-                Ok((stream, remote)) => {
-                    info!("accepted outbound connection from {}", remote);
-                    //let cfg = self.cfg.clone();
-                    let oc = OutboundConnection {
-                        cert_manager: self.cert_manager.clone(),
-                        workloads: self.workloads.clone(),
-                        cfg: self.cfg.clone(),
-                        hbone_port: self.hbone_port,
-                    };
-                    tokio::spawn(async move {
-                        if let Err(err) = handle(oc, stream).await {
-                            log::error!("handshake error: {}", err);
-                        }
-                    });
+        let accept = async move {
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                match socket {
+                    Ok((stream, remote)) => {
+                        info!("accepted outbound connection from {}", remote);
+                        //let cfg = self.cfg.clone();
+                        let oc = OutboundConnection {
+                            cert_manager: self.cert_manager.clone(),
+                            workloads: self.workloads.clone(),
+                            cfg: self.cfg.clone(),
+                            hbone_port: self.hbone_port,
+                        };
+                        tokio::spawn(async move {
+                            if let Err(err) = handle(oc, stream).await {
+                                log::error!("handshake error: {}", err);
+                            }
+                        });
+                    }
+                    Err(e) => error!("Failed TCP handshake {}", e),
                 }
-                Err(e) => error!("Failed TCP handshake {}", e),
+            }
+        };
+
+        tokio::select! {
+            res = accept => { res }
+            _ = self.drain.signaled() => {
+                info!("socks5 drained");
             }
         }
     }

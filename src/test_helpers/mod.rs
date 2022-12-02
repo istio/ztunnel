@@ -17,6 +17,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 pub mod app;
+pub mod ca;
 pub mod helpers;
 pub mod tcp;
 
@@ -29,6 +30,6 @@ pub fn test_config() -> Arc<config::Config> {
         admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        ..Default::default()
+        ..config::parse_config().unwrap()
     })
 }

@@ -19,7 +19,6 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
-use prometheus_client::registry::Registry;
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -27,19 +26,20 @@ use tracing::{debug, error, info, warn};
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::identity::Identity;
+use crate::metrics::Metrics;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
-use crate::{config, xds};
+use crate::{admin, config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
-    Tcp,
-    Hbone,
+    TCP,
+    HBONE,
 }
 
 impl Default for Protocol {
     fn default() -> Self {
-        Protocol::Tcp
+        Protocol::TCP
     }
 }
 
@@ -48,15 +48,15 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
 
     fn try_from(value: Option<xds::istio::workload::Protocol>) -> Result<Self, Self::Error> {
         match value {
-            Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::Hbone),
-            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::Tcp),
+            Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::HBONE),
+            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::TCP),
             None => Err(ProtocolParse("unknown type".into())),
         }
     }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
     pub workload_ip: IpAddr,
     #[serde(default)]
@@ -241,7 +241,8 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 impl WorkloadManager {
     pub async fn new(
         config: Arc<config::Config>,
-        registry: &mut Registry,
+        metrics: Arc<Metrics>,
+        awaiting_ready: admin::BlockReady,
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
@@ -250,7 +251,7 @@ impl WorkloadManager {
                 xds::Config::new(config.clone())
                     .with_workload_handler(xds_workloads)
                     .watch(xds::WORKLOAD_TYPE.into())
-                    .build(registry),
+                    .build(metrics, awaiting_ready.subtask("ads client")),
             )
         } else {
             None
@@ -455,14 +456,14 @@ impl WorkloadStore {
     fn set_gateway_address(us: &mut Upstream, hbone_port: u16) {
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
-                Protocol::Hbone => {
+                Protocol::HBONE => {
                     let ip = us
                         .workload
                         .choose_waypoint_address()
                         .unwrap_or(us.workload.workload_ip);
                     SocketAddr::from((ip, hbone_port))
                 }
-                Protocol::Tcp => SocketAddr::from((us.workload.workload_ip, us.port)),
+                Protocol::TCP => SocketAddr::from((us.workload.workload_ip, us.port)),
             });
         }
     }

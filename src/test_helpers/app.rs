@@ -17,13 +17,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper::{Body, Client, Method, Request, Response};
-
+use hyper::{body, Body, Client, Method, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::helpers::*;
 use crate::*;
+
+use super::helpers::*;
 
 #[derive(Clone, Copy)]
 pub struct TestApp {
@@ -50,7 +50,7 @@ where
         f(ta).await;
         shutdown.shutdown_now().await;
     };
-    let (app, _shutdown) = tokio::join!(app.spawn(), run_and_shutdown);
+    let (app, _shutdown) = tokio::join!(app.wait_termination(), run_and_shutdown);
     app.expect("app exits without error");
 }
 
@@ -67,6 +67,13 @@ impl TestApp {
             .unwrap();
         let client = Client::new();
         client.request(req).await
+    }
+
+    pub async fn admin_request_string(&self, path: &str) -> String {
+        let body = self.admin_request(path).await.expect("request").into_body();
+        let body = body::to_bytes(body).await.expect("read read body");
+        let s = std::str::from_utf8(&body).expect("to string");
+        s.to_string()
     }
 
     pub async fn ready(&self) {

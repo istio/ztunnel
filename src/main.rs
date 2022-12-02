@@ -16,8 +16,8 @@ extern crate core;
 #[cfg(feature = "gperftools")]
 extern crate gperftools;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tracing::info;
 use ztunnel::*;
 
 // #[global_allocator]
@@ -28,7 +28,7 @@ use ztunnel::*;
 
 fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
-    let config: Arc<config::Config> = Arc::new(Default::default());
+    let config: Arc<config::Config> = Arc::new(config::parse_config()?);
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
     match std::env::args().nth(1).as_deref() {
@@ -40,13 +40,7 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.num_worker_threads)
-        .thread_name_fn(|| {
-            static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-            let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-            format!("proxy-{}", id)
-        })
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
@@ -59,5 +53,6 @@ fn version() -> anyhow::Result<()> {
 }
 
 async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
-    app::build(cfg).await?.spawn().await
+    info!("running with config {cfg:?}");
+    app::build(cfg).await?.wait_termination().await
 }

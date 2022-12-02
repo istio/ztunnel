@@ -23,6 +23,7 @@ use tokio::net::TcpStream;
 use tracing::{error, info};
 
 use crate::identity::CertificateProvider;
+use crate::metrics::Metrics;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
@@ -46,17 +47,25 @@ impl Proxy {
         cfg: Arc<config::Config>,
         workloads: WorkloadInformation,
         cert_manager: Box<dyn CertificateProvider>,
+        metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound_passthrough = InboundPassthrough::new(cfg.clone());
-        let inbound = Inbound::new(cfg.clone(), workloads.clone(), cert_manager.clone()).await?;
+        let inbound = Inbound::new(
+            cfg.clone(),
+            workloads.clone(),
+            cert_manager.clone(),
+            drain.clone(),
+        )
+        .await?;
         let outbound = Outbound::new(
             cfg.clone(),
             cert_manager.clone(),
             workloads.clone(),
             inbound.address().port(),
-            drain,
+            metrics,
+            drain.clone(),
         )
         .await?;
         let socks5 = Socks5::new(
@@ -64,6 +73,7 @@ impl Proxy {
             cert_manager.clone(),
             inbound.address().port(),
             workloads.clone(),
+            drain,
         )
         .await?;
         Ok(Proxy {

@@ -15,10 +15,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_stream::StreamExt;
+use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -35,6 +36,7 @@ pub struct Inbound {
     listener: TcpListener,
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
+    drain: Watch,
 }
 
 impl Inbound {
@@ -42,6 +44,7 @@ impl Inbound {
         cfg: Arc<Config>,
         workloads: WorkloadInformation,
         cert_manager: Box<dyn CertificateProvider>,
+        drain: Watch,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
             .await
@@ -55,6 +58,7 @@ impl Inbound {
             workloads,
             listener,
             cert_manager,
+            drain,
         })
     }
 
@@ -63,44 +67,45 @@ impl Inbound {
     }
 
     pub(super) async fn run(self) {
+        let (tx, rx) = oneshot::channel();
         let addr = self.listener.local_addr().unwrap();
         let service =
             make_service_fn(|_| async { Ok::<_, hyper::Error>(service_fn(Self::serve_connect)) });
-        let boring_acceptor = crate::tls::BoringTlsAcceptor {
-            acceptor: InboundCertProvider {
-                workloads: self.workloads.clone(),
-                cert_manager: self.cert_manager.clone(),
-            },
+
+        let acceptor = InboundCertProvider {
+            workloads: self.workloads.clone(),
+            cert_manager: self.cert_manager.clone(),
         };
-        let mut listener =
-            hyper::server::conn::AddrIncoming::from_listener(self.listener).expect("hbone bind");
-        listener.set_nodelay(true);
-        let incoming = hyper::server::accept::from_stream(
-            tls_listener::builder(boring_acceptor)
-                .listen(listener)
-                .filter(|conn| {
-                    // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
-                    if let Err(err) = conn {
-                        warn!("TLS handshake error: {}", err);
-                        false
-                    } else {
-                        info!("TLS handshake succeeded");
-                        true
-                    }
-                }),
-        );
+        let tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
+        let incoming = hyper::server::accept::from_stream(tls_stream);
 
         let server = Server::builder(incoming)
             .http2_only(true)
             .http2_initial_stream_window_size(self.cfg.window_size)
             .http2_initial_connection_window_size(self.cfg.connection_window_size)
             .http2_max_frame_size(self.cfg.frame_size)
-            .serve(service);
+            .serve(service)
+            .with_graceful_shutdown(async {
+                // Wait until the drain is signaled
+                let shutdown = self.drain.signaled().await;
+                // Once `shutdown` is dropped, we are declaring the drain is complete. Hyper will start draining
+                // once with_graceful_shutdown function exists, so we need to exit the function but later
+                // drop `shutdown`.
+                if tx.send(shutdown).is_err() {
+                    error!("HBONE receiver dropped")
+                }
+                info!("starting drain of inbound connections");
+            });
 
         info!("HBONE listener established {}", addr);
 
         if let Err(e) = server.await {
             error!("server error: {}", e);
+        }
+        // Now that the server has gracefully exited, drop `shutdown` to allow draining to proceed
+        match rx.await {
+            Ok(shutdown) => drop(shutdown),
+            Err(_) => info!("HBONE sender dropped"),
         }
     }
 
@@ -213,7 +218,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
         };
         info!("tls: accepting connection to {:?} ({})", orig, identity);
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
-        let acc = cert.acceptor()?;
+        let acc = cert.mtls_acceptor()?;
         Ok(acc)
     }
 }

@@ -16,7 +16,7 @@ pub mod admin;
 pub mod app;
 pub mod config;
 pub mod identity;
-pub mod monitoring;
+mod metrics;
 pub mod proxy;
 pub mod signal;
 pub mod socket;
@@ -26,4 +26,5 @@ pub mod version;
 pub mod workload;
 pub mod xds;
 
+pub mod hyper_util;
 pub mod test_helpers;

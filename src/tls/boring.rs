@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use std::future::Future;
-
 use std::net::IpAddr;
-
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -36,7 +34,6 @@ use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyResult
 use hyper::client::ResponseFuture;
 use hyper::server::conn::AddrStream;
 use hyper::{Request, Uri};
-
 use tokio::net::TcpStream;
 use tonic::body::BoxBody;
 use tower::Service;
@@ -46,14 +43,25 @@ use crate::identity::{self, Identity};
 
 use super::Error;
 
+pub fn asn1_time_to_system_time(time: &Asn1TimeRef) -> SystemTime {
+    let unix_time = Asn1Time::from_unix(0).unwrap().diff(time).unwrap();
+    SystemTime::UNIX_EPOCH
+        + Duration::from_secs(unix_time.days as u64 * 86400 + unix_time.secs as u64)
+}
+
 pub fn cert_from(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Certs {
     let key = pkey::PKey::private_key_from_pem(key).unwrap();
     let cert = x509::X509::from_pem(cert).unwrap();
+    let ztunnel_cert = ZtunnelCert::new(cert);
     let chain = chain
         .into_iter()
-        .map(|pem| x509::X509::from_pem(pem).unwrap())
+        .map(|pem| ZtunnelCert::new(x509::X509::from_pem(pem).unwrap()))
         .collect();
-    Certs { cert, chain, key }
+    Certs {
+        cert: ztunnel_cert,
+        chain,
+        key,
+    }
 }
 
 pub struct CertSign {
@@ -94,51 +102,73 @@ impl CsrOptions {
 }
 
 #[derive(Clone, Debug)]
+pub struct ZtunnelCert {
+    x509: x509::X509,
+    not_before: SystemTime,
+    not_after: SystemTime,
+}
+
+// Wrapper around X509 that uses SystemTime for not_before/not_after.
+// Asn1Time does not support sub-second granularity.
+impl ZtunnelCert {
+    pub fn new(cert: x509::X509) -> ZtunnelCert {
+        ZtunnelCert {
+            x509: cert.clone(),
+            not_before: asn1_time_to_system_time(cert.not_before()),
+            not_after: asn1_time_to_system_time(cert.not_after()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Certs {
     // the leaf cert
-    cert: x509::X509,
+    cert: ZtunnelCert,
     // the remainder of the chain, not including the leaf cert
-    chain: Vec<x509::X509>,
+    chain: Vec<ZtunnelCert>,
     key: pkey::PKey<pkey::Private>,
 }
 
 impl PartialEq for Certs {
     fn eq(&self, other: &Self) -> bool {
-        self.cert.to_der().iter().eq(other.cert.to_der().iter())
+        self.cert
+            .x509
+            .to_der()
+            .iter()
+            .eq(other.cert.x509.to_der().iter())
             && self
                 .key
                 .private_key_to_der()
                 .iter()
                 .eq(other.key.private_key_to_der().iter())
+            && self.cert.not_after == other.cert.not_after
+            && self.cert.not_before == other.cert.not_before
     }
 }
 
 impl Certs {
     pub fn is_expired(&self) -> bool {
-        let current = Asn1Time::days_from_now(0).unwrap();
-        let end: &Asn1TimeRef = self.cert.not_after();
-        let time_until_expired = current.diff(end).unwrap();
-        if time_until_expired.secs > 0 {
-            return false;
-        }
-        true
+        SystemTime::now() > self.cert.not_after
     }
 
     pub fn get_duration_until_refresh(&self) -> Duration {
-        let current = Asn1Time::days_from_now(0).unwrap();
-        let start: &Asn1TimeRef = self.cert.not_before();
-        let end: &Asn1TimeRef = self.cert.not_after();
+        let halflife = self
+            .cert
+            .not_after
+            .duration_since(self.cert.not_before)
+            .unwrap()
+            / 2;
+        // If now() is earlier than not_before, we need to refresh ASAP, so return 0.
+        let elapsed = SystemTime::now()
+            .duration_since(self.cert.not_before)
+            .unwrap_or(halflife);
+        halflife
+            .checked_sub(elapsed)
+            .unwrap_or_else(|| Duration::from_secs(0))
+    }
 
-        let total_lifetime = start.diff(end).unwrap();
-        let total_lifetime_secs = total_lifetime.days * 86400 + total_lifetime.secs;
-        let halflife = total_lifetime_secs / 2;
-        let elapsed = start.diff(&current).unwrap();
-        let elapsed_secs = elapsed.days * 86400 + elapsed.secs; // 86400 secs/day
-        let returnval: i32 = halflife - elapsed_secs;
-        if returnval < 0 {
-            return Duration::from_secs(0);
-        }
-        Duration::from_secs(u64::try_from(returnval).unwrap())
+    pub fn x509(&self) -> &x509::X509 {
+        &self.cert.x509
     }
 }
 
@@ -185,7 +215,7 @@ impl Certs {
         ssl::SslVerifyMode::PEER | ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT
     }
 
-    pub fn acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
+    pub fn mtls_acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
         let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
         // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
         let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
@@ -193,6 +223,17 @@ impl Certs {
 
         Ok(conn.build())
     }
+
+    pub fn acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
+        let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
+        // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
+        let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
+        self.setup_ctx(&mut conn)?;
+
+        conn.set_verify_callback(ssl::SslVerifyMode::NONE, Verifier::None.callback());
+        Ok(conn.build())
+    }
+
     pub fn connector(&self, dest_id: &Option<Identity>) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
@@ -216,9 +257,9 @@ impl Certs {
 
         // key and certs
         conn.set_private_key(&self.key)?;
-        conn.set_certificate(&self.cert)?;
+        conn.set_certificate(&self.cert.x509)?;
         for chain_cert in self.chain.iter() {
-            conn.cert_store_mut().add_cert(chain_cert.clone())?;
+            conn.cert_store_mut().add_cert(chain_cert.x509.clone())?;
         }
         conn.check_private_key()?;
 
@@ -287,7 +328,7 @@ pub trait SanChecker {
 
 impl SanChecker for Certs {
     fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
-        self.cert.verify_san(identity)
+        self.cert.x509.verify_san(identity)
     }
 }
 
@@ -341,6 +382,17 @@ pub trait CertProvider: Send + Sync {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<ssl::SslAcceptor, TlsError>;
 }
 
+#[derive(Clone, Debug)]
+pub struct ControlPlaneCertProvider(pub Certs);
+
+#[async_trait::async_trait]
+impl CertProvider for ControlPlaneCertProvider {
+    async fn fetch_cert(&mut self, _: &TcpStream) -> Result<ssl::SslAcceptor, TlsError> {
+        let acc = self.0.acceptor()?;
+        Ok(acc)
+    }
+}
+
 #[derive(Clone)]
 pub struct BoringTlsAcceptor<F: CertProvider> {
     /// Acceptor is a function that determines the TLS context to use. As input, the FD of the client
@@ -350,8 +402,8 @@ pub struct BoringTlsAcceptor<F: CertProvider> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TlsError {
-    #[error("tls handshake error")]
-    Handshake,
+    #[error("tls handshake error: {0:?}")]
+    Handshake(#[from] tokio_boring::HandshakeError<TcpStream>),
     #[error("tls verification error: {0}")]
     Verification(X509VerifyResult),
     #[error("certificate lookup error: {0} is not a known destination")]
@@ -383,7 +435,7 @@ where
             let tls = acceptor.fetch_cert(&inner).await?;
             tokio_boring::accept(&tls, inner)
                 .await
-                .map_err(|_| TlsError::Handshake)
+                .map_err(TlsError::Handshake)
         })
     }
 }
@@ -393,20 +445,29 @@ const TEST_PKEY: &[u8] = include_bytes!("key.pem");
 const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
 const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
 
-// Creates an invalid dummy cert with overridden expire time
-pub fn generate_test_certs(id: &Identity, seconds_until_expiry: Duration) -> Certs {
+pub fn generate_test_certs(
+    id: &Identity,
+    duration_until_valid: Duration,
+    duration_until_expiry: Duration,
+) -> Certs {
     let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
     let (ca_cert, ca_key) = test_ca().unwrap();
     let mut builder = x509::X509::builder().unwrap();
-    let current = Asn1Time::days_from_now(0).unwrap();
-    let expire_time: i64 = (SystemTime::now()
+    let not_before_asn = Asn1Time::days_from_now(
+        (duration_until_valid.as_secs() / 60 / 24)
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap();
+    let not_before_systime = SystemTime::now() + duration_until_valid;
+    let expire_time: i64 = (not_before_systime
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
-        + seconds_until_expiry.as_secs())
+        + duration_until_expiry.as_secs())
     .try_into()
     .unwrap();
-    builder.set_not_before(&current).unwrap();
+    builder.set_not_before(&not_before_asn).unwrap();
     builder
         .set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
         .unwrap();
@@ -457,11 +518,14 @@ pub fn generate_test_certs(id: &Identity, seconds_until_expiry: Duration) -> Cer
 
     builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
 
-    let cert = builder.build();
+    let mut cert = ZtunnelCert::new(builder.build());
+    // For sub-second granularity
+    cert.not_before = not_before_systime;
+    cert.not_after = not_before_systime + duration_until_expiry;
     Certs {
         cert,
         key,
-        chain: vec![ca_cert],
+        chain: vec![ZtunnelCert::new(ca_cert)],
     }
 }
 
@@ -472,7 +536,7 @@ fn test_ca() -> Result<(x509::X509, PKey<Private>), Error> {
 }
 
 pub fn test_certs() -> Certs {
-    let cert = x509::X509::from_pem(TEST_CERT).unwrap();
+    let cert = ZtunnelCert::new(x509::X509::from_pem(TEST_CERT).unwrap());
     let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
     let chain = vec![cert.clone()];
     Certs { cert, key, chain }
@@ -480,23 +544,51 @@ pub fn test_certs() -> Certs {
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
+    use std::time::Duration;
 
-    pub fn test_certs() -> Certs {
-        let cert = x509::X509::from_pem(TEST_CERT).unwrap();
-        let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
-        let chain = vec![cert.clone()];
-        Certs { cert, key, chain }
-    }
+    use crate::identity::Identity;
+
+    use super::generate_test_certs;
 
     #[test]
     fn is_fips_enabled() {
         assert!(boring::fips::enabled());
     }
-}
 
-#[test]
-#[cfg(not(feature = "fips"))]
-fn is_fips_disabled() {
-    assert_eq!(false, boring::fips::enabled());
+    #[test]
+    fn cert_expiration() {
+        let expiry_seconds = 1000;
+        let id: Identity = Default::default();
+        let zero_dur = Duration::from_secs(0);
+        let certs_not_expired = generate_test_certs(
+            &id,
+            Duration::from_secs(0),
+            Duration::from_secs(expiry_seconds),
+        );
+        assert!(!certs_not_expired.is_expired());
+        let seconds_until_refresh = certs_not_expired.get_duration_until_refresh().as_secs();
+        // Give a couple second window to avoid flakiness in the test.
+        assert!(
+            seconds_until_refresh <= expiry_seconds / 2
+                && seconds_until_refresh >= expiry_seconds / 2 - 1
+        );
+
+        let certs_expired = generate_test_certs(&id, zero_dur, zero_dur);
+        assert!(certs_expired.is_expired());
+        assert_eq!(certs_expired.get_duration_until_refresh(), zero_dur);
+
+        let future_certs = generate_test_certs(
+            &id,
+            Duration::from_secs(1000),
+            Duration::from_secs(expiry_seconds),
+        );
+        assert!(!future_certs.is_expired());
+        assert_eq!(future_certs.get_duration_until_refresh(), zero_dur);
+    }
+
+    #[test]
+    #[cfg(not(feature = "fips"))]
+    fn is_fips_disabled() {
+        assert_eq!(false, boring::fips::enabled());
+    }
 }
