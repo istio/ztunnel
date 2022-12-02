@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
+use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::Error;
@@ -87,8 +88,8 @@ impl Outbound {
                             workloads: self.workloads.clone(),
                             cfg,
                             hbone_port: self.hbone_port,
+                            metrics: self.metrics.clone(),
                         };
-                        self.metrics.record(&traffic::ConnectionOpen {});
                         tokio::spawn(async move {
                             let res = oc.proxy(stream).await;
                             match res {
@@ -127,6 +128,7 @@ pub struct OutboundConnection {
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     pub cfg: Config,
     pub hbone_port: u16,
+    pub metrics: Arc<Metrics>,
 }
 
 impl OutboundConnection {
@@ -148,6 +150,35 @@ impl OutboundConnection {
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig, req.gateway, req.request_type, req.direction
         );
+
+        self.metrics.record(&traffic::ConnectionOpen {
+            reporter: Reporter::source,
+            source_workload: req.source.workload_name.clone(),
+            source_canonical_service: req.source.canonical_name.clone(),
+            source_canonical_revision: req.source.canonical_revision.clone(),
+            source_workload_namespace: req.source.namespace.clone(),
+            source_principal: req.source.identity(),
+            source_app: req.source.canonical_name.clone(),
+            source_version: req.source.canonical_revision.clone(),
+            source_cluster: "Kubernetes".to_string(),
+
+            destination_service: "".to_string(),
+
+            // TODO: get dest workload
+            destination_workload: req.source.workload_name.clone(),
+            destination_canonical_service: req.source.canonical_name.clone(),
+            destination_canonical_revision: req.source.canonical_revision.clone(),
+            destination_workload_namespace: req.source.namespace.clone(),
+            destination_principal: req.source.identity(),
+            destination_app: req.source.canonical_name.clone(),
+            destination_version: req.source.canonical_revision.clone(),
+            destination_cluster: "Kubernetes".to_string(),
+
+            request_protocol: traffic::RequestProtocol::tcp,
+            response_flags: traffic::ResponseFlags::none,
+            // Client doesn't know if server verified, so we can't claim it was mTLS
+            connection_security_policy: traffic::SecurityPolicy::unknown,
+        });
         if req.request_type == RequestType::DirectLocal {
             // For same node, we just access it directly rather than making a full network connection.
             // Pass our `stream` over to the inbound handler, which will process as usual
@@ -438,6 +469,7 @@ mod tests {
             workloads: wi,
             hbone_port: 15008,
             cfg,
+            metrics: Arc::new(Default::default())
         };
 
         let req = outbound

@@ -15,6 +15,7 @@
 use prometheus_client::registry::Registry;
 
 mod meta;
+#[allow(non_camel_case_types)]
 pub mod traffic;
 pub mod xds;
 
@@ -27,12 +28,25 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(registry: &mut Registry) -> Self {
+    fn new(registry: &mut Registry) -> Self {
         Self {
             xds: xds::Metrics::new(registry),
             meta: meta::Metrics::new(registry),
             traffic: traffic::Metrics::new(registry),
         }
+    }
+}
+
+impl From<&mut Registry> for Metrics {
+    fn from(registry: &mut Registry) -> Self {
+        Metrics::new(registry.sub_registry_with_prefix("istio"))
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        let mut registry = Registry::default();
+        Metrics::new(registry.sub_registry_with_prefix("istio"))
     }
 }
 

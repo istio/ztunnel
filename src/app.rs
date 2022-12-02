@@ -31,7 +31,7 @@ pub async fn build_with_cert(
     cert_manager: impl CertificateProvider,
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
-    let metrics = Arc::new(Metrics::new(registry.sub_registry_with_prefix("istio")));
+    let metrics = Arc::new(Metrics::from(&mut registry));
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete

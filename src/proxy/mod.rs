@@ -64,7 +64,7 @@ impl Proxy {
             cert_manager.clone(),
             workloads.clone(),
             inbound.address().port(),
-            metrics,
+            metrics.clone(),
             drain.clone(),
         )
         .await?;
@@ -73,6 +73,7 @@ impl Proxy {
             cert_manager.clone(),
             inbound.address().port(),
             workloads.clone(),
+            metrics,
             drain,
         )
         .await?;
