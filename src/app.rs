@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
-use crate::{admin, config, identity, proxy, signal, workload};
+use crate::{admin, config, identity, proxy, readiness, signal, workload};
 
 pub async fn build_with_cert(
     config: config::Config,
@@ -41,7 +41,7 @@ pub async fn build_with_cert(
     // Note: there is still a hard timeout if the draining takes too long
     let (drain_tx, drain_rx) = drain::channel();
 
-    let ready = admin::Ready::new();
+    let ready = readiness::Ready::new();
     let proxy_task = ready.register_task("proxy listeners");
 
     let workload_manager = workload::WorkloadManager::new(
@@ -52,9 +52,13 @@ pub async fn build_with_cert(
     .await?;
 
     let shutdown_trigger = shutdown.trigger();
-    let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
+    let admin = admin::Builder::new(config.clone(), workload_manager.workloads())
         .bind(registry, shutdown_trigger)
         .context("admin server starts")?;
+    let readiness_server = readiness::Builder::new(config.clone(), ready)
+        .bind(shutdown.trigger())
+        .context("error starting readiness server")?;
+    let readiness_address = readiness_server.address();
     let admin_address = admin.address();
 
     let drain_rx_admin = drain_rx.clone();
@@ -77,6 +81,7 @@ pub async fn build_with_cert(
     });
 
     let proxy_addresses = proxy.addresses();
+    let readiness_drain_rx = drain_rx.clone();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(config.num_worker_threads)
@@ -89,6 +94,7 @@ pub async fn build_with_cert(
             .build()
             .unwrap();
         runtime.block_on(async move {
+            readiness_server.spawn(readiness_drain_rx);
             proxy.run().await;
         });
     });
@@ -97,6 +103,7 @@ pub async fn build_with_cert(
         drain_tx,
         config,
         shutdown,
+        readiness_address,
         admin_address,
         proxy_addresses,
     })
@@ -115,6 +122,7 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
 pub struct Bound {
     pub admin_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
+    pub readiness_address: SocketAddr,
 
     pub shutdown: signal::Shutdown,
     config: config::Config,

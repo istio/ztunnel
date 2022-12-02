@@ -90,6 +90,7 @@ async fn test_shutdown_drain() {
     let ta = TestApp {
         admin_address: app.admin_address,
         proxy_addresses: app.proxy_addresses,
+        readiness_address: app.readiness_address,
     };
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
     let echo_addr = echo.address();
@@ -131,6 +132,7 @@ async fn test_shutdown_forced_drain() {
     let ta = TestApp {
         admin_address: app.admin_address,
         proxy_addresses: app.proxy_addresses,
+        readiness_address: app.readiness_address,
     };
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
     let echo_addr = echo.address();

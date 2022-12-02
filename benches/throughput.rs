@@ -70,6 +70,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
         let ta = TestApp {
             admin_address: app.admin_address,
             proxy_addresses: app.proxy_addresses,
+            readiness_address: app.readiness_address,
         };
         ta.ready().await;
         let echo = tcp::TestServer::new(mode).await;

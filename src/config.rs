@@ -64,6 +64,7 @@ pub struct Config {
 
     pub socks5_addr: SocketAddr,
     pub admin_addr: SocketAddr,
+    pub readiness_addr: SocketAddr,
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
@@ -161,7 +162,9 @@ pub fn parse_config() -> Result<Config, Error> {
         )?
         .0,
 
-        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
+        // admin API should only be accessible over localhost
+        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15000),
+        readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
