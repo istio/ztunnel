@@ -34,7 +34,7 @@ pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
 }
 
 #[cfg(target_os = "linux")]
-fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr>> {
+pub fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr>> {
     let sock = SockRef::from(stream);
     // Dual-stack IPv4/IPv6 sockets require us to check both options.
     match linux::original_dst(&sock) {
@@ -54,7 +54,7 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr
 }
 
 #[cfg(not(target_os = "linux"))]
-fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr>> {
+pub fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<Option<SocketAddr>> {
     Err(io::Error::new(
         io::ErrorKind::Other,
         "SO_ORIGINAL_DST not supported on this operating system",
