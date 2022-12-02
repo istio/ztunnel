@@ -33,7 +33,7 @@ const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 
 const DEFAULT_WORKER_THREADS: usize = 2;
 
-#[derive(serde::Serialize,Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
@@ -104,7 +104,7 @@ fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
 
 fn parse_args() -> String {
     let cli_args: Vec<String> = std::env::args().collect();
-    return cli_args[1..].join(" ")
+    cli_args[1..].join(" ")
 }
 
 pub fn parse_config() -> Result<Config, Error> {

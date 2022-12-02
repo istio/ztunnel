@@ -37,9 +37,9 @@ use tokio::io::AsyncReadExt;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::workload::WorkloadInformation;
-use crate::workload::Workload;
 use crate::version::BuildInfo;
+use crate::workload::Workload;
+use crate::workload::WorkloadInformation;
 use crate::{config, signal, telemetry};
 
 /// Supports configuring an admin server
@@ -131,7 +131,7 @@ impl Builder {
             addr: config.admin_addr,
             ready,
             workload_info,
-            config: config,
+            config,
         }
     }
 
@@ -200,12 +200,12 @@ impl Server {
                         let registry = Arc::clone(&registry);
                         let shutdown_trigger = shutdown_trigger.clone();
                         let config: Config = config.clone();
-                        
-                        let config_dump: ConfigDump = ConfigDump { 
-                            workload_info: (workload_info), 
+
+                        let config_dump: ConfigDump = ConfigDump {
+                            workload_info: (workload_info),
                             static_workloads: ([].to_vec()),
                             version: BuildInfo::new(),
-                            config: config,
+                            config,
                         };
                         async move {
                             match req.uri().path() {
@@ -344,13 +344,12 @@ async fn handle_server_shutdown(
 async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Response<Body> {
     if let Some(path) = dump.config.local_xds_path.clone() {
         match tokio::fs::read_to_string(path).await {
-            Ok(data) => {
-                match serde_yaml::from_str(&data) {
-                    Ok(raw_workloads) => dump.static_workloads = raw_workloads,
-                    Err(e) => error!("Failed to load static workloads from local XDS {:?}:{:?}",
-                        dump.config.local_xds_path, e
-                    ),
-                }
+            Ok(data) => match serde_yaml::from_str(&data) {
+                Ok(raw_workloads) => dump.static_workloads = raw_workloads,
+                Err(e) => error!(
+                    "Failed to load static workloads from local XDS {:?}:{:?}",
+                    dump.config.local_xds_path, e
+                ),
             },
             Err(e) => error!(
                 "Failed to read local XDS file {:?}:{:?}",
@@ -358,7 +357,7 @@ async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Respon
             ),
         }
     }
-    
+
     let vec = serde_json::to_vec(&dump).unwrap();
     Response::builder()
         .status(hyper::StatusCode::OK)
