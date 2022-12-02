@@ -23,7 +23,7 @@ const BUILD_STATUS: &str = env!("ZTUNNEL_BUILD_buildStatus");
 const BUILD_TAG: &str = env!("ZTUNNEL_BUILD_buildTag");
 const BUILD_RUST_VERSION: &str = env!("ZTUNNEL_BUILD_RUSTC_VERSION");
 
-#[derive(Clone, Debug, Default)]
+#[derive(serde::Serialize, Clone, Debug, Default)]
 pub struct BuildInfo {
     version: String,
     git_revision: String,

@@ -64,11 +64,8 @@ pub struct Server {
 pub struct ConfigDump {
     #[serde(flatten)]
     workload_info: WorkloadInformation,
-    #[serde(default)]
     static_workloads: Vec<Workload>,
-    #[serde(default)]
-    version: String,
-    #[serde(default)]
+    version: BuildInfo,
     config: Config,
 }
 
@@ -207,7 +204,7 @@ impl Server {
                         let config_dump: ConfigDump = ConfigDump { 
                             workload_info: (workload_info), 
                             static_workloads: ([].to_vec()),
-                            version: BuildInfo::new().to_string(),
+                            version: BuildInfo::new(),
                             config: config,
                         };
                         async move {
