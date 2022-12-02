@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::*;
+use dyn_clone::DynClone;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::codegen::InterceptedService;
@@ -23,16 +24,15 @@ use tracing::{instrument, warn};
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
 use crate::identity::Error;
-use crate::tls::TlsGrpcChannel;
-use crate::tls::{self, SanChecker};
+use crate::tls::{self, SanChecker, TlsGrpcChannel};
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 use crate::xds::istio::ca::IstioCertificateRequest;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
 }
-use dyn_clone::DynClone;
+
 #[async_trait]
 pub trait CertificateProvider: DynClone + Send + Sync + 'static {
     async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error>;
@@ -41,13 +41,8 @@ pub trait CertificateProvider: DynClone + Send + Sync + 'static {
 dyn_clone::clone_trait_object!(CertificateProvider);
 
 impl CaClient {
-    pub fn new(auth: AuthSource) -> CaClient {
-        let address = if std::env::var("KUBERNETES_SERVICE_HOST").is_ok() {
-            "https://istiod.istio-system:15012"
-        } else {
-            "https://localhost:15012"
-        };
-        let svc = tls::grpc_connector(address.to_string()).unwrap();
+    pub fn new(address: String, auth: AuthSource) -> CaClient {
+        let svc = tls::grpc_connector(address).unwrap();
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
         CaClient { client }
     }
@@ -78,8 +73,11 @@ impl CertificateProvider for CaClient {
             }),
         };
         let resp = self.client.create_certificate(req).await?.into_inner();
-
-        let leaf = resp.cert_chain.first().unwrap().as_bytes();
+        let leaf = resp
+            .cert_chain
+            .first()
+            .ok_or_else(|| Error::EmptyResponse(id.clone()))?
+            .as_bytes();
         let chain = if resp.cert_chain.len() > 1 {
             resp.cert_chain[1..].iter().map(|s| s.as_bytes()).collect()
         } else {
@@ -91,5 +89,65 @@ impl CertificateProvider for CaClient {
             .verify_san(id)
             .map_err(|_| Error::SanError(id.clone()))?;
         Ok(certs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use matches::assert_matches;
+
+    use crate::{
+        identity::{Error, Identity},
+        test_helpers, tls,
+        xds::istio::ca::IstioCertificateResponse,
+    };
+
+    use super::CertificateProvider;
+
+    async fn test_ca_client_with_response(
+        res: IstioCertificateResponse,
+    ) -> Result<tls::Certs, Error> {
+        let (mock, mut ca_client) = test_helpers::ca::CaServer::spawn().await;
+        mock.send(Ok(res)).unwrap();
+        ca_client.fetch_certificate(&Identity::default()).await
+    }
+
+    #[tokio::test]
+    async fn empty_chain() {
+        let res =
+            test_ca_client_with_response(IstioCertificateResponse { cert_chain: vec![] }).await;
+        assert_matches!(res, Err(Error::EmptyResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn wrong_identity() {
+        let id = &Identity::Spiffe {
+            service_account: "wrong-sa".to_string(),
+            namespace: "foo".to_string(),
+            trust_domain: "cluster.local".to_string(),
+        };
+        let certs = tls::generate_test_certs(id, Duration::from_secs(0), Duration::from_secs(0));
+
+        let res = test_ca_client_with_response(IstioCertificateResponse {
+            cert_chain: vec![String::from_utf8(certs.x509().to_pem().unwrap()).unwrap()],
+        })
+        .await;
+        assert_matches!(res, Err(Error::SanError(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_certificate() {
+        let certs = tls::generate_test_certs(
+            &Identity::default(),
+            Duration::from_secs(0),
+            Duration::from_secs(0),
+        );
+        let res = test_ca_client_with_response(IstioCertificateResponse {
+            cert_chain: vec![String::from_utf8(certs.x509().to_pem().unwrap()).unwrap()],
+        })
+        .await;
+        assert_matches!(res, Ok(_));
     }
 }

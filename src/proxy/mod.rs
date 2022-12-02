@@ -65,7 +65,7 @@ impl Proxy {
             workloads.clone(),
             inbound.address().port(),
             metrics,
-            drain,
+            drain.clone(),
         )
         .await?;
         let socks5 = Socks5::new(
@@ -73,6 +73,7 @@ impl Proxy {
             cert_manager.clone(),
             inbound.address().port(),
             workloads.clone(),
+            drain,
         )
         .await?;
         Ok(Proxy {

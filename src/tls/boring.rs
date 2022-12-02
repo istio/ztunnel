@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use std::future::Future;
-
 use std::net::IpAddr;
-
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -36,7 +34,6 @@ use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyResult
 use hyper::client::ResponseFuture;
 use hyper::server::conn::AddrStream;
 use hyper::{Request, Uri};
-
 use tokio::net::TcpStream;
 use tonic::body::BoxBody;
 use tower::Service;
@@ -169,6 +166,10 @@ impl Certs {
             .checked_sub(elapsed)
             .unwrap_or_else(|| Duration::from_secs(0))
     }
+
+    pub fn x509(&self) -> &x509::X509 {
+        &self.cert.x509
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -214,7 +215,7 @@ impl Certs {
         ssl::SslVerifyMode::PEER | ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT
     }
 
-    pub fn acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
+    pub fn mtls_acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
         let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
         // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
         let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
@@ -222,6 +223,17 @@ impl Certs {
 
         Ok(conn.build())
     }
+
+    pub fn acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
+        let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
+        // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
+        let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
+        self.setup_ctx(&mut conn)?;
+
+        conn.set_verify_callback(ssl::SslVerifyMode::NONE, Verifier::None.callback());
+        Ok(conn.build())
+    }
+
     pub fn connector(&self, dest_id: &Option<Identity>) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
@@ -370,6 +382,17 @@ pub trait CertProvider: Send + Sync {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<ssl::SslAcceptor, TlsError>;
 }
 
+#[derive(Clone, Debug)]
+pub struct ControlPlaneCertProvider(pub Certs);
+
+#[async_trait::async_trait]
+impl CertProvider for ControlPlaneCertProvider {
+    async fn fetch_cert(&mut self, _: &TcpStream) -> Result<ssl::SslAcceptor, TlsError> {
+        let acc = self.0.acceptor()?;
+        Ok(acc)
+    }
+}
+
 #[derive(Clone)]
 pub struct BoringTlsAcceptor<F: CertProvider> {
     /// Acceptor is a function that determines the TLS context to use. As input, the FD of the client
@@ -379,8 +402,8 @@ pub struct BoringTlsAcceptor<F: CertProvider> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TlsError {
-    #[error("tls handshake error")]
-    Handshake,
+    #[error("tls handshake error: {0:?}")]
+    Handshake(#[from] tokio_boring::HandshakeError<TcpStream>),
     #[error("tls verification error: {0}")]
     Verification(X509VerifyResult),
     #[error("certificate lookup error: {0} is not a known destination")]
@@ -412,7 +435,7 @@ where
             let tls = acceptor.fetch_cert(&inner).await?;
             tokio_boring::accept(&tls, inner)
                 .await
-                .map_err(|_| TlsError::Handshake)
+                .map_err(TlsError::Handshake)
         })
     }
 }
@@ -521,10 +544,11 @@ pub fn test_certs() -> Certs {
 
 #[cfg(test)]
 pub mod tests {
+    use std::time::Duration;
+
     use crate::identity::Identity;
 
     use super::generate_test_certs;
-    use std::time::Duration;
 
     #[test]
     fn is_fips_enabled() {

@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use prometheus_client::registry::Registry;
-use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, info, warn};
 
@@ -39,8 +40,6 @@ pub async fn build_with_cert(
     // Note: there is still a hard timeout if the draining takes too long
     let (drain_tx, drain_rx) = drain::channel();
 
-    let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-
     let ready = admin::Ready::new();
     let proxy_task = ready.register_task("proxy listeners");
 
@@ -51,12 +50,13 @@ pub async fn build_with_cert(
     )
     .await?;
 
+    let shutdown_trigger = shutdown.trigger();
     let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
-        .bind(registry)
+        .bind(registry, shutdown_trigger)
         .expect("admin server starts");
     let admin_address = admin.address();
-    admin.spawn(&shutdown, drain_rx.clone());
 
+    let drain_rx_admin = drain_rx.clone();
     let proxy = proxy::Proxy::new(
         config.clone(),
         workload_manager.workloads(),
@@ -67,14 +67,30 @@ pub async fn build_with_cert(
     .await?;
     drop(proxy_task);
 
-    let proxy_addresses = proxy.addresses();
-
-    tasks.push(tokio::spawn(async move {
+    // spawn admin task and xds client task
+    admin.spawn(drain_rx_admin);
+    tokio::spawn(async move {
         if let Err(e) = workload_manager.run().await {
             error!("workload manager: {}", e);
         }
-    }));
-    tasks.push(tokio::spawn(proxy.run()));
+    });
+
+    let proxy_addresses = proxy.addresses();
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(config.num_worker_threads)
+            .thread_name_fn(|| {
+                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                format!("ztunnel-proxy-{}", id)
+            })
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            proxy.run().await;
+        });
+    });
 
     Ok(Bound {
         drain_tx,
@@ -82,7 +98,6 @@ pub async fn build_with_cert(
         shutdown,
         admin_address,
         proxy_addresses,
-        tasks,
     })
 }
 
@@ -101,17 +116,12 @@ pub struct Bound {
     pub proxy_addresses: proxy::Addresses,
 
     pub shutdown: signal::Shutdown,
-    tasks: Vec<JoinHandle<()>>,
     config: config::Config,
     drain_tx: drain::Signal,
 }
 
 impl Bound {
-    pub async fn spawn(self) -> anyhow::Result<()> {
-        tokio::spawn(async move {
-            futures::future::join_all(self.tasks).await;
-        });
-
+    pub async fn wait_termination(self) -> anyhow::Result<()> {
         // Wait for a signal to shutdown from explicit admin shutdown or signal
         self.shutdown.wait().await;
 

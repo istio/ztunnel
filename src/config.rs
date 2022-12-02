@@ -26,6 +26,7 @@ const NODE_NAME: &str = "NODE_NAME";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
+const CA_ADDRESS: &str = "CA_ADDRESS";
 const TERMINATION_GRACE_PERIOD: &str = "TERMINATION_GRACE_PERIOD";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
@@ -56,6 +57,10 @@ pub struct Config {
     #[serde(default)]
     pub local_node: Option<String>,
 
+    /// CA address to use. If fake_ca is set, this will be None.
+    /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
+    #[serde(default)]
+    pub ca_address: Option<String>,
     /// XDS address to use. If unset, XDS will not be used.
     #[serde(default)]
     pub xds_address: Option<String>,
@@ -120,13 +125,20 @@ fn parse_args() -> String {
 }
 
 pub fn parse_config() -> Result<Config, Error> {
-    let default_xds_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
+    let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system:15012".to_string()
     } else {
         "https://localhost:15012".to_string()
     };
     let xds_address =
-        Some(parse_default(XDS_ADDRESS, default_xds_address)?).filter(|s| !s.is_empty());
+        Some(parse_default(XDS_ADDRESS, default_istiod_address.clone())?).filter(|s| !s.is_empty());
+
+    let fake_ca = parse_default(FAKE_CA, false)?;
+    let ca_address = if fake_ca {
+        None
+    } else {
+        Some(parse_default(CA_ADDRESS, default_istiod_address)?)
+    };
     Ok(Config {
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
@@ -147,10 +159,11 @@ pub fn parse_config() -> Result<Config, Error> {
         local_node: parse(NODE_NAME)?,
 
         xds_address,
+        ca_address,
         local_xds_path: parse(LOCAL_XDS_PATH)?,
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
 
-        fake_ca: parse_default(FAKE_CA, false)?,
+        fake_ca,
         auth: identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token")),
 
         num_worker_threads: parse_default(ZTUNNEL_WORKER_THREADS, DEFAULT_WORKER_THREADS)?,
