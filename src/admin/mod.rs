@@ -35,7 +35,10 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tracing::{error, info};
 
+use crate::config::Config;
 use crate::workload::WorkloadInformation;
+use crate::workload::Workload;
+use crate::version::BuildInfo;
 use crate::{config, signal, telemetry};
 
 /// Supports configuring an admin server
@@ -43,6 +46,7 @@ pub struct Builder {
     addr: SocketAddr,
     workload_info: WorkloadInformation,
     ready: Ready,
+    config: Config,
 }
 
 pub struct Server {
@@ -51,6 +55,19 @@ pub struct Server {
     server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
     workload_info: WorkloadInformation,
     registry: Arc<Mutex<Registry>>,
+    config: Config,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct ConfigDump {
+    #[serde(flatten)]
+    workload_info: WorkloadInformation,
+    #[serde(default)]
+    static_workloads: Vec<Workload>,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    config: Config,
 }
 
 /// Ready tracks whether the process is ready.
@@ -115,6 +132,7 @@ impl Builder {
             addr: config.admin_addr,
             ready,
             workload_info,
+            config: config,
         }
     }
 
@@ -123,6 +141,7 @@ impl Builder {
             addr,
             ready,
             workload_info,
+            config,
         } = self;
 
         let bind = AddrIncoming::bind(&addr)?;
@@ -139,6 +158,7 @@ impl Builder {
             server,
             workload_info,
             registry,
+            config,
         })
     }
 }
@@ -158,6 +178,7 @@ impl Server {
         let workload_info = self.workload_info.clone();
         let shutdown_trigger = shutdown.trigger();
         let registry = self.registry();
+        let config: Config = self.config;
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
@@ -165,6 +186,7 @@ impl Server {
                 let workload_info = workload_info.clone();
                 let registry = Arc::clone(&registry);
                 let shutdown_trigger = shutdown_trigger.clone();
+                let config: Config = config.clone();
                 async move {
                     let workload_info = workload_info.clone();
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
@@ -172,6 +194,14 @@ impl Server {
                         let workload_info = workload_info.clone();
                         let registry = Arc::clone(&registry);
                         let shutdown_trigger = shutdown_trigger.clone();
+                        let config: Config = config.clone();
+                        
+                        let config_dump: ConfigDump = ConfigDump { 
+                            workload_info: (workload_info), 
+                            static_workloads: ([].to_vec()),
+                            version: BuildInfo::new().to_string(),
+                            config: config,
+                        };
                         async move {
                             match req.uri().path() {
                                 "/healthz/ready" => {
@@ -190,7 +220,7 @@ impl Server {
                                     handle_server_shutdown(shutdown_trigger, req).await,
                                 ),
                                 "/config_dump" => Ok::<_, hyper::Error>(
-                                    handle_config_dump(workload_info, req).await,
+                                    handle_config_dump(config_dump, req).await,
                                 ),
                                 "/metrics" => {
                                     Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
@@ -294,7 +324,24 @@ async fn handle_server_shutdown(
     }
 }
 
-async fn handle_config_dump(dump: WorkloadInformation, _req: Request<Body>) -> Response<Body> {
+async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Response<Body> {
+    if let Some(path) = dump.config.local_xds_path.clone() {
+        match tokio::fs::read_to_string(path).await {
+            Ok(data) => {
+                match serde_yaml::from_str(&data) {
+                    Ok(raw_workloads) => dump.static_workloads = raw_workloads,
+                    Err(e) => error!("Failed to load static workloads from local XDS {:?}:{:?}",
+                        dump.config.local_xds_path, e
+                    ),
+                }
+            },
+            Err(e) => error!(
+                "Failed to read local XDS file {:?}:{:?}",
+                dump.config.local_xds_path, e
+            ),
+        }
+    }
+    
     let vec = serde_json::to_vec(&dump).unwrap();
     Response::builder()
         .status(hyper::StatusCode::OK)

@@ -32,36 +32,55 @@ const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 
 const DEFAULT_WORKER_THREADS: usize = 2;
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize,Clone, Debug)]
 pub struct Config {
+    #[serde(default)]
     pub window_size: u32,
+    #[serde(default)]
     pub connection_window_size: u32,
+    #[serde(default)]
     pub frame_size: u32,
 
+    #[serde(default)]
     pub socks5_addr: SocketAddr,
+    #[serde(default)]
     pub admin_addr: SocketAddr,
+    #[serde(default)]
     pub inbound_addr: SocketAddr,
+    #[serde(default)]
     pub inbound_plaintext_addr: SocketAddr,
+    #[serde(default)]
     pub outbound_addr: SocketAddr,
 
     /// The name of the node this ztunnel is running as.
+    #[serde(default)]
     pub local_node: Option<String>,
 
     /// XDS address to use. If unset, XDS will not be used.
+    #[serde(default)]
     pub xds_address: Option<String>,
     /// Filepath to a local xds file for workloads, as YAML.
+    #[serde(default)]
     pub local_xds_path: Option<String>,
     /// If true, on-demand XDS will be used
+    #[serde(default)]
     pub xds_on_demand: bool,
 
     /// If true, then use builtin fake CA with self-signed certificates.
+    #[serde(default)]
     pub fake_ca: bool,
+    #[serde(skip_serializing)]
     pub auth: identity::AuthSource,
-
+    #[serde(default)]
     pub termination_grace_period: time::Duration,
 
     /// Specify the number of worker threads the Tokio Runtime will use.
+    #[serde(default)]
     pub num_worker_threads: usize,
+
+    // CLI args passed to ztunnel at runtime
+    #[serde(default)]
+    pub proxy_args: String,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -93,6 +112,11 @@ fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
 
 fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
     parse(env).map(|v| v.unwrap_or(default))
+}
+
+fn parse_args() -> String {
+    let cli_args: Vec<String> = std::env::args().collect();
+    return cli_args[1..].join(" ")
 }
 
 pub fn parse_config() -> Result<Config, Error> {
@@ -130,5 +154,7 @@ pub fn parse_config() -> Result<Config, Error> {
         auth: identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token")),
 
         num_worker_threads: parse_default(ZTUNNEL_WORKER_THREADS, DEFAULT_WORKER_THREADS)?,
+
+        proxy_args: parse_args(),
     })
 }
