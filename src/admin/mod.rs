@@ -30,6 +30,7 @@ use tokio::sync::oneshot;
 use pprof::protos::Message;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
+use std::collections::HashMap;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
@@ -58,6 +59,7 @@ pub struct Server {
     registry: Arc<Mutex<Registry>>,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
+    log_handle: LogHandle,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
@@ -128,7 +130,12 @@ impl Drop for BlockReady {
 }
 
 impl Builder {
-    pub fn new(config: config::Config, workload_info: WorkloadInformation, ready: Ready) -> Self {
+    pub fn new(
+        config: config::Config,
+        workload_info: WorkloadInformation,
+        ready: Ready,
+        log_handle: telemetry::LogHandle,
+    ) -> Self {
         Self {
             addr: config.admin_addr,
             ready,
@@ -165,6 +172,7 @@ impl Builder {
             registry,
             config,
             shutdown_trigger,
+            log_handle,
         })
     }
 }
@@ -186,6 +194,7 @@ impl Server {
         let registry = self.registry();
         let config: Config = self.config;
         let shutdown_trigger = self.shutdown_trigger.clone();
+        let log_hdl = self.log_handle.clone();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
@@ -231,6 +240,9 @@ impl Server {
                                 ),
                                 "/metrics" => {
                                     Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
+                                }
+                                "/loglevel" => {
+                                    Ok::<_, hyper::Error>(handle_loglevel(req, log_hdl).await)
                                 }
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
@@ -385,6 +397,58 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
         )
         .body(Body::from(buf))
         .unwrap()
+}
+
+async fn handle_loglevel(req: Request<Body>, log_handle: telemetry::LogHandle) -> Response<Body> {
+    match *req.method() {
+        hyper::Method::GET => {
+            let loglevel = match log_handle.get_current() {
+                Ok(level) => format!("current log level is {}\n", level),
+                Err(e) => format!("failed to get log level, err: {}\n", e.to_string()),
+            };
+            Response::builder()
+                .status(hyper::StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "text/plain")
+                .body(loglevel.into())
+                .unwrap()
+        }
+        hyper::Method::POST => {
+            let new_level_str = match get_postvalue(req).await {
+                Ok(level_str) => level_str,
+                //todo how to return here
+                _ => "err".to_string(),
+            };
+            match log_handle.set_level(new_level_str) {
+                Ok(return_str) => Response::builder()
+                    .status(hyper::StatusCode::OK)
+                    .header(hyper::header::CONTENT_TYPE, "text/plain")
+                    .body(return_str.into())
+                    .unwrap(),
+                Err(return_str) => Response::builder()
+                    .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                    .body(format!("failed to change log level {}", return_str).into())
+                    .unwrap(),
+            }
+        }
+
+        _ => Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(format!("Invalid HTTP method").into())
+            .unwrap(),
+    }
+}
+
+async fn get_postvalue(req: Request<Body>) -> Result<String, Error> {
+    let body = hyper::body::to_bytes(req).await?;
+    let params = url::form_urlencoded::parse(body.as_ref())
+        .into_owned()
+        .collect::<HashMap<String, String>>();
+    let newlevel = if let Some(n) = params.get("newlevel") {
+        n
+    } else {
+        "err"
+    };
+    Ok(String::from(newlevel))
 }
 
 #[cfg(feature = "gperftools")]

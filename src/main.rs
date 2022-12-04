@@ -26,7 +26,14 @@ use ztunnel::*;
 // static GLOBAL: tcmalloc::TCMalloc = tcmalloc::TCMalloc;
 
 fn main() -> anyhow::Result<()> {
-    telemetry::setup_logging();
+    let log_handle = match telemetry::setup_logging() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("log init failed: {}", e);
+            std::process::exit(1)
+        }
+    };
+
     let config: config::Config = config::parse_config()?;
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
@@ -43,7 +50,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async move { proxy(config).await })
+        .block_on(async move { proxy(config, log_handle).await })
 }
 
 fn version() -> anyhow::Result<()> {
@@ -51,7 +58,12 @@ fn version() -> anyhow::Result<()> {
     Ok(())
 }
 
+<<<<<<< HEAD
 async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
     info!("running with config: {cfg:#?}");
+=======
+async fn proxy(cfg: config::Config, log_handle: telemetry::LogHandle) -> anyhow::Result<()> {
+    info!("running with config {cfg:?}");
+>>>>>>> add loglevel in adm command to dynamically get/set loglevels
     app::build(cfg).await?.wait_termination().await
 }

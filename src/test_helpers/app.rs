@@ -39,9 +39,17 @@ where
     F: Fn(TestApp) -> Fut,
     Fut: Future<Output = FO>,
 {
-    initialize_telemetry();
+    let log_handle = match initialize_telemetry() {
+        Ok(h) => h.clone(),
+        Err(e) => {
+            eprintln!("log init failed: {}", e);
+            std::process::exit(1)
+        }
+    };
     let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
-    let app = app::build_with_cert(cfg, cert_manager).await.unwrap();
+    let app = app::build_with_cert(cfg, cert_manager, log_handle)
+        .await
+        .unwrap();
     let shutdown = app.shutdown.trigger().clone();
 
     let ta = TestApp {

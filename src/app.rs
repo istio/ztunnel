@@ -24,11 +24,13 @@ use tracing::{error, info, warn};
 
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
+use crate::telemetry;
 use crate::{admin, config, identity, proxy, signal, workload};
 
 pub async fn build_with_cert(
     config: config::Config,
     cert_manager: impl CertificateProvider,
+    log_handle: telemetry::LogHandle,
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
     let metrics = Arc::new(Metrics::from(&mut registry));
@@ -51,9 +53,14 @@ pub async fn build_with_cert(
     .await?;
 
     let shutdown_trigger = shutdown.trigger();
-    let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
-        .bind(registry, shutdown_trigger)
-        .expect("admin server starts");
+    let admin = admin::Builder::new(
+        config.clone(),
+        workload_manager.workloads(),
+        ready,
+        log_handle,
+    )
+    .bind(registry, shutdown_trigger)
+    .expect("admin server starts");
     let admin_address = admin.address();
 
     let drain_rx_admin = drain_rx.clone();
@@ -101,13 +108,21 @@ pub async fn build_with_cert(
     })
 }
 
-pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
+pub async fn build(
+    config: config::Config,
+    log_handle: telemetry::LogHandle,
+) -> anyhow::Result<Bound> {
     if config.fake_ca {
         let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(86400));
-        build_with_cert(config, cert_manager).await
+        build_with_cert(config, cert_manager, log_handle).await
     } else {
+<<<<<<< HEAD
         let cert_manager = identity::SecretManager::new(config.clone())?;
         build_with_cert(config, cert_manager).await
+=======
+        let cert_manager = identity::SecretManager::new(config.clone());
+        build_with_cert(config, cert_manager, log_handle).await
+>>>>>>> add loglevel in adm command to dynamically get/set loglevels
     }
 }
 
