@@ -33,7 +33,7 @@ const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 
 const DEFAULT_WORKER_THREADS: usize = 2;
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
@@ -60,12 +60,15 @@ pub struct Config {
 
     /// If true, then use builtin fake CA with self-signed certificates.
     pub fake_ca: bool,
+    #[serde(skip_serializing)]
     pub auth: identity::AuthSource,
-
     pub termination_grace_period: time::Duration,
 
     /// Specify the number of worker threads the Tokio Runtime will use.
     pub num_worker_threads: usize,
+
+    // CLI args passed to ztunnel at runtime
+    pub proxy_args: String,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -97,6 +100,11 @@ fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
 
 fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
     parse(env).map(|v| v.unwrap_or(default))
+}
+
+fn parse_args() -> String {
+    let cli_args: Vec<String> = std::env::args().collect();
+    cli_args[1..].join(" ")
 }
 
 pub fn parse_config() -> Result<Config, Error> {
@@ -142,5 +150,7 @@ pub fn parse_config() -> Result<Config, Error> {
         auth: identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token")),
 
         num_worker_threads: parse_default(ZTUNNEL_WORKER_THREADS, DEFAULT_WORKER_THREADS)?,
+
+        proxy_args: parse_args(),
     })
 }
