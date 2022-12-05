@@ -128,7 +128,7 @@ async fn test_shutdown_forced_drain() {
     let shutdown = app.shutdown.trigger().clone();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        app.spawn().await.unwrap();
+        app.wait_termination().await.unwrap();
         // Notify we shut down
         shutdown_tx.send(()).unwrap();
     });
