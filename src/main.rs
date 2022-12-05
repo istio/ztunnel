@@ -26,13 +26,7 @@ use ztunnel::*;
 // static GLOBAL: tcmalloc::TCMalloc = tcmalloc::TCMalloc;
 
 fn main() -> anyhow::Result<()> {
-    let log_handle = match telemetry::setup_logging() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("log init failed: {}", e);
-            std::process::exit(1)
-        }
-    };
+    telemetry::setup_logging();
 
     let config: config::Config = config::parse_config()?;
 
@@ -50,7 +44,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async move { proxy(config, log_handle).await })
+        .block_on(async move { proxy(config).await })
 }
 
 fn version() -> anyhow::Result<()> {
@@ -59,11 +53,20 @@ fn version() -> anyhow::Result<()> {
 }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
     info!("running with config: {cfg:#?}");
 =======
 async fn proxy(cfg: config::Config, log_handle: telemetry::LogHandle) -> anyhow::Result<()> {
     info!("running with config {cfg:?}");
 >>>>>>> add loglevel in adm command to dynamically get/set loglevels
+=======
+async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
+    info!("running with config {cfg:?}");
+<<<<<<< HEAD
+>>>>>>> enhancement: avoid changing the set_logging() interface
     app::build(cfg).await?.wait_termination().await
+=======
+    app::build(cfg).await?.spawn().await
+>>>>>>> enhancement: avoid changing the set_logging() interface
 }

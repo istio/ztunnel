@@ -42,6 +42,7 @@ use crate::version::BuildInfo;
 use crate::workload::Workload;
 use crate::workload::WorkloadInformation;
 use crate::{config, signal, telemetry};
+use crate::proxy::Error;
 
 /// Supports configuring an admin server
 pub struct Builder {
@@ -59,7 +60,6 @@ pub struct Server {
     registry: Arc<Mutex<Registry>>,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
-    log_handle: LogHandle,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
@@ -130,12 +130,7 @@ impl Drop for BlockReady {
 }
 
 impl Builder {
-    pub fn new(
-        config: config::Config,
-        workload_info: WorkloadInformation,
-        ready: Ready,
-        log_handle: telemetry::LogHandle,
-    ) -> Self {
+    pub fn new(config: config::Config, workload_info: WorkloadInformation, ready: Ready) -> Self {
         Self {
             addr: config.admin_addr,
             ready,
@@ -172,7 +167,6 @@ impl Builder {
             registry,
             config,
             shutdown_trigger,
-            log_handle,
         })
     }
 }
@@ -241,9 +235,7 @@ impl Server {
                                 "/metrics" => {
                                     Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
                                 }
-                                "/loglevel" => {
-                                    Ok::<_, hyper::Error>(handle_loglevel(req, log_hdl).await)
-                                }
+                                "/loglevel" => Ok::<_, hyper::Error>(handle_loglevel(req).await),
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
@@ -399,12 +391,12 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
         .unwrap()
 }
 
-async fn handle_loglevel(req: Request<Body>, log_handle: telemetry::LogHandle) -> Response<Body> {
+async fn handle_loglevel(req: Request<Body>) -> Response<Body> {
     match *req.method() {
         hyper::Method::GET => {
-            let loglevel = match log_handle.get_current() {
+            let loglevel = match telemetry::get_current() {
                 Ok(level) => format!("current log level is {}\n", level),
-                Err(e) => format!("failed to get log level, err: {}\n", e.to_string()),
+                Err(e) => format!("failed to get log level, err: {}\n", e),
             };
             Response::builder()
                 .status(hyper::StatusCode::OK)
@@ -412,33 +404,26 @@ async fn handle_loglevel(req: Request<Body>, log_handle: telemetry::LogHandle) -
                 .body(loglevel.into())
                 .unwrap()
         }
-        hyper::Method::POST => {
-            match get_new_loglevel(req).await {
-                Ok(level) => {
-                    let response = match log_handle.set_level(level) {
-                        Ok(return_str) => Response::builder()
-                            .status(hyper::StatusCode::OK)
-                            .header(hyper::header::CONTENT_TYPE, "text/plain")
-                            .body(return_str.into())
-                            .unwrap(),
-                        Err(return_str) => Response::builder()
-                            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-                            .body(format!("failed to change log level {}\n", return_str).into())
-                            .unwrap(),
-                    };
-                    response
-                }
-                Err(msg) => {
-                    Response::builder()
-                    .status(hyper::StatusCode::NOT_FOUND)
-                    .body(format!("failed to get the new log level, {}\n", msg).into())
-                    .unwrap()
-                }
-            }
-        }
+        hyper::Method::POST => match get_new_loglevel(req).await {
+            Ok(level) => match telemetry::set_level(level) {
+                Ok(return_str) => Response::builder()
+                    .status(hyper::StatusCode::OK)
+                    .header(hyper::header::CONTENT_TYPE, "text/plain")
+                    .body(return_str.into())
+                    .unwrap(),
+                Err(return_str) => Response::builder()
+                    .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                    .body(format!("failed to change log level {}\n", return_str).into())
+                    .unwrap(),
+            },
+            Err(msg) => Response::builder()
+                .status(hyper::StatusCode::NOT_FOUND)
+                .body(format!("failed to get the new log level, {}\n", msg).into())
+                .unwrap(),
+        },
         _ => Response::builder()
             .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(format!("Invalid HTTP method\n").into())
+            .body("Invalid HTTP method\n".to_string().into())
             .unwrap(),
     }
 }
@@ -451,7 +436,9 @@ async fn get_new_loglevel(req: Request<Body>) -> Result<String, Error> {
     if let Some(n) = params.get("newlevel") {
         Ok(String::from(n))
     } else {
-        Err(Error::InvalidParam("unable to find newlevel in request".to_string()))
+        Err(Error::InvalidParam(
+            "unable to find newlevel in request".to_string(),
+        ))
     }
 }
 

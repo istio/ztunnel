@@ -32,11 +32,9 @@ use ztunnel::test_helpers::*;
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
-    let log_handle = helpers::initialize_telemetry();
+    helpers::initialize_telemetry();
 
-    let app = ztunnel::app::build(test_config(), log_handle)
-        .await
-        .unwrap();
+    let app = ztunnel::app::build(test_config()).await.unwrap();
 
     let shutdown = app.shutdown.trigger().clone();
     let (app, _shutdown) = tokio::join!(
@@ -60,11 +58,9 @@ async fn test_conflicting_bind_error() {
 
 #[tokio::test]
 async fn test_shutdown_drain() {
-    let log_handle = helpers::initialize_telemetry();
+    helpers::initialize_telemetry();
 
-    let app = ztunnel::app::build(test_config(), log_handle)
-        .await
-        .unwrap();
+    let app = ztunnel::app::build(test_config()).await.unwrap();
     let ta = TestApp {
         admin_address: app.admin_address,
         proxy_addresses: app.proxy_addresses,
@@ -138,11 +134,9 @@ async fn test_shutdown_forced_drain() {
 
 #[tokio::test]
 async fn test_quit_lifecycle() {
-    let log_handle = helpers::initialize_telemetry();
+    helpers::initialize_telemetry();
 
-    let app = ztunnel::app::build(test_config(), log_handle)
-        .await
-        .unwrap();
+    let app = ztunnel::app::build(test_config()).await.unwrap();
     let addr = app.admin_address;
 
     let (app, _shutdown) = tokio::join!(
