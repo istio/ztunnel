@@ -13,19 +13,23 @@
 // limitations under the License.
 
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use pprof::criterion::{Output, PProfProfiler};
+use prometheus_client::registry::Registry;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
-
+use tokio::sync::Mutex;
 use tracing::info;
 
+use ztunnel::metrics::traffic::ConnectionOpen;
+use ztunnel::metrics::Metrics;
+use ztunnel::metrics::Recorder;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::{helpers, tcp};
@@ -35,6 +39,8 @@ const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
 struct TestEnv {
+    ta: TestApp,
+    echo_addr: SocketAddr,
     direct: TcpStream,
     tcp: TcpStream,
     hbone: TcpStream,
@@ -91,7 +97,16 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
         tcp::run_client(&mut direct, 1, client_mode).await.unwrap();
         info!("warmup complete");
 
-        (Arc::new(Mutex::new(TestEnv { hbone, tcp, direct })), t)
+        (
+            Arc::new(Mutex::new(TestEnv {
+                hbone,
+                tcp,
+                direct,
+                ta,
+                echo_addr,
+            })),
+            t,
+        )
     });
     (env, rt)
 }
@@ -145,11 +160,58 @@ pub fn throughput(c: &mut Criterion) {
     });
 }
 
+pub fn connections(c: &mut Criterion) {
+    let (env, rt) = initialize_environment(Mode::ReadWrite);
+    let mut c = c.benchmark_group("connections");
+    c.bench_function("direct", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s = TcpStream::connect(e.echo_addr).await.unwrap();
+            s.set_nodelay(true).unwrap();
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    c.bench_function("tcp", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(e.echo_addr, "127.0.0.2".parse().unwrap()))
+                    .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    // TODO(https://github.com/istio/ztunnel/issues/15): when we have pooling, split this into "new hbone connection"
+    // and "new connection on existing HBONE connection"
+    c.bench_function("hbone", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(e.echo_addr, "127.0.0.1".parse().unwrap()))
+                    .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+}
+
+pub fn metrics(c: &mut Criterion) {
+    let mut registry = Registry::default();
+    let metrics = Metrics::new(registry.sub_registry_with_prefix("istio"));
+
+    let mut c = c.benchmark_group("metrics");
+    c.bench_function("write", |b| b.iter(|| metrics.record(&ConnectionOpen {})));
+    c.bench_function("encode", |b| {
+        b.iter(|| {
+            let mut buf: Vec<u8> = Vec::new();
+            prometheus_client::encoding::text::encode(&mut buf, &registry).unwrap();
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = latency, throughput
+    targets = latency, throughput, connections, metrics
 }
 criterion_main!(benches);
