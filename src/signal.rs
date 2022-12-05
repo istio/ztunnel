@@ -65,13 +65,20 @@ impl ShutdownTrigger {
 
 #[cfg(unix)]
 mod imp {
+    use std::process;
     use tokio::signal::unix::{signal, SignalKind};
     use tokio::sync::mpsc::Receiver;
     use tracing::info;
 
     pub(super) async fn shutdown(receiver: &mut Receiver<()>) {
         tokio::select! {
-            _ = watch_signal(SignalKind::interrupt(), "SIGINT") => {}
+            _ = watch_signal(SignalKind::interrupt(), "SIGINT") => {
+                tokio::spawn(async move{
+                    watch_signal(SignalKind::interrupt(), "SIGINT").await;
+                    info!("Double Ctrl+C, exit immediately");
+                    process::exit(0);
+                });
+            }
             _ = watch_signal(SignalKind::terminate(), "SIGTERM") => {}
             _ = receiver.recv() => { info!("received explicit shutdown signal")}
         };
