@@ -20,12 +20,14 @@ use tracing_subscriber::{
     filter::{EnvFilter, LevelFilter},
     prelude::*,
     reload,
-    reload::Error,
     Layer, Registry,
 };
 use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
+pub static LOG_HANDLE: Lazy<LogHandle> = Lazy::new(|instance|{
+    LogHandle::new(instance)
+});
 
 #[cfg(feature = "console")]
 pub fn setup_logging() {
@@ -37,7 +39,7 @@ pub fn setup_logging() {
 }
 
 #[cfg(not(feature = "console"))]
-pub fn setup_logging() -> Result<LogHandle, Error> {
+pub fn setup_logging() {
     Lazy::force(&APPLICATION_START_TIME);
     tracing_subscriber::registry().with(fmt_layer()).init();
 }
@@ -49,8 +51,8 @@ fn fmt_layer() -> impl Layer<Registry> + Sized {
         .unwrap();
     let (filter_layer, reload_handle) =
         reload::Layer::new(tracing_subscriber::fmt::layer().with_filter(filter));
+    Lazy::force(&LOG_HANDLE(reload_handle));
     tracing_subscriber::registry().with(filter_layer).init();
-    Ok(LogHandle::new(reload_handle))
 }
 
 #[derive(Clone)]
@@ -65,9 +67,8 @@ impl LogHandle {
     }
 
     pub fn set_level(&self, level_str: String) -> Result<String, Error> {
-        let mut level: LevelFilter = LevelFilter::INFO;
+        let level: LevelFilter;
 
-        let mut wrong_level = false;
         match level_str.as_str() {
             "debug" => level = LevelFilter::DEBUG,
             "error" => level = LevelFilter::ERROR,
@@ -75,28 +76,38 @@ impl LogHandle {
             "warn" => level = LevelFilter::WARN,
             "trace" => level = LevelFilter::TRACE,
             "off" => level = LevelFilter::OFF,
-            //todo how to directly return here
-            _ => wrong_level = true,
+            _ => {
+                return Err(Error::InvalidParam(
+                    "unable to find newlevel in request\n".to_string(),
+                ))
+            }
         }
 
-        if wrong_level == false {
-            let filter =
-                tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
-            self.0.modify(|layer| {
-                *layer.filter_mut() = filter;
-            })?;
-            let ret_str = format!("set new log level to {} \n", level);
-            tracing::info!(%level, ret_str);
-            Ok(ret_str)
-        } else {
-            let ret_str = format!("the new log level is incorrect {} \n", level_str);
-            Ok(ret_str)
+        let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
+        match self.0.modify(|layer| {
+            *layer.filter_mut() = filter;
+        }) {
+            Ok(_) => {
+                let ret_str = format!("set new log level to {} \n", level);
+                tracing::info!(%level, ret_str);
+                Ok(ret_str)
+            }
+            Err(e) => {
+                let ret_str = format!("failed to set new level {}: {} \n", level, e);
+                tracing::info!(%level, ret_str);
+                Err(Error::InvalidParam(ret_str))
+            }
         }
     }
 
     pub fn get_current(&self) -> Result<String, Error> {
-        self.0
-            .with_current(|f| format!("{}", f.filter()))
-            .map_err(Into::into)
+        match self.0.with_current(|f| format!("{}", f.filter())) {
+            Ok(current_level) => {
+                Ok(current_level)
+            }
+            Err(e) => {
+                Err(Error::InvalidParam(e.to_string()))
+            }
+        }
     }
 }

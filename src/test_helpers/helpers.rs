@@ -16,7 +16,7 @@ use crate::telemetry;
 use once_cell::sync::Lazy;
 use std::net::{IpAddr, SocketAddr};
 use telemetry::LogHandle;
-use tracing_subscriber::reload::Error;
+use crate::proxy::Error;
 
 // Ensure that the `tracing` stack is only initialised once using `once_cell`
 static TRACING: Lazy<Result<LogHandle, Error>> = Lazy::new(telemetry::setup_logging);

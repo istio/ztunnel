@@ -194,7 +194,7 @@ impl Server {
         let registry = self.registry();
         let config: Config = self.config;
         let shutdown_trigger = self.shutdown_trigger.clone();
-        let log_hdl = self.log_handle.clone();
+        // let log_hdl = self.log_handle.clone();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
@@ -413,42 +413,46 @@ async fn handle_loglevel(req: Request<Body>, log_handle: telemetry::LogHandle) -
                 .unwrap()
         }
         hyper::Method::POST => {
-            let new_level_str = match get_postvalue(req).await {
-                Ok(level_str) => level_str,
-                //todo how to return here
-                _ => "err".to_string(),
-            };
-            match log_handle.set_level(new_level_str) {
-                Ok(return_str) => Response::builder()
-                    .status(hyper::StatusCode::OK)
-                    .header(hyper::header::CONTENT_TYPE, "text/plain")
-                    .body(return_str.into())
-                    .unwrap(),
-                Err(return_str) => Response::builder()
-                    .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-                    .body(format!("failed to change log level {}", return_str).into())
-                    .unwrap(),
+            match get_new_loglevel(req).await {
+                Ok(level) => {
+                    let response = match log_handle.set_level(level) {
+                        Ok(return_str) => Response::builder()
+                            .status(hyper::StatusCode::OK)
+                            .header(hyper::header::CONTENT_TYPE, "text/plain")
+                            .body(return_str.into())
+                            .unwrap(),
+                        Err(return_str) => Response::builder()
+                            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                            .body(format!("failed to change log level {}\n", return_str).into())
+                            .unwrap(),
+                    };
+                    response
+                }
+                Err(msg) => {
+                    Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(format!("failed to get the new log level, {}\n", msg).into())
+                    .unwrap()
+                }
             }
         }
-
         _ => Response::builder()
             .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(format!("Invalid HTTP method").into())
+            .body(format!("Invalid HTTP method\n").into())
             .unwrap(),
     }
 }
 
-async fn get_postvalue(req: Request<Body>) -> Result<String, Error> {
+async fn get_new_loglevel(req: Request<Body>) -> Result<String, Error> {
     let body = hyper::body::to_bytes(req).await?;
     let params = url::form_urlencoded::parse(body.as_ref())
         .into_owned()
         .collect::<HashMap<String, String>>();
-    let newlevel = if let Some(n) = params.get("newlevel") {
-        n
+    if let Some(n) = params.get("newlevel") {
+        Ok(String::from(n))
     } else {
-        "err"
-    };
-    Ok(String::from(newlevel))
+        Err(Error::InvalidParam("unable to find newlevel in request".to_string()))
+    }
 }
 
 #[cfg(feature = "gperftools")]
