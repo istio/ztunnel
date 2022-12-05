@@ -206,14 +206,21 @@ impl OutboundConnection {
                 let code = response.status();
                 match hyper::upgrade::on(response).await {
                     Ok(mut upgraded) => {
-                        super::copy_hbone("hbone client", &mut upgraded, &mut stream)
-                            .await
-                            .expect("hbone client copy");
+                        if let Err(e) =
+                            super::copy_hbone("hbone client", &mut upgraded, &mut stream).await
+                        {
+                            error!("hbone client copy: {}", e);
+                            Err(Error::Io(e))
+                        } else {
+                            info!("request complete");
+                            Ok(())
+                        }
                     }
-                    Err(e) => error!("upgrade error: {}, {}", e, code),
+                    Err(e) => {
+                        error!("upgrade error: {}, {}", e, code);
+                        Err(Error::Http(e))
+                    }
                 }
-                info!("request complete");
-                Ok(())
             }
             Protocol::TCP => {
                 info!(

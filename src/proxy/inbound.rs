@@ -131,9 +131,12 @@ impl Inbound {
                         }
                         Hbone(req) => match hyper::upgrade::on(req).await {
                             Ok(mut upgraded) => {
-                                super::copy_hbone("hbone server", &mut upgraded, &mut stream)
-                                    .await
-                                    .expect("hbone server copy");
+                                if let Err(e) =
+                                    super::copy_hbone("hbone server", &mut upgraded, &mut stream)
+                                        .await
+                                {
+                                    error!("hbone server copy: {}", e);
+                                }
                             }
                             Err(e) => {
                                 // Not sure if this can even happen

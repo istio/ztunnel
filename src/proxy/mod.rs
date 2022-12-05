@@ -158,7 +158,6 @@ pub async fn copy_hbone(
         let mut wo = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wo);
         let res = tokio::io::copy(&mut ri, &mut wo).await;
         info!(?res, ?desc, "hbone -> tcp");
-        res.expect("");
         wo.shutdown().await
     };
 
