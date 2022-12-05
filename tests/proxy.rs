@@ -112,6 +112,43 @@ async fn test_shutdown_drain() {
 }
 
 #[tokio::test]
+async fn test_shutdown_forced_drain() {
+    helpers::initialize_telemetry();
+
+    let mut cfg = test_config();
+    cfg.termination_grace_period = Duration::from_millis(10);
+    let app = ztunnel::app::build(cfg).await.unwrap();
+    let ta = TestApp {
+        admin_address: app.admin_address,
+        proxy_addresses: app.proxy_addresses,
+    };
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    let shutdown = app.shutdown.trigger().clone();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        app.wait_termination().await.unwrap();
+        // Notify we shut down
+        shutdown_tx.send(()).unwrap();
+    });
+    // we shouldn't be shutdown yet
+    assert!(shutdown_rx.try_recv().is_err());
+    let dst = helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap());
+    let mut stream = ta.socks5_connect(dst).await;
+    const BODY: &[u8] = "hello world".as_bytes();
+    stream.write_all(BODY).await.unwrap();
+
+    // Since we are connected, the app shouldn't shutdown... but it will hit the max time and forcefully exit
+    shutdown.shutdown_now().await;
+    // It shouldn't shut down immediately, but checking that will cause flakes. Just make sure it exits within 1s.
+    timeout(Duration::from_secs(1), shutdown_rx)
+        .await
+        .expect("app should shutdown")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_quit_lifecycle() {
     helpers::initialize_telemetry();
 
