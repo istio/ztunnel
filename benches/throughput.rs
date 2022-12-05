@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ use ztunnel::metrics::Recorder;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::{helpers, tcp};
+use ztunnel::workload::Workload;
 use ztunnel::{app, identity, test_helpers};
 
 const KB: usize = 1024;
@@ -195,10 +196,34 @@ pub fn connections(c: &mut Criterion) {
 
 pub fn metrics(c: &mut Criterion) {
     let mut registry = Registry::default();
-    let metrics = Metrics::new(registry.sub_registry_with_prefix("istio"));
+    let metrics = Metrics::from(&mut registry);
 
     let mut c = c.benchmark_group("metrics");
-    c.bench_function("write", |b| b.iter(|| metrics.record(&ConnectionOpen {})));
+    c.bench_function("write", |b| {
+        b.iter(|| {
+            metrics.record(&ConnectionOpen {
+                reporter: Default::default(),
+                source: Workload {
+                    workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    waypoint_addresses: Default::default(),
+                    gateway_address: Default::default(),
+                    protocol: Default::default(),
+                    name: Default::default(),
+                    namespace: Default::default(),
+                    service_account: Default::default(),
+                    workload_name: Default::default(),
+                    workload_type: Default::default(),
+                    canonical_name: Default::default(),
+                    canonical_revision: Default::default(),
+                    node: Default::default(),
+                    native_hbone: Default::default(),
+                },
+                destination: None,
+                destination_service: None,
+                connection_security_policy: Default::default(),
+            })
+        })
+    });
     c.bench_function("encode", |b| {
         b.iter(|| {
             let mut buf: Vec<u8> = Vec::new();

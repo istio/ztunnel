@@ -52,27 +52,16 @@ impl Default for Metrics {
     }
 }
 
-// impl<M1, M2> Metrics
-// where
-//     Self: Recorder<M1> + Recorder<M2>,
-//     M1: std::fmt::Debug,
-//     M2: std::fmt::Debug,
-// {
-//     pub fn record_and_defer(&self, metric: &M1) {
-//         self.record(metric)
-//     }
-// }
-
 impl Metrics {
     #[must_use = "metric will be dropped (and thus recorded) immediately if not assign"]
     /// record_defer is used to record a metric now and another metric later once the MetricGuard is dropped
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let connection_open = ConnectionOpen {};
     /// // Record connection opened now
-    /// let connection_close = self.metrics.record_defer<_, ConnectionClosed>(&connection_open);
+    /// let connection_close = self.metrics.record_defer::<_, ConnectionClosed>(&connection_open);
     /// // Eventually, report connection closed
     /// drop(connection_close);
     /// ```

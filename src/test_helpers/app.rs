@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::Deref;
 use std::time::Duration;
 
 use hyper::{body, Body, Client, Method, Request, Response};
+use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -75,6 +79,16 @@ impl TestApp {
         s.to_string()
     }
 
+    pub async fn metrics(&self) -> ParsedMetrics {
+        let body = self.admin_request_string("metrics").await;
+        let iter = body
+            .lines()
+            .into_iter()
+            .map(|x| Ok::<_, io::Error>(x.to_string()));
+        let scrape = prometheus_parse::Scrape::parse(iter).unwrap();
+        ParsedMetrics { scrape }
+    }
+
     pub async fn ready(&self) {
         for _ in 0..100 {
             if self.admin_request("healthz/ready").await.is_ok() {
@@ -131,4 +145,63 @@ impl TestApp {
 
         stream
     }
+}
+
+pub struct ParsedMetrics {
+    scrape: Scrape,
+}
+
+impl ParsedMetrics {
+    pub fn query(
+        &self,
+        metric: &str,
+        labels: HashMap<String, String>,
+    ) -> Option<Vec<&prometheus_parse::Sample>> {
+        if !self
+            .scrape
+            .docs
+            .contains_key(metric.strip_suffix("_total").unwrap_or(metric))
+        {
+            return None;
+        }
+        Some(
+            self.scrape
+                .samples
+                .iter()
+                .filter(|s| s.metric == metric)
+                .filter(|s| superset_of(s.labels.deref(), &labels))
+                .collect(),
+        )
+    }
+
+    pub fn query_sum(&self, metric: &str, labels: HashMap<String, String>) -> u64 {
+        let res = self.query(metric, labels);
+        res.map(|streams| {
+            streams
+                .into_iter()
+                .map(|sample| {
+                    match sample.value {
+                        prometheus_parse::Value::Counter(f) => f,
+                        // TOOD(https://github.com/ccakes/prometheus-parse-rs/issues/5) remove this
+                        prometheus_parse::Value::Untyped(f) => f,
+                        _ => panic!("query_sum({metric}) must be a counter"),
+                    }
+                })
+                .map(|f| f as u64)
+                .sum()
+        })
+        .unwrap_or(0)
+    }
+    pub fn dump(&self) -> String {
+        format!("{:?}", self.scrape.samples)
+    }
+}
+
+fn superset_of(base: &HashMap<String, String>, check: &HashMap<String, String>) -> bool {
+    for (k, v) in check {
+        if base.get(k) != Some(v) {
+            return false;
+        }
+    }
+    true
 }

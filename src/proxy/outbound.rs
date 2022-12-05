@@ -159,10 +159,10 @@ impl OutboundConnection {
             connection_security_policy: traffic::SecurityPolicy::unknown,
             destination_service: None,
         };
+        // _connection_close will record once dropped
         let _connection_close = self
             .metrics
             .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
-        // self.metrics.record(&connection_metrics);
         if req.request_type == RequestType::DirectLocal {
             // For same node, we just access it directly rather than making a full network connection.
             // Pass our `stream` over to the inbound handler, which will process as usual

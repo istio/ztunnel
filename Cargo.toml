@@ -60,6 +60,7 @@ tracing-subscriber = { version = "0.3.11" , features = ["registry", "env-filter"
 dyn-clone = "1.0.9"
 realm_io = "0.3.5"
 go-parse-duration = "0.1.1"
+prometheus-parse = "0.2.3"
 
 [build-dependencies]
 tonic-build = { version = "0.8", default-features=false, features = ["prost"] }

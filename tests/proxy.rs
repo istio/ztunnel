@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::ops::Add;
+use std::time::{Duration, SystemTime};
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
+use tracing::trace;
 
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
@@ -89,13 +93,7 @@ async fn test_shutdown_drain() {
     assert!(shutdown_rx.try_recv().is_err());
     let dst = helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap());
     let mut stream = ta.socks5_connect(dst).await;
-
-    const BODY: &[u8] = "hello world".as_bytes();
-    stream.write_all(BODY).await.unwrap();
-    // Echo server should reply back with the same data
-    let mut buf: [u8; BODY.len()] = [0; BODY.len()];
-    stream.read_exact(&mut buf).await.unwrap();
-    assert_eq!(BODY, buf);
+    read_write_stream(&mut stream).await;
     // Since we are connected, the app shouldn't shutdown
     shutdown.shutdown_now().await;
     assert!(shutdown_rx.try_recv().is_err());
@@ -135,14 +133,7 @@ async fn run_request_test(target: &str) {
     testapp::with_app(test_config(), |app| async move {
         let dst = helpers::with_ip(echo_addr, target.parse().unwrap());
         let mut stream = app.socks5_connect(dst).await;
-
-        const BODY: &[u8] = "hello world".as_bytes();
-        stream.write_all(BODY).await.unwrap();
-
-        // Echo server should reply back with the same data
-        let mut buf: [u8; BODY.len()] = [0; BODY.len()];
-        stream.read_exact(&mut buf).await.unwrap();
-        assert_eq!(BODY, buf);
+        read_write_stream(&mut stream).await;
     })
     .await;
 }
@@ -158,19 +149,98 @@ async fn test_tcp_request() {
 }
 
 #[tokio::test]
-async fn test_stats() {
+async fn test_stats_exist() {
     testapp::with_app(test_config(), |app| async move {
-        let body = app.admin_request_string("metrics").await;
-        for (metric, t) in &[
-            ("istio_build", "gauge"),
-            ("istio_connection_terminations", "counter"),
-            ("istio_connections_opened", "counter"),
+        let metrics = app.metrics().await;
+        for metric in &[
+            ("istio_build"),
+            ("istio_connection_terminations"),
+            ("istio_tcp_connections_opened"),
+            ("istio_tcp_connections_closed"),
         ] {
-            let exp = format!("# TYPE {metric} {t}\n");
-            assert!(body.contains(&exp), "expected '{}' in:\n{}", exp, body);
+            assert!(
+                metrics.query(metric, Default::default()).is_some(),
+                "expected metric {}",
+                metric
+            );
         }
     })
     .await;
+}
+
+#[tokio::test]
+async fn test_tcp_metrics() {
+    // Test a round trip outbound call (via socks5)
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    testapp::with_app(test_config(), |app| async move {
+        let dst = helpers::with_ip(echo_addr, "127.0.0.2".parse().unwrap());
+        let mut stream = app.socks5_connect(dst).await;
+        read_write_stream(&mut stream).await;
+
+        // We should have 1 open connection but 0 closed connections
+        let metrics = app.metrics().await;
+        assert_eq!(
+            metrics.query_sum("istio_tcp_connections_opened_total", Default::default()),
+            1,
+            "metrics: {}",
+            metrics.dump()
+        );
+        assert_eq!(
+            metrics.query_sum("istio_tcp_connections_closed_total", Default::default()),
+            0,
+            "metrics: {}",
+            metrics.dump()
+        );
+
+        // Drop the connection...
+        drop(stream);
+
+        // Eventually we should also have 1 closed connection
+        let metrics = app.metrics().await;
+        assert_eventually(
+            Duration::from_secs(2),
+            || metrics.query_sum("istio_tcp_connections_opened_total", Default::default()),
+            1,
+        )
+        .await;
+        assert_eventually(
+            Duration::from_secs(2),
+            || metrics.query_sum("istio_tcp_connections_closed_total", Default::default()),
+            1,
+        )
+        .await;
+    })
+    .await;
+}
+
+async fn assert_eventually<F: Fn() -> T, T: Eq + Debug>(dur: Duration, f: F, expected: T) {
+    let mut delay = Duration::from_millis(10);
+    let end = SystemTime::now().add(dur);
+    let mut last: T;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        last = f();
+        if last == expected {
+            return;
+        }
+        trace!("attempt {attempts} with delay {delay:?}");
+        if SystemTime::now().add(delay) > end {
+            panic!("assert_eventually failed after {attempts}: last response: {last:?}")
+        }
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+    }
+}
+
+async fn read_write_stream(stream: &mut TcpStream) {
+    const BODY: &[u8] = "hello world".as_bytes();
+    stream.write_all(BODY).await.unwrap();
+    let mut buf: [u8; BODY.len()] = [0; BODY.len()];
+    stream.read_exact(&mut buf).await.unwrap();
+    assert_eq!(BODY, buf);
 }
 
 /// admin_shutdown triggers a shutdown - from the admin server
