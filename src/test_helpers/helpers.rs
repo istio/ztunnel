@@ -21,8 +21,15 @@ use tracing_subscriber::reload::Error;
 // Ensure that the `tracing` stack is only initialised once using `once_cell`
 static TRACING: Lazy<Result<LogHandle, Error>> = Lazy::new(telemetry::setup_logging);
 
-pub fn initialize_telemetry() -> &'static Result<LogHandle, Error> {
-    Lazy::force(&TRACING)
+pub fn initialize_telemetry() -> LogHandle {
+    let ret = Lazy::force(&TRACING);
+    match ret {
+        Ok(lh) => lh.to_owned(),
+        Err(err) => {
+            eprintln!("log init failed: {}", err);
+            std::process::exit(1)
+        }
+    }
 }
 
 pub fn with_ip(s: SocketAddr, ip: IpAddr) -> SocketAddr {
