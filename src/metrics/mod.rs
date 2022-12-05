@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::mem;
+
 use prometheus_client::registry::Registry;
 
 mod meta;
@@ -47,6 +49,64 @@ impl Default for Metrics {
     fn default() -> Self {
         let mut registry = Registry::default();
         Metrics::new(registry.sub_registry_with_prefix("istio"))
+    }
+}
+
+// impl<M1, M2> Metrics
+// where
+//     Self: Recorder<M1> + Recorder<M2>,
+//     M1: std::fmt::Debug,
+//     M2: std::fmt::Debug,
+// {
+//     pub fn record_and_defer(&self, metric: &M1) {
+//         self.record(metric)
+//     }
+// }
+
+impl Metrics {
+    #[must_use = "metric will be dropped (and thus recorded) immediately if not assign"]
+    /// record_defer is used to record a metric now and another metric later once the MetricGuard is dropped
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let connection_open = ConnectionOpen {};
+    /// // Record connection opened now
+    /// let connection_close = self.metrics.record_defer<_, ConnectionClosed>(&connection_open);
+    /// // Eventually, report connection closed
+    /// drop(connection_close);
+    /// ```
+    pub fn record_defer<'a, M1, M2>(&'a self, event: &'a M1) -> MetricGuard<'a, M2>
+    where
+        M1: Clone + 'a,
+        M2: From<&'a M1>,
+        Metrics: Recorder<M1> + Recorder<M2>,
+    {
+        self.record(event);
+        let m2: M2 = event.into();
+        MetricGuard {
+            metrics: self,
+            event: Some(m2),
+        }
+    }
+}
+
+pub struct MetricGuard<'a, M>
+where
+    Metrics: Recorder<M>,
+{
+    metrics: &'a Metrics,
+    event: Option<M>,
+}
+
+impl<M> Drop for MetricGuard<'_, M>
+where
+    Metrics: Recorder<M>,
+{
+    fn drop(&mut self) {
+        if let Some(m) = mem::take(&mut self.event) {
+            self.metrics.record(&m)
+        }
     }
 }
 
