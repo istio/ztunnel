@@ -5,6 +5,20 @@ Ztunnel provides an experimental implementation of the ztunnel component of
 
 Note: `istio/ztunnel` is currently intended for experimental usage only.
 
+## Feature Scope
+
+Ztunnel is intended to be a purpose built implementation of the node proxy in [ambient mesh](https://istio.io/latest/blog/2022/introducing-ambient-mesh/).
+Part of the goals of this included keeping a narrow feature set, implementing only the bare minimum requirements for ambient.
+This ensures the project remains simple and high performance.
+
+Explicitly out of scope for ztunnel include:
+* Terminating user HTTP traffic
+* Terminating user HTTP traffic (its worth repeating)
+* Generic extensibility such as `ext_authz`, WASM, linked-in extensions, Lua, etc.
+
+In general, ztunnel does not aim to be a generic extensible proxy; Envoy is better suited for that task.
+If a feature is not directly used to implement the node proxy component in ambient mesh, it is unlikely to be accepted.
+
 ## Building on Non-linux/x86_64
 
 The Ztunnel build enables the `fips` feature by default, which in turn enables the `fips` feature
