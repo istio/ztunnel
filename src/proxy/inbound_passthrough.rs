@@ -56,12 +56,12 @@ impl InboundPassthrough {
                     });
                 }
                 Err(e) => {
-                    error!("Failed TCP handshake {}", e);
                     if e.get_ref().unwrap().to_string()
                         == "A Tokio 1.x context was found, but it is being shutdown"
                     {
                         return;
                     }
+                    error!("Failed TCP handshake {}", e);
                 }
             }
         }

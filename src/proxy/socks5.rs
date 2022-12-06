@@ -92,12 +92,12 @@ impl Socks5 {
                         });
                     }
                     Err(e) => {
-                        error!("Failed TCP handshake {}", e);
                         if e.get_ref().unwrap().to_string()
                             == "A Tokio 1.x context was found, but it is being shutdown"
                         {
                             return;
                         }
+                        error!("Failed TCP handshake {}", e);
                     }
                 }
             }
@@ -106,7 +106,7 @@ impl Socks5 {
         tokio::select! {
             res = accept => { res }
             _ = self.drain.signaled() => {
-                info!("socks5 drained");
+                error!("socks5 drained");
             }
         }
     }
