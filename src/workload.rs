@@ -240,7 +240,7 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
 
 impl WorkloadManager {
     pub async fn new(
-        config: config::Config,
+        config: Arc<config::Config>,
         metrics: Arc<Metrics>,
         awaiting_ready: admin::BlockReady,
     ) -> anyhow::Result<WorkloadManager> {
@@ -256,9 +256,9 @@ impl WorkloadManager {
         } else {
             None
         };
-        if let Some(path) = config.local_xds_path {
+        if let Some(path) = &config.local_xds_path {
             let local_client = LocalClient {
-                path,
+                path: path.to_string(),
                 workloads: workloads.clone(),
             };
             local_client.run().await?;

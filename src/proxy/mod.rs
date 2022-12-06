@@ -44,7 +44,7 @@ pub struct Proxy {
 
 impl Proxy {
     pub async fn new(
-        cfg: config::Config,
+        cfg: Arc<config::Config>,
         workloads: WorkloadInformation,
         cert_manager: Box<dyn CertificateProvider>,
         metrics: Arc<Metrics>,

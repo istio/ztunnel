@@ -16,6 +16,7 @@ extern crate core;
 #[cfg(feature = "gperftools")]
 extern crate gperftools;
 
+use std::sync::Arc;
 use tracing::info;
 use ztunnel::*;
 
@@ -27,7 +28,7 @@ use ztunnel::*;
 
 fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
-    let config: config::Config = config::parse_config()?;
+    let config: Arc<config::Config> = Arc::new(config::parse_config()?);
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
     match std::env::args().nth(1).as_deref() {
@@ -51,7 +52,7 @@ fn version() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
+async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
     info!("running with config {cfg:?}");
     app::build(cfg).await?.wait_termination().await
 }

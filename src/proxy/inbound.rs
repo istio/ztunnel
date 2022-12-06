@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
@@ -31,7 +32,7 @@ use crate::workload::WorkloadInformation;
 use super::Error;
 
 pub struct Inbound {
-    cfg: Config,
+    cfg: Arc<Config>,
     listener: TcpListener,
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
@@ -40,7 +41,7 @@ pub struct Inbound {
 
 impl Inbound {
     pub async fn new(
-        cfg: Config,
+        cfg: Arc<Config>,
         workloads: WorkloadInformation,
         cert_manager: Box<dyn CertificateProvider>,
         drain: Watch,

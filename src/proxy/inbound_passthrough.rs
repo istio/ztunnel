@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
@@ -22,11 +24,11 @@ use crate::socket::relay;
 use super::Error;
 
 pub struct InboundPassthrough {
-    cfg: Config,
+    cfg: Arc<Config>,
 }
 
 impl InboundPassthrough {
-    pub(crate) fn new(cfg: Config) -> InboundPassthrough {
+    pub(crate) fn new(cfg: Arc<Config>) -> InboundPassthrough {
         InboundPassthrough { cfg }
     }
     pub(super) async fn run(self) {

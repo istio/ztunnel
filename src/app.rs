@@ -27,7 +27,7 @@ use crate::metrics::Metrics;
 use crate::{admin, config, identity, proxy, signal, workload};
 
 pub async fn build_with_cert(
-    config: config::Config,
+    config: Arc<config::Config>,
     cert_manager: impl CertificateProvider,
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
@@ -75,10 +75,11 @@ pub async fn build_with_cert(
         }
     });
 
+    let num_worker_threads = config.num_worker_threads;
     let proxy_addresses = proxy.addresses();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(config.num_worker_threads)
+            .worker_threads(num_worker_threads)
             .thread_name_fn(|| {
                 static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
                 let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
@@ -101,7 +102,7 @@ pub async fn build_with_cert(
     })
 }
 
-pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
+pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
     if config.fake_ca {
         let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(86400));
         build_with_cert(config, cert_manager).await
@@ -116,7 +117,7 @@ pub struct Bound {
     pub proxy_addresses: proxy::Addresses,
 
     pub shutdown: signal::Shutdown,
-    config: config::Config,
+    config: Arc<config::Config>,
     drain_tx: drain::Signal,
 }
 
