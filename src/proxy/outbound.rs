@@ -23,12 +23,13 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
-use crate::metrics::{traffic, Metrics, Recorder};
+use crate::metrics::traffic::Reporter;
+use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::Error;
+use crate::socket;
 use crate::socket::relay;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
-use crate::{identity, socket};
 
 pub struct Outbound {
     cfg: Config,
@@ -87,8 +88,8 @@ impl Outbound {
                             workloads: self.workloads.clone(),
                             cfg,
                             hbone_port: self.hbone_port,
+                            metrics: self.metrics.clone(),
                         };
-                        self.metrics.record(&traffic::ConnectionOpen {});
                         tokio::spawn(async move {
                             let res = oc.proxy(stream).await;
                             match res {
@@ -127,6 +128,7 @@ pub struct OutboundConnection {
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     pub cfg: Config,
     pub hbone_port: u16,
+    pub metrics: Arc<Metrics>,
 }
 
 impl OutboundConnection {
@@ -148,6 +150,19 @@ impl OutboundConnection {
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig, req.gateway, req.request_type, req.direction
         );
+
+        let connection_metrics = traffic::ConnectionOpen {
+            reporter: Reporter::source,
+            source: req.source.clone(),
+            destination: req.destination_workload.clone(),
+            // Client doesn't know if server verified, so we can't claim it was mTLS
+            connection_security_policy: traffic::SecurityPolicy::unknown,
+            destination_service: None,
+        };
+        // _connection_close will record once dropped
+        let _connection_close = self
+            .metrics
+            .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
         if req.request_type == RequestType::DirectLocal {
             // For same node, we just access it directly rather than making a full network connection.
             // Pass our `stream` over to the inbound handler, which will process as usual
@@ -184,7 +199,7 @@ impl OutboundConnection {
                 let id = &req.source.identity();
                 let cert = self.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
-                    .connector(&req.destination_identity)?
+                    .connector(&req.destination_workload.map(|w| w.identity()))?
                     .configure()
                     .expect("configure");
                 let tcp_stream = TcpStream::connect(req.gateway).await?;
@@ -261,7 +276,7 @@ impl OutboundConnection {
                 protocol: Protocol::TCP,
                 source: source_workload,
                 destination: target,
-                destination_identity: None,
+                destination_workload: None,
                 gateway: target,
                 direction: Direction::Outbound,
                 request_type: RequestType::Passthrough,
@@ -271,14 +286,13 @@ impl OutboundConnection {
         // For case source client has enabled waypoint
         if !source_workload.waypoint_addresses.is_empty() {
             let waypoint_address = source_workload.choose_waypoint_address().unwrap();
-            let destination_identity = Some(source_workload.identity());
             return Ok(Request {
                 // Always use HBONE here
                 protocol: Protocol::HBONE,
-                source: source_workload,
+                source: source_workload.clone(),
                 // Load balancing decision is deferred to remote proxy
                 destination: target,
-                destination_identity,
+                destination_workload: Some(source_workload), // TODO: should this be the waypoint workload?
                 // Send to the remote proxy
                 gateway: SocketAddr::from((waypoint_address, 15001)),
                 // Let the client remote know we are on the outbound path. The remote proxy should strictly
@@ -302,8 +316,8 @@ impl OutboundConnection {
                 source: source_workload,
                 // Use the original VIP, not translated
                 destination: target,
+                destination_workload: Some(us.workload), // TODO: should this be the waypoint workload?
                 gateway: SocketAddr::from((waypoint_address, 15006)),
-                destination_identity: us.workload.identity().into(),
                 // Let the client remote know we are on the inbound path.
                 direction: Direction::Inbound,
                 request_type: RequestType::ToServerWaypoint,
@@ -318,7 +332,7 @@ impl OutboundConnection {
                 protocol: Protocol::HBONE,
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
-                destination_identity: us.workload.identity().into(),
+                destination_workload: Some(us.workload.clone()),
                 // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
                 // expects to lookup the desired certificate based on the destination IP. If we send directly,
                 // we would try to lookup an IP for 127.0.0.1.
@@ -341,7 +355,7 @@ impl OutboundConnection {
             protocol: us.workload.protocol,
             source: source_workload,
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
-            destination_identity: us.workload.identity().into(),
+            destination_workload: Some(us.workload.clone()),
             gateway: us
                 .workload
                 .gateway_address
@@ -369,7 +383,7 @@ struct Request {
     direction: Direction,
     source: Workload,
     destination: SocketAddr,
-    destination_identity: Option<identity::Identity>,
+    destination_workload: Option<Workload>,
     gateway: SocketAddr,
     request_type: RequestType,
 }
@@ -410,7 +424,7 @@ mod tests {
 
     use bytes::Bytes;
 
-    use crate::workload;
+    use crate::{identity, workload};
 
     use crate::xds::istio::workload::Protocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
@@ -445,6 +459,7 @@ mod tests {
             workloads: wi,
             hbone_port: 15008,
             cfg,
+            metrics: Arc::new(Default::default()),
         };
 
         let req = outbound

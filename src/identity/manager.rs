@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
@@ -34,6 +35,12 @@ pub enum Identity {
         namespace: String,
         service_account: String,
     },
+}
+
+impl prometheus_client::encoding::text::Encode for Identity {
+    fn encode(&self, writer: &mut dyn Write) -> Result<(), std::io::Error> {
+        writer.write_all(self.to_string().as_bytes())
+    }
 }
 
 impl fmt::Display for Identity {

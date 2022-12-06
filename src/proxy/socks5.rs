@@ -15,6 +15,7 @@
 use crate::config::Config;
 
 use crate::identity::CertificateProvider;
+use crate::metrics::Metrics;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::Error;
 use crate::workload::WorkloadInformation;
@@ -22,6 +23,7 @@ use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -34,6 +36,7 @@ pub struct Socks5 {
     hbone_port: u16,
     listener: TcpListener,
     drain: Watch,
+    pub metrics: Arc<Metrics>,
 }
 
 impl Socks5 {
@@ -42,6 +45,7 @@ impl Socks5 {
         cert_manager: Box<dyn CertificateProvider>,
         hbone_port: u16,
         workloads: WorkloadInformation,
+        metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Socks5, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.socks5_addr)
@@ -55,6 +59,7 @@ impl Socks5 {
             hbone_port,
             listener,
             drain,
+            metrics,
         })
     }
 
@@ -78,6 +83,7 @@ impl Socks5 {
                             workloads: self.workloads.clone(),
                             cfg: self.cfg.clone(),
                             hbone_port: self.hbone_port,
+                            metrics: self.metrics.clone(),
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream).await {
