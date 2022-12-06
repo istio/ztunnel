@@ -188,7 +188,6 @@ impl Server {
         let registry = self.registry();
         let config: Config = self.config;
         let shutdown_trigger = self.shutdown_trigger.clone();
-        // let log_hdl = self.log_handle.clone();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {

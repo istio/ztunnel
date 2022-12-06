@@ -11,10 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-use std::time::Instant;
-
 use once_cell::sync::Lazy;
+use crate::proxy::Error;
+use once_cell::sync::Lazy;
+use once_cell::sync::OnceCell;
+use std::{time::Instant};
 use tracing_subscriber::{
     filter,
     filter::{EnvFilter, LevelFilter},
@@ -23,9 +24,8 @@ use tracing_subscriber::{
 };
 use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
 
-// pub static mut LOG_HANDLE: Option<&mut LogHandle> = None;
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
-static mut PRI_LOG_HANDLE: Option<&mut LogHandle> = None;
+static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
 
 #[cfg(feature = "console")]
 pub fn setup_logging() {
@@ -49,20 +49,26 @@ fn fmt_layer() -> impl Layer<Registry> + Sized {
         .unwrap();
     let (filter_layer, reload_handle) =
         reload::Layer::new(tracing_subscriber::fmt::layer().with_filter(filter));
-    unsafe {
-        PRI_LOG_HANDLE = Some(Box::leak(Box::new(LogHandle(reload_handle))));
-    }
+    match LOG_HANDLE.set(LogHandle {
+        handle: reload_handle,
+    }) {
+        Ok(_) => {}
+        Err(_) => {
+            eprintln! {"setup log handler failed\n"};
+        }
+    };
     tracing_subscriber::registry().with(filter_layer).init();
 }
 
 // a handle to get and set the log level
-pub struct LogHandle(reload::Handle<FilteredLayer, Registry>);
 type BoxLayer = tracing_subscriber::fmt::Layer<tracing_subscriber::Registry>;
 pub(crate) type FilteredLayer = filter::Filtered<BoxLayer, EnvFilter, Registry>;
+pub struct LogHandle {
+    handle: reload::Handle<FilteredLayer, Registry>,
+}
 
 pub fn set_level(level_str: String) -> Result<String, Error> {
     let level: LevelFilter;
-
     match level_str.as_str() {
         "debug" => level = LevelFilter::DEBUG,
         "error" => level = LevelFilter::ERROR,
@@ -76,10 +82,9 @@ pub fn set_level(level_str: String) -> Result<String, Error> {
             ))
         }
     }
-
-    let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
-    unsafe {
-        match PRI_LOG_HANDLE.as_ref().unwrap().0.modify(|layer| {
+    if let Some(static_log_handler) = LOG_HANDLE.get() {
+        let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
+        match static_log_handler.handle.modify(|layer| {
             *layer.filter_mut() = filter;
         }) {
             Ok(_) => {
@@ -93,19 +98,23 @@ pub fn set_level(level_str: String) -> Result<String, Error> {
                 Err(Error::InvalidParam(ret_str))
             }
         }
+    } else {
+        let ret_str = format!("log handler is not initialized\n");
+        Err(Error::InvalidParam(ret_str))
     }
 }
 
 pub fn get_current() -> Result<String, Error> {
-    unsafe {
-        match PRI_LOG_HANDLE
-            .as_ref()
-            .unwrap()
-            .0
+    if let Some(static_log_handler) = LOG_HANDLE.get() {
+        match static_log_handler
+            .handle
             .with_current(|f| format!("{}", f.filter()))
         {
             Ok(current_level) => Ok(current_level),
             Err(e) => Err(Error::InvalidParam(e.to_string())),
         }
+    } else {
+        let ret_str = format!("log handler is not initialized\n");
+        Err(Error::InvalidParam(ret_str))
     }
 }

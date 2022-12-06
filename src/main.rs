@@ -66,7 +66,4 @@ async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
 <<<<<<< HEAD
 >>>>>>> enhancement: avoid changing the set_logging() interface
     app::build(cfg).await?.wait_termination().await
-=======
-    app::build(cfg).await?.spawn().await
->>>>>>> enhancement: avoid changing the set_logging() interface
 }
