@@ -105,7 +105,14 @@ impl Outbound {
                             };
                         });
                     }
-                    Err(e) => error!("Failed TCP handshake {}", e),
+                    Err(e) => {
+                        error!("Failed TCP handshake {}", e);
+                        if e.get_ref().unwrap().to_string()
+                            == "A Tokio 1.x context was found, but it is being shutdown"
+                        {
+                            return;
+                        }
+                    }
                 }
             }
         };
