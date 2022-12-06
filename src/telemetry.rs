@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use once_cell::sync::Lazy;
-use crate::proxy::Error;
-use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
-use std::{time::Instant};
+use std::time::Instant;
 use tracing_subscriber::{
     filter,
     filter::{EnvFilter, LevelFilter},
@@ -77,8 +75,8 @@ pub fn set_level(level_str: String) -> Result<String, Error> {
         "trace" => level = LevelFilter::TRACE,
         "off" => level = LevelFilter::OFF,
         _ => {
-            return Err(Error::InvalidParam(
-                "unable to find newlevel in request\n".to_string(),
+            return Err(Error::RequestFailure(
+                "unable to find newlevel in request".to_string(),
             ))
         }
     }
@@ -88,19 +86,19 @@ pub fn set_level(level_str: String) -> Result<String, Error> {
             *layer.filter_mut() = filter;
         }) {
             Ok(_) => {
-                let ret_str = format!("set new log level to {} \n", level);
+                let ret_str = format!("set new log level to {}", level);
                 tracing::info!(%level, ret_str);
                 Ok(ret_str)
             }
             Err(e) => {
-                let ret_str = format!("failed to set new level {}: {} \n", level, e);
+                let ret_str = format!("failed to set new level {}: {} ", level, e);
                 tracing::info!(%level, ret_str);
-                Err(Error::InvalidParam(ret_str))
+                Err(Error::RequestFailure(ret_str))
             }
         }
     } else {
-        let ret_str = format!("log handler is not initialized\n");
-        Err(Error::InvalidParam(ret_str))
+        let ret_str = ("log handler is not initialized").to_string();
+        Err(Error::RequestFailure(ret_str))
     }
 }
 
@@ -111,10 +109,10 @@ pub fn get_current() -> Result<String, Error> {
             .with_current(|f| format!("{}", f.filter()))
         {
             Ok(current_level) => Ok(current_level),
-            Err(e) => Err(Error::InvalidParam(e.to_string())),
+            Err(e) => Err(Error::RequestFailure(e.to_string())),
         }
     } else {
-        let ret_str = format!("log handler is not initialized\n");
-        Err(Error::InvalidParam(ret_str))
+        let ret_str = ("log handler is not initialized").to_string();
+        Err(Error::RequestFailure(ret_str))
     }
 }

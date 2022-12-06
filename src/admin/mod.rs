@@ -38,11 +38,11 @@ use tokio::io::AsyncReadExt;
 use tracing::{error, info};
 
 use crate::config::Config;
+use crate::proxy::Error;
 use crate::version::BuildInfo;
 use crate::workload::Workload;
 use crate::workload::WorkloadInformation;
 use crate::{config, signal, telemetry};
-use crate::proxy::Error;
 
 /// Supports configuring an admin server
 pub struct Builder {
@@ -234,7 +234,7 @@ impl Server {
                                 "/metrics" => {
                                     Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
                                 }
-                                "/loglevel" => Ok::<_, hyper::Error>(handle_loglevel(req).await),
+                                "/logging" => Ok::<_, hyper::Error>(handle_logging(req).await),
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
@@ -390,7 +390,7 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
         .unwrap()
 }
 
-async fn handle_loglevel(req: Request<Body>) -> Response<Body> {
+async fn handle_logging(req: Request<Body>) -> Response<Body> {
     match *req.method() {
         hyper::Method::GET => {
             let loglevel = match telemetry::get_current() {
@@ -408,11 +408,11 @@ async fn handle_loglevel(req: Request<Body>) -> Response<Body> {
                 Ok(return_str) => Response::builder()
                     .status(hyper::StatusCode::OK)
                     .header(hyper::header::CONTENT_TYPE, "text/plain")
-                    .body(return_str.into())
+                    .body(format!("{}\n", return_str).into())
                     .unwrap(),
                 Err(return_str) => Response::builder()
-                    .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-                    .body(format!("failed to change log level {}\n", return_str).into())
+                    .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(format!("failed to change log level, {}\n", return_str).into())
                     .unwrap(),
             },
             Err(msg) => Response::builder()
