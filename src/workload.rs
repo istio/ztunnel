@@ -372,7 +372,7 @@ impl WorkloadInformation {
     // check the workload by clusterIP exist or not
     fn workload_by_vip_exist(&self, vip: &SocketAddr) -> bool {
         let wi = self.info.lock().unwrap();
-        wi.vips.get(&vip).is_some()
+        wi.vips.get(vip).is_some()
     }
 }
 
