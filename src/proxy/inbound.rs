@@ -209,16 +209,19 @@ struct InboundCertProvider {
 #[async_trait::async_trait]
 impl crate::tls::CertProvider for InboundCertProvider {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
-        let orig = crate::socket::orig_dst_addr_or_default(fd);
+        let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
-            let remote_addr = super::to_canonical_ip(orig);
+            let wip = super::to_canonical_ip(orig_dst_addr);
             self.workloads
-                .fetch_workload(&remote_addr)
+                .fetch_workload(&wip)
                 .await
-                .ok_or(TlsError::CertificateLookup(remote_addr))?
+                .ok_or(TlsError::CertificateLookup(wip))?
                 .identity()
         };
-        info!("tls: accepting connection to {:?} ({})", orig, identity);
+        info!(
+            "tls: accepting connection to {:?} ({})",
+            orig_dst_addr, identity
+        );
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
         let acc = cert.mtls_acceptor()?;
         Ok(acc)
