@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::proxy::ERR_TOKIO_RUNTIME_SHUTDOWN;
 use crate::socket;
 use crate::socket::relay;
 
@@ -56,7 +57,12 @@ impl InboundPassthrough {
                     });
                 }
                 Err(e) => {
-                    if e.get_ref().unwrap().to_string().eq("shutdown") {
+                    debug_assert_eq!(e.get_ref().unwrap().to_string(), ERR_TOKIO_RUNTIME_SHUTDOWN);
+                    if e.get_ref()
+                        .unwrap()
+                        .to_string()
+                        .eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
+                    {
                         return;
                     }
                     error!("Failed TCP handshake {}", e);

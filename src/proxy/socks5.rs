@@ -18,6 +18,7 @@ use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::Error;
+use crate::proxy::ERR_TOKIO_RUNTIME_SHUTDOWN;
 use crate::workload::WorkloadInformation;
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
@@ -77,7 +78,6 @@ impl Socks5 {
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
-                        //let cfg = self.cfg.clone();
                         let oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),
                             workloads: self.workloads.clone(),
@@ -92,7 +92,15 @@ impl Socks5 {
                         });
                     }
                     Err(e) => {
-                        if e.get_ref().unwrap().to_string().contains("shutdown") {
+                        debug_assert_eq!(
+                            e.get_ref().unwrap().to_string(),
+                            ERR_TOKIO_RUNTIME_SHUTDOWN
+                        );
+                        if e.get_ref()
+                            .unwrap()
+                            .to_string()
+                            .eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
+                        {
                             return;
                         }
                         error!("Failed TCP handshake {}", e);
