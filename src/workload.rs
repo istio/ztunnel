@@ -338,15 +338,40 @@ impl WorkloadInformation {
         }
     }
 
-    pub fn find_workload(&self, addr: &IpAddr) -> Option<Workload> {
+    pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
+        self.fetch_workload_on_demand(addr).await;
+        let wi = self.info.lock().unwrap();
+        wi.find_upstream(addr, hbone_port)
+    }
+
+    // It is to do on demand workload fetch if necessary, it handles both workload ip and clusterIP
+    async fn fetch_workload_on_demand(&self, addr: SocketAddr) {
+        // Wait for it on-demand, *if* needed
+        debug!("lookup workload for {addr}");
+        // 1. handle workload ip, if workload not found, do on demand fetch
+        if let None = self.find_workload(&addr.ip()) {
+            // 2. handle clusterIP if
+            if self.workload_by_vip_exist(addr) {
+                return;
+            }
+            // if both cache not found, start on demand fetch
+            if let Some(demand) = &self.demand {
+                info!("workload not found, sending on-demand request for {addr}");
+                demand.demand(addr.ip().to_string()).await.recv().await;
+                debug!("on demand ready: {addr}");
+            }
+        }
+    }
+
+    // keep private so that we can ensure that we always fetch on-demand
+    fn find_workload(&self, addr: &IpAddr) -> Option<Workload> {
         let wi = self.info.lock().unwrap();
         wi.find_workload(addr).cloned()
     }
 
-    pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
-        let _ = self.fetch_workload(&addr.ip()).await;
+    fn workload_by_vip_exist(&self, vip: SocketAddr) -> bool {
         let wi = self.info.lock().unwrap();
-        wi.find_upstream(addr, hbone_port)
+        wi.vips.get(&vip).is_some()
     }
 }
 

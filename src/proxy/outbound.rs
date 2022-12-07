@@ -135,20 +135,20 @@ impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
         let peer = stream.peer_addr().expect("must receive peer addr");
         let remote_addr = super::to_canonical_ip(peer);
-        let orig = socket::orig_dst_addr_or_default(&stream);
-        self.proxy_to(stream, remote_addr, orig).await
+        let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
+        self.proxy_to(stream, remote_addr, orig_dst_addr).await
     }
 
     pub async fn proxy_to(
         &mut self,
         mut stream: TcpStream,
         remote_addr: IpAddr,
-        orig: SocketAddr,
+        orig_dst_addr: SocketAddr,
     ) -> Result<(), Error> {
-        let req = self.build_request(remote_addr, orig).await?;
+        let req = self.build_request(remote_addr, orig_dst_addr).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
-            req.source.name, orig, req.gateway, req.request_type, req.direction
+            req.source.name, orig_dst_addr, req.gateway, req.request_type, req.direction
         );
 
         let connection_metrics = traffic::ConnectionOpen {
@@ -269,6 +269,7 @@ impl OutboundConnection {
         };
 
         // TODO: we want a single lock for source and upstream probably...?
+        // TODO: we need to handle the case where the target is clusterIP.
         let us = self.workloads.find_upstream(target, self.hbone_port).await;
         if us.is_none() {
             // For case no upstream found, passthrough it

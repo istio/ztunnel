@@ -213,7 +213,8 @@ impl crate::tls::CertProvider for InboundCertProvider {
         let identity = {
             let remote_addr = super::to_canonical_ip(orig);
             self.workloads
-                .find_workload(&remote_addr)
+                .fetch_workload(&remote_addr)
+                .await
                 .ok_or(TlsError::CertificateLookup(remote_addr))?
                 .identity()
         };
