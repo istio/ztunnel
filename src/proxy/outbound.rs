@@ -269,7 +269,6 @@ impl OutboundConnection {
         };
 
         // TODO: we want a single lock for source and upstream probably...?
-        // TODO: we need to handle the case where the target is clusterIP.
         let us = self.workloads.find_upstream(target, self.hbone_port).await;
         if us.is_none() {
             // For case no upstream found, passthrough it

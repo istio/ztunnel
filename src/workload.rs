@@ -348,10 +348,10 @@ impl WorkloadInformation {
     async fn fetch_workload_on_demand(&self, addr: SocketAddr) {
         // Wait for it on-demand, *if* needed
         debug!("lookup workload for {addr}");
-        // 1. handle workload ip, if workload not found, do on demand fetch
-        if let None = self.find_workload(&addr.ip()) {
-            // 2. handle clusterIP if
-            if self.workload_by_vip_exist(addr) {
+        // 1. handle workload ip, if workload not found fallback to clusterIP.
+        if self.find_workload(&addr.ip()).is_none() {
+            // 2. handle clusterIP
+            if self.workload_by_vip_exist(&addr) {
                 return;
             }
             // if both cache not found, start on demand fetch
@@ -363,13 +363,14 @@ impl WorkloadInformation {
         }
     }
 
-    // keep private so that we can ensure that we always fetch on-demand
+    // keep private so that we can ensure that we always use fetch_workload
     fn find_workload(&self, addr: &IpAddr) -> Option<Workload> {
         let wi = self.info.lock().unwrap();
         wi.find_workload(addr).cloned()
     }
 
-    fn workload_by_vip_exist(&self, vip: SocketAddr) -> bool {
+    // check the workload by clusterIP exist or not
+    fn workload_by_vip_exist(&self, vip: &SocketAddr) -> bool {
         let wi = self.info.lock().unwrap();
         wi.vips.get(&vip).is_some()
     }
