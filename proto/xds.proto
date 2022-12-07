@@ -6,6 +6,7 @@ package envoy.service.discovery.v3;
 
 import "google/protobuf/any.proto";
 import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
 
 option go_package="github.com/envoyproxy/go-control-plane";
 
@@ -48,7 +49,7 @@ message Node {
 
     // Opaque metadata extending the node identifier. Envoy will pass this
     // directly to the management server.
-    //Struct metadata = 3;
+    google.protobuf.Struct metadata = 3;
 
     // Locality specifying where the Envoy instance is running.
     //Locality locality = 4;
