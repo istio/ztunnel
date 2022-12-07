@@ -40,6 +40,12 @@ pub struct ResourceKey {
     pub type_url: String,
 }
 
+impl Display for ResourceKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.type_url, self.name)
+    }
+}
+
 pub struct RejectedConfig {
     name: String,
     reason: anyhow::Error,
@@ -53,7 +59,7 @@ impl RejectedConfig {
 
 impl fmt::Display for RejectedConfig {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}: {}", self.name, self.reason,)
+        write!(f, "{}: {}", self.name, self.reason)
     }
 }
 
@@ -455,12 +461,16 @@ impl AdsClient {
         demand_event: Option<(oneshot::Sender<()>, ResourceKey)>,
         send: &mpsc::Sender<DeltaDiscoveryRequest>,
     ) -> Result<(), Error> {
-        info!("received on demand request {demand_event:?}");
         let Some((tx, demand_event)) = demand_event else {
             return Ok(());
         };
+        info!("received on demand request {demand_event}");
         let ResourceKey { type_url, name } = demand_event.clone();
         self.pending.insert(demand_event, tx);
+        self.known_resources
+            .entry(type_url.clone())
+            .or_default()
+            .insert(name.clone());
         send.send(DeltaDiscoveryRequest {
             type_url,
             resource_names_subscribe: vec![name],
