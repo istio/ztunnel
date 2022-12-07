@@ -21,14 +21,14 @@ use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::identity::Identity;
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::ProtocolParse;
-use crate::xds::{AdsClient, Demander, HandlerContext, XdsUpdate};
+use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{admin, config, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -203,38 +203,23 @@ impl TryFrom<&XdsWorkload> for Workload {
 
 pub struct WorkloadManager {
     workloads: WorkloadInformation,
-    xds_client: Option<xds::AdsClient>,
-}
-
-fn handle_xds<F: FnOnce() -> anyhow::Result<()>>(ctx: &mut HandlerContext, name: String, f: F) {
-    debug!("handling update {}", name);
-    let result: anyhow::Result<()> = f();
-    if let Err(e) = result {
-        warn!("rejecting workload {name}: {e}");
-        ctx.reject(name, e)
-    }
+    xds_client: Option<AdsClient>,
 }
 
 impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
-    fn handle(&self, ctx: &mut HandlerContext, updates: Vec<XdsUpdate<XdsWorkload>>) {
+    fn handle(&self, updates: Vec<XdsUpdate<XdsWorkload>>) -> Result<(), Vec<RejectedConfig>> {
         let mut wli = self.lock().unwrap();
-        for res in updates {
-            let name = res.name();
-            handle_xds(ctx, name, || {
-                match res {
-                    XdsUpdate::Update(w) => {
-                        // TODO: we process each item on its own, this may lead to heavy lock contention.
-                        // Need batch updates?
-                        wli.insert_xds_workload(w.resource)?
-                    }
-                    XdsUpdate::Remove(name) => {
-                        info!("handling delete {}", name);
-                        wli.remove(name);
-                    }
+        let handle = |res: XdsUpdate<XdsWorkload>| {
+            match res {
+                XdsUpdate::Update(w) => wli.insert_xds_workload(w.resource)?,
+                XdsUpdate::Remove(name) => {
+                    info!("handling delete {}", name);
+                    wli.remove(name);
                 }
-                Ok(())
-            });
-        }
+            }
+            Ok(())
+        };
+        xds::handle_single_resource(updates, handle)
     }
 }
 
