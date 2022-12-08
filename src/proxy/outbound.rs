@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,7 +27,7 @@ use crate::identity::CertificateProvider;
 use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::{Inbound, InboundConnect};
-use crate::proxy::Error;
+use crate::proxy::{Error, ERR_TOKIO_RUNTIME_SHUTDOWN};
 use crate::socket;
 use crate::socket::relay;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
@@ -105,7 +106,14 @@ impl Outbound {
                             };
                         });
                     }
-                    Err(e) => error!("Failed TCP handshake {}", e),
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::Other
+                            && e.to_string().eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
+                        {
+                            return;
+                        }
+                        error!("Failed TCP handshake {}", e);
+                    }
                 }
             }
         };

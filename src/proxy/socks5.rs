@@ -12,22 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::Config;
-
-use crate::identity::CertificateProvider;
-use crate::metrics::Metrics;
-use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::Error;
-use crate::workload::WorkloadInformation;
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
+
+use crate::config::Config;
+use crate::identity::CertificateProvider;
+use crate::metrics::Metrics;
+use crate::proxy::outbound::OutboundConnection;
+use crate::proxy::{Error, ERR_TOKIO_RUNTIME_SHUTDOWN};
+use crate::workload::WorkloadInformation;
 
 pub struct Socks5 {
     cfg: Config,
@@ -77,7 +78,6 @@ impl Socks5 {
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
-                        //let cfg = self.cfg.clone();
                         let oc = OutboundConnection {
                             cert_manager: self.cert_manager.clone(),
                             workloads: self.workloads.clone(),
@@ -91,7 +91,14 @@ impl Socks5 {
                             }
                         });
                     }
-                    Err(e) => error!("Failed TCP handshake {}", e),
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::Other
+                            && e.to_string().eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
+                        {
+                            return;
+                        }
+                        error!("Failed TCP handshake {}", e);
+                    }
                 }
             }
         };

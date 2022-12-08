@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
+use super::Error;
 use crate::config::Config;
+use crate::proxy::ERR_TOKIO_RUNTIME_SHUTDOWN;
 use crate::socket;
 use crate::socket::relay;
-
-use super::Error;
 
 pub struct InboundPassthrough {
     cfg: Config,
@@ -55,7 +56,14 @@ impl InboundPassthrough {
                         }
                     });
                 }
-                Err(e) => error!("Failed TCP handshake {}", e),
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::Other
+                        && e.to_string().eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
+                    {
+                        return;
+                    }
+                    error!("Failed TCP handshake {}", e);
+                }
             }
         }
     }
