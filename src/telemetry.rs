@@ -14,6 +14,7 @@
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use std::time::Instant;
+use tracing::warn;
 use tracing_subscriber::{
     filter,
     filter::{EnvFilter, LevelFilter},
@@ -47,14 +48,11 @@ fn fmt_layer() -> impl Layer<Registry> + Sized {
         .unwrap();
     let (filter_layer, reload_handle) =
         reload::Layer::new(tracing_subscriber::fmt::layer().with_filter(filter));
-    match LOG_HANDLE.set(LogHandle {
-        handle: reload_handle,
-    }) {
-        Ok(_) => {}
-        Err(_) => {
-            eprintln! {"setup log handler failed\n"};
-        }
-    };
+    LOG_HANDLE
+        .set(LogHandle {
+            handle: reload_handle,
+        })
+        .map_or_else(|_| warn!("setup log handler failed"), |_| {});
     tracing_subscriber::registry().with(filter_layer).init();
 }
 
@@ -65,54 +63,44 @@ pub struct LogHandle {
     handle: reload::Handle<FilteredLayer, Registry>,
 }
 
-pub fn set_level(level_str: String) -> Result<String, Error> {
-    let level: LevelFilter;
-    match level_str.as_str() {
-        "debug" => level = LevelFilter::DEBUG,
-        "error" => level = LevelFilter::ERROR,
-        "info" => level = LevelFilter::INFO,
-        "warn" => level = LevelFilter::WARN,
-        "trace" => level = LevelFilter::TRACE,
-        "off" => level = LevelFilter::OFF,
-        _ => {
-            return Err(Error::RequestFailure(
-                "unable to find newlevel in request".to_string(),
-            ))
-        }
-    }
+pub fn set_global_level(level: LevelFilter) -> bool {
     if let Some(static_log_handler) = LOG_HANDLE.get() {
         let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
-        match static_log_handler.handle.modify(|layer| {
-            *layer.filter_mut() = filter;
-        }) {
-            Ok(_) => {
-                let ret_str = format!("set new log level to {}", level);
-                tracing::info!(%level, ret_str);
-                Ok(ret_str)
-            }
-            Err(e) => {
-                let ret_str = format!("failed to set new level {}: {} ", level, e);
-                tracing::info!(%level, ret_str);
-                Err(Error::RequestFailure(ret_str))
-            }
-        }
+        static_log_handler
+            .handle
+            .modify(|layer| {
+                *layer.filter_mut() = filter;
+            })
+            .map_or(false, |_| true)
     } else {
-        let ret_str = ("log handler is not initialized").to_string();
-        Err(Error::RequestFailure(ret_str))
+        warn!("failed to get log handle");
+        false
     }
 }
 
-pub fn get_current() -> Result<String, Error> {
+pub fn get_current_loglevel() -> Option<String> {
     if let Some(static_log_handler) = LOG_HANDLE.get() {
-        match static_log_handler
+        static_log_handler
             .handle
             .with_current(|f| format!("{}", f.filter()))
-        {
-            Ok(current_level) => Ok(current_level),
-            Err(e) => Err(Error::RequestFailure(e.to_string())),
-        }
+            .ok()
     } else {
-        let ret_str = ("log handler is not initialized").to_string();
-        Err(Error::RequestFailure(ret_str))
+        warn!("failed to get log handle");
+        None
+    }
+}
+
+pub fn get_log_level_from_str(level_str: String) -> Option<LevelFilter> {
+    match level_str.as_str() {
+        "debug" => Some(LevelFilter::DEBUG),
+        "error" => Some(LevelFilter::ERROR),
+        "info" => Some(LevelFilter::INFO),
+        "warn" => Some(LevelFilter::WARN),
+        "trace" => Some(LevelFilter::TRACE),
+        "off" => Some(LevelFilter::OFF),
+        _ => {
+            warn!("unable to find newlevel in request {}", level_str);
+            None
+        }
     }
 }

@@ -38,7 +38,6 @@ use tokio::io::AsyncReadExt;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::proxy::Error;
 use crate::version::BuildInfo;
 use crate::workload::Workload;
 use crate::workload::WorkloadInformation;
@@ -390,55 +389,124 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
         .unwrap()
 }
 
+// we mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
+//curl -X POST http://127.0.0.1:15021/logging To list the loggers
+//curl -X POST http://127.0.0.1:15021/logging?level={new_level} To change the logging level across all loggers
+
+//TODO: below is not implemented
+//curl -X POST http://127.0.0.1:15021/logging?{mod_name}={new_level} To change a particular logger’s level
+//curl -X POST http://127.0.0.1:15021/logging?paths={mod_name_1}:{level1},{mod_name_2}:{level2} To change multiple logging levels at once
+
+//NOTE: mutilple query parameters is not supported, for example
+//curl -X POST http://127.0.0.1:15021/logging?"tap=debug&router=debug"
+static HELP_STRING: &str = "
+usage: loglevel: error|warn|info|debug|trace|off
+usage: POST /logging (list current level)
+usage: POST /logging?level=<level> (change all levels)
+";
 async fn handle_logging(req: Request<Body>) -> Response<Body> {
     match *req.method() {
-        hyper::Method::GET => {
-            let loglevel = match telemetry::get_current() {
-                Ok(level) => format!("current log level is {}\n", level),
-                Err(e) => format!("failed to get log level, err: {}\n", e),
-            };
-            Response::builder()
-                .status(hyper::StatusCode::OK)
-                .header(hyper::header::CONTENT_TYPE, "text/plain")
-                .body(loglevel.into())
-                .unwrap()
+        hyper::Method::POST => {
+            let params: HashMap<String, String> = req
+                .uri()
+                .query()
+                .map(|v| {
+                    url::form_urlencoded::parse(v.as_bytes())
+                        .into_owned()
+                        .collect()
+                })
+                .unwrap_or_else(HashMap::new);
+
+            match params.len() {
+                // POST /logging, list all the loggers
+                0 => list_loggers(),
+                // POST /logging/?{query_param}, change the loggers
+                1 => {
+                    //POST /logging?level={new_level}
+                    if let Some(global_level) = params.get_key_value("level") {
+                        change_global_logger(global_level.1.into())
+                    }
+                    //POST /logging?paths={mod_name_1}:{level1},{mod_name_2}:{level2}
+                    else if let Some(multiple_mods) = params.get_key_value("paths") {
+                        change_multiple_mods_level(multiple_mods.1.into())
+                    }
+                    //POST /logging?{mod_name}={new_level}
+                    else {
+                        change_single_mod_level()
+                    }
+                }
+                // multiple query parameters is not supported
+                _ => Response::builder()
+                    .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                    .body(format!("operation is not supported\n {}", HELP_STRING).into())
+                    .unwrap(),
+            }
         }
-        hyper::Method::POST => match get_new_loglevel(req).await {
-            Ok(level) => match telemetry::set_level(level) {
-                Ok(return_str) => Response::builder()
-                    .status(hyper::StatusCode::OK)
-                    .header(hyper::header::CONTENT_TYPE, "text/plain")
-                    .body(format!("{}\n", return_str).into())
-                    .unwrap(),
-                Err(return_str) => Response::builder()
-                    .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("failed to change log level, {}\n", return_str).into())
-                    .unwrap(),
-            },
-            Err(msg) => Response::builder()
-                .status(hyper::StatusCode::NOT_FOUND)
-                .body(format!("failed to get the new log level, {}\n", msg).into())
-                .unwrap(),
-        },
         _ => Response::builder()
             .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body("Invalid HTTP method\n".to_string().into())
+            .body(format!("Invalid HTTP method\n {}", HELP_STRING).into())
             .unwrap(),
     }
 }
 
-async fn get_new_loglevel(req: Request<Body>) -> Result<String, Error> {
-    let body = hyper::body::to_bytes(req).await?;
-    let params = url::form_urlencoded::parse(body.as_ref())
-        .into_owned()
-        .collect::<HashMap<String, String>>();
-    if let Some(n) = params.get("newlevel") {
-        Ok(String::from(n))
+fn list_loggers() -> Response<Body> {
+    if let Some(loglevel) = telemetry::get_current_loglevel() {
+        Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "text/plain")
+            .body(format!("current global log level is {}\n", loglevel.to_uppercase()).into())
+            .unwrap()
     } else {
-        Err(Error::InvalidParam(
-            "unable to find newlevel in request".to_string(),
-        ))
+        Response::builder()
+            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(format!("failed to get the log level\n {}", HELP_STRING).into())
+            .unwrap()
     }
+}
+
+fn change_global_logger(level: String) -> Response<Body> {
+    if let Some(new_level) = telemetry::get_log_level_from_str(level.clone()) {
+        if telemetry::set_global_level(new_level) {
+            Response::builder()
+                .status(hyper::StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "text/plain")
+                .body(format!("set the global log level to {}\n", level.to_uppercase()).into())
+                .unwrap()
+        } else {
+            Response::builder()
+                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(
+                    format!(
+                        "failed to set the global log level to {}\n {}",
+                        level.to_uppercase(),
+                        HELP_STRING
+                    )
+                    .into(),
+                )
+                .unwrap()
+        }
+    } else {
+        Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(format!("Invalid log level\n {}", HELP_STRING).into())
+            .unwrap()
+    }
+}
+
+//TODO
+fn change_multiple_mods_level(level: String) -> Response<Body> {
+    Response::builder()
+        .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+        .body(format!("change level on {} is WIP\n {}", level, HELP_STRING).into())
+        .unwrap()
+}
+
+//TODO
+fn change_single_mod_level() -> Response<Body> {
+    Response::builder()
+        .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+        .body(format!("change level on mod is WIP\n {}", HELP_STRING).into())
+        .unwrap()
 }
 
 #[cfg(feature = "gperftools")]
