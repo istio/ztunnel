@@ -107,11 +107,10 @@ impl Outbound {
                         });
                     }
                     Err(e) => {
-                        if e.kind() == io::ErrorKind::Other {
-                            debug_assert_eq!(e.to_string(), ERR_TOKIO_RUNTIME_SHUTDOWN);
-                            if e.to_string().eq(ERR_TOKIO_RUNTIME_SHUTDOWN) {
-                                return;
-                            }
+                        if e.kind() == io::ErrorKind::Other
+                            && e.to_string().eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
+                        {
+                            return;
                         }
                         error!("Failed TCP handshake {}", e);
                     }
