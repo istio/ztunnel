@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -106,16 +107,11 @@ impl Outbound {
                         });
                     }
                     Err(e) => {
-                        debug_assert_eq!(
-                            e.get_ref().unwrap().to_string(),
-                            ERR_TOKIO_RUNTIME_SHUTDOWN
-                        );
-                        if e.get_ref()
-                            .unwrap()
-                            .to_string()
-                            .eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
-                        {
-                            return;
+                        if e.kind() == io::ErrorKind::Other {
+                            debug_assert_eq!(e.to_string(), ERR_TOKIO_RUNTIME_SHUTDOWN);
+                            if e.to_string().eq(ERR_TOKIO_RUNTIME_SHUTDOWN) {
+                                return;
+                            }
                         }
                         error!("Failed TCP handshake {}", e);
                     }
