@@ -15,6 +15,7 @@
 use std::fmt::Debug;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::ops::Add;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use hyper::{Body, Client, Method, Request};
@@ -28,21 +29,6 @@ use tracing::trace;
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::*;
-use ztunnel::*;
-
-fn test_config() -> config::Config {
-    config::Config {
-        xds_address: None,
-        fake_ca: true,
-        local_xds_path: Some("examples/localhost.yaml".to_string()),
-        socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        ..config::parse_config().unwrap()
-    }
-}
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
@@ -167,8 +153,9 @@ async fn run_request_test(target: &str) {
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
-    testapp::with_app(test_config(), |app| async move {
-        let dst = helpers::with_ip(echo_addr, target.parse().unwrap());
+    testapp::with_app(test_config_with_port(echo_addr.port()), |app| async move {
+        let dst = SocketAddr::from_str(target)
+            .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
         let mut stream = app.socks5_connect(dst).await;
         read_write_stream(&mut stream).await;
     })
@@ -183,6 +170,11 @@ async fn test_hbone_request() {
 #[tokio::test]
 async fn test_tcp_request() {
     run_request_test("127.0.0.2").await;
+}
+
+#[tokio::test]
+async fn test_vip_request() {
+    run_request_test("127.10.0.1:80").await;
 }
 
 #[tokio::test]

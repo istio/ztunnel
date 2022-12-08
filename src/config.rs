@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::Bytes;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::time;
 
 use crate::identity;
@@ -39,6 +39,21 @@ pub enum RootCert {
     File(PathBuf),
     Static(Bytes),
     Default,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub enum ConfigSource {
+    File(PathBuf),
+    Static(Bytes),
+}
+
+impl ConfigSource {
+    pub async fn read_to_string(&self) -> anyhow::Result<String> {
+        Ok(match self {
+            ConfigSource::File(path) => tokio::fs::read_to_string(path).await?,
+            ConfigSource::Static(data) => std::str::from_utf8(data).map(|s| s.to_string())?,
+        })
+    }
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -65,8 +80,9 @@ pub struct Config {
     pub xds_address: Option<String>,
     /// Root cert for XDS TLS verification.
     pub xds_root_cert: RootCert,
-    /// Filepath to a local xds file for workloads, as YAML.
-    pub local_xds_path: Option<String>,
+    /// YAML config for local XDS workloads
+    #[serde(skip_serializing)]
+    pub local_xds_config: Option<ConfigSource>,
     /// If true, on-demand XDS will be used
     pub xds_on_demand: bool,
 
@@ -159,7 +175,7 @@ pub fn parse_config() -> Result<Config, Error> {
         ca_address,
         // TODO: full FindRootCAForCA logic like in Istio
         ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
-        local_xds_path: parse(LOCAL_XDS_PATH)?,
+        local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
 
         fake_ca,

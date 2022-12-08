@@ -349,18 +349,18 @@ async fn handle_server_shutdown(
 }
 
 async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Response<Body> {
-    if let Some(path) = dump.config.local_xds_path.clone() {
-        match tokio::fs::read_to_string(path).await {
+    if let Some(cfg) = dump.config.local_xds_config.clone() {
+        match cfg.read_to_string().await {
             Ok(data) => match serde_yaml::from_str(&data) {
                 Ok(raw_workloads) => dump.static_workloads = raw_workloads,
                 Err(e) => error!(
                     "Failed to load static workloads from local XDS {:?}:{:?}",
-                    dump.config.local_xds_path, e
+                    dump.config.local_xds_config, e
                 ),
             },
             Err(e) => error!(
-                "Failed to read local XDS file {:?}:{:?}",
-                dump.config.local_xds_path, e
+                "Failed to read local XDS config {:?}:{:?}",
+                dump.config.local_xds_config, e
             ),
         }
     }

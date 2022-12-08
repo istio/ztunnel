@@ -6,6 +6,9 @@
   workloadIp: "127.0.0.1"
   protocol: HBONE
   node: local
+  vips:
+    "127.10.0.1":
+      80: 8080
 # Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
 - name: local-tcp
   namespace: default
@@ -13,3 +16,6 @@
   workloadIp: "127.0.0.2"
   protocol: TCP
   node: local
+  vips:
+    "127.10.0.1":
+      80: 8080
