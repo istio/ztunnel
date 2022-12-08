@@ -146,9 +146,6 @@ pub enum Error {
 
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
-
-    #[error("invalid param: {0}")]
-    InvalidParam(String),
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.

@@ -58,8 +58,8 @@ fn fmt_layer() -> impl Layer<Registry> + Sized {
 
 // a handle to get and set the log level
 type BoxLayer = tracing_subscriber::fmt::Layer<tracing_subscriber::Registry>;
-pub(crate) type FilteredLayer = filter::Filtered<BoxLayer, EnvFilter, Registry>;
-pub struct LogHandle {
+type FilteredLayer = filter::Filtered<BoxLayer, EnvFilter, Registry>;
+struct LogHandle {
     handle: reload::Handle<FilteredLayer, Registry>,
 }
 

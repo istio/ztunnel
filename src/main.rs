@@ -27,7 +27,6 @@ use ztunnel::*;
 
 fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
-
     let config: config::Config = config::parse_config()?;
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
