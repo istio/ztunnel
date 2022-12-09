@@ -415,42 +415,20 @@ impl AdsClient {
             return Ok( XdsSignal::None);
         };
         let type_url = response.type_url.clone();
+        let nonce = response.nonce.clone();
         info!(
             type_url = type_url.clone(),
             size = response.resources.len(),
             "received response"
         );
-        let removes = self.handle_removes(&response);
-        let iter = response.resources.into_iter().map(|r| {
-            let key = ResourceKey {
-                name: r.name.clone(),
-                type_url: type_url.clone(),
-            };
-            self.notify_on_demand(&key);
-            self.known_resources
-                .entry(key.type_url)
-                .or_default()
-                .insert(key.name);
-            r
-        });
         // Due to lack of dynamic typing in Rust we have some code duplication here. In the future this could be a macro,
         // but for now its easier to just have a bit of duplication.
         let handler_response: Result<(), Vec<RejectedConfig>> = match type_url.as_str() {
             xds::WORKLOAD_TYPE => {
-                let updates: Vec<XdsUpdate<Workload>> = iter
-                    .map(|raw| decode_proto::<Workload>(raw).unwrap())
-                    .map(XdsUpdate::Update)
-                    .chain(removes.into_iter().map(XdsUpdate::Remove))
-                    .collect();
-                self.config.workload_handler.handle(updates)
+                self.decode_and_handle::<Workload, _>(|a| &a.config.workload_handler, response)
             }
             xds::RBAC_TYPE => {
-                let updates: Vec<XdsUpdate<Authorization>> = iter
-                    .map(|raw| decode_proto::<Authorization>(raw).unwrap())
-                    .map(XdsUpdate::Update)
-                    .chain(removes.into_iter().map(XdsUpdate::Remove))
-                    .collect();
-                self.config.rbac_handler.handle(updates)
+                self.decode_and_handle::<Authorization, _>(|a| &a.config.rbac_handler, response)
             }
             _ => {
                 error!("unknown type");
@@ -472,13 +450,13 @@ impl AdsClient {
 
         debug!(
             type_url=type_url.clone(),
-            nonce=response.nonce,
-            typpe=?response_type,
-            "sending reponse",
+            nonce,
+            "type"=?response_type,
+            "sending response",
         );
         send.send(DeltaDiscoveryRequest {
             type_url: type_url.clone(),
-            response_nonce: response.nonce.clone(),
+            response_nonce: nonce.clone(),
             error_detail: error.map(|msg| Status {
                 message: msg,
                 ..Default::default()
@@ -536,6 +514,40 @@ impl AdsClient {
                 k.name
             })
             .collect()
+    }
+
+    fn decode_and_handle<
+        T: prost::Message + Default + 'static,
+        F: FnOnce(&AdsClient) -> &Box<dyn Handler<T>>,
+    >(
+        &mut self,
+        f: F,
+        response: DeltaDiscoveryResponse,
+    ) -> Result<(), Vec<RejectedConfig>> {
+        let type_url = response.type_url.clone();
+        let removes = self.handle_removes(&response);
+        let updates: Vec<XdsUpdate<T>> = response
+            .resources
+            .into_iter()
+            .map(|r| {
+                let key = ResourceKey {
+                    name: r.name.clone(),
+                    type_url: type_url.clone(),
+                };
+                self.notify_on_demand(&key);
+                self.known_resources
+                    .entry(key.type_url)
+                    .or_default()
+                    .insert(key.name);
+                r
+            })
+            .map(|raw| decode_proto::<T>(raw).unwrap())
+            .map(XdsUpdate::Update)
+            .chain(removes.into_iter().map(XdsUpdate::Remove))
+            .collect();
+        let handler = f(self);
+
+        handler.handle(updates)
     }
 }
 
