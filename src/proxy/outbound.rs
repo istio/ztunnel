@@ -237,7 +237,11 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
                 // Create a TCP connection to upstream
-                let mut outbound = super::freebind_connect(super::get_original_src_from_stream(&stream),req.gateway).await?;
+                let mut outbound = super::freebind_connect(
+                    super::get_original_src_from_stream(&stream),
+                    req.gateway,
+                )
+                .await?;
                 // Proxying data between downstrean and upstream
                 match relay(&mut stream, &mut outbound, self.pi.cfg.zero_copy_enabled).await {
                     // Connection closed with count of bytes transferred between streams

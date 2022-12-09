@@ -135,7 +135,7 @@ impl Inbound {
                 InboundConnect::DirectPath(stream) => {
                     let org_src = super::get_original_src_from_stream(stream);
                     super::freebind_connect(org_src, addr).await
-                },
+                }
                 Hbone(req) => {
                     let org_src = super::get_original_src_from_xff(req);
                     super::freebind_connect(org_src, addr).await

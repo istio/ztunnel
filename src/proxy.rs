@@ -32,7 +32,7 @@ use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
-use crate::{config, identity, tls, socket};
+use crate::{config, identity, socket, tls};
 use hyper::{Body, Request};
 
 mod inbound;
@@ -266,7 +266,7 @@ pub fn get_original_src_from_xff(req: &Request<Body>) -> Option<IpAddr> {
 pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
     match stream.peer_addr() {
         Ok(sa) => Some(to_canonical_ip(sa)),
-        _ => None
+        _ => None,
     }
 }
 
@@ -283,8 +283,11 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
             let local_addr = SocketAddr::new(src, 0);
             match socket::set_freebind(&socket) {
                 Err(err) => warn!("failed to set freebind: {:?}", err),
-                _ => if let Err(err) = socket.bind(local_addr) { warn!("failed to bind local addr: {:?}", err) },
-
+                _ => {
+                    if let Err(err) = socket.bind(local_addr) {
+                        warn!("failed to bind local addr: {:?}", err)
+                    }
+                }
             };
             Ok(socket.connect(addr).await?)
         }
