@@ -41,7 +41,7 @@ use tonic::body::BoxBody;
 use tower::Service;
 use tracing::{error, info};
 
-use crate::config::ConfigSource;
+use crate::config::RootCert;
 use crate::identity::{self, Identity};
 
 use super::Error;
@@ -185,7 +185,7 @@ pub struct TlsGrpcChannel {
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: String, root_cert: ConfigSource) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
 
     let uri = Uri::try_from(uri)?;
@@ -195,12 +195,15 @@ pub fn grpc_connector(uri: String, root_cert: ConfigSource) -> Result<TlsGrpcCha
     conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
     conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
     match root_cert {
-        ConfigSource::File(f) => {
-            conn.set_ca_file(f)?;
+        RootCert::File(f) => {
+            conn.set_ca_file(f).map_err(Error::InvalidRootCert)?;
         }
-        ConfigSource::Static(b) => {
-            conn.cert_store_mut().add_cert(x509::X509::from_pem(&b)?)?;
+        RootCert::Static(b) => {
+            conn.cert_store_mut()
+                .add_cert(x509::X509::from_pem(&b).map_err(Error::InvalidRootCert)?)
+                .map_err(Error::InvalidRootCert)?;
         }
+        RootCert::Default => {} // Already configured to use system root certs
     }
     let mut http = hyper::client::HttpConnector::new();
     http.enforce_http(false);

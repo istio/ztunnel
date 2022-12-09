@@ -35,18 +35,10 @@ const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const DEFAULT_WORKER_THREADS: usize = 2;
 
 #[derive(serde::Serialize, Clone, Debug)]
-pub enum ConfigSource {
+pub enum RootCert {
     File(PathBuf),
     Static(Bytes),
-}
-
-impl ConfigSource {
-    pub async fn read_to_string(&self) -> anyhow::Result<String> {
-        Ok(match self {
-            ConfigSource::File(path) => tokio::fs::read_to_string(path).await?,
-            ConfigSource::Static(data) => std::str::from_utf8(data).map(|s| s.to_string())?,
-        })
-    }
+    Default,
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -68,11 +60,11 @@ pub struct Config {
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
     pub ca_address: Option<String>,
     /// Root cert for CA TLS verification.
-    pub ca_root_cert: ConfigSource,
+    pub ca_root_cert: RootCert,
     /// XDS address to use. If unset, XDS will not be used.
     pub xds_address: Option<String>,
     /// Root cert for XDS TLS verification.
-    pub xds_root_cert: ConfigSource,
+    pub xds_root_cert: RootCert,
     /// Filepath to a local xds file for workloads, as YAML.
     pub local_xds_path: Option<String>,
     /// If true, on-demand XDS will be used
@@ -163,10 +155,10 @@ pub fn parse_config() -> Result<Config, Error> {
 
         xds_address,
         // TODO: full FindRootCAForXDS logic like in Istio
-        xds_root_cert: ConfigSource::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
+        xds_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         ca_address,
         // TODO: full FindRootCAForCA logic like in Istio
-        ca_root_cert: ConfigSource::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
+        ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         local_xds_path: parse(LOCAL_XDS_PATH)?,
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
 

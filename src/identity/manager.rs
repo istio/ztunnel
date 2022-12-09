@@ -78,13 +78,13 @@ where
 }
 
 impl SecretManager<CaClient> {
-    pub fn new(cfg: crate::config::Config) -> SecretManager<CaClient> {
-        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert.clone(), cfg.auth);
+    pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
+        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert.clone(), cfg.auth)?;
         let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
-        SecretManager {
+        Ok(Self {
             client: caclient,
             cache: Arc::new(RwLock::new(cache)),
-        }
+        })
     }
 }
 

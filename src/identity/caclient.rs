@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::ConfigSource;
+use crate::config::RootCert;
 use async_trait::*;
 use dyn_clone::DynClone;
 use prost_types::value::Kind;
@@ -42,10 +42,10 @@ pub trait CertificateProvider: DynClone + Send + Sync + 'static {
 dyn_clone::clone_trait_object!(CertificateProvider);
 
 impl CaClient {
-    pub fn new(address: String, root_cert: ConfigSource, auth: AuthSource) -> CaClient {
-        let svc = tls::grpc_connector(address, root_cert).unwrap();
+    pub fn new(address: String, root_cert: RootCert, auth: AuthSource) -> Result<CaClient, Error> {
+        let svc = tls::grpc_connector(address, root_cert)?;
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
-        CaClient { client }
+        Ok(CaClient { client })
     }
 }
 

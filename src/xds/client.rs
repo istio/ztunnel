@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
-use crate::config::ConfigSource;
+use crate::config::RootCert;
 use crate::metrics::xds::*;
 use crate::metrics::{Metrics, Recorder};
 use crate::xds::istio::workload::{Authorization, Workload};
@@ -103,7 +103,7 @@ pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyho
 
 pub struct Config {
     address: String,
-    root_cert: ConfigSource,
+    root_cert: RootCert,
     auth: identity::AuthSource,
 
     workload_handler: Box<dyn Handler<Workload>>,

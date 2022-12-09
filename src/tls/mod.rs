@@ -23,6 +23,9 @@ pub enum Error {
     #[error("invalid operation: {0:?}")]
     SslError(#[from] ErrorStack),
 
+    #[error("invalid root certificate: {0}")]
+    InvalidRootCert(ErrorStack),
+
     #[error("invalid uri: {0}")]
     InvalidUri(#[from] InvalidUri),
 }
