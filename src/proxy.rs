@@ -283,12 +283,7 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
             let local_addr = SocketAddr::new(src, 0);
             match socket::set_freebind(&socket) {
                 Err(err) => warn!("failed to set freebind: {:?}", err),
-                _ => {
-                    match socket.bind(local_addr) {
-                        Err(err) => warn!("failed to bind local addr: {:?}", err),
-                        _ => (),
-                    };
-                },
+                _ => if let Err(err) = socket.bind(local_addr) { warn!("failed to bind local addr: {:?}", err) },
 
             };
             Ok(socket.connect(addr).await?)
