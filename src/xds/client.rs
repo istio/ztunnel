@@ -450,7 +450,7 @@ impl AdsClient {
 
         debug!(
             type_url=type_url.clone(),
-            nonce=response.nonce,
+            nonce,
             "type"=?response_type,
             "sending response",
         );
