@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
@@ -24,6 +25,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
+use crate::config::ConfigSource;
 use crate::metrics::xds::*;
 use crate::metrics::{Metrics, Recorder};
 use crate::xds::istio::workload::{Authorization, Workload};
@@ -101,7 +103,9 @@ pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyho
 
 pub struct Config {
     address: String,
+    root_cert: ConfigSource,
     auth: identity::AuthSource,
+
     workload_handler: Box<dyn Handler<Workload>>,
     rbac_handler: Box<dyn Handler<Authorization>>,
     initial_watches: Vec<String>,
@@ -112,6 +116,7 @@ impl Config {
     pub fn new(config: crate::config::Config) -> Config {
         Config {
             address: config.xds_address.clone().unwrap(),
+            root_cert: config.xds_root_cert.clone(),
             auth: config.auth,
             workload_handler: Box::new(NopHandler {}),
             rbac_handler: Box::new(NopHandler {}),
@@ -279,7 +284,7 @@ impl AdsClient {
         info!("Starting initial ADS client");
 
         let address = self.config.address.clone();
-        let svc = tls::grpc_connector(address).unwrap();
+        let svc = tls::grpc_connector(address, self.config.root_cert.clone()).unwrap();
         let mut client =
             AggregatedDiscoveryServiceClient::with_interceptor(svc, self.config.auth.clone());
         let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);

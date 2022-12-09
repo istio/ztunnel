@@ -79,7 +79,7 @@ where
 
 impl SecretManager<CaClient> {
     pub fn new(cfg: crate::config::Config) -> SecretManager<CaClient> {
-        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.auth);
+        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert.clone(), cfg.auth);
         let cache: HashMap<Identity, watch::Receiver<Option<tls::Certs>>> = Default::default();
         SecretManager {
             client: caclient,
@@ -208,7 +208,11 @@ pub mod mock {
     #[async_trait]
     impl CertificateProvider for MockCaClient {
         async fn fetch_certificate(&mut self, id: &Identity) -> Result<Certs, Error> {
-            let certs = generate_test_certs(id, Duration::from_secs(0), self.cert_lifetime);
+            let certs = generate_test_certs(
+                &id.clone().into(),
+                Duration::from_secs(0),
+                self.cert_lifetime,
+            );
             return Ok(certs);
         }
     }
