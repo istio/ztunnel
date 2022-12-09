@@ -20,14 +20,14 @@ use std::time::Instant;
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::{Inbound, InboundConnect};
-use crate::proxy::{Error, ERR_TOKIO_RUNTIME_SHUTDOWN};
+use crate::proxy::{Error, TraceParent, ERR_TOKIO_RUNTIME_SHUTDOWN};
 use crate::socket;
 use crate::socket::relay;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
@@ -54,11 +54,15 @@ impl Outbound {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
             .await
             .map_err(|e| Error::Bind(cfg.outbound_addr, e))?;
-        match socket::set_transparent(&listener) {
-            Err(_e) => info!("running without transparent mode"),
-            _ => info!("running with transparent mode"),
-        };
 
+        let transparent = socket::set_transparent(&listener).is_ok();
+
+        info!(
+            address=%listener.local_addr().unwrap(),
+            component="outbound",
+            transparent,
+            "listener established",
+        );
         Ok(Outbound {
             cfg,
             cert_manager,
@@ -75,7 +79,6 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
-        info!("outbound listener established {}", self.address());
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -91,20 +94,21 @@ impl Outbound {
                             hbone_port: self.hbone_port,
                             metrics: self.metrics.clone(),
                         };
-                        tokio::spawn(async move {
-                            let res = oc.proxy(stream).await;
-                            match res {
-                                Ok(_) => info!(
-                                    "outbound proxy complete ({:?})",
-                                    start_outbound_instant.elapsed()
-                                ),
-                                Err(ref e) => warn!(
-                                    "outbound proxy failed: {} ({:?})",
-                                    e,
-                                    start_outbound_instant.elapsed()
-                                ),
-                            };
-                        });
+                        let span = info_span!("outbound", id=%TraceParent::new());
+                        tokio::spawn(
+                            (async move {
+                                let res = oc.proxy(stream).await;
+                                // tracing::span::Span::current().record()
+                                // TODO: put id in OutboundConnect as means to pass it around. Put it on the wire
+                                info!("id {}", tracing::span::Span::current().field("id").unwrap());
+                                info!("id {}", tracing::span::Span::current().metadata().unwrap().fields());
+                                match res {
+                                    Ok(_) => info!(dur=?start_outbound_instant.elapsed(), "complete"),
+                                    Err(e) => warn!(dur=?start_outbound_instant.elapsed(), err=%e, "failed")
+                                };
+                            })
+                            .instrument(span),
+                        );
                     }
                     Err(e) => {
                         if e.kind() == io::ErrorKind::Other
@@ -227,23 +231,12 @@ impl OutboundConnection {
                 let response = request_sender.send_request(request).await?;
 
                 let code = response.status();
-                match hyper::upgrade::on(response).await {
-                    Ok(mut upgraded) => {
-                        if let Err(e) =
-                            super::copy_hbone("hbone client", &mut upgraded, &mut stream).await
-                        {
-                            error!("hbone client copy: {}", e);
-                            Err(Error::Io(e))
-                        } else {
-                            info!("request complete");
-                            Ok(())
-                        }
-                    }
-                    Err(e) => {
-                        error!("upgrade error: {}, {}", e, code);
-                        Err(Error::Http(e))
-                    }
+                if code != 200 {
+                    return Err(Error::HttpStatus(code));
                 }
+                let mut upgraded = hyper::upgrade::on(response).await?;
+                super::copy_hbone("hbone client", &mut upgraded, &mut stream).await?;
+                Ok(())
             }
             Protocol::TCP => {
                 info!(
@@ -255,12 +248,6 @@ impl OutboundConnection {
                 // Proxying data between downstrean and upstream
                 relay(&mut stream, &mut outbound).await?;
 
-                // TODO: metrics, time, more info, etc.
-                // Probably shouldn't log at start
-                info!(
-                    "Proxying complete to {} using TCP via {} type {:?}",
-                    req.destination, req.gateway, req.request_type
-                );
                 Ok(())
             }
         }
@@ -427,15 +414,13 @@ async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
-
     use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
 
-    use crate::{identity, workload};
-
     use crate::xds::istio::workload::Protocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::{identity, workload};
 
     use super::*;
 

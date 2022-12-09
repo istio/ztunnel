@@ -57,7 +57,7 @@ tokio-stream = "0.1.9"
 tonic = { version = "0.8", default-features=false, features = ["channel", "transport", "prost", "codegen"]}
 tower = { version = "0.4.12", features = ["full"] }
 tracing = "0.1.34"
-tracing-subscriber = { version = "0.3.11" , features = ["registry", "env-filter"]}
+tracing-subscriber = { version = "0.3.16" , features = ["registry", "env-filter"]}
 dyn-clone = "1.0.9"
 realm_io = "0.3.5"
 go-parse-duration = "0.1.1"

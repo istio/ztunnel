@@ -19,7 +19,7 @@ use std::io::Write;
 use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use super::Error;
 use super::{CaClient, CertificateProvider};
@@ -97,8 +97,8 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
     ) {
         loop {
             let sleep_dur = match ca_client.fetch_certificate(&id).await {
-                Err(e) => {
-                    warn!("Failed cert refresh for id {:?}: {:?}", id, e);
+                Err(err) => {
+                    warn!(identity=%id, ?err, "fail cert refresh");
                     let mut write_locked_cache = cache.write().unwrap();
                     let Some(certs_rx) = write_locked_cache.get(&id) else {
                         // Should not be possible, but if there is no receiver
@@ -123,7 +123,7 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
                             return;
                         }
                         Ok(_) => {
-                            info!("refreshed certs for id: {:?}", id);
+                            info!(identity=%id, "refreshed certs");
                         }
                     }
                     fetched_certs.get_duration_until_refresh()
@@ -181,7 +181,7 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
             Ok(_) => {
                 let current_cert = cache_rx.borrow().clone();
                 if let Some(cert) = current_cert {
-                    info!("Got cached cert.");
+                    debug!("return cached cert");
                     return Ok(cert);
                 }
                 return Err(Error::EmptyResponse(id.clone()));

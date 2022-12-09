@@ -21,7 +21,7 @@ use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
@@ -278,16 +278,18 @@ struct LocalClient {
 }
 
 impl LocalClient {
+    #[instrument(skip_all, name="local_client")]
     async fn run(self) -> Result<(), anyhow::Error> {
-        info!("running local client");
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = tokio::fs::read_to_string(self.path).await?;
         let r: Vec<Workload> = serde_yaml::from_str(&data)?;
         let mut wli = self.workloads.lock().unwrap();
+        let l = r.len();
         for wl in r {
-            info!("inserting local workloads {wl}");
+            debug!("inserting local workloads {wl}");
             wli.insert(wl);
         }
+        info!("inserted {} local workloads", l);
         Ok(())
     }
 }

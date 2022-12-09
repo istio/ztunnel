@@ -12,33 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use once_cell::sync::Lazy;
+use std::fmt::Debug;
 use std::time::Instant;
+
+use once_cell::sync::Lazy;
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 #[cfg(feature = "console")]
 pub fn setup_logging() {
     Lazy::force(&APPLICATION_START_TIME);
-    let console_layer = console_subscriber::spawn();
-
-    let filter_layer = tracing_subscriber::EnvFilter::try_from_default_env()
-        .or_else(|_| tracing_subscriber::EnvFilter::try_new("info"))
-        .unwrap();
     tracing_subscriber::registry()
-        .with(console_layer)
-        .with(tracing_subscriber::fmt::layer().with_filter(filter_layer))
+        .with(console_subscriber::spawn())
+        .with(fmt_layer())
         .init();
 }
 
 #[cfg(not(feature = "console"))]
 pub fn setup_logging() {
     Lazy::force(&APPLICATION_START_TIME);
-    let filter_layer = tracing_subscriber::EnvFilter::try_from_default_env()
-        .or_else(|_| tracing_subscriber::EnvFilter::try_new("info"))
+    tracing_subscriber::registry().with(fmt_layer()).init();
+}
+
+fn fmt_layer() -> impl Layer<Registry> + Sized {
+    let format = fmt::format();
+    let filter_layer = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
         .unwrap();
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(filter_layer))
-        .init();
+    tracing_subscriber::fmt::layer()
+        .event_format(format)
+        .with_filter(filter_layer)
 }

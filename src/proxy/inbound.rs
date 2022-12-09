@@ -19,7 +19,7 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
@@ -48,10 +48,14 @@ impl Inbound {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
             .await
             .map_err(|e| Error::Bind(cfg.inbound_addr, e))?;
-        match crate::socket::set_transparent(&listener) {
-            Err(_e) => info!("running without transparent mode"),
-            _ => info!("running with transparent mode"),
-        };
+        let transparent = crate::socket::set_transparent(&listener).is_ok();
+
+        info!(
+            address=%listener.local_addr().unwrap(),
+            component="inbound",
+            transparent,
+            "listener established",
+        );
         Ok(Inbound {
             cfg,
             workloads,
@@ -67,7 +71,6 @@ impl Inbound {
 
     pub(super) async fn run(self) {
         let (tx, rx) = oneshot::channel();
-        let addr = self.listener.local_addr().unwrap();
         let service =
             make_service_fn(|_| async { Ok::<_, hyper::Error>(service_fn(Self::serve_connect)) });
 
@@ -95,8 +98,6 @@ impl Inbound {
                 }
                 info!("starting drain of inbound connections");
             });
-
-        info!("HBONE listener established {}", addr);
 
         if let Err(e) = server.await {
             error!("server error: {}", e);
@@ -218,9 +219,10 @@ impl crate::tls::CertProvider for InboundCertProvider {
                 .ok_or(TlsError::CertificateLookup(wip))?
                 .identity()
         };
-        info!(
-            "tls: accepting connection to {:?} ({})",
-            orig_dst_addr, identity
+        debug!(
+            destination=?orig_dst_addr,
+            %identity,
+            "fetching cert"
         );
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
         let acc = cert.mtls_acceptor()?;

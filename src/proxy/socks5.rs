@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
-use byteorder::{BigEndian, ByteOrder};
-use drain::Watch;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+
+use anyhow::Result;
+use byteorder::{BigEndian, ByteOrder};
+use drain::Watch;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -53,6 +54,12 @@ impl Socks5 {
             .await
             .map_err(|e| Error::Bind(cfg.socks5_addr, e))?;
 
+        info!(
+            address=%listener.local_addr().unwrap(),
+            component="socks5",
+            "listener established",
+        );
+
         Ok(Socks5 {
             cfg,
             cert_manager,
@@ -69,8 +76,6 @@ impl Socks5 {
     }
 
     pub async fn run(self) {
-        info!("socks5 listener established {}", self.address());
-
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.

@@ -12,23 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use boring::error::ErrorStack;
-use drain::Watch;
-use std::io;
+use std::{fmt, io};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use inbound::Inbound;
+use boring::error::ErrorStack;
+use drain::Watch;
+use rand::Rng;
 use tokio::net::TcpStream;
-use tracing::{error, info};
+use tracing::{error, trace};
 
+use inbound::Inbound;
+
+use crate::{config, identity, tls};
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
-use crate::{config, identity, tls};
 
 mod inbound;
 mod inbound_passthrough;
@@ -129,6 +131,9 @@ pub enum Error {
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
 
+    #[error("http status: {0}")]
+    HttpStatus(hyper::StatusCode),
+
     #[error("tls error: {0}")]
     Tls(#[from] tls::Error),
 
@@ -158,7 +163,7 @@ pub async fn copy_hbone(
         let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
         let mut wo = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wo);
         let res = tokio::io::copy(&mut ri, &mut wo).await;
-        info!(?res, ?desc, "hbone -> tcp");
+        trace!(?res, ?desc, "hbone -> tcp");
         wo.shutdown().await
     };
 
@@ -166,33 +171,11 @@ pub async fn copy_hbone(
         let mut ro = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ro);
         let mut wi = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wi);
         let res = tokio::io::copy(&mut ro, &mut wi).await;
-        info!(?res, ?desc, "tcp -> hbone");
+        trace!(?res, ?desc, "tcp -> hbone");
         wi.shutdown().await
     };
 
     tokio::try_join!(client_to_server, server_to_client).map(|_| ())
-    // TODO: Buffered may be faster, but couldn't get around the "WriteZero" errors
-    // let (ri, mut wi) = tokio::io::split(upgraded);
-    // let (ro, mut wo) = stream.split();
-    //
-    // // 16 mb buffers
-    // let mut rib = tokio::io::BufReader::with_capacity(1048576 * 16, ri);
-    // let mut rob = tokio::io::BufReader::with_capacity(1048576 * 16, ro);
-    //
-    // let client_to_server = async {
-    //     let res = io::copy_buf(&mut rib, &mut wo).await;
-    //     info!(?res, ?desc, "hbone -> tcp");
-    //     res.expect("");
-    //     wo.shutdown().await
-    // };
-    //
-    // let server_to_client = async {
-    //     let res = io::copy_buf(&mut rob, &mut wi).await;
-    //     info!(?res, ?desc, "tcp -> hbone");
-    //     wi.shutdown().await
-    // };
-    //
-    // tokio::try_join!(client_to_server, server_to_client).map(|_| ())
 }
 
 pub fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
@@ -210,3 +193,40 @@ pub fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
 }
 
 const ERR_TOKIO_RUNTIME_SHUTDOWN: &str = "A Tokio 1.x context was found, but it is being shutdown.";
+
+/// Represents a traceparent, as defined by https://www.w3.org/TR/trace-context/
+#[derive(Eq, PartialEq)]
+pub struct TraceParent {
+    version: u8,
+    trace_id: u128,
+    parent_id: u64,
+    flags: u8,
+}
+
+impl TraceParent {
+    fn new() -> Self {
+        let mut rng = rand::thread_rng();
+        Self {
+            version: 0,
+            trace_id: rng.gen(),
+            parent_id: rng.gen(),
+            flags: 0,
+        }
+    }
+}
+
+impl fmt::Debug for TraceParent {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{:02x}-{:032x}-{:016x}-{:02x}",
+            self.version, self.trace_id, self.parent_id, self.flags
+        )
+    }
+}
+
+impl fmt::Display for TraceParent {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:032x}", self.trace_id,)
+    }
+}

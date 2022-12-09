@@ -13,14 +13,17 @@
 // limitations under the License.
 
 use std::io;
+use std::net::SocketAddr;
+
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
-use super::Error;
 use crate::config::Config;
 use crate::proxy::ERR_TOKIO_RUNTIME_SHUTDOWN;
 use crate::socket;
 use crate::socket::relay;
+
+use super::Error;
 
 pub struct InboundPassthrough {
     cfg: Config,
@@ -34,14 +37,13 @@ impl InboundPassthrough {
         let tcp_listener: TcpListener = TcpListener::bind(self.cfg.inbound_plaintext_addr)
             .await
             .expect("failed to bind");
-        match socket::set_transparent(&tcp_listener) {
-            Err(_e) => info!("running without transparent mode"),
-            _ => info!("running with transparent mode"),
-        };
+        let transparent = socket::set_transparent(&tcp_listener).is_ok();
 
         info!(
-            "inbound plaintext listener established {}",
-            tcp_listener.local_addr().unwrap()
+            address=%tcp_listener.local_addr().unwrap(),
+            component="inbound plaintext",
+            transparent,
+            "listener established",
         );
 
         loop {
@@ -49,10 +51,9 @@ impl InboundPassthrough {
             let socket = tcp_listener.accept().await;
             match socket {
                 Ok((mut stream, remote)) => {
-                    info!("accepted inbound plaintext connection from {}", remote);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::proxy_inbound_plaintext(&mut stream).await {
-                            warn!("plaintext proxying failed {}", e)
+                        if let Err(e) = Self::proxy_inbound_plaintext(remote, &mut stream).await {
+                            warn!("plaintext proxying failed: {}", e)
                         }
                     });
                 }
@@ -68,11 +69,12 @@ impl InboundPassthrough {
         }
     }
 
-    async fn proxy_inbound_plaintext(inbound: &mut TcpStream) -> Result<(), Error> {
+    async fn proxy_inbound_plaintext(source: SocketAddr, inbound: &mut TcpStream) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(inbound);
+        info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let mut outbound = TcpStream::connect(orig).await?;
         relay(inbound, &mut outbound).await?;
-        info!("proxy inbound plaintext complete");
+        info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }
 }

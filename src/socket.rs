@@ -19,7 +19,7 @@ use realm_io;
 use socket2::SockRef;
 use tokio::io;
 use tokio::net::TcpListener;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
@@ -34,23 +34,30 @@ pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
 }
 
 #[cfg(target_os = "linux")]
-pub fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
+fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     let sock = SockRef::from(stream);
     // Dual-stack IPv4/IPv6 sockets require us to check both options.
     match linux::original_dst(&sock) {
         Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
-        _ => match linux::original_dst_ipv6(&sock) {
+        Err(e4) => match linux::original_dst_ipv6(&sock) {
             Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
-            Err(e) => {
-                warn!("failed to read SO_ORIGINAL_DST: {:?}", e);
-                Err(e)
+            Err(e6) => {
+                if !sock.ip_transparent().unwrap_or(false) {
+                    // In TPROXY mode, this is normal, so don't bother logging
+                    warn!(
+                        peer=?stream.peer_addr().unwrap(),
+                        local=?stream.local_addr().unwrap(),
+                        "failed to read SO_ORIGINAL_DST: {e4:?}, {e6:?}"
+                    );
+                }
+                Err(e6)
             }
         },
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
+fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     Err(io::Error::new(
         io::ErrorKind::Other,
         "SO_ORIGINAL_DST not supported on this operating system",
