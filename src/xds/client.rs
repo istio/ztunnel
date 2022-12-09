@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
 
 use prost::DecodeError;
+use prost_types::value::Kind;
+use prost_types::{Struct, Value};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -276,6 +278,18 @@ impl AdsClient {
         }
     }
 
+    fn build_struct<const N: usize>(a: [(&str, &str); N]) -> Struct {
+        let fields = BTreeMap::from(a.map(|(k, v)| {
+            (
+                k.to_string(),
+                Value {
+                    kind: Some(Kind::StringValue(v.to_string())),
+                },
+            )
+        }));
+        Struct { fields }
+    }
+
     fn node(&self) -> Node {
         let ip = std::env::var("INSTANCE_IP");
         let ip = ip.as_deref().unwrap_or("1.1.1.1");
@@ -283,8 +297,16 @@ impl AdsClient {
         let pod_name = pod_name.as_deref().unwrap_or("");
         let ns = std::env::var("POD_NAMESPACE");
         let ns = ns.as_deref().unwrap_or("");
+        let node = std::env::var("NODE_NAME");
+        let node = node.as_deref().unwrap_or("");
         Node {
             id: format!("sidecar~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
+            metadata: Some(Self::build_struct([
+                ("POD_NAME", pod_name),
+                ("POD_NAMESPACE", ns),
+                ("INSTANCE_IP", ip),
+                ("NODE_NAME", node),
+            ])),
             ..Default::default()
         }
     }
