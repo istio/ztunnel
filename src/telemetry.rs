@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::{EnvFilter, fmt, Layer, Registry};
+use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 

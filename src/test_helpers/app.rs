@@ -132,7 +132,7 @@ impl TestApp {
             0x0u8,  // RSV
             addr_type,
         ];
-        match proxy::to_canonical_ip(addr) {
+        match socket::to_canonical(addr).ip() {
             IpAddr::V6(ip) => cmd.extend_from_slice(&ip.octets()),
             IpAddr::V4(ip) => cmd.extend_from_slice(&ip.octets()),
         };

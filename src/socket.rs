@@ -13,24 +13,39 @@
 // limitations under the License.
 
 use std::io::Error;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use realm_io;
 use socket2::SockRef;
 use tokio::io;
 use tokio::net::TcpListener;
-use tracing::{instrument, warn};
+use tracing::warn;
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
     SockRef::from(l).set_ip_transparent(true)
 }
 
+pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
+    // another match has to be used for IPv4 and IPv6 support
+    // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
+    let ip = match addr.ip() {
+        IpAddr::V4(_) => return addr,
+        IpAddr::V6(i) => match i.octets() {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
+                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+            }
+            _ => return addr,
+        },
+    };
+    SocketAddr::from((ip, addr.port()))
+}
+
 pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
-    match orig_dst_addr(stream) {
+    to_canonical(match orig_dst_addr(stream) {
         Ok(addr) => addr,
         _ => stream.local_addr().expect("must get local address"),
-    }
+    })
 }
 
 #[cfg(target_os = "linux")]

@@ -113,13 +113,13 @@ impl Drop for BlockReady {
         let dur = telemetry::APPLICATION_START_TIME.elapsed();
         if left == 0 {
             info!(
-                task=self.name,
+                task = self.name,
                 ?dur,
                 "Readiness blocker complete, marking server ready",
             );
         } else {
             info!(
-                task=self.name,
+                task = self.name,
                 ?dur,
                 "Readiness blocker complete, still awaiting {left} tasks",
             );

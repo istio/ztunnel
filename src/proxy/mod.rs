@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt, io};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::fmt::Debug;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::{fmt, io};
 
 use boring::error::ErrorStack;
 use drain::Watch;
@@ -24,13 +25,13 @@ use tracing::{error, trace};
 
 use inbound::Inbound;
 
-use crate::{config, identity, tls};
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
+use crate::{config, identity, tls};
 
 mod inbound;
 mod inbound_passthrough;
@@ -151,7 +152,6 @@ pub enum Error {
 const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
 
 pub async fn copy_hbone(
-    desc: &str,
     upgraded: &mut hyper::upgrade::Upgraded,
     stream: &mut TcpStream,
 ) -> Result<(), std::io::Error> {
@@ -163,7 +163,7 @@ pub async fn copy_hbone(
         let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
         let mut wo = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wo);
         let res = tokio::io::copy(&mut ri, &mut wo).await;
-        trace!(?res, ?desc, "hbone -> tcp");
+        trace!(?res, "hbone -> tcp");
         wo.shutdown().await
     };
 
@@ -171,25 +171,11 @@ pub async fn copy_hbone(
         let mut ro = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ro);
         let mut wi = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wi);
         let res = tokio::io::copy(&mut ro, &mut wi).await;
-        trace!(?res, ?desc, "tcp -> hbone");
+        trace!(?res, "tcp -> hbone");
         wi.shutdown().await
     };
 
     tokio::try_join!(client_to_server, server_to_client).map(|_| ())
-}
-
-pub fn to_canonical_ip(ip: SocketAddr) -> IpAddr {
-    // another match has to be used for IPv4 and IPv6 support
-    // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
-    match ip.ip() {
-        IpAddr::V4(i) => IpAddr::V4(i),
-        IpAddr::V6(i) => match i.octets() {
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
-                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
-            }
-            _ => IpAddr::V6(i),
-        },
-    }
 }
 
 const ERR_TOKIO_RUNTIME_SHUTDOWN: &str = "A Tokio 1.x context was found, but it is being shutdown.";
@@ -201,6 +187,15 @@ pub struct TraceParent {
     trace_id: u128,
     parent_id: u64,
     flags: u8,
+}
+
+pub const BAGGAGE_HEADER: &str = "baggage";
+pub const TRACEPARENT_HEADER: &str = "traceparent";
+
+impl TraceParent {
+    pub fn header(&self) -> hyper::header::HeaderValue {
+        hyper::header::HeaderValue::from_bytes(format!("{self:?}").as_bytes()).unwrap()
+    }
 }
 
 impl TraceParent {
@@ -228,5 +223,24 @@ impl fmt::Debug for TraceParent {
 impl fmt::Display for TraceParent {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:032x}", self.trace_id,)
+    }
+}
+
+impl TryFrom<&str> for TraceParent {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.len() != 55 {
+            anyhow::bail!("traceparent malformed length was {}", value.len())
+        }
+
+        let segs: Vec<&str> = value.split('-').collect();
+
+        Ok(Self {
+            version: u8::from_str_radix(segs[0], 16)?,
+            trace_id: u128::from_str_radix(segs[1], 16)?,
+            parent_id: u64::from_str_radix(segs[2], 16)?,
+            flags: u8::from_str_radix(segs[3], 16)?,
+        })
     }
 }

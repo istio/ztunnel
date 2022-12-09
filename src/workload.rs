@@ -278,7 +278,7 @@ struct LocalClient {
 }
 
 impl LocalClient {
-    #[instrument(skip_all, name="local_client")]
+    #[instrument(skip_all, name = "local_client")]
     async fn run(self) -> Result<(), anyhow::Error> {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = tokio::fs::read_to_string(self.path).await?;
@@ -310,7 +310,7 @@ impl WorkloadInformation {
     // only support workload
     pub async fn fetch_workload(&self, addr: &IpAddr) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
-        debug!("lookup workload for {addr}");
+        debug!(%addr, "fetch workload");
         match self.find_workload(addr) {
             None => {
                 self.fetch_on_demand(addr).await;
@@ -330,7 +330,7 @@ impl WorkloadInformation {
     // It is to do on demand workload fetch if necessary, it handles both workload ip and clusterIP
     async fn fetch_address(&self, addr: &SocketAddr) {
         // Wait for it on-demand, *if* needed
-        debug!("lookup workload for {addr}");
+        debug!(%addr, "fetch address");
         // 1. handle workload ip, if workload not found fallback to clusterIP.
         if self.find_workload(&addr.ip()).is_none() {
             // 2. handle clusterIP
@@ -344,9 +344,9 @@ impl WorkloadInformation {
 
     async fn fetch_on_demand(&self, ip: &IpAddr) {
         if let Some(demand) = &self.demand {
-            debug!("sending demand request for: {}", ip);
+            debug!(%ip, "sending demand request");
             demand.demand(ip.to_string()).await.recv().await;
-            debug!("on demand ready: {}", ip);
+            debug!(%ip, "on demand ready");
         }
     }
 

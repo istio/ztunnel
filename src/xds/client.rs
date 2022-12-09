@@ -22,7 +22,7 @@ use prost::DecodeError;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::metrics::xds::*;
 use crate::metrics::{Metrics, Recorder};
@@ -145,6 +145,7 @@ impl Config {
             demand_tx: tx,
             metrics,
             block_ready: Some(block_ready),
+            connection_id: 0,
         }
     }
 }
@@ -162,6 +163,8 @@ pub struct AdsClient {
 
     pub(crate) metrics: Arc<Metrics>,
     block_ready: Option<admin::BlockReady>,
+
+    connection_id: u32,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
@@ -231,34 +234,45 @@ impl AdsClient {
         }
     }
 
+    async fn run_loop(&mut self, backoff: Duration) -> Duration {
+        const MAX_BACKOFF: Duration = Duration::from_secs(15);
+        match self.run_internal().await {
+            Err(e @ Error::Connection(_)) => {
+                // For connection errors, we add backoff
+                let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
+                warn!("XDS client error: {}, retrying in {:?}", e, backoff);
+                self.metrics
+                    .record(&ConnectionTerminationReason::ConnectionError);
+                tokio::time::sleep(backoff).await;
+                backoff
+            }
+            Err(e) => {
+                // For other errors, we connect immediately
+                // TODO: we may need more nuance here; if we fail due to invalid initial request we may overload
+                // But we want to reconnect from MaxConnectionAge immediately.
+                warn!("XDS client error: {}, retrying", e);
+                self.metrics.record(&ConnectionTerminationReason::Error);
+                // Reset backoff
+                Duration::from_millis(10)
+            }
+            Ok(_) => {
+                self.metrics.record(&ConnectionTerminationReason::Complete);
+                warn!("XDS client complete");
+                // Reset backoff
+                Duration::from_millis(10)
+            }
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), Error> {
         let mut backoff = Duration::from_millis(10);
-        let max_backoff = Duration::from_secs(15);
         loop {
-            let res = self.run_internal().await;
-            match res {
-                Err(e @ Error::Connection(_)) => {
-                    // For connection errors, we add backoff
-                    backoff = std::cmp::min(max_backoff, backoff * 2);
-                    warn!("XDS client error: {}, retrying in {:?}", e, backoff);
-                    self.metrics
-                        .record(&ConnectionTerminationReason::ConnectionError);
-                    tokio::time::sleep(backoff).await;
-                }
-                Err(e) => {
-                    // For other errors, we connect immediately
-                    // TODO: we may need more nuance here; if we fail due to invalid initial request we may overload
-                    // But we want to reconnect from MaxConnectionAge immediately.
-                    warn!("XDS client error: {}, retrying", e);
-                    self.metrics.record(&ConnectionTerminationReason::Error);
-                    backoff = Duration::from_millis(10);
-                }
-                Ok(_) => {
-                    self.metrics.record(&ConnectionTerminationReason::Complete);
-                    warn!("XDS client complete");
-                    backoff = Duration::from_millis(10);
-                }
-            }
+            self.connection_id += 1;
+            let id = self.connection_id;
+            backoff = self
+                .run_loop(backoff)
+                .instrument(info_span!("xds", id))
+                .await;
         }
     }
 
@@ -276,8 +290,6 @@ impl AdsClient {
     }
 
     async fn run_internal(&mut self) -> Result<(), Error> {
-        info!("Starting initial ADS client");
-
         let address = self.config.address.clone();
         let svc = tls::grpc_connector(address).unwrap();
         let mut client =
@@ -291,20 +303,19 @@ impl AdsClient {
                 yield initial;
             }
             while let Some(message) = discovery_req_rx.recv().await {
-                info!(type_url=message.type_url, "sending request");
+                debug!(type_url=message.type_url, "sending request");
                 yield message
             }
             warn!("outbound stream complete");
         };
 
-        info!("Starting stream");
         let mut response_stream = client
             .delta_aggregated_resources(tonic::Request::new(outbound))
             .await
             .map_err(Error::Connection)?
             .into_inner();
+        debug!("connected established");
 
-        info!("Stream established");
         // Create a oneshot channel to
         let (tx, initial_xds_rx) = oneshot::channel();
         let mut initial_xds_tx = Some(tx);
@@ -437,10 +448,11 @@ impl AdsClient {
             _ => (XdsSignal::Ack, None),
         };
 
-        info!(
-            type_url = type_url.clone(),
-            nonce = response.nonce,
-            "sending {response_type}",
+        debug!(
+            type_url=type_url.clone(),
+            nonce=response.nonce,
+            typpe=?response_type,
+            "sending reponse",
         );
         send.send(DeltaDiscoveryRequest {
             type_url: type_url.clone(),

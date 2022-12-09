@@ -52,7 +52,10 @@ impl InboundPassthrough {
             match socket {
                 Ok((mut stream, remote)) => {
                     tokio::spawn(async move {
-                        if let Err(e) = Self::proxy_inbound_plaintext(remote, &mut stream).await {
+                        if let Err(e) =
+                            Self::proxy_inbound_plaintext(socket::to_canonical(remote), &mut stream)
+                                .await
+                        {
                             warn!("plaintext proxying failed: {}", e)
                         }
                     });
@@ -69,7 +72,10 @@ impl InboundPassthrough {
         }
     }
 
-    async fn proxy_inbound_plaintext(source: SocketAddr, inbound: &mut TcpStream) -> Result<(), Error> {
+    async fn proxy_inbound_plaintext(
+        source: SocketAddr,
+        inbound: &mut TcpStream,
+    ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(inbound);
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let mut outbound = TcpStream::connect(orig).await?;

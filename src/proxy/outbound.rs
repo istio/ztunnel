@@ -20,14 +20,16 @@ use std::time::Instant;
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::{Inbound, InboundConnect};
-use crate::proxy::{Error, TraceParent, ERR_TOKIO_RUNTIME_SHUTDOWN};
+use crate::proxy::{
+    Error, TraceParent, BAGGAGE_HEADER, ERR_TOKIO_RUNTIME_SHUTDOWN, TRACEPARENT_HEADER,
+};
 use crate::socket;
 use crate::socket::relay;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
@@ -93,15 +95,12 @@ impl Outbound {
                             cfg,
                             hbone_port: self.hbone_port,
                             metrics: self.metrics.clone(),
+                            id: TraceParent::new(),
                         };
-                        let span = info_span!("outbound", id=%TraceParent::new());
+                        let span = info_span!("outbound", id=%oc.id);
                         tokio::spawn(
                             (async move {
                                 let res = oc.proxy(stream).await;
-                                // tracing::span::Span::current().record()
-                                // TODO: put id in OutboundConnect as means to pass it around. Put it on the wire
-                                info!("id {}", tracing::span::Span::current().field("id").unwrap());
-                                info!("id {}", tracing::span::Span::current().metadata().unwrap().fields());
                                 match res {
                                     Ok(_) => info!(dur=?start_outbound_instant.elapsed(), "complete"),
                                     Err(e) => warn!(dur=?start_outbound_instant.elapsed(), err=%e, "failed")
@@ -141,14 +140,14 @@ pub struct OutboundConnection {
     pub cfg: Config,
     pub hbone_port: u16,
     pub metrics: Arc<Metrics>,
+    pub id: TraceParent,
 }
 
 impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
-        let peer = stream.peer_addr().expect("must receive peer addr");
-        let remote_addr = super::to_canonical_ip(peer);
+        let peer = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
         let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
-        self.proxy_to(stream, remote_addr, orig_dst_addr).await
+        self.proxy_to(stream, peer.ip(), orig_dst_addr).await
     }
 
     pub async fn proxy_to(
@@ -178,7 +177,7 @@ impl OutboundConnection {
         if req.request_type == RequestType::DirectLocal {
             // For same node, we just access it directly rather than making a full network connection.
             // Pass our `stream` over to the inbound handler, which will process as usual
-            info!("Proxying to {} using node local fast path", req.destination);
+            info!("proxying to {} using node local fast path", req.destination);
             return Inbound::handle_inbound(InboundConnect::DirectPath(stream), req.destination)
                 .await
                 .map_err(Error::Io);
@@ -186,7 +185,7 @@ impl OutboundConnection {
         match req.protocol {
             Protocol::HBONE => {
                 info!(
-                    "Proxying to {} using HBONE via {} type {:#?}",
+                    "proxy to {} using HBONE via {} type {:#?}",
                     req.destination, req.gateway, req.request_type
                 );
 
@@ -204,7 +203,8 @@ impl OutboundConnection {
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
-                    .header("baggage", baggage(&req))
+                    .header(BAGGAGE_HEADER, baggage(&req))
+                    .header(TRACEPARENT_HEADER, self.id.header())
                     .body(hyper::Body::empty())
                     .unwrap();
 
@@ -235,7 +235,9 @@ impl OutboundConnection {
                     return Err(Error::HttpStatus(code));
                 }
                 let mut upgraded = hyper::upgrade::on(response).await?;
-                super::copy_hbone("hbone client", &mut upgraded, &mut stream).await?;
+                super::copy_hbone(&mut upgraded, &mut stream)
+                    .instrument(trace_span!("hbone client"))
+                    .await?;
                 Ok(())
             }
             Protocol::TCP => {
@@ -453,6 +455,7 @@ mod tests {
             hbone_port: 15008,
             cfg,
             metrics: Arc::new(Default::default()),
+            id: TraceParent::new(),
         };
 
         let req = outbound

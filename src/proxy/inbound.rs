@@ -13,17 +13,19 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
+use crate::proxy::{TraceParent, TRACEPARENT_HEADER};
 use crate::socket::relay;
 use crate::tls::TlsError;
 use crate::workload::WorkloadInformation;
@@ -114,38 +116,45 @@ impl Inbound {
         request_type: InboundConnect,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
+        let start = Instant::now();
         let stream = TcpStream::connect(addr).await;
         match stream {
             Err(err) => {
-                warn!("connect to {} failed: {}", addr, err);
+                warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
                 Err(err)
             }
             Ok(stream) => {
                 let mut stream = stream;
                 stream.set_nodelay(true)?;
-                tokio::task::spawn(async move {
-                    match request_type {
-                        InboundConnect::DirectPath(mut incoming) => {
-                            if let Err(e) = relay(&mut incoming, &mut stream).await {
-                                error!("internal server copy: {}", e);
-                            }
-                        }
-                        Hbone(req) => match hyper::upgrade::on(req).await {
-                            Ok(mut upgraded) => {
-                                if let Err(e) =
-                                    super::copy_hbone("hbone server", &mut upgraded, &mut stream)
-                                        .await
-                                {
-                                    error!("hbone server copy: {}", e);
+                trace!(dur=?start.elapsed(), "connected to: {addr}");
+                tokio::task::spawn(
+                    (async move {
+                        match request_type {
+                            InboundConnect::DirectPath(mut incoming) => {
+                                if let Err(e) = relay(&mut incoming, &mut stream).await {
+                                    error!(dur=?start.elapsed(), "internal server copy: {}", e);
                                 }
                             }
-                            Err(e) => {
-                                // Not sure if this can even happen
-                                error!("No upgrade {e}");
-                            }
-                        },
-                    }
-                });
+                            Hbone(req) => match hyper::upgrade::on(req).await {
+                                Ok(mut upgraded) => {
+                                    if let Err(e) = super::copy_hbone(&mut upgraded, &mut stream)
+                                        .instrument(trace_span!("hbone server"))
+                                        .await
+                                    {
+                                        error!(dur=?start.elapsed(), "hbone server copy: {}", e);
+                                    } else {
+                                        info!(dur=?start.elapsed(), "complete");
+                                    }
+                                }
+                                Err(e) => {
+                                    // Not sure if this can even happen
+                                    error!(dur=?start.elapsed(), "No upgrade {e}");
+                                }
+                            },
+                        }
+                    })
+                    .instrument(tracing::span::Span::current()),
+                );
                 // Send back our 200. We do this regardless of if our spawned task copies the data;
                 // we need to respond with headers immediately once connection is established for the
                 // stream of bytes to begin.
@@ -154,11 +163,20 @@ impl Inbound {
         }
     }
 
+    fn extract_traceparent(req: &Request<Body>) -> TraceParent {
+        req.headers()
+            .get(TRACEPARENT_HEADER)
+            .and_then(|b| b.to_str().ok())
+            .and_then(|b| TraceParent::try_from(b).ok())
+            .unwrap_or_else(TraceParent::new)
+    }
+
+    #[instrument(name="inbound", skip_all, fields(id=%Self::extract_traceparent(&req)))]
     async fn serve_connect(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
-                info!("Got {} request to {}", req.method(), uri);
+                info!("got {} request to {}", req.method(), uri);
                 let addr: Result<SocketAddr, _> = uri.to_string().as_str().parse();
                 if addr.is_err() {
                     info!("Sending 400, {:?}", addr.err());
@@ -169,7 +187,9 @@ impl Inbound {
                 }
 
                 let addr: SocketAddr = addr.unwrap();
-                let status_code = match Self::handle_inbound(InboundConnect::Hbone(req), addr).await
+                let status_code = match Self::handle_inbound(InboundConnect::Hbone(req), addr)
+                    .instrument(tracing::span::Span::current())
+                    .await
                 {
                     Ok(_) => StatusCode::OK,
                     Err(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -212,7 +232,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
-            let wip = super::to_canonical_ip(orig_dst_addr);
+            let wip = orig_dst_addr.ip();
             self.workloads
                 .fetch_workload(&wip)
                 .await

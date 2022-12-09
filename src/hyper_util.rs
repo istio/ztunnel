@@ -18,7 +18,7 @@ use hyper::server::conn::AddrIncoming;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::{Stream, StreamExt};
-use tracing::{info, debug, warn};
+use tracing::{debug, warn};
 
 use crate::tls::{BoringTlsAcceptor, CertProvider, TlsError};
 pub fn tls_server<T: CertProvider + Clone + 'static>(

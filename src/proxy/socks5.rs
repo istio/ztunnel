@@ -28,7 +28,8 @@ use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{Error, ERR_TOKIO_RUNTIME_SHUTDOWN};
+use crate::proxy::{Error, TraceParent, ERR_TOKIO_RUNTIME_SHUTDOWN};
+use crate::socket;
 use crate::workload::WorkloadInformation;
 
 pub struct Socks5 {
@@ -89,6 +90,7 @@ impl Socks5 {
                             cfg: self.cfg.clone(),
                             hbone_port: self.hbone_port,
                             metrics: self.metrics.clone(),
+                            id: TraceParent::new(),
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream).await {
@@ -201,7 +203,7 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     let host = SocketAddr::new(ip, port);
 
-    let remote_addr = super::to_canonical_ip(stream.peer_addr().expect("must receive peer addr"));
+    let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
     // Send dummy values - the client generally ignores it.
     let buf = [
@@ -214,7 +216,7 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     info!("accepted connection from {remote_addr} to {host}");
     tokio::spawn(async move {
-        let res = oc.proxy_to(stream, remote_addr, host).await;
+        let res = oc.proxy_to(stream, remote_addr.ip(), host).await;
         match res {
             Ok(_) => {}
             Err(ref e) => warn!("outbound proxy failed: {}", e),
