@@ -195,6 +195,7 @@ impl OutboundConnection {
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
                     .header(TRACEPARENT_HEADER, self.id.header())
+                    .header("X-Forwarded-For", remote_addr.to_string())
                     .body(hyper::Body::empty())
                     .unwrap();
 
@@ -204,7 +205,7 @@ impl OutboundConnection {
                     .connector(req.destination_workload.map(|w| w.identity()).as_ref())?
                     .configure()
                     .expect("configure");
-                let tcp_stream = TcpStream::connect(req.gateway).await?;
+                let tcp_stream = super::freebind_connect(None, req.gateway).await?;
                 tcp_stream.set_nodelay(true)?;
                 let tls_stream = connect_tls(connector, tcp_stream).await?;
                 let (mut request_sender, connection) = builder
@@ -236,7 +237,7 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
                 // Create a TCP connection to upstream
-                let mut outbound = TcpStream::connect(req.gateway).await?;
+                let mut outbound = super::freebind_connect(super::get_original_src_from_stream(&stream),req.gateway).await?;
                 // Proxying data between downstrean and upstream
                 match relay(&mut stream, &mut outbound, self.pi.cfg.zero_copy_enabled).await {
                     // Connection closed with count of bytes transferred between streams

@@ -19,11 +19,19 @@ use realm_io;
 use socket2::SockRef;
 use tokio::io;
 use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
 use tracing::warn;
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
     SockRef::from(l).set_ip_transparent(true)
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_freebind(sock: &TcpSocket) -> io::Result<()> {
+    let sock = SockRef::from(sock);
+    sock.set_ip_transparent(true)?;
+    linux::set_ip_freebind(&sock)
 }
 
 pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
@@ -87,6 +95,14 @@ pub fn set_transparent(_: &TcpListener) -> io::Result<()> {
     ))
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn set_freebind(sock: &TcpSocket) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "IP_FREEBIND not supported on this operating system",
+    ))
+}
+
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod linux {
@@ -94,6 +110,23 @@ mod linux {
 
     use socket2::{SockAddr, SockRef};
     use tokio::io;
+
+    pub fn set_ip_freebind(sock: &SockRef) -> io::Result<()> {
+        unsafe {
+            let optval: libc::c_int = 1;
+            let ret = libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_FREEBIND,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
 
     // Replace with socket2's version once there is a release that contains
     // https://github.com/rust-lang/socket2/pull/360

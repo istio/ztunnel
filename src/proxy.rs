@@ -20,8 +20,9 @@ use std::{fmt, io};
 use boring::error::ErrorStack;
 use drain::Watch;
 use rand::Rng;
-use tokio::net::TcpStream;
-use tracing::{error, trace};
+use tokio::net::{TcpSocket, TcpStream};
+
+use tracing::{error, trace, warn, info};
 
 use inbound::Inbound;
 
@@ -31,7 +32,8 @@ use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
-use crate::{config, identity, tls};
+use crate::{config, identity, tls, socket};
+use hyper::{Body, Request};
 
 mod inbound;
 mod inbound_passthrough;
@@ -241,3 +243,49 @@ impl TryFrom<&str> for TraceParent {
         })
     }
 }
+pub fn get_original_src_from_xff(req: &Request<Body>) -> Option<IpAddr> {
+    let value = req.headers().get("X-Forwarded-For")?;
+    let ip = value
+        .to_str()
+        .unwrap_or("")
+        .to_string()
+        .split(",")
+        .next()?
+        .trim()
+        .parse::<IpAddr>();
+
+    match ip {
+        Ok(ip) => return Some(ip),
+        Err(err) => {
+            warn!("failed to parse XFF value: {:?}", err);
+            None
+        }
+    }
+}
+
+pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
+    match stream.peer_addr() {
+        Ok(sa) => Some(to_canonical_ip(sa)),
+        _ => None
+    }
+}
+
+pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
+    match local {
+        None => Ok(TcpStream::connect(addr).await?),
+        Some(src) => {
+            let socket = if src.is_ipv4() {
+                TcpSocket::new_v4()?
+            } else {
+                TcpSocket::new_v6()?
+            };
+
+            let local_addr = SocketAddr::new(src, 0);
+            socket::set_freebind(&socket)?;
+            socket.bind(local_addr)?;
+            Ok(socket.connect(addr).await?)
+        }
+    }
+}
+
+const ERR_TOKIO_RUNTIME_SHUTDOWN: &str = "A Tokio 1.x context was found, but it is being shutdown.";
