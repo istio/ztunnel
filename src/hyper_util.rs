@@ -18,7 +18,7 @@ use hyper::server::conn::AddrIncoming;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::{Stream, StreamExt};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::tls::{BoringTlsAcceptor, CertProvider, TlsError};
 pub fn tls_server<T: CertProvider + Clone + 'static>(
@@ -39,7 +39,7 @@ pub fn tls_server<T: CertProvider + Clone + 'static>(
                 warn!("TLS handshake error: {}", err);
                 false
             } else {
-                info!("TLS handshake succeeded");
+                debug!("TLS handshake succeeded");
                 true
             }
         })

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::io::Error;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use realm_io;
 use socket2::SockRef;
@@ -26,31 +26,53 @@ pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
     SockRef::from(l).set_ip_transparent(true)
 }
 
+pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
+    // another match has to be used for IPv4 and IPv6 support
+    // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
+    let ip = match addr.ip() {
+        IpAddr::V4(_) => return addr,
+        IpAddr::V6(i) => match i.octets() {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
+                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+            }
+            _ => return addr,
+        },
+    };
+    SocketAddr::from((ip, addr.port()))
+}
+
 pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
-    match orig_dst_addr(stream) {
+    to_canonical(match orig_dst_addr(stream) {
         Ok(addr) => addr,
         _ => stream.local_addr().expect("must get local address"),
-    }
+    })
 }
 
 #[cfg(target_os = "linux")]
-pub fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
+fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     let sock = SockRef::from(stream);
     // Dual-stack IPv4/IPv6 sockets require us to check both options.
     match linux::original_dst(&sock) {
         Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
-        _ => match linux::original_dst_ipv6(&sock) {
+        Err(e4) => match linux::original_dst_ipv6(&sock) {
             Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
-            Err(e) => {
-                warn!("failed to read SO_ORIGINAL_DST: {:?}", e);
-                Err(e)
+            Err(e6) => {
+                if !sock.ip_transparent().unwrap_or(false) {
+                    // In TPROXY mode, this is normal, so don't bother logging
+                    warn!(
+                        peer=?stream.peer_addr().unwrap(),
+                        local=?stream.local_addr().unwrap(),
+                        "failed to read SO_ORIGINAL_DST: {e4:?}, {e6:?}"
+                    );
+                }
+                Err(e6)
             }
         },
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
+fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     Err(io::Error::new(
         io::ErrorKind::Other,
         "SO_ORIGINAL_DST not supported on this operating system",

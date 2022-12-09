@@ -113,13 +113,15 @@ impl Drop for BlockReady {
         let dur = telemetry::APPLICATION_START_TIME.elapsed();
         if left == 0 {
             info!(
-                "Task '{}' complete ({dur:?}), marking server ready",
-                self.name
+                task = self.name,
+                ?dur,
+                "Readiness blocker complete, marking server ready",
             );
         } else {
             info!(
-                "Task '{}' complete ({dur:?}), still awaiting {left} tasks",
-                self.name
+                task = self.name,
+                ?dur,
+                "Readiness blocker complete, still awaiting {left} tasks",
             );
         }
     }
@@ -252,7 +254,12 @@ impl Server {
                 }
                 info!("starting drain of admin server");
             });
-        info!("Serving admin server at {}", self.addr);
+
+        info!(
+            address=%self.addr,
+            component="admin",
+            "listener established",
+        );
         let shutdown_trigger = self.shutdown_trigger;
         tokio::spawn(async move {
             if let Err(err) = server.await {

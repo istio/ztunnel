@@ -20,14 +20,16 @@ use std::time::Instant;
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::{Inbound, InboundConnect};
-use crate::proxy::{Error, ERR_TOKIO_RUNTIME_SHUTDOWN};
+use crate::proxy::{
+    Error, TraceParent, BAGGAGE_HEADER, ERR_TOKIO_RUNTIME_SHUTDOWN, TRACEPARENT_HEADER,
+};
 use crate::socket;
 use crate::socket::relay;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
@@ -54,11 +56,15 @@ impl Outbound {
         let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
             .await
             .map_err(|e| Error::Bind(cfg.outbound_addr, e))?;
-        match socket::set_transparent(&listener) {
-            Err(_e) => info!("running without transparent mode"),
-            _ => info!("running with transparent mode"),
-        };
 
+        let transparent = socket::set_transparent(&listener).is_ok();
+
+        info!(
+            address=%listener.local_addr().unwrap(),
+            component="outbound",
+            transparent,
+            "listener established",
+        );
         Ok(Outbound {
             cfg,
             cert_manager,
@@ -75,7 +81,6 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
-        info!("outbound listener established {}", self.address());
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -90,21 +95,19 @@ impl Outbound {
                             cfg,
                             hbone_port: self.hbone_port,
                             metrics: self.metrics.clone(),
+                            id: TraceParent::new(),
                         };
-                        tokio::spawn(async move {
-                            let res = oc.proxy(stream).await;
-                            match res {
-                                Ok(_) => info!(
-                                    "outbound proxy complete ({:?})",
-                                    start_outbound_instant.elapsed()
-                                ),
-                                Err(ref e) => warn!(
-                                    "outbound proxy failed: {} ({:?})",
-                                    e,
-                                    start_outbound_instant.elapsed()
-                                ),
-                            };
-                        });
+                        let span = info_span!("outbound", id=%oc.id);
+                        tokio::spawn(
+                            (async move {
+                                let res = oc.proxy(stream).await;
+                                match res {
+                                    Ok(_) => info!(dur=?start_outbound_instant.elapsed(), "complete"),
+                                    Err(e) => warn!(dur=?start_outbound_instant.elapsed(), err=%e, "failed")
+                                };
+                            })
+                            .instrument(span),
+                        );
                     }
                     Err(e) => {
                         if e.kind() == io::ErrorKind::Other
@@ -137,14 +140,14 @@ pub struct OutboundConnection {
     pub cfg: Config,
     pub hbone_port: u16,
     pub metrics: Arc<Metrics>,
+    pub id: TraceParent,
 }
 
 impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
-        let peer = stream.peer_addr().expect("must receive peer addr");
-        let remote_addr = super::to_canonical_ip(peer);
+        let peer = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
         let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
-        self.proxy_to(stream, remote_addr, orig_dst_addr).await
+        self.proxy_to(stream, peer.ip(), orig_dst_addr).await
     }
 
     pub async fn proxy_to(
@@ -174,7 +177,7 @@ impl OutboundConnection {
         if req.request_type == RequestType::DirectLocal {
             // For same node, we just access it directly rather than making a full network connection.
             // Pass our `stream` over to the inbound handler, which will process as usual
-            info!("Proxying to {} using node local fast path", req.destination);
+            info!("proxying to {} using node local fast path", req.destination);
             return Inbound::handle_inbound(InboundConnect::DirectPath(stream), req.destination)
                 .await
                 .map_err(Error::Io);
@@ -182,7 +185,7 @@ impl OutboundConnection {
         match req.protocol {
             Protocol::HBONE => {
                 info!(
-                    "Proxying to {} using HBONE via {} type {:#?}",
+                    "proxy to {} using HBONE via {} type {:#?}",
                     req.destination, req.gateway, req.request_type
                 );
 
@@ -200,7 +203,8 @@ impl OutboundConnection {
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
-                    .header("baggage", baggage(&req))
+                    .header(BAGGAGE_HEADER, baggage(&req))
+                    .header(TRACEPARENT_HEADER, self.id.header())
                     .body(hyper::Body::empty())
                     .unwrap();
 
@@ -227,23 +231,14 @@ impl OutboundConnection {
                 let response = request_sender.send_request(request).await?;
 
                 let code = response.status();
-                match hyper::upgrade::on(response).await {
-                    Ok(mut upgraded) => {
-                        if let Err(e) =
-                            super::copy_hbone("hbone client", &mut upgraded, &mut stream).await
-                        {
-                            error!("hbone client copy: {}", e);
-                            Err(Error::Io(e))
-                        } else {
-                            info!("request complete");
-                            Ok(())
-                        }
-                    }
-                    Err(e) => {
-                        error!("upgrade error: {}, {}", e, code);
-                        Err(Error::Http(e))
-                    }
+                if code != 200 {
+                    return Err(Error::HttpStatus(code));
                 }
+                let mut upgraded = hyper::upgrade::on(response).await?;
+                super::copy_hbone(&mut upgraded, &mut stream)
+                    .instrument(trace_span!("hbone client"))
+                    .await?;
+                Ok(())
             }
             Protocol::TCP => {
                 info!(
@@ -255,12 +250,6 @@ impl OutboundConnection {
                 // Proxying data between downstrean and upstream
                 relay(&mut stream, &mut outbound).await?;
 
-                // TODO: metrics, time, more info, etc.
-                // Probably shouldn't log at start
-                info!(
-                    "Proxying complete to {} using TCP via {} type {:?}",
-                    req.destination, req.gateway, req.request_type
-                );
                 Ok(())
             }
         }
@@ -427,15 +416,13 @@ async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
-
     use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
 
-    use crate::{identity, workload};
-
     use crate::xds::istio::workload::Protocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::{identity, workload};
 
     use super::*;
 
@@ -468,6 +455,7 @@ mod tests {
             hbone_port: 15008,
             cfg,
             metrics: Arc::new(Default::default()),
+            id: TraceParent::new(),
         };
 
         let req = outbound
