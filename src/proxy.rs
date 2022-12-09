@@ -249,13 +249,13 @@ pub fn get_original_src_from_xff(req: &Request<Body>) -> Option<IpAddr> {
         .to_str()
         .unwrap_or("")
         .to_string()
-        .split(",")
+        .split(',')
         .next()?
         .trim()
         .parse::<IpAddr>();
 
     match ip {
-        Ok(ip) => return Some(ip),
+        Ok(ip) => Some(ip),
         Err(err) => {
             warn!("failed to parse XFF value: {:?}", err);
             None
@@ -281,8 +281,16 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
             };
 
             let local_addr = SocketAddr::new(src, 0);
-            socket::set_freebind(&socket)?;
-            socket.bind(local_addr)?;
+            match socket::set_freebind(&socket) {
+                Err(err) => warn!("failed to set freebind: {:?}", err),
+                _ => {
+                    match socket.bind(local_addr) {
+                        Err(err) => warn!("failed to bind local addr: {:?}", err),
+                        _ => (),
+                    };
+                },
+
+            };
             Ok(socket.connect(addr).await?)
         }
     }
