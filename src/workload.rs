@@ -305,46 +305,46 @@ pub struct WorkloadInformation {
 }
 
 impl WorkloadInformation {
+    // only support workload
     pub async fn fetch_workload(&self, addr: &IpAddr) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
         debug!("lookup workload for {addr}");
         match self.find_workload(addr) {
             None => {
-                if let Some(demand) = &self.demand {
-                    info!("workload not found, sending on-demand request for {addr}");
-                    demand.demand(addr.to_string()).await.recv().await;
-                    debug!("on demand ready: {addr}");
-                    self.find_workload(addr)
-                } else {
-                    None
-                }
+                self.fetch_on_demand(addr).await;
+                self.find_workload(addr)
             }
             wl @ Some(_) => wl,
         }
     }
 
     pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
-        self.fetch_workload_on_demand(addr).await;
+        self.fetch_address(&addr).await;
         let wi = self.info.lock().unwrap();
         wi.find_upstream(addr, hbone_port)
     }
 
+    // Support workload and VIP
     // It is to do on demand workload fetch if necessary, it handles both workload ip and clusterIP
-    async fn fetch_workload_on_demand(&self, addr: SocketAddr) {
+    async fn fetch_address(&self, addr: &SocketAddr) {
         // Wait for it on-demand, *if* needed
         debug!("lookup workload for {addr}");
         // 1. handle workload ip, if workload not found fallback to clusterIP.
         if self.find_workload(&addr.ip()).is_none() {
             // 2. handle clusterIP
-            if self.workload_by_vip_exist(&addr) {
+            if self.workload_by_vip_exist(addr) {
                 return;
             }
             // if both cache not found, start on demand fetch
-            if let Some(demand) = &self.demand {
-                info!("workload not found, sending on-demand request for {addr}");
-                demand.demand(addr.ip().to_string()).await.recv().await;
-                debug!("on demand ready: {addr}");
-            }
+            self.fetch_on_demand(&addr.ip()).await;
+        }
+    }
+
+    async fn fetch_on_demand(&self, ip: &IpAddr) {
+        if let Some(demand) = &self.demand {
+            debug!("sending demand request for: {}", ip);
+            demand.demand(ip.to_string()).await.recv().await;
+            debug!("on demand ready: {}", ip);
         }
     }
 
