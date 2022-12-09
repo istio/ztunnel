@@ -417,6 +417,7 @@ async fn connect_tls(
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use bytes::Bytes;
 
@@ -450,7 +451,7 @@ mod tests {
             demand: None,
         };
         let outbound = OutboundConnection {
-            cert_manager: Box::new(identity::SecretManager::new(cfg.clone())),
+            cert_manager: Box::new(identity::mock::MockCaClient::new(Duration::from_secs(10))),
             workloads: wi,
             hbone_port: 15008,
             cfg,

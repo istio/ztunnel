@@ -106,7 +106,7 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(86400));
         build_with_cert(config, cert_manager).await
     } else {
-        let cert_manager = identity::SecretManager::new(config.clone());
+        let cert_manager = identity::SecretManager::new(config.clone())?;
         build_with_cert(config, cert_manager).await
     }
 }

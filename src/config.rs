@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Bytes;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -34,6 +35,13 @@ const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const DEFAULT_WORKER_THREADS: usize = 2;
 
 #[derive(serde::Serialize, Clone, Debug)]
+pub enum RootCert {
+    File(PathBuf),
+    Static(Bytes),
+    Default,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
@@ -51,8 +59,12 @@ pub struct Config {
     /// CA address to use. If fake_ca is set, this will be None.
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
     pub ca_address: Option<String>,
+    /// Root cert for CA TLS verification.
+    pub ca_root_cert: RootCert,
     /// XDS address to use. If unset, XDS will not be used.
     pub xds_address: Option<String>,
+    /// Root cert for XDS TLS verification.
+    pub xds_root_cert: RootCert,
     /// Filepath to a local xds file for workloads, as YAML.
     pub local_xds_path: Option<String>,
     /// If true, on-demand XDS will be used
@@ -74,7 +86,7 @@ pub struct Config {
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("invalid env var {0}={1}")]
-    RequestFailure(String, String),
+    EnvVar(String, String),
 }
 
 /// GoDuration wraps a Duration to implement golang Duration parsing semantics
@@ -93,7 +105,7 @@ fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
         Ok(val) => val
             .parse()
             .map(|v| Some(v))
-            .map_err(|_| Error::RequestFailure(env.to_string(), val)),
+            .map_err(|_| Error::EnvVar(env.to_string(), val)),
         Err(_) => Ok(None),
     }
 }
@@ -109,7 +121,7 @@ fn parse_args() -> String {
 
 pub fn parse_config() -> Result<Config, Error> {
     let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
-        "https://istiod.istio-system:15012".to_string()
+        "https://istiod.istio-system.svc:15012".to_string()
     } else {
         "https://localhost:15012".to_string()
     };
@@ -142,7 +154,11 @@ pub fn parse_config() -> Result<Config, Error> {
         local_node: parse(NODE_NAME)?,
 
         xds_address,
+        // TODO: full FindRootCAForXDS logic like in Istio
+        xds_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         ca_address,
+        // TODO: full FindRootCAForCA logic like in Istio
+        ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         local_xds_path: parse(LOCAL_XDS_PATH)?,
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
 

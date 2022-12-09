@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::config::RootCert;
 use async_trait::*;
 use dyn_clone::DynClone;
 use prost_types::value::Kind;
@@ -41,10 +42,10 @@ pub trait CertificateProvider: DynClone + Send + Sync + 'static {
 dyn_clone::clone_trait_object!(CertificateProvider);
 
 impl CaClient {
-    pub fn new(address: String, auth: AuthSource) -> CaClient {
-        let svc = tls::grpc_connector(address).unwrap();
+    pub fn new(address: String, root_cert: RootCert, auth: AuthSource) -> Result<CaClient, Error> {
+        let svc = tls::grpc_connector(address, root_cert)?;
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
-        CaClient { client }
+        Ok(CaClient { client })
     }
 }
 
@@ -123,12 +124,13 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_identity() {
-        let id = &Identity::Spiffe {
+        let id = Identity::Spiffe {
             service_account: "wrong-sa".to_string(),
             namespace: "foo".to_string(),
             trust_domain: "cluster.local".to_string(),
         };
-        let certs = tls::generate_test_certs(id, Duration::from_secs(0), Duration::from_secs(0));
+        let certs =
+            tls::generate_test_certs(&id.into(), Duration::from_secs(0), Duration::from_secs(0));
 
         let res = test_ca_client_with_response(IstioCertificateResponse {
             cert_chain: vec![String::from_utf8(certs.x509().to_pem().unwrap()).unwrap()],
@@ -140,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_certificate() {
         let certs = tls::generate_test_certs(
-            &Identity::default(),
+            &Identity::default().into(),
             Duration::from_secs(0),
             Duration::from_secs(0),
         );

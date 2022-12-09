@@ -22,12 +22,12 @@ use hyper::service::make_service_fn;
 use tokio::sync::watch;
 use tonic::codegen::Service;
 
+use crate::config::RootCert;
 use crate::identity::{AuthSource, CaClient};
 use crate::xds::istio::ca::istio_certificate_service_server::{
     IstioCertificateService, IstioCertificateServiceServer,
 };
 use crate::{
-    identity::Identity,
     tls,
     xds::istio::ca::{IstioCertificateRequest, IstioCertificateResponse},
 };
@@ -50,10 +50,11 @@ impl CaServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
         let certs = tls::generate_test_certs(
-            &Identity::default(),
+            &server_addr.ip().into(),
             Duration::from_secs(0),
             Duration::from_secs(100),
         );
+        let root_cert = RootCert::Static(certs.chain().unwrap());
         let acceptor = tls::ControlPlaneCertProvider(certs);
         let tls_stream = crate::hyper_util::tls_server(acceptor, listener);
         let incoming = hyper::server::accept::from_stream(tls_stream);
@@ -72,8 +73,10 @@ impl CaServer {
         });
         let client = CaClient::new(
             "https://".to_string() + &server_addr.to_string(),
+            root_cert,
             AuthSource::Token(PathBuf::from(r"src/test_helpers/fake-jwt")),
-        );
+        )
+        .unwrap();
         (tx, client)
     }
 }

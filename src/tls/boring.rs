@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -30,6 +31,7 @@ use boring::stack::Stack;
 use boring::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
+use boring::x509::verify::X509CheckFlags;
 use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyResult};
 use hyper::client::ResponseFuture;
 use hyper::server::conn::AddrStream;
@@ -39,6 +41,7 @@ use tonic::body::BoxBody;
 use tower::Service;
 use tracing::{error, info};
 
+use crate::config::RootCert;
 use crate::identity::{self, Identity};
 
 use super::Error;
@@ -147,6 +150,9 @@ impl PartialEq for Certs {
 }
 
 impl Certs {
+    pub fn chain(&self) -> Result<bytes::Bytes, Error> {
+        Ok(self.chain[0].x509.to_pem()?.into())
+    }
     pub fn is_expired(&self) -> bool {
         SystemTime::now() > self.cert.not_after
     }
@@ -179,33 +185,43 @@ pub struct TlsGrpcChannel {
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: String) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
 
-    conn.set_verify(ssl::SslVerifyMode::NONE);
-    conn.set_verify_callback(ssl::SslVerifyMode::NONE, |_, x509| {
-        info!("ssl: {:?}", x509.error());
-        // TODO: this MUST verify before upstreaming
-        true
-    });
-
+    let uri = Uri::try_from(uri)?;
+    let is_localhost_call = uri.host() == Some("localhost");
+    conn.set_verify(ssl::SslVerifyMode::PEER);
     conn.set_alpn_protos(Alpn::H2.encode())?;
     conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
     conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+    match root_cert {
+        RootCert::File(f) => {
+            conn.set_ca_file(f).map_err(Error::InvalidRootCert)?;
+        }
+        RootCert::Static(b) => {
+            conn.cert_store_mut()
+                .add_cert(x509::X509::from_pem(&b).map_err(Error::InvalidRootCert)?)
+                .map_err(Error::InvalidRootCert)?;
+        }
+        RootCert::Default => {} // Already configured to use system root certs
+    }
     let mut http = hyper::client::HttpConnector::new();
     http.enforce_http(false);
     let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
-    https.set_callback(|cc, _| {
-        // TODO: this MUST verify before upstreaming
-        cc.set_verify_hostname(false);
+    https.set_callback(move |cc, _| {
+        if is_localhost_call {
+            // Follow Istio logic to allow localhost calls: https://github.com/istio/istio/blob/373fc89518c986c9f48ed3cd891930da6fdc8628/pkg/istio-agent/xds_proxy.go#L735
+            cc.set_verify_hostname(false);
+            let param = cc.param_mut();
+            param.set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
+            param.set_host("istiod.istio-system.svc").unwrap();
+        }
         Ok(())
     });
 
     // Configure hyper's client to be h2 only and build with the
     // correct https connector.
     let hyper = hyper::Client::builder().http2_only(true).build(https);
-
-    let uri = Uri::try_from(uri)?;
 
     Ok(TlsGrpcChannel { uri, client: hyper })
 }
@@ -445,8 +461,35 @@ const TEST_PKEY: &[u8] = include_bytes!("key.pem");
 const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
 const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
 
+/// TestIdentity is an identity used for testing. This extends the Identity with test-only types
+pub enum TestIdentity {
+    Identity(Identity),
+    Ip(IpAddr),
+}
+
+impl From<Identity> for TestIdentity {
+    fn from(i: Identity) -> Self {
+        Self::Identity(i)
+    }
+}
+
+impl From<IpAddr> for TestIdentity {
+    fn from(i: IpAddr) -> Self {
+        Self::Ip(i)
+    }
+}
+//
+// impl Display for TestIdentity {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+//         match self {
+//             TestIdentity::Identity(i) => std::fmt::Display::fmt(&i, f),
+//             TestIdentity::Ip(i) => std::fmt::Display::fmt(&i, f),
+//         }
+//     }
+// }
+
 pub fn generate_test_certs(
-    id: &Identity,
+    id: &TestIdentity,
     duration_until_valid: Duration,
     duration_until_expiry: Duration,
 ) -> Certs {
@@ -505,8 +548,12 @@ pub fn generate_test_certs(
         .issuer(false)
         .build(&builder.x509v3_context(Some(&ca_cert), None))
         .unwrap();
-    let subject_alternative_name = SubjectAlternativeName::new()
-        .uri(&id.to_string())
+    let mut san = SubjectAlternativeName::new();
+    let subject_alternative_name = match id {
+        TestIdentity::Identity(id) => san.uri(&id.to_string()),
+        TestIdentity::Ip(ip) => san.ip(&ip.to_string()),
+    };
+    let subject_alternative_name = subject_alternative_name
         .critical()
         .build(&builder.x509v3_context(Some(&ca_cert), None))
         .unwrap();
@@ -547,6 +594,7 @@ pub mod tests {
     use std::time::Duration;
 
     use crate::identity::Identity;
+    use crate::tls::TestIdentity;
 
     use super::generate_test_certs;
 
@@ -558,7 +606,7 @@ pub mod tests {
     #[test]
     fn cert_expiration() {
         let expiry_seconds = 1000;
-        let id: Identity = Default::default();
+        let id: TestIdentity = Identity::default().into();
         let zero_dur = Duration::from_secs(0);
         let certs_not_expired = generate_test_certs(
             &id,
