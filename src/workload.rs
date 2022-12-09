@@ -20,11 +20,13 @@ use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
+
 use thiserror::Error;
 use tracing::{debug, error, info, instrument};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
+use crate::config::ConfigSource;
 use crate::identity::Identity;
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::ProtocolParse;
@@ -241,9 +243,9 @@ impl WorkloadManager {
         } else {
             None
         };
-        if let Some(path) = config.local_xds_path {
+        if let Some(cfg) = config.local_xds_config {
             let local_client = LocalClient {
-                path,
+                cfg,
                 workloads: workloads.clone(),
             };
             local_client.run().await?;
@@ -273,21 +275,41 @@ impl WorkloadManager {
 
 /// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
 struct LocalClient {
-    path: String,
+    cfg: ConfigSource,
     workloads: Arc<Mutex<WorkloadStore>>,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalWorkload {
+    #[serde(flatten)]
+    pub workload: Workload,
+    pub vips: HashMap<String, HashMap<u16, u16>>,
 }
 
 impl LocalClient {
     #[instrument(skip_all, name = "local_client")]
     async fn run(self) -> Result<(), anyhow::Error> {
         // Currently, we just load the file once. In the future, we could dynamically reload.
-        let data = tokio::fs::read_to_string(self.path).await?;
-        let r: Vec<Workload> = serde_yaml::from_str(&data)?;
+        let data = self.cfg.read_to_string().await?;
+        let r: Vec<LocalWorkload> = serde_yaml::from_str(&data)?;
         let mut wli = self.workloads.lock().unwrap();
         let l = r.len();
         for wl in r {
-            debug!("inserting local workloads {wl}");
-            wli.insert(wl);
+            let wip = wl.workload.workload_ip;
+            debug!("inserting local workloads {wip}");
+            wli.insert(wl.workload);
+            for (vip, ports) in wl.vips {
+                let ip = vip.parse::<IpAddr>()?;
+                for (service_port, target_port) in ports {
+                    let addr = SocketAddr::from((ip, service_port));
+                    wli.vips.entry(addr).or_default().insert((wip, target_port));
+                    wli.workload_to_vip
+                        .entry(wip)
+                        .or_default()
+                        .insert((addr, target_port));
+                }
+            }
         }
         info!("inserted {} local workloads", l);
         Ok(())
@@ -710,16 +732,15 @@ mod tests {
 
     #[tokio::test]
     async fn local_client() {
-        let dir = std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
-            .join("examples")
-            .join("localhost.yaml")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let cfg = ConfigSource::File(
+            std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("localhost.yaml"),
+        );
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
 
         let local_client = LocalClient {
-            path: dir,
+            cfg,
             workloads: workloads.clone(),
         };
         local_client.run().await.expect("client should run");
@@ -728,5 +749,9 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.unwrap().service_account, "default");
+        let us = store.find_upstream("127.10.0.1:80".parse().unwrap(), 15008);
+        // Make sure we get a valid VIP
+        assert!(us.is_some());
+        assert_eq!(us.unwrap().port, 8080);
     }
 }
