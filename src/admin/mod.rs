@@ -34,7 +34,7 @@ use prometheus_client::registry::Registry;
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
-use tracing::{error, info};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::Config;
 use crate::version::BuildInfo;
@@ -232,6 +232,7 @@ impl Server {
                                 "/metrics" => {
                                     Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
                                 }
+                                "/logging" => Ok::<_, hyper::Error>(handle_logging(req).await),
                                 _ => Ok::<_, hyper::Error>(
                                     Response::builder()
                                         .status(hyper::StatusCode::NOT_FOUND)
@@ -385,6 +386,78 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
         )
         .body(Body::from(buf))
         .unwrap()
+}
+
+//mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
+//NOTE: mutilple query parameters is not supported, for example
+//curl -X POST http://127.0.0.1:15021/logging?"tap=debug&router=debug"
+static HELP_STRING: &str = "
+usage: POST /logging\t\t\t\t\t\t(To list current level)
+usage: POST /logging?level=<level>\t\t\t\t(To change global levels)
+usage: POST /logging?level={mod1}:{level1},{mod2}:{level2}\t(To change specific mods' logging level)
+
+hint: loglevel:\terror|warn|info|debug|trace|off
+hint: mod_name:\tthe module name defined in the cargo.toml, i.e. ztunnel::proxy
+";
+async fn handle_logging(req: Request<Body>) -> Response<Body> {
+    match *req.method() {
+        hyper::Method::POST => {
+            if let Some(params) = req.uri().query() {
+                let input = params.to_string().to_lowercase();
+                if input.contains("level=") {
+                    change_log_level(input.replace("level=", ""))
+                } else {
+                    Response::builder()
+                        .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                        .body(format!("only support changing levels\n {}", HELP_STRING).into())
+                        .unwrap()
+                }
+            } else {
+                list_loggers()
+            }
+        }
+        _ => Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(format!("Invalid HTTP method\n {}", HELP_STRING).into())
+            .unwrap(),
+    }
+}
+
+fn list_loggers() -> Response<Body> {
+    warn!("testing warn");
+    info!("testing info");
+    error!("testing error");
+    trace!("testing trace");
+    debug!("testing debug");
+
+    if let Some(loglevel) = telemetry::get_current_loglevel() {
+        Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "text/plain")
+            .body(format!("current log level is {}\n", loglevel.to_uppercase()).into())
+            .unwrap()
+    } else {
+        Response::builder()
+            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(format!("failed to get the log level\n {}", HELP_STRING).into())
+            .unwrap()
+    }
+}
+
+fn change_log_level(level: String) -> Response<Body> {
+    match telemetry::set_mod_level(level) {
+        true => list_loggers(),
+        false => Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(
+                format!(
+                    "failed to set new level, please check your parameters\n {}",
+                    HELP_STRING
+                )
+                .into(),
+            )
+            .unwrap(),
+    }
 }
 
 #[cfg(feature = "gperftools")]
