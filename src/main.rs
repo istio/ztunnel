@@ -51,18 +51,7 @@ fn version() -> anyhow::Result<()> {
     Ok(())
 }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
     info!("running with config: {cfg:#?}");
-=======
-async fn proxy(cfg: config::Config, log_handle: telemetry::LogHandle) -> anyhow::Result<()> {
-    info!("running with config {cfg:?}");
->>>>>>> add loglevel in adm command to dynamically get/set loglevels
-=======
-async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
-    info!("running with config {cfg:?}");
-<<<<<<< HEAD
->>>>>>> enhancement: avoid changing the set_logging() interface
     app::build(cfg).await?.wait_termination().await
 }

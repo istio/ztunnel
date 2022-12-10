@@ -15,13 +15,7 @@ use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use std::time::Instant;
 use tracing::{debug, warn};
-use tracing_subscriber::{
-    filter,
-    filter::{EnvFilter},
-    prelude::*,
-    reload, Layer, Registry,
-};
-use tracing_subscriber::{fmt, filter, filter::EnvFilter, prelude::*, reload, Layer, Registry};
+use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
@@ -43,17 +37,20 @@ pub fn setup_logging() {
 
 fn fmt_layer() -> impl Layer<Registry> + Sized {
     let format = fmt::format();
-    let filter_layer = EnvFilter::try_from_default_env()
+    let event_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info"))
         .unwrap();
-    let (filter_layer, reload_handle) =
-        reload::Layer::new(tracing_subscriber::fmt::layer().with_filter(filter));
+    let (filter_layer, reload_handle) = reload::Layer::new(
+        tracing_subscriber::fmt::layer()
+            .event_format(format)
+            .with_filter(event_filter),
+    );
     LOG_HANDLE
         .set(LogHandle {
             handle: reload_handle,
         })
         .map_or_else(|_| warn!("setup log handler failed"), |_| {});
-    tracing_subscriber::registry().with(filter_layer).init();
+    filter_layer
 }
 
 // a handle to get and set the log level

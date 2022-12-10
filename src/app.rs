@@ -106,13 +106,8 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(86400));
         build_with_cert(config, cert_manager).await
     } else {
-<<<<<<< HEAD
         let cert_manager = identity::SecretManager::new(config.clone())?;
         build_with_cert(config, cert_manager).await
-=======
-        let cert_manager = identity::SecretManager::new(config.clone());
-        build_with_cert(config, cert_manager, log_handle).await
->>>>>>> add loglevel in adm command to dynamically get/set loglevels
     }
 }
 
