@@ -34,7 +34,7 @@ use prometheus_client::registry::Registry;
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
-use tracing::{error, warn, info, debug, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::Config;
 use crate::version::BuildInfo;
@@ -402,18 +402,16 @@ hint: mod_name:\tthe module name defined in the cargo.toml, i.e. ztunnel::proxy
 async fn handle_logging(req: Request<Body>) -> Response<Body> {
     match *req.method() {
         hyper::Method::POST => {
-            if let Some(params)  = req
-                .uri()
-                .query() {
-                    let input = params.to_string().to_lowercase();
-                    if input.contains("level=") {
-                        change_log_level(input.replace("level=", ""))
-                    } else {
-                        Response::builder()
+            if let Some(params) = req.uri().query() {
+                let input = params.to_string().to_lowercase();
+                if input.contains("level=") {
+                    change_log_level(input.replace("level=", ""))
+                } else {
+                    Response::builder()
                         .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
                         .body(format!("only support changing levels\n {}", HELP_STRING).into())
-                        .unwrap() 
-                    }
+                        .unwrap()
+                }
             } else {
                 list_loggers()
             }
@@ -447,19 +445,20 @@ fn list_loggers() -> Response<Body> {
 }
 
 fn change_log_level(level: String) -> Response<Body> {
-    match telemetry::set_mod_level(level) { 
-        true => {
-            list_loggers()
-        }
-        false => {
-            Response::builder()
+    match telemetry::set_mod_level(level) {
+        true => list_loggers(),
+        false => Response::builder()
             .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(format!("failed to set new level, please check your parameters\n {}", HELP_STRING).into())
-            .unwrap()
-        }
+            .body(
+                format!(
+                    "failed to set new level, please check your parameters\n {}",
+                    HELP_STRING
+                )
+                .into(),
+            )
+            .unwrap(),
     }
 }
-
 
 #[cfg(feature = "gperftools")]
 async fn handle_gprof(_req: Request<Body>) -> Response<Body> {

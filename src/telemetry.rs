@@ -21,7 +21,7 @@ use tracing_subscriber::{
     prelude::*,
     reload, Layer, Registry,
 };
-use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
+use tracing_subscriber::{fmt, filter, filter::EnvFilter, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
@@ -68,17 +68,16 @@ pub fn set_mod_level(new_level: String) -> bool {
         //new_directve = current_directive + new_level
         //it can be duplicate, but no worry, the envfilter's parse() will properly handle it
         let new_directive_str;
-        if let Some(current_directives_str) = static_log_handler
+        if let Ok(current_directives_str) = static_log_handler
             .handle
             .with_current(|f| format!("{}", f.filter()))
-            .ok()
         {
             new_directive_str = format!("{},{}", current_directives_str, new_level);
         } else {
             new_directive_str = new_level;
         }
         debug!("new directive is {}", new_directive_str);
-        
+
         //create the new envfilter based on the new directives
         let new_filter;
         let res = EnvFilter::try_new(new_directive_str);
