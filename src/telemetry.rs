@@ -14,10 +14,10 @@
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use std::time::Instant;
-use tracing::warn;
+use tracing::{debug, warn};
 use tracing_subscriber::{
     filter,
-    filter::{EnvFilter, LevelFilter},
+    filter::{EnvFilter},
     prelude::*,
     reload, Layer, Registry,
 };
@@ -63,13 +63,40 @@ struct LogHandle {
     handle: reload::Handle<FilteredLayer, Registry>,
 }
 
-pub fn set_global_level(level: LevelFilter) -> bool {
+pub fn set_mod_level(new_level: String) -> bool {
     if let Some(static_log_handler) = LOG_HANDLE.get() {
-        let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
+        //new_directve = current_directive + new_level
+        //it can be duplicate, but no worry, the envfilter's parse() will properly handle it
+        let new_directive_str;
+        if let Some(current_directives_str) = static_log_handler
+            .handle
+            .with_current(|f| format!("{}", f.filter()))
+            .ok()
+        {
+            new_directive_str = format!("{},{}", current_directives_str, new_level);
+        } else {
+            new_directive_str = new_level;
+        }
+        debug!("new directive is {}", new_directive_str);
+        
+        //create the new envfilter based on the new directives
+        let new_filter;
+        let res = EnvFilter::try_new(new_directive_str);
+        match res {
+            Ok(e) => {
+                new_filter = e;
+            }
+            Err(e) => {
+                warn!("{}", e.to_string());
+                return false;
+            }
+        }
+
+        //set the new filter
         static_log_handler
             .handle
             .modify(|layer| {
-                *layer.filter_mut() = filter;
+                *layer.filter_mut() = new_filter;
             })
             .map_or(false, |_| true)
     } else {
@@ -87,20 +114,5 @@ pub fn get_current_loglevel() -> Option<String> {
     } else {
         warn!("failed to get log handle");
         None
-    }
-}
-
-pub fn get_log_level_from_str(level_str: String) -> Option<LevelFilter> {
-    match level_str.as_str() {
-        "debug" => Some(LevelFilter::DEBUG),
-        "error" => Some(LevelFilter::ERROR),
-        "info" => Some(LevelFilter::INFO),
-        "warn" => Some(LevelFilter::WARN),
-        "trace" => Some(LevelFilter::TRACE),
-        "off" => Some(LevelFilter::OFF),
-        _ => {
-            warn!("unable to find newlevel in request {}", level_str);
-            None
-        }
     }
 }
