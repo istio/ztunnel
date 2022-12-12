@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -28,7 +26,7 @@ use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{Error, TraceParent, ERR_TOKIO_RUNTIME_SHUTDOWN};
+use crate::proxy::{util, Error, TraceParent};
 use crate::socket;
 use crate::workload::WorkloadInformation;
 
@@ -99,9 +97,7 @@ impl Socks5 {
                         });
                     }
                     Err(e) => {
-                        if e.kind() == io::ErrorKind::Other
-                            && e.to_string().eq(ERR_TOKIO_RUNTIME_SHUTDOWN)
-                        {
+                        if util::is_runtime_shutdown(&e) {
                             return;
                         }
                         error!("Failed TCP handshake {}", e);
