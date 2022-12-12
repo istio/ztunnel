@@ -59,21 +59,6 @@ pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
     SocketAddr::from((ip, addr.port()))
 }
 
-pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
-    // another match has to be used for IPv4 and IPv6 support
-    // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
-    let ip = match addr.ip() {
-        IpAddr::V4(_) => return addr,
-        IpAddr::V6(i) => match i.octets() {
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
-                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
-            }
-            _ => return addr,
-        },
-    };
-    SocketAddr::from((ip, addr.port()))
-}
-
 pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
     to_canonical(match orig_dst_addr(stream) {
         Ok(addr) => addr,

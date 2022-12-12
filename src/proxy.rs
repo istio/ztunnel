@@ -22,7 +22,7 @@ use drain::Watch;
 use rand::Rng;
 use tokio::net::{TcpSocket, TcpStream};
 
-use tracing::{error, trace, warn, info};
+use tracing::{error, info, trace, warn};
 
 use inbound::Inbound;
 
@@ -278,7 +278,7 @@ pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
 pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
     stream
         .peer_addr()
-        .map_or(None, |sa| Some(to_canonical_ip(sa)))
+        .map_or(None, |sa| Some(socket::to_canonical(sa).ip()))
 }
 
 pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
@@ -304,5 +304,3 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
         }
     }
 }
-
-const ERR_TOKIO_RUNTIME_SHUTDOWN: &str = "A Tokio 1.x context was found, but it is being shutdown.";
