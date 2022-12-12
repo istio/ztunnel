@@ -37,6 +37,7 @@ mod inbound;
 mod inbound_passthrough;
 mod outbound;
 mod socks5;
+mod util;
 
 pub struct Proxy {
     inbound: Inbound,
@@ -178,8 +179,6 @@ pub async fn copy_hbone(
     tokio::try_join!(client_to_server, server_to_client).map(|_| ())
 }
 
-const ERR_TOKIO_RUNTIME_SHUTDOWN: &str = "A Tokio 1.x context was found, but it is being shutdown.";
-
 /// Represents a traceparent, as defined by https://www.w3.org/TR/trace-context/
 #[derive(Eq, PartialEq)]
 pub struct TraceParent {
@@ -197,7 +196,6 @@ impl TraceParent {
         hyper::header::HeaderValue::from_bytes(format!("{self:?}").as_bytes()).unwrap()
     }
 }
-
 impl TraceParent {
     fn new() -> Self {
         let mut rng = rand::thread_rng();
