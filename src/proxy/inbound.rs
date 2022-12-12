@@ -137,7 +137,7 @@ impl Inbound {
                     super::freebind_connect(org_src, addr).await
                 }
                 Hbone(req) => {
-                    let org_src = super::get_original_src_from_xff(req);
+                    let org_src = super::get_original_src_from_fwded(req);
                     super::freebind_connect(org_src, addr).await
                 }
             }

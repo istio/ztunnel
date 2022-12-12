@@ -33,7 +33,7 @@ use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
 use crate::{config, identity, socket, tls};
-use hyper::{Body, Request};
+use hyper::{header, Body, Request};
 
 mod inbound;
 mod inbound_passthrough;
@@ -243,31 +243,42 @@ impl TryFrom<&str> for TraceParent {
         })
     }
 }
-pub fn get_original_src_from_xff(req: &Request<Body>) -> Option<IpAddr> {
-    let value = req.headers().get("X-Forwarded-For")?;
-    let ip = value
+pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
+    let deli: &[_] = &[' ', '"'];
+    let first = req.headers().get(header::FORWARDED)?;
+    // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
+    // https://www.rfc-editor.org/rfc/rfc7239#section-4
+    let first = first
         .to_str()
         .unwrap_or("")
-        .to_string()
         .split(',')
         .next()?
         .trim()
-        .parse::<IpAddr>();
-
-    match ip {
-        Ok(ip) => Some(ip),
-        Err(err) => {
-            warn!("failed to parse XFF value: {:?}", err);
-            None
-        }
+        .split(';')
+        .find(|x| x.trim().to_lowercase().starts_with("for="))?
+        .split('=')
+        .nth(1)?
+        .trim_matches(deli);
+    info!("chun, stripped value: {:?}", first);
+    if first.starts_with('[') {
+        let deli: &[_] = &[' ', '[', ']'];
+        first
+            .trim_matches(deli)
+            .split("]:")
+            .next()?
+            .parse::<IpAddr>()
+            .ok()
+    } else {
+        first
+            .parse::<IpAddr>()
+            .map_or_else(|_| first.split(':').next()?.parse::<IpAddr>().ok(), Some)
     }
 }
 
 pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
-    match stream.peer_addr() {
-        Ok(sa) => Some(to_canonical_ip(sa)),
-        _ => None,
-    }
+    stream
+        .peer_addr()
+        .map_or(None, |sa| Some(to_canonical_ip(sa)))
 }
 
 pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
@@ -281,7 +292,7 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
             };
 
             let local_addr = SocketAddr::new(src, 0);
-            match socket::set_freebind(&socket) {
+            match socket::set_freebind_and_transparent(&socket) {
                 Err(err) => warn!("failed to set freebind: {:?}", err),
                 _ => {
                     if let Err(err) = socket.bind(local_addr) {

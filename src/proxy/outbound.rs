@@ -195,7 +195,7 @@ impl OutboundConnection {
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
                     .header(TRACEPARENT_HEADER, self.id.header())
-                    .header("X-Forwarded-For", remote_addr.to_string())
+                    .header(hyper::header::FORWARDED, format!("for={}", remote_addr))
                     .body(hyper::Body::empty())
                     .unwrap();
 

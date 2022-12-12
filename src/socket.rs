@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::Error;
+use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use realm_io;
-use socket2::SockRef;
+use socket2::{Domain, SockRef};
 use tokio::io;
 use tokio::net::TcpListener;
 use tokio::net::TcpSocket;
@@ -28,10 +28,35 @@ pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn set_freebind(sock: &TcpSocket) -> io::Result<()> {
-    let sock = SockRef::from(sock);
-    sock.set_ip_transparent(true)?;
-    linux::set_ip_freebind(&sock)
+pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
+    let socket = SockRef::from(socket);
+    match socket.domain()? {
+        Domain::IPV4 => {
+            socket.set_ip_transparent(true)?;
+            socket.set_freebind(true)?;
+        }
+        Domain::IPV6 => {
+            linux::set_ipv6_transparent(&socket)?;
+            socket.set_freebind_ipv6(true)?
+        }
+        _ => return Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
+    };
+    Ok(())
+}
+
+pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
+    // another match has to be used for IPv4 and IPv6 support
+    // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
+    let ip = match addr.ip() {
+        IpAddr::V4(_) => return addr,
+        IpAddr::V6(i) => match i.octets() {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
+                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+            }
+            _ => return addr,
+        },
+    };
+    SocketAddr::from((ip, addr.port()))
 }
 
 pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
@@ -111,13 +136,13 @@ mod linux {
     use socket2::{SockAddr, SockRef};
     use tokio::io;
 
-    pub fn set_ip_freebind(sock: &SockRef) -> io::Result<()> {
+    pub fn set_ipv6_transparent(sock: &SockRef) -> io::Result<()> {
         unsafe {
             let optval: libc::c_int = 1;
             let ret = libc::setsockopt(
                 sock.as_raw_fd(),
-                libc::IPPROTO_IP,
-                libc::IP_FREEBIND,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TRANSPARENT,
                 &optval as *const _ as *const libc::c_void,
                 std::mem::size_of_val(&optval) as libc::socklen_t,
             );
