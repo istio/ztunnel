@@ -159,6 +159,7 @@ impl OutboundConnection {
             // We *could* apply this to all traffic, rather than just for destinations that are "captured"
             // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
             info!("proxying to {} using node local fast path", req.destination);
+            let origin_src = super::get_original_src_from_stream(&stream);
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
                 src_ip: remote_addr,
@@ -168,9 +169,13 @@ impl OutboundConnection {
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
-            return Inbound::handle_inbound(InboundConnect::DirectPath(stream), req.destination)
-                .await
-                .map_err(Error::Io);
+            return Inbound::handle_inbound(
+                InboundConnect::DirectPath(stream),
+                origin_src,
+                req.destination,
+            )
+            .await
+            .map_err(Error::Io);
         }
         match req.protocol {
             Protocol::HBONE => {
@@ -195,7 +200,7 @@ impl OutboundConnection {
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
                     .header(TRACEPARENT_HEADER, self.id.header())
-                    .header(hyper::header::FORWARDED, format!("for={}", remote_addr))
+                    // .header(hyper::header::FORWARDED, format!("for={}", remote_addr))
                     .body(hyper::Body::empty())
                     .unwrap();
 
@@ -205,7 +210,7 @@ impl OutboundConnection {
                     .connector(req.destination_workload.map(|w| w.identity()).as_ref())?
                     .configure()
                     .expect("configure");
-                let tcp_stream = super::freebind_connect(None, req.gateway).await?;
+                let tcp_stream = super::freebind_connect(Some(remote_addr), req.gateway).await?;
                 tcp_stream.set_nodelay(true)?;
                 let tls_stream = connect_tls(connector, tcp_stream).await?;
                 let (mut request_sender, connection) = builder

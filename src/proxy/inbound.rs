@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use drain::Watch;
@@ -26,8 +26,9 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
-use crate::proxy::inbound::InboundConnect::Hbone;
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
+use crate::socket;
 use crate::rbac;
 use crate::socket::{relay, to_canonical};
 use crate::tls::TlsError;
@@ -127,18 +128,19 @@ impl Inbound {
     /// handle_inbound serves an inbound connection with a target address `addr`.
     pub(super) async fn handle_inbound(
         request_type: InboundConnect,
+        origin_src: Option<IpAddr>,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = {
             match &request_type {
-                InboundConnect::DirectPath(stream) => {
-                    let org_src = super::get_original_src_from_stream(stream);
-                    super::freebind_connect(org_src, addr).await
+                DirectPath(_) => {
+                    // let org_src = super::get_original_src_from_stream(stream);
+                    super::freebind_connect(origin_src, addr).await
                 }
-                Hbone(req) => {
-                    let org_src = super::get_original_src_from_fwded(req);
-                    super::freebind_connect(org_src, addr).await
+                Hbone(_) => {
+                    // let org_src = super::get_original_src_from_fwded(req);
+                    super::freebind_connect(origin_src, addr).await
                 }
             }
         };
@@ -257,7 +259,7 @@ impl Inbound {
                             .unwrap());
                     }
                 }
-                let status_code = match Self::handle_inbound(Hbone(req), addr)
+                let status_code = match Self::handle_inbound(Hbone(req), Some(conn.src_ip), addr)
                     .instrument(tracing::span::Span::current())
                     .await
                 {
