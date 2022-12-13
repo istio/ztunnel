@@ -31,7 +31,7 @@ FIPS compliance was [granted](https://csrc.nist.gov/projects/cryptographic-modul
 to an old version of BoringSSL that was tested with `Clang 7.0.1`.
 
 Installing `Clang 7.0.1` on modern environments is at best difficult. For `linux` `x86_64`, we work around
-this problem by shipping the pre-built binaries under`boringssl-fips/linux_x86_64`. We then tell the BoringSSL libraries
+this problem by shipping the pre-built binaries under `vendor/boringssl-fips/linux_x86_64`. We then tell the BoringSSL libraries
 to use this path by setting the `BORING_BSSL_PATH` environment variable in `.cargo/config.toml`.
 
 For non-linux/x86_64 platforms, you can disable FIPS by doing the following:
