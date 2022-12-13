@@ -6,6 +6,10 @@ test:
 build:
 	cargo build
 
+# Test that all important features build
+build-features:
+	cargo build --features console
+
 # target in common/Makefile.common.mk doesn't handle our third party vendored files; only check golang and rust codes
 lint-copyright:
 	@${FINDFILES} \( -name '*.go' -o -name '*.rs' \) \( ! \( -name '*.gen.go' -o -name '*.pb.go' -o -name '*_pb2.py' \) \) -print0 |\
@@ -32,4 +36,4 @@ gen: format
 gen-check: gen check-clean-repo
 
 presubmit: export RUSTFLAGS = -D warnings
-presubmit: build test lint gen-check
+presubmit: build test lint gen-check build-features
