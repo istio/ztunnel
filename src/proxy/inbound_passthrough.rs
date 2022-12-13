@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
@@ -23,29 +24,29 @@ use crate::socket;
 use crate::socket::relay;
 
 pub struct InboundPassthrough {
-    cfg: Config,
+    listener: TcpListener,
 }
 
 impl InboundPassthrough {
-    pub(crate) fn new(cfg: Config) -> InboundPassthrough {
-        InboundPassthrough { cfg }
-    }
-    pub(super) async fn run(self) {
-        let tcp_listener: TcpListener = TcpListener::bind(self.cfg.inbound_plaintext_addr)
+    pub async fn new(cfg: Config) -> Result<InboundPassthrough, Error> {
+        let listener: TcpListener = TcpListener::bind(cfg.inbound_plaintext_addr)
             .await
-            .expect("failed to bind");
-        let transparent = socket::set_transparent(&tcp_listener).is_ok();
+            .map_err(|e| Error::Bind(cfg.inbound_plaintext_addr, e))?;
+        let transparent = socket::set_transparent(&listener).is_ok();
 
         info!(
-            address=%tcp_listener.local_addr().unwrap(),
+            address=%listener.local_addr().unwrap(),
             component="inbound plaintext",
             transparent,
             "listener established",
         );
+        Ok(InboundPassthrough { listener })
+    }
 
+    pub(super) async fn run(self) {
         loop {
             // Asynchronously wait for an inbound socket.
-            let socket = tcp_listener.accept().await;
+            let socket = self.listener.accept().await;
             match socket {
                 Ok((mut stream, remote)) => {
                     tokio::spawn(async move {

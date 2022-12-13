@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::Context;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -53,7 +54,7 @@ pub async fn build_with_cert(
     let shutdown_trigger = shutdown.trigger();
     let admin = admin::Builder::new(config.clone(), workload_manager.workloads(), ready)
         .bind(registry, shutdown_trigger)
-        .expect("admin server starts");
+        .context("admin server starts")?;
     let admin_address = admin.address();
 
     let drain_rx_admin = drain_rx.clone();

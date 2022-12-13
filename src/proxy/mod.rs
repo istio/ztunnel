@@ -55,7 +55,7 @@ impl Proxy {
         drain: Watch,
     ) -> Result<Proxy, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
-        let inbound_passthrough = InboundPassthrough::new(cfg.clone());
+        let inbound_passthrough = InboundPassthrough::new(cfg.clone()).await?;
         let inbound = Inbound::new(
             cfg.clone(),
             workloads.clone(),

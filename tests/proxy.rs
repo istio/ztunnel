@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::future::Future;
+use std::net::SocketAddr;
 use std::ops::Add;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
@@ -45,15 +46,40 @@ async fn test_shutdown_lifecycle() {
         .expect("app exits without error")
 }
 
-#[tokio::test]
-async fn test_conflicting_bind_error() {
+// Check that port conflicts on any address results in the app failing instead of silently failing
+async fn test_bind_conflict<F: FnOnce(&mut ztunnel::config::Config) -> &mut SocketAddr>(f: F) {
     helpers::initialize_telemetry();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = test_config();
+    let sa = f(&mut cfg);
+    *sa = l.local_addr().unwrap();
 
-    let mut test_config_with_port = test_config();
-    let inbound_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
-    test_config_with_port.inbound_addr = inbound_addr;
-    let _listener = TcpListener::bind(inbound_addr).await.unwrap();
-    assert!(ztunnel::app::build(test_config_with_port).await.is_err());
+    assert!(ztunnel::app::build(cfg).await.is_err());
+}
+
+#[tokio::test]
+async fn test_conflicting_bind_error_inbound() {
+    test_bind_conflict(|c| &mut c.inbound_addr).await;
+}
+
+#[tokio::test]
+async fn test_conflicting_bind_error_inbound_plaintext() {
+    test_bind_conflict(|c| &mut c.inbound_plaintext_addr).await;
+}
+
+#[tokio::test]
+async fn test_conflicting_bind_error_outbound() {
+    test_bind_conflict(|c| &mut c.outbound_addr).await;
+}
+
+#[tokio::test]
+async fn test_conflicting_bind_error_socks5() {
+    test_bind_conflict(|c| &mut c.socks5_addr).await;
+}
+
+#[tokio::test]
+async fn test_conflicting_bind_error_admin() {
+    test_bind_conflict(|c| &mut c.admin_addr).await;
 }
 
 #[tokio::test]
@@ -227,16 +253,23 @@ async fn test_tcp_metrics() {
         drop(stream);
 
         // Eventually we should also have 1 closed connection
-        let metrics = app.metrics().await;
         assert_eventually(
             Duration::from_secs(2),
-            || metrics.query_sum("istio_tcp_connections_opened_total", Default::default()),
+            || async {
+                app.metrics()
+                    .await
+                    .query_sum("istio_tcp_connections_opened_total", Default::default())
+            },
             1,
         )
         .await;
         assert_eventually(
             Duration::from_secs(2),
-            || metrics.query_sum("istio_tcp_connections_closed_total", Default::default()),
+            || async {
+                app.metrics()
+                    .await
+                    .query_sum("istio_tcp_connections_closed_total", Default::default())
+            },
             1,
         )
         .await;
@@ -244,14 +277,19 @@ async fn test_tcp_metrics() {
     .await;
 }
 
-async fn assert_eventually<F: Fn() -> T, T: Eq + Debug>(dur: Duration, f: F, expected: T) {
+async fn assert_eventually<F, T, Fut>(dur: Duration, f: F, expected: T)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = T>,
+    T: Eq + Debug,
+{
     let mut delay = Duration::from_millis(10);
     let end = SystemTime::now().add(dur);
     let mut last: T;
     let mut attempts = 0;
     loop {
         attempts += 1;
-        last = f();
+        last = f().await;
         if last == expected {
             return;
         }
