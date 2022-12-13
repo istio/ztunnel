@@ -24,8 +24,8 @@ static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
 pub fn setup_logging() {
     Lazy::force(&APPLICATION_START_TIME);
     tracing_subscriber::registry()
-        .with(console_subscriber::spawn())
         .with(fmt_layer())
+        .with(console_subscriber::spawn())
         .init();
 }
 
