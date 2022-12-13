@@ -2516,6 +2516,7 @@ dependencies = [
  "gperftools",
  "hyper",
  "hyper-boring",
+ "itertools",
  "libc",
  "log",
  "matches",

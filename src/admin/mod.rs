@@ -14,7 +14,7 @@
 
 // Forked from https://github.com/olix0r/kubert/blob/main/kubert/src/admin.rs
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -25,8 +25,7 @@ use gperftools::heap_profiler::HEAP_PROFILER;
 use gperftools::profiler::PROFILER;
 use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
-use tokio::sync::oneshot;
-
+use itertools::Itertools;
 use pprof::protos::Message;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
@@ -34,7 +33,8 @@ use prometheus_client::registry::Registry;
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
-use tracing::{debug, error, info, trace, warn};
+use tokio::sync::oneshot;
+use tracing::{error, info};
 
 use crate::config::Config;
 use crate::version::BuildInfo;
@@ -87,8 +87,8 @@ impl Ready {
         }
     }
 
-    pub fn is_ready(&self) -> bool {
-        self.0.lock().unwrap().len() == 0
+    pub fn pending(&self) -> HashSet<String> {
+        self.0.lock().unwrap().clone()
     }
 }
 
@@ -233,12 +233,9 @@ impl Server {
                                     Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
                                 }
                                 "/logging" => Ok::<_, hyper::Error>(handle_logging(req).await),
-                                _ => Ok::<_, hyper::Error>(
-                                    Response::builder()
-                                        .status(hyper::StatusCode::NOT_FOUND)
-                                        .body(Body::default())
-                                        .unwrap(),
-                                ),
+                                _ => Ok::<_, hyper::Error>(empty_response(
+                                    hyper::StatusCode::NOT_FOUND,
+                                )),
                             }
                         }
                     }))
@@ -281,24 +278,19 @@ impl Server {
 async fn handle_ready(ready: &Ready, req: Request<Body>) -> Response<Body> {
     match *req.method() {
         hyper::Method::GET | hyper::Method::HEAD => {
-            if ready.is_ready() {
-                return Response::builder()
-                    .status(hyper::StatusCode::OK)
-                    .header(hyper::header::CONTENT_TYPE, "text/plain")
-                    .body("ready\n".into())
-                    .unwrap();
+            let pending = ready.pending();
+            if pending.is_empty() {
+                return plaintext_response(hyper::StatusCode::OK, "ready\n".into());
             }
-
-            Response::builder()
-                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                .header(hyper::header::CONTENT_TYPE, "text/plain")
-                .body("not ready\n".into())
-                .unwrap()
+            plaintext_response(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "not ready, pending: {}\n",
+                    pending.into_iter().sorted().join(", ")
+                ),
+            )
         }
-        _ => Response::builder()
-            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::default())
-            .unwrap(),
+        _ => empty_response(hyper::StatusCode::METHOD_NOT_ALLOWED),
     }
 }
 
@@ -321,11 +313,10 @@ async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
                 .body(body.into())
                 .unwrap()
         }
-        Err(err) => Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .header(hyper::header::CONTENT_TYPE, "text/plain")
-            .body(format!("failed to build profile: {}", err).into())
-            .unwrap(),
+        Err(err) => plaintext_response(
+            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to build profile: {err}\n"),
+        ),
     }
 }
 
@@ -336,16 +327,9 @@ async fn handle_server_shutdown(
     match *_req.method() {
         hyper::Method::POST => {
             shutdown_trigger.shutdown_now().await;
-            Response::builder()
-                .status(hyper::StatusCode::OK)
-                .header(hyper::header::CONTENT_TYPE, "text/plain")
-                .body("shutdown now\n".into())
-                .unwrap()
+            plaintext_response(hyper::StatusCode::OK, "shutdown now\n".into())
         }
-        _ => Response::builder()
-            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::default())
-            .unwrap(),
+        _ => empty_response(hyper::StatusCode::METHOD_NOT_ALLOWED),
     }
 }
 
@@ -389,7 +373,7 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
 }
 
 //mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
-//NOTE: mutilple query parameters is not supported, for example
+//NOTE: multiple query parameters is not supported, for example
 //curl -X POST http://127.0.0.1:15021/logging?"tap=debug&router=debug"
 static HELP_STRING: &str = "
 usage: POST /logging\t\t\t\t\t\t(To list current level)
@@ -397,66 +381,70 @@ usage: POST /logging?level=<level>\t\t\t\t(To change global levels)
 usage: POST /logging?level={mod1}:{level1},{mod2}:{level2}\t(To change specific mods' logging level)
 
 hint: loglevel:\terror|warn|info|debug|trace|off
-hint: mod_name:\tthe module name defined in the cargo.toml, i.e. ztunnel::proxy
+hint: mod_name:\tthe module name, i.e. ztunnel::proxy
 ";
 async fn handle_logging(req: Request<Body>) -> Response<Body> {
     match *req.method() {
         hyper::Method::POST => {
-            if let Some(params) = req.uri().query() {
-                let input = params.to_string().to_lowercase();
-                if input.contains("level=") {
-                    change_log_level(input.replace("level=", ""))
-                } else {
-                    Response::builder()
-                        .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-                        .body(format!("only support changing levels\n {}", HELP_STRING).into())
-                        .unwrap()
-                }
+            let qp = req
+                .uri()
+                .query()
+                .map(|v| {
+                    url::form_urlencoded::parse(v.as_bytes())
+                        .into_owned()
+                        .collect()
+                })
+                .unwrap_or_else(HashMap::new);
+            let level = qp.get("level").cloned();
+            let reset = qp.get("reset").cloned();
+            if level.is_some() || reset.is_some() {
+                change_log_level(reset.is_some(), &level.unwrap_or_default())
             } else {
                 list_loggers()
             }
         }
-        _ => Response::builder()
-            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(format!("Invalid HTTP method\n {}", HELP_STRING).into())
-            .unwrap(),
+        _ => plaintext_response(
+            hyper::StatusCode::METHOD_NOT_ALLOWED,
+            format!("Invalid HTTP method\n {}", HELP_STRING),
+        ),
     }
 }
 
 fn list_loggers() -> Response<Body> {
-    warn!("testing warn");
-    info!("testing info");
-    error!("testing error");
-    trace!("testing trace");
-    debug!("testing debug");
-
-    if let Some(loglevel) = telemetry::get_current_loglevel() {
-        Response::builder()
-            .status(hyper::StatusCode::OK)
-            .header(hyper::header::CONTENT_TYPE, "text/plain")
-            .body(format!("current log level is {}\n", loglevel.to_uppercase()).into())
-            .unwrap()
-    } else {
-        Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("failed to get the log level\n {}", HELP_STRING).into())
-            .unwrap()
+    match telemetry::get_current_loglevel() {
+        Ok(loglevel) => plaintext_response(
+            hyper::StatusCode::OK,
+            format!("current log level is {}\n", loglevel),
+        ),
+        Err(err) => plaintext_response(
+            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to get the log level: {err}\n {HELP_STRING}"),
+        ),
     }
 }
 
-fn change_log_level(level: String) -> Response<Body> {
-    match telemetry::set_mod_level(level) {
-        true => list_loggers(),
-        false => Response::builder()
-            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(
-                format!(
-                    "failed to set new level, please check your parameters\n {}",
-                    HELP_STRING
-                )
-                .into(),
-            )
-            .unwrap(),
+fn empty_response(code: hyper::StatusCode) -> Response<Body> {
+    Response::builder()
+        .status(code)
+        .body(Body::default())
+        .unwrap()
+}
+
+fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Body> {
+    Response::builder()
+        .status(code)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .body(body.into())
+        .unwrap()
+}
+
+fn change_log_level(reset: bool, level: &str) -> Response<Body> {
+    match telemetry::set_level(reset, level) {
+        Ok(_) => list_loggers(),
+        Err(e) => plaintext_response(
+            hyper::StatusCode::METHOD_NOT_ALLOWED,
+            format!("failed to set new level: {e}\n{HELP_STRING}",),
+        ),
     }
 }
 

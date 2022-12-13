@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,8 +15,8 @@
 // limitations under the License.
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
-use std::time::Instant;
-use tracing::{debug, warn};
+use thiserror::Error;
+use tracing::{error, warn};
 use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
@@ -37,78 +39,72 @@ pub fn setup_logging() {
 
 fn fmt_layer() -> impl Layer<Registry> + Sized {
     let format = fmt::format();
-    let event_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap();
     let (filter_layer, reload_handle) = reload::Layer::new(
         tracing_subscriber::fmt::layer()
             .event_format(format)
-            .with_filter(event_filter),
+            .with_filter(default_env_filter()),
     );
     LOG_HANDLE
-        .set(LogHandle {
-            handle: reload_handle,
-        })
+        .set(reload_handle)
         .map_or_else(|_| warn!("setup log handler failed"), |_| {});
     filter_layer
 }
 
-// a handle to get and set the log level
-type BoxLayer = tracing_subscriber::fmt::Layer<tracing_subscriber::Registry>;
-type FilteredLayer = filter::Filtered<BoxLayer, EnvFilter, Registry>;
-struct LogHandle {
-    handle: reload::Handle<FilteredLayer, Registry>,
+fn default_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .unwrap()
 }
 
-pub fn set_mod_level(new_level: String) -> bool {
-    if let Some(static_log_handler) = LOG_HANDLE.get() {
-        //new_directve = current_directive + new_level
-        //it can be duplicate, but no worry, the envfilter's parse() will properly handle it
-        let new_directive_str;
-        if let Ok(current_directives_str) = static_log_handler
-            .handle
-            .with_current(|f| format!("{}", f.filter()))
-        {
-            new_directive_str = format!("{},{}", current_directives_str, new_level);
-        } else {
-            new_directive_str = new_level;
-        }
-        debug!("new directive is {}", new_directive_str);
+// a handle to get and set the log level
+type BoxLayer = fmt::Layer<Registry>;
+type FilteredLayer = filter::Filtered<BoxLayer, EnvFilter, Registry>;
+type LogHandle = reload::Handle<FilteredLayer, Registry>;
 
-        //create the new envfilter based on the new directives
-        let new_filter;
-        let res = EnvFilter::try_new(new_directive_str);
-        match res {
-            Ok(e) => {
-                new_filter = e;
+/// set_level dynamically updates the logging level to *include* level. If `reset` is true, it will
+/// reset the entire logging configuration first.
+pub fn set_level(reset: bool, level: &str) -> Result<(), Error> {
+    if let Some(handle) = LOG_HANDLE.get() {
+        // new_directive will be current_directive + level
+        //it can be duplicate, but the envfilter's parse() will properly handle it
+        let new_directive = if let Ok(current) = handle.with_current(|f| f.filter().to_string()) {
+            if reset {
+                format!("{},{}", default_env_filter(), level)
+            } else {
+                format!("{},{}", current, level)
             }
-            Err(e) => {
-                warn!("{}", e.to_string());
-                return false;
-            }
-        }
+        } else {
+            level.to_string()
+        };
+
+        //create the new EnvFilter based on the new directives
+        let new_filter = EnvFilter::builder().parse(new_directive)?;
+        error!("new log filter is {new_filter}");
 
         //set the new filter
-        static_log_handler
-            .handle
-            .modify(|layer| {
-                *layer.filter_mut() = new_filter;
-            })
-            .map_or(false, |_| true)
+        Ok(handle.modify(|layer| {
+            *layer.filter_mut() = new_filter;
+        })?)
     } else {
         warn!("failed to get log handle");
-        false
+        Err(Error::Uninitialized)
     }
 }
 
-pub fn get_current_loglevel() -> Option<String> {
-    if let Some(static_log_handler) = LOG_HANDLE.get() {
-        static_log_handler
-            .handle
-            .with_current(|f| format!("{}", f.filter()))
-            .ok()
+pub fn get_current_loglevel() -> Result<String, Error> {
+    if let Some(handle) = LOG_HANDLE.get() {
+        Ok(handle.with_current(|f| f.filter().to_string())?)
     } else {
-        warn!("failed to get log handle");
-        None
+        Err(Error::Uninitialized)
     }
+}
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("parse failure: {0}")]
+    InvalidFilter(#[from] filter::ParseError),
+    #[error("reload failure: {0}")]
+    Reload(#[from] reload::Error),
+    #[error("logging is not initialized")]
+    Uninitialized,
 }
