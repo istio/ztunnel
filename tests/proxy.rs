@@ -104,7 +104,7 @@ async fn test_shutdown_drain() {
     });
     // we shouldn't be shutdown yet
     assert!(shutdown_rx.try_recv().is_err());
-    let dst = helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap());
+    let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
     let mut stream = ta.socks5_connect(dst).await;
     read_write_stream(&mut stream).await;
     // Since we are connected, the app shouldn't shutdown
@@ -146,7 +146,7 @@ async fn test_shutdown_forced_drain() {
     });
     // we shouldn't be shutdown yet
     assert!(shutdown_rx.try_recv().is_err());
-    let dst = helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap());
+    let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
     let mut stream = ta.socks5_connect(dst).await;
     const BODY: &[u8] = "hello world".as_bytes();
     stream.write_all(BODY).await.unwrap();
@@ -192,17 +192,17 @@ async fn run_request_test(target: &str) {
 
 #[tokio::test]
 async fn test_hbone_request() {
-    run_request_test("127.0.0.1").await;
+    run_request_test(TEST_WORKLOAD_HBONE).await;
 }
 
 #[tokio::test]
 async fn test_tcp_request() {
-    run_request_test("127.0.0.2").await;
+    run_request_test(TEST_WORKLOAD_TCP).await;
 }
 
 #[tokio::test]
 async fn test_vip_request() {
-    run_request_test("127.10.0.1:80").await;
+    run_request_test(&format!("{TEST_VIP}:80")).await;
 }
 
 #[tokio::test]
@@ -232,7 +232,7 @@ async fn test_tcp_metrics() {
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
-        let dst = helpers::with_ip(echo_addr, "127.0.0.2".parse().unwrap());
+        let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
         let mut stream = app.socks5_connect(dst).await;
         read_write_stream(&mut stream).await;
 
