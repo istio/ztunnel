@@ -34,7 +34,7 @@ use crate::xds::istio::workload::{Authorization, Workload};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{admin, identity, tls, xds};
+use crate::{identity, readiness, tls, xds};
 
 use super::Error;
 
@@ -142,7 +142,7 @@ impl Config {
         self
     }
 
-    pub fn build(self, metrics: Arc<Metrics>, block_ready: admin::BlockReady) -> AdsClient {
+    pub fn build(self, metrics: Arc<Metrics>, block_ready: readiness::BlockReady) -> AdsClient {
         let (tx, rx) = mpsc::channel(100);
         AdsClient {
             config: self,
@@ -169,7 +169,7 @@ pub struct AdsClient {
     demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 
     pub(crate) metrics: Arc<Metrics>,
-    block_ready: Option<admin::BlockReady>,
+    block_ready: Option<readiness::BlockReady>,
 
     connection_id: u32,
 }
@@ -343,7 +343,8 @@ impl AdsClient {
             .into_inner();
         debug!("connected established");
 
-        // Create a oneshot channel to
+        info!("Stream established");
+        // Create a oneshot channel to be notified as soon as we ACK the first XDS response
         let (tx, initial_xds_rx) = oneshot::channel();
         let mut initial_xds_tx = Some(tx);
         let ready = mem::take(&mut self.block_ready);
@@ -362,6 +363,8 @@ impl AdsClient {
                     self.handle_demand_event(_demand_event, &discovery_req_tx).await?;
                 }
                 msg = response_stream.message() => {
+                    // TODO: If we have responses of different types (e.g. RBAC), we'll want to wait for
+                    // each type to receive a response before marking ready
                     if let XdsSignal::Ack = self.handle_stream_event(msg?, &discovery_req_tx).await? {
                         let val = mem::take(&mut initial_xds_tx);
                         if let Some(tx) = val {

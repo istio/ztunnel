@@ -31,7 +31,7 @@ use crate::identity::Identity;
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
-use crate::{admin, config, xds};
+use crate::{config, readiness, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -229,7 +229,7 @@ impl WorkloadManager {
     pub async fn new(
         config: config::Config,
         metrics: Arc<Metrics>,
-        awaiting_ready: admin::BlockReady,
+        awaiting_ready: readiness::BlockReady,
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();

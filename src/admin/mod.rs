@@ -14,7 +14,7 @@
 
 // Forked from https://github.com/olix0r/kubert/blob/main/kubert/src/admin.rs
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -25,7 +25,6 @@ use gperftools::heap_profiler::HEAP_PROFILER;
 use gperftools::profiler::PROFILER;
 use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
-use itertools::Itertools;
 use pprof::protos::Message;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
@@ -46,13 +45,11 @@ use crate::{config, signal, telemetry};
 pub struct Builder {
     addr: SocketAddr,
     workload_info: WorkloadInformation,
-    ready: Ready,
     config: Config,
 }
 
 pub struct Server {
     addr: SocketAddr,
-    ready: Ready,
     server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
     workload_info: WorkloadInformation,
     registry: Arc<Mutex<Registry>>,
@@ -69,69 +66,10 @@ pub struct ConfigDump {
     config: Config,
 }
 
-/// Ready tracks whether the process is ready.
-#[derive(Clone, Debug, Default)]
-pub struct Ready(Arc<Mutex<HashSet<String>>>);
-
-impl Ready {
-    pub fn new() -> Ready {
-        Ready(Default::default())
-    }
-
-    /// register_task allows a caller to add a dependency to be marked "ready".
-    pub fn register_task(&self, name: &str) -> BlockReady {
-        self.0.lock().unwrap().insert(name.to_string());
-        BlockReady {
-            parent: self.clone(),
-            name: name.to_string(),
-        }
-    }
-
-    pub fn pending(&self) -> HashSet<String> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
-/// BlockReady blocks readiness until it is dropped.
-pub struct BlockReady {
-    parent: Ready,
-    name: String,
-}
-
-impl BlockReady {
-    pub fn subtask(&self, name: &str) -> BlockReady {
-        self.parent.register_task(name)
-    }
-}
-
-impl Drop for BlockReady {
-    fn drop(&mut self) {
-        let mut pending = self.parent.0.lock().unwrap();
-        let removed = pending.remove(&self.name);
-        debug_assert!(removed); // It is a bug to somehow remove something twice
-        let left = pending.len();
-        let dur = telemetry::APPLICATION_START_TIME.elapsed();
-        if left == 0 {
-            info!(
-                task = self.name,
-                ?dur,
-                "Readiness blocker complete, marking server ready",
-            );
-        } else {
-            info!(
-                task = self.name,
-                ?dur,
-                "Readiness blocker complete, still awaiting {left} tasks",
-            );
-        }
-    }
-}
-
 impl Builder {
-    pub fn new(config: config::Config, workload_info: WorkloadInformation, ready: Ready) -> Self {
+    pub fn new(config: config::Config, workload_info: WorkloadInformation) -> Self {
         Self {
             addr: config.admin_addr,
-            ready,
             workload_info,
             config,
         }
@@ -144,7 +82,6 @@ impl Builder {
     ) -> hyper::Result<Server> {
         let Self {
             addr,
-            ready,
             workload_info,
             config,
         } = self;
@@ -159,7 +96,6 @@ impl Builder {
 
         Ok(Server {
             addr,
-            ready,
             server,
             workload_info,
             registry,
@@ -180,7 +116,6 @@ impl Server {
 
     pub fn spawn(self, drain_rx: Watch) {
         let _dx = drain_rx.clone();
-        let ready = self.ready.clone();
         let (tx, rx) = oneshot::channel();
         let workload_info = self.workload_info.clone();
         let registry = self.registry();
@@ -189,7 +124,6 @@ impl Server {
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
-                let ready = ready.clone();
                 let workload_info = workload_info.clone();
                 let registry = Arc::clone(&registry);
                 let shutdown_trigger = shutdown_trigger.clone();
@@ -197,7 +131,6 @@ impl Server {
                 async move {
                     let workload_info = workload_info.clone();
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
-                        let ready = ready.clone();
                         let workload_info = workload_info.clone();
                         let registry = Arc::clone(&registry);
                         let shutdown_trigger = shutdown_trigger.clone();
@@ -211,9 +144,6 @@ impl Server {
                         };
                         async move {
                             match req.uri().path() {
-                                "/healthz/ready" => {
-                                    Ok::<_, hyper::Error>(handle_ready(&ready, req).await)
-                                }
                                 "/debug/pprof/profile" => {
                                     Ok::<_, hyper::Error>(handle_pprof(req).await)
                                 }
@@ -272,25 +202,6 @@ impl Server {
                 info!("admin server terminated");
             }
         });
-    }
-}
-
-async fn handle_ready(ready: &Ready, req: Request<Body>) -> Response<Body> {
-    match *req.method() {
-        hyper::Method::GET | hyper::Method::HEAD => {
-            let pending = ready.pending();
-            if pending.is_empty() {
-                return plaintext_response(hyper::StatusCode::OK, "ready\n".into());
-            }
-            plaintext_response(
-                hyper::StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "not ready, pending: {}\n",
-                    pending.into_iter().sorted().join(", ")
-                ),
-            )
-        }
-        _ => empty_response(hyper::StatusCode::METHOD_NOT_ALLOWED),
     }
 }
 

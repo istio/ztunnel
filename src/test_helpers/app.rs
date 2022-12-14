@@ -31,6 +31,7 @@ use super::helpers::*;
 #[derive(Clone, Copy)]
 pub struct TestApp {
     pub admin_address: SocketAddr,
+    pub readiness_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
 }
 
@@ -47,6 +48,7 @@ where
     let ta = TestApp {
         admin_address: app.admin_address,
         proxy_addresses: app.proxy_addresses,
+        readiness_address: app.readiness_address,
     };
     let run_and_shutdown = async {
         ta.ready().await;
@@ -72,6 +74,29 @@ impl TestApp {
         client.request(req).await
     }
 
+    pub async fn readiness_request(&self) -> anyhow::Result<()> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "http://localhost:{}/healthz/ready",
+                self.readiness_address
+            ))
+            .body(Body::default())
+            .unwrap();
+        let client = Client::new();
+        let resp = client
+            .request(req)
+            .await
+            .expect("error sending ready healthcheck request");
+        match resp.status() {
+            hyper::StatusCode::OK => Ok(()),
+            other => Err(anyhow::anyhow!(
+                "non-200 status code from readiness request: received {}",
+                other
+            )),
+        }
+    }
+
     pub async fn admin_request_string(&self, path: &str) -> String {
         let body = self.admin_request(path).await.expect("request").into_body();
         let body = body::to_bytes(body).await.expect("read read body");
@@ -91,7 +116,7 @@ impl TestApp {
 
     pub async fn ready(&self) {
         for _ in 0..100 {
-            if self.admin_request("healthz/ready").await.is_ok() {
+            if self.readiness_request().await.is_ok() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
