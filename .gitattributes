@@ -9,4 +9,3 @@
 *.gen.json linguist-generated=true
 *_pb2.py linguist-generated=true
 go.sum merge=union
-vendor/**  linguist-vendored
