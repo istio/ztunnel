@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
+use hyper_util::client::pool::Pool;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
@@ -39,6 +40,7 @@ pub struct Outbound {
     drain: Watch,
     metrics: Arc<Metrics>,
     hbone_port: u16,
+    pub pool: Pool<Uniq<i32>, Key>,
 }
 
 impl Outbound {
@@ -62,6 +64,11 @@ impl Outbound {
             transparent,
             "listener established",
         );
+
+        let pool: Pool<Uniq<i32>, Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
+            idle_timeout: Some(Duration::from_secs(90)),
+            max_idle_per_host: std::usize::MAX,
+        }, &hyper_util::common::exec::Exec::Default);
         Ok(Outbound {
             cfg,
             cert_manager,
@@ -70,6 +77,7 @@ impl Outbound {
             hbone_port,
             metrics,
             drain,
+            pool,
         })
     }
 
@@ -93,6 +101,7 @@ impl Outbound {
                             hbone_port: self.hbone_port,
                             metrics: self.metrics.clone(),
                             id: TraceParent::new(),
+                            pool: self.pool.clone(),
                         };
                         let span = info_span!("outbound", id=%oc.id);
                         tokio::spawn(
@@ -136,7 +145,29 @@ pub struct OutboundConnection {
     pub hbone_port: u16,
     pub metrics: Arc<Metrics>,
     pub id: TraceParent,
+    pub pool: Pool<Uniq<i32>, Key>,
 }
+
+/// Test unique reservations.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Uniq<T>(T);
+
+impl<T: Send + 'static + Unpin> hyper_util::client::pool::Poolable for Uniq<T> {
+    fn is_open(&self) -> bool {
+        true
+    }
+
+    fn reserve(self) -> hyper_util::client::pool::Reservation<Self> {
+        hyper_util::client::pool::Reservation::Unique(self)
+    }
+
+    fn can_share(&self) -> bool {
+        false
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+pub struct Key{}
 
 impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
@@ -177,10 +208,18 @@ impl OutboundConnection {
                 .await
                 .map_err(Error::Io);
         }
-        let pool = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
-            idle_timeout: Some(Duration::from_secs(90)),
-            max_idle_per_host: std::usize::MAX,
-        }, &Exec::Default);
+        let pool = self.pool.clone();
+        let k = Key{};
+        let co = pool.checkout(k.clone());
+        let res = tokio::time::timeout(Duration::from_secs(1), co).await;
+        let ver = hyper_util::client::client::Ver::Http2;
+        error!("checkout: {:?}", res);
+        if let Some(lock) = pool.connecting(&k, ver) {
+            error!("got connecting lock");
+            pool.pooled(lock, Uniq(10));
+        } else {
+            error!("no connecting lock");
+        }
         match req.protocol {
             Protocol::HBONE => {
                 info!(

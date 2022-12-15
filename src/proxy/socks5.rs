@@ -17,6 +17,8 @@ use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
+use hyper_util::client::pool::Pool;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -38,6 +40,7 @@ pub struct Socks5 {
     listener: TcpListener,
     drain: Watch,
     pub metrics: Arc<Metrics>,
+    pub pool: Pool<super::outbound::Uniq<i32>, super::outbound::Key>,
 }
 
 impl Socks5 {
@@ -59,6 +62,10 @@ impl Socks5 {
             "listener established",
         );
 
+        let pool: Pool<super::outbound::Uniq<i32>, super::outbound::Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
+            idle_timeout: Some(Duration::from_secs(90)),
+            max_idle_per_host: std::usize::MAX,
+        }, &hyper_util::common::exec::Exec::Default);
         Ok(Socks5 {
             cfg,
             cert_manager,
@@ -67,6 +74,7 @@ impl Socks5 {
             listener,
             drain,
             metrics,
+            pool,
         })
     }
 
@@ -89,6 +97,7 @@ impl Socks5 {
                             hbone_port: self.hbone_port,
                             metrics: self.metrics.clone(),
                             id: TraceParent::new(),
+                            pool: self.pool.clone(),
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream).await {
