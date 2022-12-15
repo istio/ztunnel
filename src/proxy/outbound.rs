@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures_util::future::{self, Either, TryFutureExt as _};
+use futures_util::future::{self, Either};
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
