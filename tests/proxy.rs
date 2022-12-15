@@ -20,7 +20,6 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use hyper::{Body, Client, Method, Request};
-use log::{info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
