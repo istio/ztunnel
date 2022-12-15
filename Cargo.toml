@@ -64,8 +64,9 @@ go-parse-duration = "0.1.1"
 prometheus-parse = "0.2.3"
 url = "2.2"
 itertools = "0.10.5"
-hyper-util = "0"
+hyper-util = { version = "0" , features = ["runtime", "tcp", "http2"]}
 futures-util = "0.3.25"
+want = "0.3.0"
 
 [build-dependencies]
 tonic-build = { version = "0.8", default-features=false, features = ["prost"] }

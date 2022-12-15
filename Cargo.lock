@@ -2595,4 +2595,5 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "want",
 ]

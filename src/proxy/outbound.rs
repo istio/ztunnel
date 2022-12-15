@@ -12,19 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use futures_util::future::{self, Either};
 
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::{fmt, task};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use futures::pin_mut;
 use hyper::client::conn::SendRequest;
-use hyper::Body;
-use hyper_util::client::pool::{Pool, Pooled};
+use hyper::{Body, Response};
+use hyper_util::client::pool::{Pool, Poolable, Pooled, Reservation};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::Config;
@@ -161,17 +166,208 @@ pub struct OutboundConnection {
     pub pool: Pool<PoolValue, Key>,
 }
 
+pub struct Http2SendRequest<B> {
+    dispatch: UnboundedSender<hyper::Request<B>, Response<Body>>,
+}
+
+fn to_h2<B>(x: SendRequest<B>) -> Http2SendRequest<B> {
+
+}
+
+impl<B> Http2SendRequest<B> {
+    pub(super) fn is_ready(&self) -> bool {
+        self.dispatch.is_ready()
+    }
+
+    pub(super) fn is_closed(&self) -> bool {
+        self.dispatch.is_closed()
+    }
+}
+
+impl<B> fmt::Debug for Http2SendRequest<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Http2SendRequest").finish()
+    }
+}
+
+impl<B> Clone for Http2SendRequest<B> {
+    fn clone(&self) -> Self {
+        Http2SendRequest {
+            dispatch: self.dispatch.clone(),
+        }
+    }
+}
+
+pub(crate) struct UnboundedSender<T, U> {
+    /// Only used for `is_closed`, since mpsc::UnboundedSender cannot be checked.
+    giver: want::SharedGiver,
+    inner: mpsc::UnboundedSender<Envelope<T, U>>,
+}
+type RetryPromise<T, U> = oneshot::Receiver<Result<U, (Error, Option<T>)>>;
+impl<T, U> UnboundedSender<T, U> {
+    pub(crate) fn is_ready(&self) -> bool {
+        !self.giver.is_canceled()
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.giver.is_canceled()
+    }
+
+    pub(crate) fn try_send(&mut self, val: T) -> Result<RetryPromise<T, U>, T> {
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .send(Envelope(Some((val, Callback::Retry(Some(tx))))))
+            .map(move |_| rx)
+            .map_err(|mut e| (e.0).0.take().expect("envelope not dropped").0)
+    }
+}
+impl<T, U> Clone for UnboundedSender<T, U> {
+    fn clone(&self) -> Self {
+        UnboundedSender {
+            giver: self.giver.clone(),
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+
+struct Envelope<T, U>(Option<(T, Callback<T, U>)>);
+
+impl<T, U> Drop for Envelope<T, U> {
+    fn drop(&mut self) {
+        if let Some((val, cb)) = self.0.take() {
+            cb.send(Err((
+                Error::Dropped,
+                Some(val),
+            )));
+        }
+    }
+}
+
+pub(crate) enum Callback<T, U> {
+    Retry(Option<oneshot::Sender<Result<U, (Error, Option<T>)>>>),
+    NoRetry(Option<oneshot::Sender<Result<U, Error>>>),
+}
+
+impl<T, U> Drop for Callback<T, U> {
+    fn drop(&mut self) {
+        // FIXME(nox): What errors do we want here?
+        let error = Error::Dropped;
+
+        match self {
+            Callback::Retry(tx) => {
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(Err((error, None)));
+                }
+            }
+            Callback::NoRetry(tx) => {
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(Err(error));
+                }
+            }
+        }
+    }
+}
+
+macro_rules! ready {
+    ($e:expr) => {
+        match $e {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        }
+    };
+}
+impl<T, U> Callback<T, U> {
+    pub(crate) fn is_canceled(&self) -> bool {
+        match *self {
+            Callback::Retry(Some(ref tx)) => tx.is_closed(),
+            Callback::NoRetry(Some(ref tx)) => tx.is_closed(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn poll_canceled(&mut self, cx: &mut task::Context<'_>) -> Poll<()> {
+        match *self {
+            Callback::Retry(Some(ref mut tx)) => tx.poll_closed(cx),
+            Callback::NoRetry(Some(ref mut tx)) => tx.poll_closed(cx),
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn send(mut self, val: Result<U, (Error, Option<T>)>) {
+        match self {
+            Callback::Retry(ref mut tx) => {
+                let _ = tx.take().unwrap().send(val);
+            }
+            Callback::NoRetry(ref mut tx) => {
+                let _ = tx.take().unwrap().send(val.map_err(|e| e.0));
+            }
+        }
+    }
+
+    pub(crate) async fn send_when(
+        self,
+        mut when: impl Future<Output = Result<U, (Error, Option<T>)>> + Unpin,
+    ) {
+        use futures_util::future;
+        use tracing::trace;
+
+        let mut cb = Some(self);
+
+        // "select" on this callback being canceled, and the future completing
+        future::poll_fn(move |cx| {
+            match Pin::new(&mut when).poll(cx) {
+                Poll::Ready(Ok(res)) => {
+                    cb.take().expect("polled after complete").send(Ok(res));
+                    Poll::Ready(())
+                }
+                Poll::Pending => {
+                    // check if the callback is canceled
+                    ready!(cb.as_mut().unwrap().poll_canceled(cx));
+                    trace!("send_when canceled");
+                    Poll::Ready(())
+                }
+                Poll::Ready(Err(err)) => {
+                    cb.take().expect("polled after complete").send(Err(err));
+                    Poll::Ready(())
+                }
+            }
+        })
+            .await
+    }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct PoolClient(Http2SendRequest<Body>);
+
+impl Poolable for PoolClient {
+    fn is_open(&self) -> bool {
+        self.0.is_ready()
+    }
+
+    fn reserve(self) -> Reservation<Self> {
+        let b = self.clone();
+        let a = self;
+        Reservation::Shared(a, b)
+    }
+
+    fn can_share(&self) -> bool {
+        true // http2 always shares
+    }
+}
+
 /// Test unique reservations.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Uniq<T>(T);
 
-impl<T: Send + 'static + Unpin> hyper_util::client::pool::Poolable for Uniq<T> {
+impl<T: Send + 'static + Unpin> Poolable for Uniq<T> {
     fn is_open(&self) -> bool {
         true
     }
 
-    fn reserve(self) -> hyper_util::client::pool::Reservation<Self> {
-        hyper_util::client::pool::Reservation::Unique(self)
+    fn reserve(self) -> Reservation<Self> {
+        Reservation::Unique(self)
     }
 
     fn can_share(&self) -> bool {
