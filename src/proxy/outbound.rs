@@ -275,27 +275,6 @@ impl OutboundConnection {
             });
         }
 
-        // For case source client has enabled waypoint
-        if !source_workload.waypoint_addresses.is_empty() {
-            let waypoint_address = source_workload.choose_waypoint_address().unwrap();
-            return Ok(Request {
-                // Always use HBONE here
-                protocol: Protocol::HBONE,
-                source: source_workload.clone(),
-                // Load balancing decision is deferred to remote proxy
-                destination: target,
-                destination_workload: Some(source_workload), // TODO: should this be the waypoint workload?
-                // Send to the remote proxy
-                gateway: SocketAddr::from((waypoint_address, 15001)),
-                // Let the client remote know we are on the outbound path. The remote proxy should strictly
-                // validate the identity when we declare this
-                direction: Direction::Outbound,
-                // Source has a remote proxy. We should delegate everything to that proxy - do not even resolve VIP.
-                // TODO: add client skipping
-                request_type: RequestType::ToClientWaypoint,
-            });
-        }
-
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
         if !us.workload.waypoint_addresses.is_empty() {
@@ -388,8 +367,6 @@ enum Direction {
 
 #[derive(PartialEq, Debug)]
 enum RequestType {
-    /// ToClientWaypoint refers to requests targeting a client waypoint proxy
-    ToClientWaypoint,
     /// ToServerWaypoint refers to requests targeting a server waypoint proxy
     ToServerWaypoint,
     /// Direct requests are made directly to a intended backend pod
@@ -594,6 +571,47 @@ mod tests {
                 ..Default::default()
             },
             None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_source_waypoint() {
+        run_build_request(
+            "127.0.0.2",
+            "127.0.0.1:80",
+            XdsWorkload {
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                waypoint_addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
+                ..Default::default()
+            },
+            // Even though source has a waypoint, we don't use it
+            Some(ExpectedRequest {
+                protocol: Protocol::TCP,
+                destination: "127.0.0.1:80",
+                gateway: "127.0.0.1:80",
+                request_type: RequestType::Direct,
+            }),
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn build_request_destination_waypoint() {
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.2:80",
+            XdsWorkload {
+                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                waypoint_addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
+                ..Default::default()
+            },
+            // Should use the waypoint
+            Some(ExpectedRequest {
+                protocol: Protocol::HBONE,
+                destination: "127.0.0.2:80",
+                gateway: "127.0.0.10:15006",
+                request_type: RequestType::ToServerWaypoint,
+            }),
         )
         .await;
     }
