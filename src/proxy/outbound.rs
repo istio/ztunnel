@@ -14,7 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
@@ -177,6 +177,10 @@ impl OutboundConnection {
                 .await
                 .map_err(Error::Io);
         }
+        let pool = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
+            idle_timeout: Some(Duration::from_secs(90)),
+            max_idle_per_host: std::usize::MAX,
+        }, &Exec::Default);
         match req.protocol {
             Protocol::HBONE => {
                 info!(
