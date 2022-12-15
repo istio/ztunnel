@@ -293,7 +293,7 @@ impl OutboundConnection {
                 // Use the original VIP, not translated
                 destination: target,
                 destination_workload: Some(us.workload), // TODO: should this be the waypoint workload?
-                gateway: SocketAddr::from((waypoint_address, 15006)),
+                gateway: SocketAddr::from((waypoint_address, 15008)),
                 // Let the client remote know we are on the inbound path.
                 direction: Direction::Inbound,
                 request_type: RequestType::ToServerWaypoint,
