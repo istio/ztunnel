@@ -250,17 +250,15 @@ impl Certs {
         Ok(conn.build())
     }
 
-    pub fn connector(&self, dest_id: &Option<Identity>) -> Result<ssl::SslConnector, Error> {
+    pub fn connector(&self, dest_id: Identity) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
 
         // client verifies SAN
-        if let Some(dest_id) = dest_id {
             conn.set_verify_callback(
                 Self::verify_mode(),
-                Verifier::San(dest_id.clone()).callback(),
+                Verifier::San(dest_id).callback(),
             );
-        }
 
         Ok(conn.build())
     }

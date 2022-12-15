@@ -40,7 +40,7 @@ pub struct Socks5 {
     listener: TcpListener,
     drain: Watch,
     pub metrics: Arc<Metrics>,
-    pub pool: Pool<super::outbound::Uniq<i32>, super::outbound::Key>,
+    pub pool: Pool<super::outbound::PoolValue, super::outbound::Key>,
 }
 
 impl Socks5 {
@@ -62,7 +62,7 @@ impl Socks5 {
             "listener established",
         );
 
-        let pool: Pool<super::outbound::Uniq<i32>, super::outbound::Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
+        let pool: Pool<super::outbound::PoolValue, super::outbound::Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
             idle_timeout: Some(Duration::from_secs(90)),
             max_idle_per_host: std::usize::MAX,
         }, &hyper_util::common::exec::Exec::Default);

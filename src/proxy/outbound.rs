@@ -12,18 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures_util::future::{self, Either, FutureExt as _, TryFutureExt as _};
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
-use hyper_util::client::pool::Pool;
+use futures::pin_mut;
+use hyper::Body;
+use hyper::client::conn::SendRequest;
+use hyper_util::client::pool::{Pool, Pooled};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::Config;
-use crate::identity::CertificateProvider;
+use crate::identity::{CertificateProvider, Identity};
 use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::{Inbound, InboundConnect};
@@ -40,8 +45,10 @@ pub struct Outbound {
     drain: Watch,
     metrics: Arc<Metrics>,
     hbone_port: u16,
-    pub pool: Pool<Uniq<i32>, Key>,
+    pub pool: Pool<PoolValue, Key>,
 }
+
+pub type PoolValue = Uniq<SendRequest<Body>>;
 
 impl Outbound {
     pub async fn new(
@@ -65,7 +72,7 @@ impl Outbound {
             "listener established",
         );
 
-        let pool: Pool<Uniq<i32>, Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
+        let pool: Pool<PoolValue, Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
             idle_timeout: Some(Duration::from_secs(90)),
             max_idle_per_host: std::usize::MAX,
         }, &hyper_util::common::exec::Exec::Default);
@@ -145,7 +152,7 @@ pub struct OutboundConnection {
     pub hbone_port: u16,
     pub metrics: Arc<Metrics>,
     pub id: TraceParent,
-    pub pool: Pool<Uniq<i32>, Key>,
+    pub pool: Pool<PoolValue, Key>,
 }
 
 /// Test unique reservations.
@@ -166,8 +173,11 @@ impl<T: Send + 'static + Unpin> hyper_util::client::pool::Poolable for Uniq<T> {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
-pub struct Key{}
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct Key{
+    src: Identity,
+    dst: Identity,
+}
 
 impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
@@ -208,18 +218,7 @@ impl OutboundConnection {
                 .await
                 .map_err(Error::Io);
         }
-        let pool = self.pool.clone();
-        let k = Key{};
-        let co = pool.checkout(k.clone());
-        let res = tokio::time::timeout(Duration::from_secs(1), co).await;
-        let ver = hyper_util::client::client::Ver::Http2;
-        error!("checkout: {:?}", res);
-        if let Some(lock) = pool.connecting(&k, ver) {
-            error!("got connecting lock");
-            pool.pooled(lock, Uniq(10));
-        } else {
-            error!("no connecting lock");
-        }
+
         match req.protocol {
             Protocol::HBONE => {
                 info!(
@@ -227,15 +226,78 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
 
-                // Using the raw connection API, instead of client, is a bit annoying, but the only reasonable
-                // way to work around https://github.com/hyperium/hyper/issues/2863
-                // Eventually we will need to implement our own smarter pooling, TLS handshaking, etc anyways.
-                let mut builder = hyper::client::conn::Builder::new();
-                let builder = builder
-                    .http2_only(true)
-                    .http2_initial_stream_window_size(self.cfg.window_size)
-                    .http2_max_frame_size(self.cfg.frame_size)
-                    .http2_initial_connection_window_size(self.cfg.connection_window_size);
+                let dst_identity = req.destination_workload.clone().expect("hbone requires destination workload").identity();
+
+
+                let pool = self.pool.clone();
+                let k = Key{
+                    src: req.source.identity(),
+                    dst: dst_identity.clone()
+                };
+                let connect = async {
+                    let ver = hyper_util::client::client::Ver::Http2;
+                    let Some(connecting) = pool.connecting(&k, ver) else {
+                        return Err(Error::Dropped)
+                    };
+                    // Using the raw connection API, instead of client, is a bit annoying, but the only reasonable
+                    // way to work around https://github.com/hyperium/hyper/issues/2863
+                    // Eventually we will need to implement our own smarter pooling, TLS handshaking, etc anyways.
+                    let mut builder = hyper::client::conn::Builder::new();
+                    let builder = builder
+                        .http2_only(true)
+                        .http2_initial_stream_window_size(self.cfg.window_size)
+                        .http2_max_frame_size(self.cfg.frame_size)
+                        .http2_initial_connection_window_size(self.cfg.connection_window_size);
+
+                    let id = &req.source.identity();
+                    let cert = self.cert_manager.fetch_certificate(id).await?;
+                    let connector = cert
+                        .connector(dst_identity.clone())?
+                        .configure()
+                        .expect("configure");
+                    let tcp_stream = TcpStream::connect(req.gateway).await?;
+                    tcp_stream.set_nodelay(true)?;
+                    let tls_stream = connect_tls(connector, tcp_stream).await?;
+                    let (mut request_sender, connection) = builder
+                        .handshake(tls_stream)
+                        .await
+                        .map_err(Error::HttpHandshake)?;
+                    // spawn a task to poll the connection and drive the HTTP state
+                    tokio::spawn(async move {
+                        if let Err(e) = connection.await {
+                            error!("Error in HBONE connection handshake: {:?}", e);
+                        }
+                    });
+                    let pooled = pool.pooled(connecting, Uniq(request_sender));
+                    Ok::<_, Error>(pooled)
+                };
+                let co = pool.checkout(k.clone());
+                // let res = tokio::time::timeout(Duration::from_secs(1), co).await;
+                // let ver = hyper_util::client::client::Ver::Http2;
+                // error!("checkout: {:?}", res);
+                //
+                // if let Some(lock) = pool.connecting(&k, ver) {
+                //     error!("got connecting lock");
+                //     pool.pooled(lock, Uniq(10));
+                // } else {
+                //     error!("no connecting lock");
+                // }
+                // TODO hyper client is more precise here...
+                pin_mut!(connect);
+                let mut request_sender: Pooled<PoolValue, _> = match future::select(co, connect).await {
+                    Either::Left((c, _)) => {
+                        error!("howardjohn: checked out {c:?}");
+                        // if let Ok(inner) = c {
+                        //     error!("co innner {:?}", inner.0);
+                        // }
+                        c.unwrap()
+
+                    },
+                    Either::Right((request_sender, _)) => {
+                        error!("howardjohn: connected {:?}", request_sender);
+                        request_sender?
+                    }
+                };
 
                 let request = hyper::Request::builder()
                     .uri(&req.destination.to_string())
@@ -245,28 +307,8 @@ impl OutboundConnection {
                     .header(TRACEPARENT_HEADER, self.id.header())
                     .body(hyper::Body::empty())
                     .unwrap();
-
-                let id = &req.source.identity();
-                let cert = self.cert_manager.fetch_certificate(id).await?;
-                let connector = cert
-                    .connector(&req.destination_workload.map(|w| w.identity()))?
-                    .configure()
-                    .expect("configure");
-                let tcp_stream = TcpStream::connect(req.gateway).await?;
-                tcp_stream.set_nodelay(true)?;
-                let tls_stream = connect_tls(connector, tcp_stream).await?;
-                let (mut request_sender, connection) = builder
-                    .handshake(tls_stream)
-                    .await
-                    .map_err(Error::HttpHandshake)?;
-                // spawn a task to poll the connection and drive the HTTP state
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        error!("Error in HBONE connection handshake: {:?}", e);
-                    }
-                });
-
-                let response = request_sender.send_request(request).await?;
+                // let rs = request_sender.deref_mut();
+                let response = request_sender.0.send_request(request).await?;
 
                 let code = response.status();
                 if code != 200 {

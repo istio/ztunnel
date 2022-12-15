@@ -2529,6 +2529,7 @@ dependencies = [
  "drain",
  "dyn-clone",
  "futures",
+ "futures-util",
  "go-parse-duration",
  "gperftools",
  "hyper",

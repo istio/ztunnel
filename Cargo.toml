@@ -65,6 +65,7 @@ prometheus-parse = "0.2.3"
 url = "2.2"
 itertools = "0.10.5"
 hyper-util = "0"
+futures-util = "0.3.25"
 
 [build-dependencies]
 tonic-build = { version = "0.8", default-features=false, features = ["prost"] }

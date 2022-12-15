@@ -130,6 +130,9 @@ pub enum Error {
     #[error("http handshake failed: {0}")]
     HttpHandshake(#[source] hyper::Error),
 
+    #[error("dropped")]
+    Dropped,
+
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
 
