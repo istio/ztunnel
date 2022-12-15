@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures_util::future::{self, Either, FutureExt as _, TryFutureExt as _};
-use std::future::Future;
+use futures_util::future::{self, Either, TryFutureExt as _};
+
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use futures::pin_mut;
-use hyper::Body;
 use hyper::client::conn::SendRequest;
+use hyper::Body;
 use hyper_util::client::pool::{Pool, Pooled};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
@@ -50,6 +50,16 @@ pub struct Outbound {
 
 pub type PoolValue = Uniq<SendRequest<Body>>;
 
+fn pool() -> Pool<PoolValue, Key> {
+    Pool::new(
+        hyper_util::client::pool::Config {
+            idle_timeout: Some(Duration::from_secs(90)),
+            max_idle_per_host: std::usize::MAX,
+        },
+        &hyper_util::common::exec::Exec::Default,
+    )
+}
+
 impl Outbound {
     pub async fn new(
         cfg: Config,
@@ -72,10 +82,6 @@ impl Outbound {
             "listener established",
         );
 
-        let pool: Pool<PoolValue, Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
-            idle_timeout: Some(Duration::from_secs(90)),
-            max_idle_per_host: std::usize::MAX,
-        }, &hyper_util::common::exec::Exec::Default);
         Ok(Outbound {
             cfg,
             cert_manager,
@@ -84,7 +90,7 @@ impl Outbound {
             hbone_port,
             metrics,
             drain,
-            pool,
+            pool: pool(),
         })
     }
 
@@ -174,7 +180,7 @@ impl<T: Send + 'static + Unpin> hyper_util::client::pool::Poolable for Uniq<T> {
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub struct Key{
+pub struct Key {
     src: Identity,
     dst: Identity,
 }
@@ -226,13 +232,16 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
 
-                let dst_identity = req.destination_workload.clone().expect("hbone requires destination workload").identity();
-
+                let dst_identity = req
+                    .destination_workload
+                    .clone()
+                    .expect("hbone requires destination workload")
+                    .identity();
 
                 let pool = self.pool.clone();
-                let k = Key{
+                let k = Key {
                     src: req.source.identity(),
-                    dst: dst_identity.clone()
+                    dst: dst_identity.clone(),
                 };
                 let connect = async {
                     let ver = hyper_util::client::client::Ver::Http2;
@@ -258,7 +267,7 @@ impl OutboundConnection {
                     let tcp_stream = TcpStream::connect(req.gateway).await?;
                     tcp_stream.set_nodelay(true)?;
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
-                    let (mut request_sender, connection) = builder
+                    let (request_sender, connection) = builder
                         .handshake(tls_stream)
                         .await
                         .map_err(Error::HttpHandshake)?;
@@ -284,20 +293,20 @@ impl OutboundConnection {
                 // }
                 // TODO hyper client is more precise here...
                 pin_mut!(connect);
-                let mut request_sender: Pooled<PoolValue, _> = match future::select(co, connect).await {
-                    Either::Left((c, _)) => {
-                        error!("howardjohn: checked out {c:?}");
-                        // if let Ok(inner) = c {
-                        //     error!("co innner {:?}", inner.0);
-                        // }
-                        c.unwrap()
-
-                    },
-                    Either::Right((request_sender, _)) => {
-                        error!("howardjohn: connected {:?}", request_sender);
-                        request_sender?
-                    }
-                };
+                let mut request_sender: Pooled<PoolValue, _> =
+                    match future::select(co, connect).await {
+                        Either::Left((c, _)) => {
+                            error!("howardjohn: checked out {c:?}");
+                            // if let Ok(inner) = c {
+                            //     error!("co innner {:?}", inner.0);
+                            // }
+                            c.unwrap()
+                        }
+                        Either::Right((request_sender, _)) => {
+                            error!("howardjohn: connected {:?}", request_sender);
+                            request_sender?
+                        }
+                    };
 
                 let request = hyper::Request::builder()
                     .uri(&req.destination.to_string())
@@ -514,6 +523,7 @@ mod tests {
             cfg,
             metrics: Arc::new(Default::default()),
             id: TraceParent::new(),
+            pool: pool(),
         };
 
         let req = outbound

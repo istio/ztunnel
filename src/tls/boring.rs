@@ -255,10 +255,7 @@ impl Certs {
         self.setup_ctx(&mut conn)?;
 
         // client verifies SAN
-            conn.set_verify_callback(
-                Self::verify_mode(),
-                Verifier::San(dest_id).callback(),
-            );
+        conn.set_verify_callback(Self::verify_mode(), Verifier::San(dest_id).callback());
 
         Ok(conn.build())
     }

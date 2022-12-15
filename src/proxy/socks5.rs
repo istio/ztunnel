@@ -15,10 +15,10 @@
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
+use hyper_util::client::pool::Pool;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use hyper_util::client::pool::Pool;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -62,10 +62,14 @@ impl Socks5 {
             "listener established",
         );
 
-        let pool: Pool<super::outbound::PoolValue, super::outbound::Key> = hyper_util::client::pool::Pool::new(hyper_util::client::pool::Config {
-            idle_timeout: Some(Duration::from_secs(90)),
-            max_idle_per_host: std::usize::MAX,
-        }, &hyper_util::common::exec::Exec::Default);
+        let pool: Pool<super::outbound::PoolValue, super::outbound::Key> =
+            hyper_util::client::pool::Pool::new(
+                hyper_util::client::pool::Config {
+                    idle_timeout: Some(Duration::from_secs(90)),
+                    max_idle_per_host: std::usize::MAX,
+                },
+                &hyper_util::common::exec::Exec::Default,
+            );
         Ok(Socks5 {
             cfg,
             cert_manager,
