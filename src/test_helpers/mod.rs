@@ -27,7 +27,7 @@ pub mod ca;
 pub mod helpers;
 pub mod tcp;
 
-pub fn test_config_with_port(port: u16) -> config::Config {
+pub fn test_config_with_port_and_node(port: u16, node: Option<String>) -> config::Config {
     config::Config {
         xds_address: None,
         fake_ca: true,
@@ -38,8 +38,13 @@ pub fn test_config_with_port(port: u16) -> config::Config {
         readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        local_node: node,
         ..config::parse_config().unwrap()
     }
+}
+
+pub fn test_config_with_port(port: u16) -> config::Config {
+    test_config_with_port_and_node(port, None)
 }
 
 pub fn test_config() -> config::Config {

@@ -20,6 +20,7 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use hyper::{Body, Client, Method, Request};
+use log::{info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -188,6 +189,12 @@ async fn run_request_test(target: &str) {
         read_write_stream(&mut stream).await;
     })
     .await;
+    testapp::with_app(test_config_with_port_and_node(echo_addr.port(), Some(String::from("local"))), |app| async move {
+        let dst = SocketAddr::from_str(target)
+            .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
+        let mut stream = app.socks5_connect(dst).await;
+        read_write_stream(&mut stream).await;
+    }).await;
 }
 
 #[tokio::test]
