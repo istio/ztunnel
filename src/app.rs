@@ -70,7 +70,7 @@ pub async fn build_with_cert(
         drain_rx.clone(),
     )
     .await?;
-    std::mem::forget(proxy_task);
+    drop(proxy_task);
 
     // spawn admin task and xds client task
     admin.spawn(drain_rx_admin);

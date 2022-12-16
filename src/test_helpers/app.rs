@@ -115,12 +115,15 @@ impl TestApp {
     }
 
     pub async fn ready(&self) {
-        for _ in 0..100 {
-            if self.readiness_request().await.is_ok() {
+        let mut last_err: anyhow::Result<()> = Ok(());
+        for _ in 0..200 {
+            last_err = self.readiness_request().await;
+            if last_err.is_ok() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        panic!("failed to get ready (last: {last_err:?})");
     }
 
     pub async fn socks5_connect(&self, addr: SocketAddr) -> TcpStream {
