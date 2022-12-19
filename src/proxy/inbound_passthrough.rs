@@ -27,6 +27,7 @@ use crate::rbac;
 
 pub(super) struct InboundPassthrough {
     listener: TcpListener,
+    enable_orig_src: bool,
     pi: ProxyInputs,
 }
 
@@ -43,7 +44,10 @@ impl InboundPassthrough {
             transparent,
             "listener established",
         );
-        Ok(InboundPassthrough { listener, pi })
+        Ok(InboundPassthrough {
+            listener,
+            enable_orig_src: cfg.enable_original_source,
+       , pi })
     }
 
     pub(super) async fn run(self) {
@@ -53,7 +57,7 @@ impl InboundPassthrough {
             let pi = self.pi.clone();
             match socket {
                 Ok((stream, remote)) => {
-                    let orig_src = if self.cfg.enable_original_source {
+                    let orig_src = if self.enable_orig_src {
                         super::get_original_src_from_stream(&stream)
                     } else {
                         None
