@@ -284,6 +284,9 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
 pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
     match local {
         None => Ok(TcpStream::connect(addr).await?),
+        // TODO: Need figure out how to handle case of loadbalancing to itself.
+        //       We use ztunnel addr instead, otherwise app side will be confused.
+        Some(src) if src == socket::to_canonical(addr).ip() => Ok(TcpStream::connect(addr).await?),
         Some(src) => {
             let socket = if src.is_ipv4() {
                 TcpSocket::new_v4()?
