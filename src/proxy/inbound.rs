@@ -138,7 +138,7 @@ impl Inbound {
                 Hbone(req) => {
                     let origin_src = if origin_src.is_some() {
                         // overwrite the original source if encoded in fwded from waypoint
-                        super::get_original_src_from_fwded(req)
+                        super::get_original_src_from_fwded(req).map_or(origin_src, Some)
                     } else {
                         origin_src
                     };
