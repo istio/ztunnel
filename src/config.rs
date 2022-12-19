@@ -34,12 +34,14 @@ const CA_ADDRESS: &str = "CA_ADDRESS";
 const TERMINATION_GRACE_PERIOD: &str = "TERMINATION_GRACE_PERIOD";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+const ENABLE_ORIG_SRC: &str = "ISTIO_ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_STATUS_PORT: u16 = 15021;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
+const ENABLE_ORIG_SRC_DEFAULT: bool = false;
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -104,6 +106,9 @@ pub struct Config {
 
     /// Specify the number of worker threads the Tokio Runtime will use.
     pub num_worker_threads: usize,
+
+    // If true, then use original source proxying
+    pub enable_original_source: bool,
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
@@ -230,6 +235,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
                 .expect("concurrency cannot be negative"),
         )?,
 
+        enable_original_source: parse_default(ENABLE_ORIG_SRC, ENABLE_ORIG_SRC_DEFAULT)?,
         proxy_args: parse_args(),
         zero_copy_enabled: true,
     })

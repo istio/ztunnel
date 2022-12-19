@@ -33,7 +33,7 @@ use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
 use crate::{config, identity, socket, tls};
-// use hyper::{header, Body, Request};
+use hyper::{header, Body, Request};
 
 mod inbound;
 mod inbound_passthrough;
@@ -243,37 +243,37 @@ impl TryFrom<&str> for TraceParent {
         })
     }
 }
-// pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
-//     let deli: &[_] = &[' ', '"'];
-//     let first = req.headers().get(header::FORWARDED)?;
-//     // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
-//     // https://www.rfc-editor.org/rfc/rfc7239#section-4
-//     let first = first
-//         .to_str()
-//         .unwrap_or("")
-//         .split(',')
-//         .next()?
-//         .trim()
-//         .split(';')
-//         .find(|x| x.trim().to_lowercase().starts_with("for="))?
-//         .split('=')
-//         .nth(1)?
-//         .trim_matches(deli);
-//     info!("chun, stripped value: {:?}", first);
-//     if first.starts_with('[') {
-//         let deli: &[_] = &[' ', '[', ']'];
-//         first
-//             .trim_matches(deli)
-//             .split("]:")
-//             .next()?
-//             .parse::<IpAddr>()
-//             .ok()
-//     } else {
-//         first
-//             .parse::<IpAddr>()
-//             .map_or_else(|_| first.split(':').next()?.parse::<IpAddr>().ok(), Some)
-//     }
-// }
+
+pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
+    let deli: &[_] = &[' ', '"'];
+    let first = req.headers().get(header::FORWARDED)?;
+    // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
+    // https://www.rfc-editor.org/rfc/rfc7239#section-4
+    let first = first
+        .to_str()
+        .unwrap_or("")
+        .split(',')
+        .next()?
+        .trim()
+        .split(';')
+        .find(|x| x.trim().to_lowercase().starts_with("for="))?
+        .split('=')
+        .nth(1)?
+        .trim_matches(deli);
+    if first.starts_with('[') {
+        let deli: &[_] = &[' ', '[', ']'];
+        first
+            .trim_matches(deli)
+            .split("]:")
+            .next()?
+            .parse::<IpAddr>()
+            .ok()
+    } else {
+        first
+            .parse::<IpAddr>()
+            .map_or_else(|_| first.split(':').next()?.parse::<IpAddr>().ok(), Some)
+    }
+}
 
 pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
     stream

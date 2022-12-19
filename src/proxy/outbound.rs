@@ -159,7 +159,11 @@ impl OutboundConnection {
             // We *could* apply this to all traffic, rather than just for destinations that are "captured"
             // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
             info!("proxying to {} using node local fast path", req.destination);
-            let origin_src = super::get_original_src_from_stream(&stream);
+            let origin_src = if self.cfg.enable_original_source {
+                super::get_original_src_from_stream(&stream)
+            } else {
+                None
+            };
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
                 src_ip: remote_addr,
@@ -199,18 +203,27 @@ impl OutboundConnection {
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
-                    .header(TRACEPARENT_HEADER, self.id.header())
-                    // .header(hyper::header::FORWARDED, format!("for={}", remote_addr))
-                    .body(hyper::Body::empty())
-                    .unwrap();
-
+                    .header(TRACEPARENT_HEADER, self.id.header());
+                let request =
+                    if self.cfg.enable_original_source && req.request_type != RequestType::Direct {
+                        request.header(hyper::header::FORWARDED, format!("for={}", remote_addr))
+                    } else {
+                        request
+                    };
+                let request = request.body(hyper::Body::empty()).unwrap();
+                let local =
+                    if self.cfg.enable_original_source && req.request_type == RequestType::Direct {
+                        Some(remote_addr)
+                    } else {
+                        None
+                    };
                 let id = &req.source.identity();
                 let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
                     .connector(req.destination_workload.map(|w| w.identity()).as_ref())?
                     .configure()
                     .expect("configure");
-                let tcp_stream = super::freebind_connect(Some(remote_addr), req.gateway).await?;
+                let tcp_stream = super::freebind_connect(local, req.gateway).await?;
                 tcp_stream.set_nodelay(true)?;
                 let tls_stream = connect_tls(connector, tcp_stream).await?;
                 let (mut request_sender, connection) = builder
@@ -242,11 +255,12 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
                 // Create a TCP connection to upstream
-                let mut outbound = super::freebind_connect(
-                    super::get_original_src_from_stream(&stream),
-                    req.gateway,
-                )
-                .await?;
+                let local = if self.cfg.enable_original_source {
+                    super::get_original_src_from_stream(&stream)
+                } else {
+                    None
+                };
+                let mut outbound = super::freebind_connect(local, req.gateway).await?;
                 // Proxying data between downstrean and upstream
                 match relay(&mut stream, &mut outbound, self.pi.cfg.zero_copy_enabled).await {
                     // Connection closed with count of bytes transferred between streams

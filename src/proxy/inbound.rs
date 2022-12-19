@@ -28,7 +28,6 @@ use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
-use crate::socket;
 use crate::rbac;
 use crate::socket::{relay, to_canonical};
 use crate::tls::TlsError;
@@ -83,9 +82,10 @@ impl Inbound {
                 dst,
             };
             let workloads = self.workloads.clone();
+            let enable_original_source = self.cfg.enable_original_source;
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    Self::serve_connect(workloads.clone(), conn.clone(), req)
+                    Self::serve_connect(workloads.clone(), conn.clone(), enable_original_source, req)
                 }))
             }
         });
@@ -134,12 +134,14 @@ impl Inbound {
         let start = Instant::now();
         let stream = {
             match &request_type {
-                DirectPath(_) => {
-                    // let org_src = super::get_original_src_from_stream(stream);
-                    super::freebind_connect(origin_src, addr).await
-                }
-                Hbone(_) => {
-                    // let org_src = super::get_original_src_from_fwded(req);
+                DirectPath(_) => super::freebind_connect(origin_src, addr).await,
+                Hbone(req) => {
+                    let origin_src = if origin_src.is_some() {
+                        // overwrite the original source if encoded in fwded from waypoint
+                        super::get_original_src_from_fwded(req)
+                    } else {
+                        origin_src
+                    };
                     super::freebind_connect(origin_src, addr).await
                 }
             }
@@ -205,6 +207,7 @@ impl Inbound {
     async fn serve_connect(
         workloads: WorkloadInformation,
         conn: rbac::Connection,
+        enable_original_source: bool,
         req: Request<Body>,
     ) -> Result<Response<Body>, hyper::Error> {
         match req.method() {
@@ -237,6 +240,11 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
+                let org_src = if enable_original_source {
+                    Some(conn.src_ip.clone())
+                } else {
+                    None
+                };
 
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
                     info!(%conn, "unknown destination");
@@ -259,7 +267,7 @@ impl Inbound {
                             .unwrap());
                     }
                 }
-                let status_code = match Self::handle_inbound(Hbone(req), Some(conn.src_ip), addr)
+                let status_code = match Self::handle_inbound(Hbone(req), org_src, addr)
                     .instrument(tracing::span::Span::current())
                     .await
                 {

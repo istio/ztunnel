@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
@@ -53,8 +53,14 @@ impl InboundPassthrough {
             let pi = self.pi.clone();
             match socket {
                 Ok((stream, remote)) => {
+                    let orig_src = if self.cfg.enable_original_source {
+                        super::get_original_src_from_stream(&stream)
+                    } else {
+                        None
+                    };
                     tokio::spawn(async move {
                         if let Err(e) = Self::proxy_inbound_plaintext(
+                            orig_src,
                             pi.clone(),
                             socket::to_canonical(remote),
                             stream,
@@ -76,6 +82,7 @@ impl InboundPassthrough {
     }
 
     async fn proxy_inbound_plaintext(
+        orig_src: Option<IpAddr>,
         pi: ProxyInputs,
         source: SocketAddr,
         mut inbound: TcpStream,
@@ -111,7 +118,7 @@ impl InboundPassthrough {
             return Ok(());
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
-        let mut outbound = TcpStream::connect(orig).await?;
+        let mut outbound = super::freebind_connect(orig_src, orig).await?;
         relay(&mut inbound, &mut outbound, true).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
