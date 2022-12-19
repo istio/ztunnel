@@ -13,23 +13,19 @@
 // limitations under the License.
 
 use std::future::Future;
-use futures_util::future::{self, Either};
-
 use std::net::{IpAddr, SocketAddr};
-use std::pin::Pin;
+
 use std::sync::Arc;
-use std::{fmt, task};
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use futures::pin_mut;
-use hyper::client::conn::{http2, SendRequest};
-use hyper::{Body, Response};
+use futures_util::future::{self, Either};
+use hyper::client::conn::http2;
+use hyper::Body;
 use hyper_util::client::pool::{Pool, Poolable, Pooled, Reservation};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::Config;
@@ -50,12 +46,12 @@ pub struct Outbound {
     drain: Watch,
     metrics: Arc<Metrics>,
     hbone_port: u16,
-    pub pool: Pool<PoolValue, Key>,
+    pub pool: Pool<PoolValue, PoolKey>,
 }
 
 pub type PoolValue = PoolClient;
 
-fn pool() -> Pool<PoolValue, Key> {
+fn pool() -> Pool<PoolValue, PoolKey> {
     Pool::new(
         hyper_util::client::pool::Config {
             idle_timeout: Some(Duration::from_secs(90)),
@@ -163,9 +159,8 @@ pub struct OutboundConnection {
     pub hbone_port: u16,
     pub metrics: Arc<Metrics>,
     pub id: TraceParent,
-    pub pool: Pool<PoolValue, Key>,
+    pub pool: Pool<PoolValue, PoolKey>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct PoolClient(http2::SendRequest<Body>);
@@ -187,26 +182,8 @@ impl Poolable for PoolClient {
     }
 }
 
-/// Test unique reservations.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Uniq<T>(T);
-
-impl<T: Send + 'static + Unpin> Poolable for Uniq<T> {
-    fn is_open(&self) -> bool {
-        true
-    }
-
-    fn reserve(self) -> Reservation<Self> {
-        Reservation::Unique(self)
-    }
-
-    fn can_share(&self) -> bool {
-        false
-    }
-}
-
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub struct Key {
+pub struct PoolKey {
     src: Identity,
     dst: Identity,
 }
@@ -265,15 +242,11 @@ impl OutboundConnection {
                     .identity();
 
                 let pool = self.pool.clone();
-                let k = Key {
+                let pool_key = PoolKey {
                     src: req.source.identity(),
                     dst: dst_identity.clone(),
                 };
                 let connect = async {
-                    let ver = hyper_util::client::client::Ver::Http2;
-                    let Some(connecting) = pool.connecting(&k, ver) else {
-                        return Err(Error::Dropped)
-                    };
                     // Using the raw connection API, instead of client, is a bit annoying, but the only reasonable
                     // way to work around https://github.com/hyperium/hyper/issues/2863
                     // Eventually we will need to implement our own smarter pooling, TLS handshaking, etc anyways.
@@ -302,37 +275,10 @@ impl OutboundConnection {
                             error!("Error in HBONE connection handshake: {:?}", e);
                         }
                     });
-                    let pooled = pool.pooled(connecting, PoolClient(request_sender));
-                    Ok::<_, Error>(pooled)
+                    Ok(PoolClient(request_sender))
                 };
-                let co = pool.checkout(k.clone());
-                // let res = tokio::time::timeout(Duration::from_secs(1), co).await;
-                // let ver = hyper_util::client::client::Ver::Http2;
-                // error!("checkout: {:?}", res);
-                //
-                // if let Some(lock) = pool.connecting(&k, ver) {
-                //     error!("got connecting lock");
-                //     pool.pooled(lock, Uniq(10));
-                // } else {
-                //     error!("no connecting lock");
-                // }
-                // TODO hyper client is more precise here...
-                pin_mut!(connect);
                 let mut request_sender: Pooled<PoolValue, _> =
-                    match future::select(co, connect).await {
-                        Either::Left((c, _)) => {
-                            error!("howardjohn: checked out {c:?}");
-                            // if let Ok(inner) = c {
-                            //     error!("co innner {:?}", inner.0);
-                            // }
-                            c.unwrap()
-                        }
-                        Either::Right((request_sender, _)) => {
-                            error!("howardjohn: connected {:?}", request_sender);
-                            request_sender?
-                        }
-                    };
-
+                    Self::connect_pool(&pool, pool_key.clone(), connect).await?;
                 let request = hyper::Request::builder()
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
@@ -453,6 +399,44 @@ impl OutboundConnection {
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
         })
+    }
+
+    async fn connect_pool<F>(
+        pool: &Pool<PoolValue, PoolKey>,
+        key: PoolKey,
+        connect: F,
+    ) -> Result<Pooled<PoolValue, PoolKey>, Error>
+    where
+        F: Future<Output = Result<PoolValue, Error>>,
+    {
+        let reuse_connection = pool.checkout(key.clone());
+
+        let connect_pool = async {
+            let ver = hyper_util::client::client::Ver::Http2;
+            let Some(connecting) = pool.connecting(&key, ver) else {
+                return Err(Error::Dropped)
+            };
+            let pc = connect.await?;
+            let pooled = pool.pooled(connecting, pc);
+            Ok::<_, Error>(pooled)
+        };
+        pin_mut!(connect_pool);
+        let request_sender: Pooled<PoolValue, _> =
+            match future::select(reuse_connection, connect_pool).await {
+                Either::Left((c, _)) => {
+                    error!("howardjohn: checked out {c:?}");
+                    // if let Ok(inner) = c {
+                    //     error!("co innner {:?}", inner.0);
+                    // }
+                    c.map_err(Error::Generic)?
+                }
+                Either::Right((request_sender, _)) => {
+                    error!("howardjohn: connected {:?}", request_sender);
+                    request_sender?
+                }
+            };
+
+        Ok(request_sender)
     }
 }
 
