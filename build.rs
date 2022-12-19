@@ -22,6 +22,7 @@ fn main() -> Result<(), anyhow::Error> {
         "proto/workload.proto",
         "proto/networkpolicy.proto",
         "proto/citadel.proto",
+        "proto/proxy_config.proto",
     ]
     .iter()
     .map(|name| std::env::current_dir().unwrap().join(name))
@@ -34,6 +35,18 @@ fn main() -> Result<(), anyhow::Error> {
         let mut c = prost_build::Config::new();
         c.disable_comments(Some("."));
         c.bytes([".istio.workload.Workload", ".istio.workload.Address"]);
+
+        // make ProxyConfig compatible with serde
+        c.type_attribute(
+            ".istio.mesh.v1alpha1.ProxyConfig",
+            "#[serde_with::serde_as]",
+        );
+        c.type_attribute(".istio.mesh", "#[derive(serde::Deserialize)]");
+        c.field_attribute(
+            ".istio.mesh.v1alpha1.ProxyConfig.termination_drain_duration",
+            "#[serde_as(as = \"crate::prost_serde::DurationDeserializer\")]",
+        );
+
         c
     };
     tonic_build::configure()

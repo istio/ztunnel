@@ -35,6 +35,10 @@ pub mod istio {
     pub mod ca {
         tonic::include_proto!("istio.v1.auth");
     }
+    pub mod mesh {
+        // TODO consider moving this somewhere not under "xds"
+        tonic::include_proto!("istio.mesh.v1alpha1");
+    }
 }
 
 pub const WORKLOAD_TYPE: &str = "type.googleapis.com/istio.workload.Workload";

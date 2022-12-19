@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::fs;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -21,6 +23,7 @@ use bytes::Bytes;
 use tokio::time;
 
 use crate::identity;
+use crate::xds::istio::mesh::{MeshConfig, ProxyConfig};
 
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
@@ -31,8 +34,11 @@ const CA_ADDRESS: &str = "CA_ADDRESS";
 const TERMINATION_GRACE_PERIOD: &str = "TERMINATION_GRACE_PERIOD";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
-const DEFAULT_WORKER_THREADS: usize = 2;
+const DEFAULT_WORKER_THREADS: i32 = 2;
+const DEFAULT_ADMIN_PORT: i32 = 15021;
+const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(serde::Serialize, Clone, Debug)]
 pub enum RootCert {
@@ -93,6 +99,8 @@ pub struct Config {
     pub auth: identity::AuthSource,
     pub termination_grace_period: time::Duration,
 
+    pub proxy_metadata: HashMap<String, String>,
+
     /// Specify the number of worker threads the Tokio Runtime will use.
     pub num_worker_threads: usize,
 
@@ -104,6 +112,8 @@ pub struct Config {
 pub enum Error {
     #[error("invalid env var {0}={1}")]
     EnvVar(String, String),
+    #[error("error occurred: {0}")]
+    Other(anyhow::Error),
 }
 
 /// GoDuration wraps a Duration to implement golang Duration parsing semantics
@@ -137,20 +147,18 @@ fn parse_args() -> String {
 }
 
 pub fn parse_config() -> Result<Config, Error> {
-    let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
-        "https://istiod.istio-system.svc:15012".to_string()
-    } else {
-        "https://localhost:15012".to_string()
-    };
+    let pc = construct_proxy_config().map_err(Error::Other)?;
+
     let xds_address =
-        Some(parse_default(XDS_ADDRESS, default_istiod_address.clone())?).filter(|s| !s.is_empty());
+        Some(parse_default(XDS_ADDRESS, pc.discovery_address.clone())?).filter(|s| !s.is_empty());
 
     let fake_ca = parse_default(FAKE_CA, false)?;
     let ca_address = if fake_ca {
         None
     } else {
-        Some(parse_default(CA_ADDRESS, default_istiod_address)?)
+        Some(parse_default(CA_ADDRESS, pc.discovery_address)?)
     };
+
     Ok(Config {
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
@@ -158,12 +166,21 @@ pub fn parse_config() -> Result<Config, Error> {
 
         termination_grace_period: parse_default(
             TERMINATION_GRACE_PERIOD,
-            GoDuration(Duration::from_secs(5)),
+            GoDuration(
+                pc.termination_drain_duration
+                    .map(|v| v.try_into().unwrap())
+                    .unwrap_or(DEFAULT_DRAIN_DURATION),
+            ),
         )?
         .0,
 
         // admin API should only be accessible over localhost
-        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15000),
+        admin_addr: SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            pc.proxy_admin_port
+                .try_into()
+                .expect("proxy_admin_port is a valid port number"),
+        ),
         readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
@@ -180,12 +197,111 @@ pub fn parse_config() -> Result<Config, Error> {
         ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
+        proxy_metadata: pc.proxy_metadata,
 
         fake_ca,
         auth: identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token")),
 
-        num_worker_threads: parse_default(ZTUNNEL_WORKER_THREADS, DEFAULT_WORKER_THREADS)?,
+        num_worker_threads: parse_default(
+            ZTUNNEL_WORKER_THREADS,
+            pc.concurrency
+                .unwrap_or(DEFAULT_WORKER_THREADS)
+                .try_into()
+                .expect("concurrency cannot be negative"),
+        )?,
 
         proxy_args: parse_args(),
     })
+}
+
+fn default_proxy_config() -> ProxyConfig {
+    ProxyConfig {
+        proxy_admin_port: DEFAULT_ADMIN_PORT,
+        concurrency: Some(DEFAULT_WORKER_THREADS),
+        discovery_address: if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
+            "https://istiod.istio-system.svc:15012".to_string()
+        } else {
+            "https://localhost:15012".to_string()
+        },
+        termination_drain_duration: Some(DEFAULT_DRAIN_DURATION.try_into().unwrap()),
+        ..Default::default()
+    }
+}
+
+fn construct_proxy_config() -> Result<ProxyConfig, anyhow::Error> {
+    let mut pc = default_proxy_config();
+
+    // lowest merge priority: mesh config file
+    // TODO file path from cmd line arg
+    // TODO if waypoints sandwich a ztunnel and an envoy, each might need its own file.
+    let mesh_config_file = match fs::File::open("./etc/istio/config/mesh") {
+        Ok(f) => serde_yaml::from_reader(f)?,
+        Err(_) => MeshConfig::default(),
+    };
+    merge_message(
+        &mut pc,
+        &mesh_config_file.default_config.unwrap_or_default(),
+    )?;
+
+    // next, PROXY_CONFIG env
+    if let Some(pc_env) = parse::<String>(PROXY_CONFIG)? {
+        let proxy_config_env = serde_yaml::from_str(&pc_env)?;
+        merge_message(&mut pc, &proxy_config_env)?;
+    }
+
+    // TODO read annotations
+
+    Ok(pc)
+}
+
+fn merge_message<M>(into: &mut M, from: &M) -> Result<(), prost::DecodeError>
+where
+    M: prost::Message,
+{
+    let buf = &from.encode_to_vec()[..];
+    into.merge(buf)
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::merge_message;
+    use crate::xds::istio::mesh::ProxyConfig;
+
+    #[test]
+    fn test_proxy_config_merging() {
+        // base, empty
+        let mut pc = ProxyConfig::default();
+
+        // layer 1, set a string and a number
+        merge_message(
+            &mut pc,
+            &ProxyConfig {
+                discovery_address: "istiod.istio-system.svc:15012".to_string(),
+                proxy_admin_port: 123,
+                ..Default::default()
+            },
+        )
+        .expect("merging doesn't fail");
+
+        // layer 3, empty string shouldn't override; number should
+        merge_message(
+            &mut pc,
+            &ProxyConfig {
+                discovery_address: "".to_string(),
+                proxy_admin_port: 321,
+                ..Default::default()
+            },
+        )
+        .expect("merging doesn't fail");
+
+        // expect these merging semantics
+        assert_eq!(
+            pc,
+            ProxyConfig {
+                proxy_admin_port: 321,
+                discovery_address: "istiod.istio-system.svc:15012".to_string(),
+                ..Default::default()
+            }
+        )
+    }
 }

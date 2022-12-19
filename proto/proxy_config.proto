@@ -1,0 +1,95 @@
+// Copyright Istio Authors
+//
+//   Licensed under the Apache License, Version 2.0 (the "License");
+//   you may not use this file except in compliance with the License.
+//   You may obtain a copy of the License at
+//
+//       http://www.apache.org/licenses/LICENSE-2.0
+//
+//   Unless required by applicable law or agreed to in writing, software
+//   distributed under the License is distributed on an "AS IS" BASIS,
+//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//   See the License for the specific language governing permissions an
+//   limitations under the License.
+
+// This proto is hand-copied from istio/api
+// The key differences are many ignored fields, and comments about Envoy are changed. 
+
+syntax = "proto3";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/wrappers.proto";
+
+package istio.mesh.v1alpha1;
+
+option go_package="istio.io/api/mesh/v1alpha1";
+
+message MeshConfig {
+  ProxyConfig default_config = 14;
+}
+
+message ProxyConfig {
+
+  // The time in seconds that Envoy will drain connections during a hot
+  // restart. MUST be >=1s (e.g., _1s/1m/1h_)
+  // Default drain duration is `45s`.
+  // TODO unimplemented
+  // TODO serde can't deserialize prost types
+  // google.protobuf.Duration drain_duration = 4;
+
+  // The time in seconds that Envoy will wait before shutting down the
+  // parent process during a hot restart. MUST be >=1s (e.g., `1s/1m/1h`).
+  // MUST BE greater than `drain_duration` parameter.
+  // Default shutdown duration is `60s`.
+  // TODO unimplemented
+  // TODO serde can't deserialize prost types
+  // google.protobuf.Duration parent_shutdown_duration = 5;
+
+  // Address of the discovery service exposing xDS with mTLS connection.
+  // The inject configuration may override this value.
+  string discovery_address = 6;
+
+  // Port on which zTunnel should listen for administrative commands.
+  // Default port is `15021`.
+  int32 proxy_admin_port = 11;
+
+  // AuthenticationPolicy defines how the proxy is authenticated when it connects to the control plane.
+  // Default is set to `MUTUAL_TLS`.
+  // TODO unimplemented
+  // AuthenticationPolicy control_plane_auth_policy = 13;
+
+  // File path of custom proxy configuration. Equivalent to LOCAL_XDS_PATH.
+  // TODO unimplemented
+  // string custom_config_file = 14;
+
+  // The number of worker threads to run.
+  // If unset, this will be automatically determined based on CPU requests/limits.
+  // If set to 0, all cores on the machine will be used.
+  // Default is 2 worker threads.
+  // TODO update comment with accurate info
+  google.protobuf.Int32Value concurrency = 16;
+
+  // TODO could ztunnel begin to care about interception mode?
+
+  // TODO tracing 
+  
+  // Additional environment variables for the proxy.
+  // Names starting with `ISTIO_META_` will be included in the generated bootstrap and sent to the XDS server.
+  map<string,string> proxy_metadata = 24;
+
+  // Port on which the agent should listen for administrative commands such as readiness probe.
+  // Default is set to port `15020`.
+  // TODO unimplemented - status is same as admin
+  // int32 status_port = 26;
+
+  // The amount of time allowed for connections to complete on proxy shutdown.
+	// On receiving `SIGTERM` or `SIGINT`, zTunnel will start draining,
+	// preventing any new connections and allowing existing connections to complete. It then
+  // sleeps for the `termination_drain_duration` and then kills any remaining active Envoy processes.
+  // If not set, a default of `5s` will be applied.
+  // TODO double check default in comment is correct
+  google.protobuf.Duration  termination_drain_duration = 29;
+
+  // TODO ca_certificates_pem?
+
+}

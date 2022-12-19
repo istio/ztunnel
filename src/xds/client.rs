@@ -40,278 +40,287 @@ use super::Error;
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub struct ResourceKey {
-    pub name: String,
-    pub type_url: String,
+pub name: String,
+pub type_url: String,
 }
 
 impl Display for ResourceKey {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.type_url, self.name)
-    }
+fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "{}/{}", self.type_url, self.name)
+}
 }
 
 pub struct RejectedConfig {
-    name: String,
-    reason: anyhow::Error,
+name: String,
+reason: anyhow::Error,
 }
 
 impl RejectedConfig {
-    pub fn new(name: String, reason: anyhow::Error) -> Self {
-        Self { name, reason }
-    }
+pub fn new(name: String, reason: anyhow::Error) -> Self {
+    Self { name, reason }
+}
 }
 
 impl fmt::Display for RejectedConfig {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}: {}", self.name, self.reason)
-    }
+fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    write!(f, "{}: {}", self.name, self.reason)
+}
 }
 
 pub trait Handler<T: prost::Message>: Send + Sync + 'static {
-    fn handle(&self, res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>>;
+fn handle(&self, res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>>;
 }
 
 struct NopHandler {}
 
 impl<T: prost::Message> Handler<T> for NopHandler {
-    fn handle(&self, _res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>> {
-        Ok(())
-    }
+fn handle(&self, _res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>> {
+    Ok(())
+}
 }
 
 /// handle_single_resource is a helper to process a set of updates with a closure that processes items one-by-one.
 /// It handles aggregating errors as NACKS.
 pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyhow::Result<()>>(
-    updates: Vec<XdsUpdate<T>>,
-    mut handle_one: F,
+updates: Vec<XdsUpdate<T>>,
+mut handle_one: F,
 ) -> Result<(), Vec<RejectedConfig>> {
-    let rejects: Vec<RejectedConfig> = updates
-        .into_iter()
-        .filter_map(|res| {
-            let name = res.name();
-            if let Err(e) = handle_one(res) {
-                Some(RejectedConfig::new(name, e))
-            } else {
-                None
-            }
-        })
-        .collect();
-    if rejects.is_empty() {
-        Ok(())
-    } else {
-        Err(rejects)
-    }
+let rejects: Vec<RejectedConfig> = updates
+    .into_iter()
+    .filter_map(|res| {
+        let name = res.name();
+        if let Err(e) = handle_one(res) {
+            Some(RejectedConfig::new(name, e))
+        } else {
+            None
+        }
+    })
+    .collect();
+if rejects.is_empty() {
+    Ok(())
+} else {
+    Err(rejects)
+}
 }
 
 pub struct Config {
-    address: String,
-    root_cert: RootCert,
-    auth: identity::AuthSource,
+address: String,
+root_cert: RootCert,
+auth: identity::AuthSource,
+proxy_metadata: HashMap<String, String>,
 
-    workload_handler: Box<dyn Handler<Workload>>,
-    rbac_handler: Box<dyn Handler<Rbac>>,
-    initial_watches: Vec<String>,
-    on_demand: bool,
+workload_handler: Box<dyn Handler<Workload>>,
+rbac_handler: Box<dyn Handler<Rbac>>,
+initial_watches: Vec<String>,
+on_demand: bool,
 }
 
 impl Config {
-    pub fn new(config: crate::config::Config) -> Config {
-        Config {
-            address: config.xds_address.clone().unwrap(),
-            root_cert: config.xds_root_cert.clone(),
-            auth: config.auth,
-            workload_handler: Box::new(NopHandler {}),
-            rbac_handler: Box::new(NopHandler {}),
-            initial_watches: Vec::new(),
-            on_demand: config.xds_on_demand,
-        }
-    }
-
-    pub fn with_workload_handler(mut self, f: impl Handler<Workload>) -> Config {
-        self.workload_handler = Box::new(f);
-        self
-    }
-
-    pub fn with_rbac_handler(mut self, f: impl Handler<Rbac>) -> Config {
-        self.rbac_handler = Box::new(f);
-        self
-    }
-
-    pub fn watch(mut self, type_url: String) -> Config {
-        self.initial_watches.push(type_url);
-        self
-    }
-
-    pub fn build(self, metrics: Arc<Metrics>, block_ready: readiness::BlockReady) -> AdsClient {
-        let (tx, rx) = mpsc::channel(100);
-        AdsClient {
-            config: self,
-            known_resources: Default::default(),
-            pending: Default::default(),
-            demand: rx,
-            demand_tx: tx,
-            metrics,
-            block_ready: Some(block_ready),
-            connection_id: 0,
-        }
+pub fn new(config: crate::config::Config) -> Config {
+    Config {
+        address: config.xds_address.clone().unwrap(),
+        root_cert: config.xds_root_cert.clone(),
+        auth: config.auth,
+        workload_handler: Box::new(NopHandler {}),
+        rbac_handler: Box::new(NopHandler {}),
+        initial_watches: Vec::new(),
+        on_demand: config.xds_on_demand,
+        proxy_metadata: config.proxy_metadata,
     }
 }
 
+pub fn with_workload_handler(mut self, f: impl Handler<Workload>) -> Config {
+    self.workload_handler = Box::new(f);
+    self
+}
+
+pub fn with_rbac_handler(mut self, f: impl Handler<Rbac>) -> Config {
+    self.rbac_handler = Box::new(f);
+    self
+}
+
+pub fn watch(mut self, type_url: String) -> Config {
+    self.initial_watches.push(type_url);
+    self
+}
+
+pub fn build(self, metrics: Arc<Metrics>, block_ready: readiness::BlockReady) -> AdsClient {
+    let (tx, rx) = mpsc::channel(100);
+    AdsClient {
+        config: self,
+        known_resources: Default::default(),
+        pending: Default::default(),
+        demand: rx,
+        demand_tx: tx,
+        metrics,
+        block_ready: Some(block_ready),
+        connection_id: 0,
+    }
+}
+}
+
 pub struct AdsClient {
-    config: Config,
-    /// Stores all known workload resources. Map from type_url to name
-    known_resources: HashMap<String, HashSet<String>>,
+config: Config,
+/// Stores all known workload resources. Map from type_url to name
+known_resources: HashMap<String, HashSet<String>>,
 
-    /// pending stores a list of all resources that are pending and XDS push
-    pending: HashMap<ResourceKey, oneshot::Sender<()>>,
+/// pending stores a list of all resources that are pending and XDS push
+pending: HashMap<ResourceKey, oneshot::Sender<()>>,
 
-    demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
-    demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
+demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
+demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 
-    pub(crate) metrics: Arc<Metrics>,
-    block_ready: Option<readiness::BlockReady>,
+pub(crate) metrics: Arc<Metrics>,
+block_ready: Option<readiness::BlockReady>,
 
-    connection_id: u32,
+connection_id: u32,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
 pub struct Demanded {
-    b: oneshot::Receiver<()>,
+b: oneshot::Receiver<()>,
 }
 
 impl Demanded {
-    /// recv awaits for the requested resource
-    /// Note: the actual resource is not directly returned. Instead, callers are notified that the event
-    /// has been handled through the configured resource handler.
-    pub async fn recv(self) {
-        let _ = self.b.await;
-    }
+/// recv awaits for the requested resource
+/// Note: the actual resource is not directly returned. Instead, callers are notified that the event
+/// has been handled through the configured resource handler.
+pub async fn recv(self) {
+    let _ = self.b.await;
+}
 }
 
 /// Demander allows requesting XDS resources on-demand
 #[derive(Debug, Clone)]
 pub struct Demander {
-    demand: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
+demand: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 }
 
 #[derive(Debug)]
 enum XdsSignal {
-    None,
-    Ack,
-    Nack,
+None,
+Ack,
+Nack,
 }
 
 impl Display for XdsSignal {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            XdsSignal::None => "NONE",
-            XdsSignal::Ack => "ACK",
-            XdsSignal::Nack => "NACK",
-        })
-    }
+fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    f.write_str(match self {
+        XdsSignal::None => "NONE",
+        XdsSignal::Ack => "ACK",
+        XdsSignal::Nack => "NACK",
+    })
+}
 }
 
 impl Demander {
-    /// Demand requests a given workload by name
-    pub async fn demand(&self, name: String) -> Demanded {
-        let (tx, rx) = oneshot::channel::<()>();
-        self.demand
-            .send((
-                tx,
-                ResourceKey {
-                    name,
-                    type_url: xds::WORKLOAD_TYPE.to_string(),
-                },
-            ))
-            .await
-            .unwrap();
-        Demanded { b: rx }
-    }
+/// Demand requests a given workload by name
+pub async fn demand(&self, name: String) -> Demanded {
+    let (tx, rx) = oneshot::channel::<()>();
+    self.demand
+        .send((
+            tx,
+            ResourceKey {
+                name,
+                type_url: xds::WORKLOAD_TYPE.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+    Demanded { b: rx }
+}
 }
 
 impl AdsClient {
-    /// demander returns a Demander instance which can be used to request resources on-demand
-    pub fn demander(&self) -> Option<Demander> {
-        if self.config.on_demand {
-            Some(Demander {
-                demand: self.demand_tx.clone(),
-            })
-        } else {
-            None
+/// demander returns a Demander instance which can be used to request resources on-demand
+pub fn demander(&self) -> Option<Demander> {
+    if self.config.on_demand {
+        Some(Demander {
+            demand: self.demand_tx.clone(),
+        })
+    } else {
+        None
+    }
+}
+
+async fn run_loop(&mut self, backoff: Duration) -> Duration {
+    const MAX_BACKOFF: Duration = Duration::from_secs(15);
+    match self.run_internal().await {
+        Err(e @ Error::Connection(_)) => {
+            // For connection errors, we add backoff
+            let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
+            warn!("XDS client error: {}, retrying in {:?}", e, backoff);
+            self.metrics
+                .record(&ConnectionTerminationReason::ConnectionError);
+            tokio::time::sleep(backoff).await;
+            backoff
+        }
+        Err(e) => {
+            // For other errors, we connect immediately
+            // TODO: we may need more nuance here; if we fail due to invalid initial request we may overload
+            // But we want to reconnect from MaxConnectionAge immediately.
+            warn!("XDS client error: {}, retrying", e);
+            self.metrics.record(&ConnectionTerminationReason::Error);
+            // Reset backoff
+            Duration::from_millis(10)
+        }
+        Ok(_) => {
+            self.metrics.record(&ConnectionTerminationReason::Complete);
+            warn!("XDS client complete");
+            // Reset backoff
+            Duration::from_millis(10)
         }
     }
+}
 
-    async fn run_loop(&mut self, backoff: Duration) -> Duration {
-        const MAX_BACKOFF: Duration = Duration::from_secs(15);
-        match self.run_internal().await {
-            Err(e @ Error::Connection(_)) => {
-                // For connection errors, we add backoff
-                let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
-                warn!("XDS client error: {}, retrying in {:?}", e, backoff);
-                self.metrics
-                    .record(&ConnectionTerminationReason::ConnectionError);
-                tokio::time::sleep(backoff).await;
-                backoff
-            }
-            Err(e) => {
-                // For other errors, we connect immediately
-                // TODO: we may need more nuance here; if we fail due to invalid initial request we may overload
-                // But we want to reconnect from MaxConnectionAge immediately.
-                warn!("XDS client error: {}, retrying", e);
-                self.metrics.record(&ConnectionTerminationReason::Error);
-                // Reset backoff
-                Duration::from_millis(10)
-            }
-            Ok(_) => {
-                self.metrics.record(&ConnectionTerminationReason::Complete);
-                warn!("XDS client complete");
-                // Reset backoff
-                Duration::from_millis(10)
-            }
-        }
+pub async fn run(mut self) -> Result<(), Error> {
+    let mut backoff = Duration::from_millis(10);
+    loop {
+        self.connection_id += 1;
+        let id = self.connection_id;
+        backoff = self
+            .run_loop(backoff)
+            .instrument(info_span!("xds", id))
+            .await;
     }
+}
 
-    pub async fn run(mut self) -> Result<(), Error> {
-        let mut backoff = Duration::from_millis(10);
-        loop {
-            self.connection_id += 1;
-            let id = self.connection_id;
-            backoff = self
-                .run_loop(backoff)
-                .instrument(info_span!("xds", id))
-                .await;
-        }
-    }
+fn build_struct<T: IntoIterator<Item = (S, S)>, S: ToString>(a: T) -> Struct {
+    let fields = BTreeMap::from_iter(a.into_iter().map(|(k, v)| {
+        (
+            k.to_string(),
+            Value {
+                kind: Some(Kind::StringValue(v.to_string())),
+            },
+        )
+    }));
+    Struct { fields }
+}
 
-    fn build_struct<const N: usize>(a: [(&str, &str); N]) -> Struct {
-        let fields = BTreeMap::from(a.map(|(k, v)| {
-            (
-                k.to_string(),
-                Value {
-                    kind: Some(Kind::StringValue(v.to_string())),
-                },
-            )
-        }));
-        Struct { fields }
-    }
+fn node(&self) -> Node {
+    let ip = std::env::var("INSTANCE_IP");
+    let ip = ip.as_deref().unwrap_or("1.1.1.1");
+    let pod_name = std::env::var("POD_NAME");
+    let pod_name = pod_name.as_deref().unwrap_or("");
+    let ns = std::env::var("POD_NAMESPACE");
+    let ns = ns.as_deref().unwrap_or("");
+    let node = std::env::var("NODE_NAME");
+    let node = node.as_deref().unwrap_or("");
+        let ambient_type = std::env::var("AMBIENT_TYPE");
+        let ambient_type = ambient_type.as_deref().unwrap_or("");
+        let mut metadata = Self::build_struct([
+            ("NAME", pod_name),
+            ("NAMESPACE", ns),
+            ("INSTANCE_IPS", ip),
+            ("NODE_NAME", node),
+        ]);
+        metadata
+            .fields
+            .append(&mut Self::build_struct(self.config.proxy_metadata.clone()).fields);
 
-    fn node(&self) -> Node {
-        let ip = std::env::var("INSTANCE_IP");
-        let ip = ip.as_deref().unwrap_or("1.1.1.1");
-        let pod_name = std::env::var("POD_NAME");
-        let pod_name = pod_name.as_deref().unwrap_or("");
-        let ns = std::env::var("POD_NAMESPACE");
-        let ns = ns.as_deref().unwrap_or("");
-        let node = std::env::var("NODE_NAME");
-        let node = node.as_deref().unwrap_or("");
         Node {
             id: format!("ztunnel~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
-            metadata: Some(Self::build_struct([
-                ("NAME", pod_name),
-                ("NAMESPACE", ns),
-                ("INSTANCE_IPS", ip),
-                ("NODE_NAME", node),
-            ])),
+            metadata: Some(metadata),
             ..Default::default()
         }
     }
@@ -600,3 +609,25 @@ pub enum AdsError {
     #[error("XDS payload without resource")]
     MissingResource(),
 }
+
+// struct StructWrapper(Struct);
+//
+// impl<const N: usize> From<[(&str, &str); N]> for StructWrapper {
+//     fn from(a: [(&str, &str); N]) -> Self {
+//         let fields = BTreeMap::from(a.map(|(k, v)| {
+//             (
+//                 k.to_string(),
+//                 Value {
+//                     kind: Some(Kind::StringValue(v.to_string())),
+//                 },
+//             )
+//         }));
+//         StructWrapper(Struct{fields})
+//     }
+// }
+//
+// impl From<StructWrapper> for Struct {
+//     fn from(wrapper: StructWrapper) -> Self {
+//        wrapper.0
+//     }
+// }
