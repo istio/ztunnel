@@ -38,6 +38,7 @@ const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
 const DEFAULT_WORKER_THREADS: i32 = 2;
 const DEFAULT_ADMIN_PORT: i32 = 15021;
+const DEFAULT_STATUS_PORT: i32 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -181,7 +182,13 @@ pub fn parse_config() -> Result<Config, Error> {
                 .try_into()
                 .expect("proxy_admin_port is a valid port number"),
         ),
-        readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
+        readiness_addr: SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            pc.status_port
+                .try_into()
+                .expect("status_port is a valid port number"),
+        ),
+
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
@@ -217,6 +224,7 @@ pub fn parse_config() -> Result<Config, Error> {
 fn default_proxy_config() -> ProxyConfig {
     ProxyConfig {
         proxy_admin_port: DEFAULT_ADMIN_PORT,
+        status_port: DEFAULT_STATUS_PORT,
         concurrency: Some(DEFAULT_WORKER_THREADS),
         discovery_address: if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
             "https://istiod.istio-system.svc:15012".to_string()

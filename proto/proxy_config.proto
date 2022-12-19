@@ -30,21 +30,6 @@ message MeshConfig {
 
 message ProxyConfig {
 
-  // The time in seconds that Envoy will drain connections during a hot
-  // restart. MUST be >=1s (e.g., _1s/1m/1h_)
-  // Default drain duration is `45s`.
-  // TODO unimplemented
-  // TODO serde can't deserialize prost types
-  // google.protobuf.Duration drain_duration = 4;
-
-  // The time in seconds that Envoy will wait before shutting down the
-  // parent process during a hot restart. MUST be >=1s (e.g., `1s/1m/1h`).
-  // MUST BE greater than `drain_duration` parameter.
-  // Default shutdown duration is `60s`.
-  // TODO unimplemented
-  // TODO serde can't deserialize prost types
-  // google.protobuf.Duration parent_shutdown_duration = 5;
-
   // Address of the discovery service exposing xDS with mTLS connection.
   // The inject configuration may override this value.
   string discovery_address = 6;
@@ -79,8 +64,7 @@ message ProxyConfig {
 
   // Port on which the agent should listen for administrative commands such as readiness probe.
   // Default is set to port `15020`.
-  // TODO unimplemented - status is same as admin
-  // int32 status_port = 26;
+  int32 status_port = 26;
 
   // The amount of time allowed for connections to complete on proxy shutdown.
 	// On receiving `SIGTERM` or `SIGINT`, zTunnel will start draining,
