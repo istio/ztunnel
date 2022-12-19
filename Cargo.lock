@@ -115,7 +115,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body 0.4.5",
- "hyper 0.14.23 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hyper 0.14.23",
  "itoa",
  "matchit",
  "memchr",
@@ -915,31 +915,7 @@ checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
 [[package]]
 name = "hyper"
 version = "0.14.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "034711faac9d2166cb1baf1a2fb0b60b1f277f8492fd72176c17f3515e1abd3c"
-dependencies = [
- "bytes",
- "futures-channel",
- "futures-core",
- "futures-util",
- "h2",
- "http",
- "http-body 0.4.5",
- "httparse",
- "httpdate",
- "itoa",
- "pin-project-lite",
- "socket2",
- "tokio",
- "tower-service",
- "tracing",
- "want",
-]
-
-[[package]]
-name = "hyper"
-version = "0.14.23"
-source = "git+https://github.com/hyperium/hyper?branch=0.14.x#d32beb3843179acdaf0e64f3e708b9dbcd0c29e4"
+source = "git+https://github.com/kxt/hyper?branch=3053-backport-split-conn-modules#87790426785cfafd11d523d65315ec5f6c3bc297"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -989,7 +965,7 @@ dependencies = [
  "antidote",
  "boring",
  "http",
- "hyper 0.14.23 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hyper 0.14.23",
  "linked_hash_set",
  "once_cell",
  "tokio",
@@ -1003,7 +979,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbb958482e8c7be4bc3cf272a766a2b0bf1a6755e7a6ae777f017a31d11b13b1"
 dependencies = [
- "hyper 0.14.23 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hyper 0.14.23",
  "pin-project-lite",
  "tokio",
  "tokio-io-timeout",
@@ -2040,7 +2016,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9d4ff21187d434ac7709bfc7441ca88f63681247e5ad99f0f08c8c91ddc103d"
 dependencies = [
  "futures-util",
- "hyper 0.14.23 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hyper 0.14.23",
  "pin-project-lite",
  "thiserror",
  "tokio",
@@ -2140,7 +2116,7 @@ dependencies = [
  "h2",
  "http",
  "http-body 0.4.5",
- "hyper 0.14.23 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hyper 0.14.23",
  "hyper-timeout",
  "percent-encoding",
  "pin-project",
@@ -2576,7 +2552,7 @@ dependencies = [
  "futures-util",
  "go-parse-duration",
  "gperftools",
- "hyper 0.14.23 (git+https://github.com/hyperium/hyper?branch=0.14.x)",
+ "hyper 0.14.23",
  "hyper-boring",
  "hyper-util",
  "itertools",
