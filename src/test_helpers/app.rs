@@ -22,8 +22,9 @@ use std::time::Duration;
 use hyper::{body, Body, Client, Method, Request, Response};
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 
+use crate::test_helpers::TEST_WORKLOAD_SOURCE;
 use crate::*;
 
 use super::helpers::*;
@@ -127,11 +128,6 @@ impl TestApp {
     }
 
     pub async fn socks5_connect(&self, addr: SocketAddr) -> TcpStream {
-        // let addr = net::lookup_host(addr)
-        //     .await
-        //     .expect("must get localhost address")
-        //     .next()
-        //     .expect("must get at least one localhost address");
         // Always use IPv4 address. In theory, we can resolve `localhost` to pick to support any machine
         // However, we need to make sure the WorkloadStore knows about both families then.
         let socks_addr = with_ip(
@@ -139,7 +135,16 @@ impl TestApp {
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         );
 
-        let mut stream = TcpStream::connect(socks_addr).await.expect("must connect");
+        // Set source IP to TEST_WORKLOAD_SOURCE
+        let socket = TcpSocket::new_v4().unwrap();
+        socket
+            .bind(SocketAddr::from((
+                TEST_WORKLOAD_SOURCE.parse::<IpAddr>().unwrap(),
+                0,
+            )))
+            .unwrap();
+
+        let mut stream = socket.connect(socks_addr).await.expect("must connect");
         stream.set_nodelay(true).unwrap();
 
         let addr_type = if addr.ip().is_ipv4() { 0x01u8 } else { 0x04u8 };
