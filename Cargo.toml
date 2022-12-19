@@ -67,7 +67,7 @@ go-parse-duration = "0.1.1"
 prometheus-parse = "0.2.3"
 url = "2.2"
 itertools = "0.10.5"
-hyper-util = { version = "0" , features = ["runtime", "tcp", "http2"]}
+hyper-util = { git = "https://github.com/hyperium/hyper-util" , features = ["runtime", "tcp", "http2"]}
 futures-util = "0.3.25"
 want = "0.3.0"
 
@@ -95,8 +95,4 @@ matches = "0.1.9"
 #debug = true
 
 [patch.crates-io]
-hyper-util = { path = "/usr/local/google/home/howardjohn/git/hyper-util" }
-#hyper = {version="0.14", features = ["full"]}
-#hyper = { git = "https://github.com/kxt/hyper", branch="3053-backport-split-conn-modules", features = ["full"] }
-#hyper = { git = "https://github.com/hyperium/hyper", branch="0.14.x", features = ["full"] }
 hyper = { git = "https://github.com/kxt/hyper", branch="3053-backport-split-conn-modules"}
