@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::time;
+use tracing::warn;
 
 use crate::identity;
 use crate::xds::istio::mesh::{MeshConfig, ProxyConfig};
@@ -239,25 +240,25 @@ fn default_proxy_config() -> ProxyConfig {
 fn construct_proxy_config() -> Result<ProxyConfig, anyhow::Error> {
     let mut pc = default_proxy_config();
 
-    // lowest merge priority: mesh config file
-    // TODO file path from cmd line arg
-    // TODO if waypoints sandwich a ztunnel and an envoy, each might need its own file.
-    let mesh_config_file = match fs::File::open("./etc/istio/config/mesh") {
-        Ok(f) => serde_yaml::from_reader(f)?,
-        Err(_) => MeshConfig::default(),
-    };
-    merge_message(
-        &mut pc,
-        &mesh_config_file.default_config.unwrap_or_default(),
-    )?;
-
-    // next, PROXY_CONFIG env
-    if let Some(pc_env) = parse::<String>(PROXY_CONFIG)? {
-        let proxy_config_env = serde_yaml::from_str(&pc_env)?;
-        merge_message(&mut pc, &proxy_config_env)?;
+    let mesh_config_path = "./etc/istio/config/mesh";
+    let mesh_config = fs::File::open(mesh_config_path)
+        .map_err(anyhow::Error::new)
+        .and_then(|f| serde_yaml::from_reader(f).map_err(anyhow::Error::new))
+        .and_then(|mc: MeshConfig| {
+            let dc = mc.default_config.unwrap_or_default();
+            merge_message(&mut pc, &dc).map_err(anyhow::Error::new)
+        });
+    if let Err(e) = mesh_config {
+        warn!("failed reading MeshConfig from {}: {}", mesh_config_path, e);
     }
 
-    // TODO read annotations
+    let proxy_config_env = parse_default::<String>(PROXY_CONFIG, "".to_string())
+        .map_err(anyhow::Error::new)
+        .and_then(|env_str| serde_yaml::from_str(&env_str).map_err(anyhow::Error::new))
+        .and_then(|pc_env| merge_message(&mut pc, &pc_env).map_err(anyhow::Error::new));
+    if let Err(e) = proxy_config_env {
+        warn!("failed reading {PROXY_CONFIG} env: {e}");
+    }
 
     Ok(pc)
 }
