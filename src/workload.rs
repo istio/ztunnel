@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
@@ -208,9 +208,9 @@ pub struct WorkloadManager {
     xds_client: Option<AdsClient>,
 }
 
-impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
+impl xds::Handler<XdsWorkload> for Arc<RwLock<WorkloadStore>> {
     fn handle(&self, updates: Vec<XdsUpdate<XdsWorkload>>) -> Result<(), Vec<RejectedConfig>> {
-        let mut wli = self.lock().unwrap();
+        let mut wli = self.write().unwrap();
         let handle = |res: XdsUpdate<XdsWorkload>| {
             match res {
                 XdsUpdate::Update(w) => wli.insert_xds_workload(w.resource)?,
@@ -231,7 +231,7 @@ impl WorkloadManager {
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
     ) -> anyhow::Result<WorkloadManager> {
-        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let workloads: Arc<RwLock<WorkloadStore>> = Arc::new(RwLock::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
             Some(
@@ -276,7 +276,7 @@ impl WorkloadManager {
 /// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
 struct LocalClient {
     cfg: ConfigSource,
-    workloads: Arc<Mutex<WorkloadStore>>,
+    workloads: Arc<RwLock<WorkloadStore>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -293,7 +293,7 @@ impl LocalClient {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = self.cfg.read_to_string().await?;
         let r: Vec<LocalWorkload> = serde_yaml::from_str(&data)?;
-        let mut wli = self.workloads.lock().unwrap();
+        let mut wli = self.workloads.write().unwrap();
         let l = r.len();
         for wl in r {
             let wip = wl.workload.workload_ip;
@@ -321,7 +321,7 @@ impl LocalClient {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct WorkloadInformation {
     #[serde(flatten)]
-    pub info: Arc<Mutex<WorkloadStore>>,
+    pub info: Arc<RwLock<WorkloadStore>>,
 
     /// demand, if present, is used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
@@ -344,7 +344,7 @@ impl WorkloadInformation {
 
     pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         self.fetch_address(&addr).await;
-        let wi = self.info.lock().unwrap();
+        let wi = self.info.read().unwrap();
         wi.find_upstream(addr, hbone_port)
     }
 
@@ -374,13 +374,13 @@ impl WorkloadInformation {
 
     // keep private so that we can ensure that we always use fetch_workload
     fn find_workload(&self, addr: &IpAddr) -> Option<Workload> {
-        let wi = self.info.lock().unwrap();
+        let wi = self.info.read().unwrap();
         wi.find_workload(addr).cloned()
     }
 
     // check the workload by clusterIP exist or not
     fn workload_by_vip_exist(&self, vip: &SocketAddr) -> bool {
-        let wi = self.info.lock().unwrap();
+        let wi = self.info.read().unwrap();
         wi.vips.get(vip).is_some()
     }
 }
@@ -737,14 +737,14 @@ mod tests {
                 .join("examples")
                 .join("localhost.yaml"),
         );
-        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let workloads: Arc<RwLock<WorkloadStore>> = Arc::new(RwLock::new(WorkloadStore::default()));
 
         let local_client = LocalClient {
             cfg,
             workloads: workloads.clone(),
         };
         local_client.run().await.expect("client should run");
-        let store = workloads.lock().unwrap();
+        let store = workloads.read().unwrap();
         let wl = store.find_workload(&"127.0.0.1".parse().unwrap());
         // Make sure we get a valid workload
         assert!(wl.is_some());

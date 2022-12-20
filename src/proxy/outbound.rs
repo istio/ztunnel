@@ -388,7 +388,7 @@ async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -419,7 +419,7 @@ mod tests {
         let wl = workload::WorkloadStore::test_store(vec![source, xds]).unwrap();
 
         let wi = WorkloadInformation {
-            info: Arc::new(Mutex::new(wl)),
+            info: Arc::new(RwLock::new(wl)),
             demand: None,
         };
         let outbound = OutboundConnection {
