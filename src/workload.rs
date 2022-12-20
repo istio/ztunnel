@@ -18,6 +18,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
+use std::borrow::Borrow;
+use std::future::Future;
 
 use rand::prelude::IteratorRandom;
 
@@ -27,11 +29,13 @@ use tracing::{debug, error, info, instrument};
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
-use crate::identity::Identity;
+use crate::identity::{CaClient, CertificateProvider, Identity, SecretManager};
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, readiness, xds};
+use crate::config::RootCert::Default;
+use crate::tls::{Certs, Error};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -203,8 +207,8 @@ impl TryFrom<&XdsWorkload> for Workload {
     }
 }
 
-pub struct WorkloadManager {
-    workloads: WorkloadInformation,
+pub struct WorkloadManager<'a> {
+    workloads: WorkloadInformation<'a>,
     xds_client: Option<AdsClient>,
 }
 
@@ -213,7 +217,16 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
         let mut wli = self.lock().unwrap();
         let handle = |res: XdsUpdate<XdsWorkload>| {
             match res {
-                XdsUpdate::Update(w) => wli.insert_xds_workload(w.resource)?,
+                XdsUpdate::Update(w) => {
+                    // prefetch CA cert on discovery
+                    let identity = &Identity::Spiffe {
+                        trust_domain: w.resource.clone().trust_domain,
+                        namespace: w.resource.clone().name,
+                        service_account: w.resource.clone().service_account,
+                    };
+                    wli.prefetch(identity);
+                    wli.insert_xds_workload(w.resource)?
+                },
                 XdsUpdate::Remove(name) => {
                     info!("handling delete {}", name);
                     wli.remove(name);
@@ -230,8 +243,10 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
+        mut ca_client: &impl CertificateProvider,
     ) -> anyhow::Result<WorkloadManager> {
-        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let fetch = |i: &Identity| ca_client.fetch_certificate(i);
+        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::with_prefetch(fetch)));
         let xds_workloads = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
             Some(
@@ -274,9 +289,9 @@ impl WorkloadManager {
 }
 
 /// LocalClient serves as a local file reader alternative for XDS. This is intended for testing.
-struct LocalClient {
+struct LocalClient<'a> {
     cfg: ConfigSource,
-    workloads: Arc<Mutex<WorkloadStore>>,
+    workloads: Arc<Mutex<WorkloadStore<'a>>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -319,9 +334,9 @@ impl LocalClient {
 /// WorkloadInformation wraps WorkloadStore, but is able to additionally request resources on-demand.
 /// It is designed to be cheap to clone.
 #[derive(serde::Serialize, Debug, Clone)]
-pub struct WorkloadInformation {
+pub struct WorkloadInformation<'a> {
     #[serde(flatten)]
-    pub info: Arc<Mutex<WorkloadStore>>,
+    pub info: Arc<Mutex<WorkloadStore<'a>>>,
 
     /// demand, if present, is used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
@@ -387,13 +402,15 @@ impl WorkloadInformation {
 
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
-pub struct WorkloadStore {
+pub struct WorkloadStore<'a> {
     workloads: HashMap<IpAddr, Workload>,
     // workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
     workload_to_vip: HashMap<IpAddr, HashSet<(SocketAddr, u16)>>,
     // vips maintains a mapping of socket address with service port to workload ip and socket address
     // with target ports in hashset.
     vips: HashMap<SocketAddr, HashSet<(IpAddr, u16)>>,
+    // for fetching certificates on workload discovery
+    prefetch: &'a dyn Fn(&Identity) -> dyn Future<Output=Result<Certs, Error>>
 }
 
 impl WorkloadStore {
@@ -404,6 +421,13 @@ impl WorkloadStore {
             store.insert_xds_workload(w)?;
         }
         Ok(store)
+    }
+
+    pub fn with_prefetch<'a>(f: fn(&Identity) -> impl Future<Output=Result<Certs, Error>>) -> WorkloadStore<'a> {
+        WorkloadStore {
+            prefetch: f,
+            ..Default::default()
+        }
     }
 
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {

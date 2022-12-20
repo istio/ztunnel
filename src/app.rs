@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Borrow;
 use anyhow::Context;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,9 +49,9 @@ pub async fn build_with_cert(
         config.clone(),
         metrics.clone(),
         ready.register_task("workload manager"),
+        cert_manager.borrow(),
     )
     .await?;
-
     let shutdown_trigger = shutdown.trigger();
     let admin = admin::Builder::new(config.clone(), workload_manager.workloads())
         .bind(registry, shutdown_trigger)
