@@ -304,6 +304,8 @@ impl AdsClient {
         let ns = ns.as_deref().unwrap_or("");
         let node = std::env::var("NODE_NAME");
         let node = node.as_deref().unwrap_or("");
+        let ambient_type = std::env::var("AMBIENT_TYPE");
+        let ambient_type = ambient_type.as_deref().unwrap_or("");
         Node {
             id: format!("sidecar~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
             metadata: Some(Self::build_struct([
@@ -311,6 +313,7 @@ impl AdsClient {
                 ("POD_NAMESPACE", ns),
                 ("INSTANCE_IP", ip),
                 ("NODE_NAME", node),
+                ("AMBIENT_TYPE", ambient_type),
             ])),
             ..Default::default()
         }
