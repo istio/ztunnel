@@ -18,6 +18,7 @@ pub mod config;
 pub mod identity;
 pub mod metrics;
 pub mod proxy;
+pub mod rbac;
 pub mod readiness;
 pub mod signal;
 pub mod socket;

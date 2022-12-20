@@ -37,7 +37,7 @@ use tracing::{error, info};
 
 use crate::config::Config;
 use crate::version::BuildInfo;
-use crate::workload::Workload;
+use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
 use crate::{config, signal, telemetry};
 
@@ -61,7 +61,7 @@ pub struct Server {
 pub struct ConfigDump {
     #[serde(flatten)]
     workload_info: WorkloadInformation,
-    static_workloads: Vec<Workload>,
+    static_config: LocalConfig,
     version: BuildInfo,
     config: Config,
 }
@@ -137,8 +137,8 @@ impl Server {
                         let config: Config = config.clone();
 
                         let config_dump: ConfigDump = ConfigDump {
-                            workload_info: (workload_info),
-                            static_workloads: ([].to_vec()),
+                            workload_info,
+                            static_config: Default::default(),
                             version: BuildInfo::new(),
                             config,
                         };
@@ -248,7 +248,7 @@ async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Respon
     if let Some(cfg) = dump.config.local_xds_config.clone() {
         match cfg.read_to_string().await {
             Ok(data) => match serde_yaml::from_str(&data) {
-                Ok(raw_workloads) => dump.static_workloads = raw_workloads,
+                Ok(c) => dump.static_config = c,
                 Err(e) => error!(
                     "Failed to load static workloads from local XDS {:?}:{:?}",
                     dump.config.local_xds_config, e

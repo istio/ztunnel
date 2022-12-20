@@ -1,5 +1,6 @@
 # This shows an example local config for ztunnel that adds a workload for localhost.
 # This allows local testing by sending requests through the local ztunnel to other servers running on localhost.
+workloads:
 - name: local
   namespace: default
   serviceAccount: default
@@ -19,3 +20,11 @@
   vips:
     "127.10.0.1":
       80: 8080
+policies:
+  - action: Allow
+    groups:
+    - - - not_destination_ports:
+          - 9999
+    name: deny-9999
+    namespace: default
+    scope: Namespace

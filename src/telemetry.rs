@@ -16,7 +16,7 @@ use std::time::Instant;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use thiserror::Error;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
@@ -79,7 +79,7 @@ pub fn set_level(reset: bool, level: &str) -> Result<(), Error> {
 
         //create the new EnvFilter based on the new directives
         let new_filter = EnvFilter::builder().parse(new_directive)?;
-        error!("new log filter is {new_filter}");
+        info!("new log filter is {new_filter}");
 
         //set the new filter
         Ok(handle.modify(|layer| {

@@ -35,4 +35,6 @@ pub enum Error {
     SanError(Identity),
     #[error("chain returned from CA is empty for: {0}")]
     EmptyResponse(Identity),
+    #[error("invalid spiffe identity: {0}")]
+    Spiffe(String),
 }

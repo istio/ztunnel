@@ -64,6 +64,7 @@ go-parse-duration = "0.1.1"
 prometheus-parse = "0.2.3"
 url = "2.2"
 itertools = "0.10.5"
+ipnet = { version = "2.7.0", features = ["serde"] }
 
 [build-dependencies]
 tonic-build = { version = "0.8", default-features=false, features = ["prost"] }
