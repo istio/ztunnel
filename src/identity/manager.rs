@@ -69,7 +69,7 @@ impl Default for Identity {
 }
 
 #[derive(Clone)]
-pub struct SecretManager<'a, C: CertificateProvider>
+pub struct SecretManager<C: CertificateProvider>
 where
     C: Clone,
 {
