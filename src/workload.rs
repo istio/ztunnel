@@ -18,20 +18,24 @@ use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
+use futures::executor::block_on;
 
 use rand::prelude::IteratorRandom;
 
 use thiserror::Error;
+use tokio::runtime::Handle;
 use tracing::{debug, error, info, instrument};
 
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
-use crate::identity::Identity;
+use crate::identity::{CertificateProvider, Error, Identity, SecretManager};
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::ProtocolParse;
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, readiness, xds};
+use crate::config::RootCert::Default;
+use crate::tls::Certs;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -230,6 +234,7 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
+        cert_manager: Box<dyn CertificateProvider>
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
@@ -394,6 +399,8 @@ pub struct WorkloadStore {
     // vips maintains a mapping of socket address with service port to workload ip and socket address
     // with target ports in hashset.
     vips: HashMap<SocketAddr, HashSet<(IpAddr, u16)>>,
+    // cert_manager allows for the prefetching of certificates on workload discovery.
+    cert_manager: Box<dyn CertificateProvider>,
 }
 
 impl WorkloadStore {
@@ -423,6 +430,15 @@ impl WorkloadStore {
                     .or_default()
                     .insert((service_sock_addr, port.target_port as u16));
             }
+        }
+        // prefetch certificate - get the handle of the current runtime so we can
+        // block on fetch_certificate
+        let handle = Handle::current();
+        let _ = handle.enter();
+        // we just need to call fetch_certificate to cache, don't care about the actual cert
+        match block_on(self.cert_manager.fetch_certificate(&workload.identity())) {
+            Ok(_) => debug!("cert for workload {} cached.", workload.workload_name),
+            Err(e) => error!("unable to cache cert for workload {} , ignoring: {}", workload.workload_name, e),
         }
         Ok(())
     }
