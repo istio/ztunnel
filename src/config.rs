@@ -19,12 +19,13 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use bytes::Bytes;
 use tokio::time;
 use tracing::warn;
 
 use crate::identity;
-use crate::xds::istio::mesh::{MeshConfig, ProxyConfig};
+use crate::xds::istio::mesh::ProxyConfig;
 
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
@@ -241,87 +242,110 @@ pub fn default_proxy_config() -> ProxyConfig {
     }
 }
 
-fn construct_proxy_config(mesh_config_path: &str) -> Result<ProxyConfig, anyhow::Error> {
-    let mut pc = default_proxy_config();
-
-    let mesh_config = fs::File::open(mesh_config_path)
+fn construct_proxy_config(mesh_config_path: &str) -> anyhow::Result<ProxyConfig> {
+    let mesh_config: anyhow::Result<serde_yaml::Value> = fs::File::open(mesh_config_path)
         .map_err(anyhow::Error::new)
-        .and_then(|f| serde_yaml::from_reader(f).map_err(anyhow::Error::new))
-        .and_then(|mc: MeshConfig| {
-            let dc = mc.default_config.unwrap_or_default();
-            merge_message(&mut pc, &dc).map_err(anyhow::Error::new)
-        });
-    if let Err(e) = mesh_config {
-        warn!("failed reading MeshConfig from {}: {}", mesh_config_path, e);
-    }
+        .and_then(|f| serde_yaml::from_reader(f).map_err(anyhow::Error::new));
 
-    let proxy_config_env = parse_default::<String>(PROXY_CONFIG, "".to_string())
-        .map_err(anyhow::Error::new)
-        .and_then(|env_str| serde_yaml::from_str(&env_str).map_err(anyhow::Error::new))
-        .and_then(|pc_env| merge_message(&mut pc, &pc_env).map_err(anyhow::Error::new));
-    if let Err(e) = proxy_config_env {
-        warn!("failed reading {PROXY_CONFIG} env: {e}");
-    }
+    let proxy_config_env: anyhow::Result<serde_yaml::Value> =
+        parse_default::<String>(PROXY_CONFIG, "".to_string())
+            .map_err(anyhow::Error::new)
+            .and_then(|env_str| serde_yaml::from_str(&env_str).map_err(anyhow::Error::new));
+
+    let yaml = match (mesh_config, proxy_config_env) {
+        (Ok(mc), Ok(pc_env)) => {
+            let mut mc = mc
+                .get("defaultConfig")
+                .unwrap_or(&serde_yaml::Value::Null)
+                .clone();
+            merge_yaml(&mut mc, pc_env);
+            Ok(mc)
+        }
+        (Ok(mc), Err(_)) => Ok(mc
+            .get("defaultConfig")
+            .unwrap_or(&serde_yaml::Value::Null)
+            .clone()),
+        (Err(_), Ok(pc_env)) => Ok(pc_env),
+        (Err(mc), Err(pc_env)) => Err(anyhow!("neither parsed: {mc}; {pc_env}")),
+    };
+
+    let pc = match yaml {
+        Ok(yaml) => serde_yaml::from_value(yaml).map_err(anyhow::Error::new)?,
+        Err(e) => {
+            warn!("{}", e);
+            default_proxy_config()
+        }
+    };
+
+    // TODO add all env with ISTIO_META_ prefix
+    // TODO remove ISTIO_META_ prefix from proxy_metadata
 
     Ok(pc)
 }
 
-fn merge_message<M>(into: &mut M, from: &M) -> Result<(), prost::DecodeError>
-where
-    M: prost::Message,
-{
-    let buf = &from.encode_to_vec()[..];
-    into.merge(buf)
+fn merge_yaml(a: &mut serde_yaml::Value, b: serde_yaml::Value) {
+    match (a, b) {
+        (a @ &mut serde_yaml::Value::Mapping(_), serde_yaml::Value::Mapping(b)) => {
+            let a = a.as_mapping_mut().unwrap();
+            for (k, v) in b {
+                if v.is_sequence() && a.contains_key(&k) && a[&k].is_sequence() {
+                    let mut _b = a.get(&k).unwrap().as_sequence().unwrap().to_owned();
+                    _b.append(&mut v.as_sequence().unwrap().to_owned());
+                    a[&k] = serde_yaml::Value::from(_b);
+                    continue;
+                }
+                if !a.contains_key(&k) {
+                    a.insert(k.to_owned(), v.to_owned());
+                } else {
+                    merge_yaml(&mut a[&k], v);
+                }
+            }
+        }
+        (a, b) => *a = b,
+    }
 }
 
 #[cfg(test)]
 pub mod tests {
-    use super::{construct_config, construct_proxy_config, merge_message};
+    use super::{construct_config, construct_proxy_config, default_proxy_config};
     use crate::xds::istio::mesh::ProxyConfig;
 
     #[test]
     fn config_from_proxyconfig() {
+        // mesh config only
         let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
         let pc = construct_proxy_config(mesh_config_path).unwrap();
         let cfg = construct_config(pc).unwrap();
         assert_eq!(cfg.readiness_addr.port(), 15888);
+        assert_eq!(cfg.admin_addr.port(), 15099);
+        // TODO remove prefix
+        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "bar");
+
+        // env only
+        let pc_env = "{ \
+            \"discoveryAddress\": \"istiod-rev0.istio-system-2:15012\", \
+            \"proxyAdminPort\": 15999 \
+        }";
+        std::env::set_var("PROXY_CONFIG", pc_env);
+        let pc = construct_proxy_config("").unwrap();
+        let cfg = construct_config(pc).unwrap();
+        assert_eq!(
+            cfg.readiness_addr.port(),
+            default_proxy_config().status_port as u16
+        );
+        assert_eq!(cfg.xds_address.unwrap(), "istiod-rev0.istio-system-2:15012");
+
+        // both (with one override)
+        let pc = construct_proxy_config(mesh_config_path).unwrap();
+        let cfg = construct_config(pc).unwrap();
+        assert_eq!(cfg.readiness_addr.port(), 15888);
+        assert_eq!(cfg.admin_addr.port(), 15999);
     }
 
     #[test]
-    fn test_proxy_config_merging() {
-        // base, empty
-        let mut pc = ProxyConfig::default();
-
-        // layer 1, set a string and a number
-        merge_message(
-            &mut pc,
-            &ProxyConfig {
-                discovery_address: "istiod.istio-system.svc:15012".to_string(),
-                proxy_admin_port: 123,
-                ..Default::default()
-            },
-        )
-        .expect("merging doesn't fail");
-
-        // layer 3, empty string shouldn't override; number should
-        merge_message(
-            &mut pc,
-            &ProxyConfig {
-                discovery_address: "".to_string(),
-                proxy_admin_port: 321,
-                ..Default::default()
-            },
-        )
-        .expect("merging doesn't fail");
-
-        // expect these merging semantics
-        assert_eq!(
-            pc,
-            ProxyConfig {
-                proxy_admin_port: 321,
-                discovery_address: "istiod.istio-system.svc:15012".to_string(),
-                ..Default::default()
-            }
-        )
+    fn test_default_from_yaml() {
+        // this is sort of "testing a library" but it's nice to check it does what we expect
+        let from_yaml: ProxyConfig = serde_yaml::from_value(serde_yaml::Value::Null).unwrap();
+        assert_eq!(default_proxy_config().status_port, from_yaml.status_port);
     }
 }
