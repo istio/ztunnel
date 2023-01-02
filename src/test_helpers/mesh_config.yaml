@@ -1,0 +1,6 @@
+default_config:
+  # discoveryAddress: istiod-rev0.istio-system.svc:15012
+  statusPort: 15888
+  # proxyMetadata:
+  #   ISTIO_META_FOO: "true"
+

@@ -41,6 +41,10 @@ fn main() -> Result<(), anyhow::Error> {
             ".istio.mesh.v1alpha1.ProxyConfig",
             "#[serde_with::serde_as]",
         );
+        c.type_attribute(
+            ".istio.mesh.v1alpha1.ProxyConfig",
+            "#[serde(rename_all=\"camelCase\", default=\"crate::config::default_proxy_config\")]",
+        );
         c.type_attribute(".istio.mesh", "#[derive(serde::Deserialize)]");
         c.field_attribute(
             ".istio.mesh.v1alpha1.ProxyConfig.termination_drain_duration",

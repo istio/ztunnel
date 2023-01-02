@@ -42,14 +42,14 @@ const DEFAULT_ADMIN_PORT: i32 = 15021;
 const DEFAULT_STATUS_PORT: i32 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
     Static(Bytes),
     Default,
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigSource {
     File(PathBuf),
     Static(Bytes),
@@ -64,7 +64,7 @@ impl ConfigSource {
     }
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
@@ -149,8 +149,12 @@ fn parse_args() -> String {
 }
 
 pub fn parse_config() -> Result<Config, Error> {
-    let pc = construct_proxy_config().map_err(Error::Other)?;
+    let mesh_config_path = "./etc/istio/config/mesh";
+    let pc = construct_proxy_config(mesh_config_path).map_err(Error::Other)?;
+    construct_config(pc)
+}
 
+pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let xds_address =
         Some(parse_default(XDS_ADDRESS, pc.discovery_address.clone())?).filter(|s| !s.is_empty());
 
@@ -222,7 +226,7 @@ pub fn parse_config() -> Result<Config, Error> {
     })
 }
 
-fn default_proxy_config() -> ProxyConfig {
+pub fn default_proxy_config() -> ProxyConfig {
     ProxyConfig {
         proxy_admin_port: DEFAULT_ADMIN_PORT,
         status_port: DEFAULT_STATUS_PORT,
@@ -237,10 +241,9 @@ fn default_proxy_config() -> ProxyConfig {
     }
 }
 
-fn construct_proxy_config() -> Result<ProxyConfig, anyhow::Error> {
+fn construct_proxy_config(mesh_config_path: &str) -> Result<ProxyConfig, anyhow::Error> {
     let mut pc = default_proxy_config();
 
-    let mesh_config_path = "./etc/istio/config/mesh";
     let mesh_config = fs::File::open(mesh_config_path)
         .map_err(anyhow::Error::new)
         .and_then(|f| serde_yaml::from_reader(f).map_err(anyhow::Error::new))
@@ -273,8 +276,16 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use super::merge_message;
+    use super::{construct_config, construct_proxy_config, merge_message};
     use crate::xds::istio::mesh::ProxyConfig;
+
+    #[test]
+    fn config_from_proxyconfig() {
+        let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
+        let pc = construct_proxy_config(mesh_config_path).unwrap();
+        let cfg = construct_config(pc).unwrap();
+        assert_eq!(cfg.readiness_addr.port(), 15888);
+    }
 
     #[test]
     fn test_proxy_config_merging() {
