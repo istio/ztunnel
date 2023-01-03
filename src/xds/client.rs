@@ -310,8 +310,8 @@ impl AdsClient {
             id: format!("sidecar~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
             metadata: Some(Self::build_struct([
                 ("POD_NAME", pod_name),
-                ("POD_NAMESPACE", ns),
-                ("INSTANCE_IP", ip),
+                ("NAMESPACE", ns),
+                ("INSTANCE_IPS", ip),
                 ("NODE_NAME", node),
                 ("AMBIENT_TYPE", ambient_type),
             ])),
