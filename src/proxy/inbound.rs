@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -26,7 +28,8 @@ use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::proxy::{TraceParent, TRACEPARENT_HEADER};
-use crate::socket::relay;
+use crate::rbac;
+use crate::socket::{relay, to_canonical};
 use crate::tls::TlsError;
 use crate::workload::WorkloadInformation;
 
@@ -73,8 +76,23 @@ impl Inbound {
 
     pub(super) async fn run(self) {
         let (tx, rx) = oneshot::channel();
-        let service =
-            make_service_fn(|_| async { Ok::<_, hyper::Error>(service_fn(Self::serve_connect)) });
+        let service = make_service_fn(|socket: &tokio_boring::SslStream<TcpStream>| {
+            let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
+            let conn = rbac::Connection {
+                src_identity: socket
+                    .ssl()
+                    .peer_certificate()
+                    .and_then(|x| crate::tls::boring::extract_sans(&x).first().cloned()),
+                src_ip: to_canonical(socket.get_ref().peer_addr().unwrap()).ip(),
+                dst,
+            };
+            let workloads = self.workloads.clone();
+            async move {
+                Ok::<_, hyper::Error>(service_fn(move |req| {
+                    Self::serve_connect(workloads.clone(), conn.clone(), req)
+                }))
+            }
+        });
 
         let acceptor = InboundCertProvider {
             workloads: self.workloads.clone(),
@@ -171,8 +189,16 @@ impl Inbound {
             .unwrap_or_else(TraceParent::new)
     }
 
-    #[instrument(name="inbound", skip_all, fields(id=%Self::extract_traceparent(&req)))]
-    async fn serve_connect(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    #[instrument(name="inbound", skip_all, fields(
+        id=%Self::extract_traceparent(&req),
+        peer_ip=%conn.src_ip,
+        peer_id=%OptionDisplay(&conn.src_identity)
+    ))]
+    async fn serve_connect(
+        workloads: WorkloadInformation,
+        conn: rbac::Connection,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
@@ -187,6 +213,22 @@ impl Inbound {
                 }
 
                 let addr: SocketAddr = addr.unwrap();
+                if addr.ip() != conn.dst.ip() {
+                    info!("Sending 400, ip mismatch {addr} != {}", conn.dst);
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::empty())
+                        .unwrap());
+                }
+                // Orig has 15008, swap with the real port
+                let conn = rbac::Connection { dst: addr, ..conn };
+                if !workloads.assert_rbac(&conn).await {
+                    info!(%conn, "RBAC rejected");
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Body::empty())
+                        .unwrap());
+                }
                 let status_code = match Self::handle_inbound(InboundConnect::Hbone(req), addr)
                     .instrument(tracing::span::Span::current())
                     .await
@@ -208,6 +250,17 @@ impl Inbound {
                     .body(Body::empty())
                     .unwrap())
             }
+        }
+    }
+}
+
+struct OptionDisplay<'a, T>(&'a Option<T>);
+
+impl<'a, T: Display> Display for OptionDisplay<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            None => write!(f, "None"),
+            Some(i) => write!(f, "{}", i),
         }
     }
 }

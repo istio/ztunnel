@@ -218,6 +218,7 @@ pub fn metrics(c: &mut Criterion) {
                     canonical_revision: Default::default(),
                     node: Default::default(),
                     native_hbone: Default::default(),
+                    authorization_policies: Default::default(),
                 },
                 destination: None,
                 destination_service: None,

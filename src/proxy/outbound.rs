@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
+use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
@@ -27,9 +28,9 @@ use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::{util, Error, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::socket;
 use crate::socket::relay;
 use crate::workload::{Protocol, Workload, WorkloadInformation};
+use crate::{rbac, socket};
 
 pub struct Outbound {
     cfg: Config,
@@ -156,7 +157,12 @@ impl OutboundConnection {
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig_dst_addr, req.gateway, req.request_type, req.direction
         );
-
+        let can_fastpath = req.protocol == Protocol::HBONE
+            && !req
+                .destination_workload
+                .as_ref()
+                .map(|w| w.native_hbone)
+                .unwrap_or(false);
         let connection_metrics = traffic::ConnectionOpen {
             reporter: Reporter::source,
             source: req.source.clone(),
@@ -169,10 +175,21 @@ impl OutboundConnection {
         let _connection_close = self
             .metrics
             .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
-        if req.request_type == RequestType::DirectLocal {
+        if req.request_type == RequestType::DirectLocal && can_fastpath {
             // For same node, we just access it directly rather than making a full network connection.
             // Pass our `stream` over to the inbound handler, which will process as usual
+            // We *could* apply this to all traffic, rather than just for destinations that are "captured"
+            // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
             info!("proxying to {} using node local fast path", req.destination);
+            let conn = rbac::Connection {
+                src_identity: Some(req.source.identity()),
+                src_ip: remote_addr,
+                dst: req.destination,
+            };
+            if !self.workloads.assert_rbac(&conn).await {
+                info!(%conn, "RBAC rejected");
+                return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
+            }
             return Inbound::handle_inbound(InboundConnect::DirectPath(stream), req.destination)
                 .await
                 .map_err(Error::Io);
@@ -304,16 +321,12 @@ impl OutboundConnection {
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
                 destination_workload: Some(us.workload.clone()),
-                // We would want to send to 127.0.0.1:15008 in theory. However, the inbound listener
-                // expects to lookup the desired certificate based on the destination IP. If we send directly,
-                // we would try to lookup an IP for 127.0.0.1.
-                // Instead, we send to the actual IP, but iptables in the pod ensures traffic is redirected to 15008.
                 gateway: SocketAddr::from((
                     us.workload
                         .gateway_address
                         .expect("todo: refactor gateway ip handling")
                         .ip(),
-                    15088,
+                    15008,
                 )),
                 direction: Direction::Outbound,
                 // Sending to a node on the same node (ourselves).
@@ -554,7 +567,7 @@ mod tests {
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
                 destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:15088",
+                gateway: "127.0.0.2:15008",
                 request_type: RequestType::DirectLocal,
             }),
         )

@@ -18,7 +18,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use crate::config;
 use crate::config::ConfigSource;
 use crate::workload::Protocol::{HBONE, TCP};
-use crate::workload::{LocalWorkload, Workload};
+use crate::workload::{LocalConfig, LocalWorkload, Workload};
 use bytes::{BufMut, Bytes};
 use std::default::Default;
 
@@ -70,6 +70,7 @@ fn local_xds_config(echo_port: u16) -> anyhow::Result<Bytes> {
                 node: "local".to_string(),
 
                 waypoint_addresses: vec![],
+                authorization_policies: vec![],
                 gateway_address: None,
                 workload_name: "".to_string(),
                 workload_type: "".to_string(),
@@ -89,6 +90,7 @@ fn local_xds_config(echo_port: u16) -> anyhow::Result<Bytes> {
                 node: "local".to_string(),
 
                 waypoint_addresses: vec![],
+                authorization_policies: vec![],
                 gateway_address: None,
                 workload_name: "".to_string(),
                 workload_type: "".to_string(),
@@ -108,6 +110,7 @@ fn local_xds_config(echo_port: u16) -> anyhow::Result<Bytes> {
                 node: "local".to_string(),
 
                 waypoint_addresses: vec![],
+                authorization_policies: vec![],
                 gateway_address: None,
                 workload_name: "".to_string(),
                 workload_type: "".to_string(),
@@ -118,6 +121,10 @@ fn local_xds_config(echo_port: u16) -> anyhow::Result<Bytes> {
             vips: Default::default(),
         },
     ];
-    serde_yaml::to_writer(&mut b, &res)?;
+    let lc = LocalConfig {
+        workloads: res,
+        policies: vec![],
+    };
+    serde_yaml::to_writer(&mut b, &lc)?;
     Ok(b.into_inner().freeze())
 }

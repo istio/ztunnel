@@ -30,7 +30,7 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use crate::config::RootCert;
 use crate::metrics::xds::*;
 use crate::metrics::{Metrics, Recorder};
-use crate::xds::istio::workload::{Authorization, Workload};
+use crate::xds::istio::workload::{Rbac, Workload};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
@@ -109,7 +109,7 @@ pub struct Config {
     auth: identity::AuthSource,
 
     workload_handler: Box<dyn Handler<Workload>>,
-    rbac_handler: Box<dyn Handler<Authorization>>,
+    rbac_handler: Box<dyn Handler<Rbac>>,
     initial_watches: Vec<String>,
     on_demand: bool,
 }
@@ -132,7 +132,7 @@ impl Config {
         self
     }
 
-    pub fn with_rbac_handler(mut self, f: impl Handler<Authorization>) -> Config {
+    pub fn with_rbac_handler(mut self, f: impl Handler<Rbac>) -> Config {
         self.rbac_handler = Box::new(f);
         self
     }
@@ -439,7 +439,7 @@ impl AdsClient {
                 self.decode_and_handle::<Workload, _>(|a| &a.config.workload_handler, response)
             }
             xds::RBAC_TYPE => {
-                self.decode_and_handle::<Authorization, _>(|a| &a.config.rbac_handler, response)
+                self.decode_and_handle::<Rbac, _>(|a| &a.config.rbac_handler, response)
             }
             _ => {
                 error!("unknown type");
@@ -519,7 +519,7 @@ impl AdsClient {
                     name: res.clone(),
                     type_url: resp.type_url.clone(),
                 };
-                debug!("received delete resource {:#?}", k);
+                debug!("received delete resource {k}");
                 self.known_resources.remove(res);
                 self.notify_on_demand(&k);
                 k.name

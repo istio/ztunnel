@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+
+use async_trait::async_trait;
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, instrument};
+use tracing::{info, warn};
+
+use crate::identity::Error::Spiffe;
+use crate::tls;
 
 use super::Error;
 use super::{CaClient, CertificateProvider};
-use crate::tls;
-use tracing::{info, warn};
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
@@ -40,6 +44,30 @@ pub enum Identity {
 impl prometheus_client::encoding::text::Encode for Identity {
     fn encode(&self, writer: &mut dyn Write) -> Result<(), std::io::Error> {
         writer.write_all(self.to_string().as_bytes())
+    }
+}
+
+impl FromStr for Identity {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        const URI_PREFIX: &str = "spiffe://";
+        const SERVICE_ACCOUNT: &str = "sa";
+        const NAMESPACE: &str = "ns";
+        if !s.starts_with(URI_PREFIX) {
+            return Err(Spiffe(s.to_string()));
+        }
+        let split: Vec<_> = s[URI_PREFIX.len()..].split('/').collect();
+        if split.len() != 5 {
+            return Err(Spiffe(s.to_string()));
+        }
+        if split[1] != NAMESPACE || split[3] != SERVICE_ACCOUNT {
+            return Err(Spiffe(s.to_string()));
+        }
+        Ok(Identity::Spiffe {
+            trust_domain: split[0].to_string(),
+            namespace: split[2].to_string(),
+            service_account: split[4].to_string(),
+        })
     }
 }
 
@@ -191,14 +219,17 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
 }
 
 pub mod mock {
-    use super::*;
-    use crate::identity::{CertificateProvider, Identity, SecretManager};
-    use crate::tls::{generate_test_certs, Certs};
-    use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
+
+    use async_trait::async_trait;
     use tokio::sync::watch;
+
+    use crate::identity::{CertificateProvider, Identity, SecretManager};
+    use crate::tls::{generate_test_certs, Certs};
+
+    use super::*;
 
     #[derive(Clone, Debug)]
     pub struct MockCaClient {
@@ -233,8 +264,11 @@ pub mod mock {
 mod tests {
     use std::time;
 
-    use super::*;
+    use matches::assert_matches;
+
     use crate::identity::{self, *};
+
+    use super::*;
 
     async fn stress_many_ids(mut sm: SecretManager<mock::MockCaClient>, iterations: u32) {
         for i in 0..iterations {
@@ -342,5 +376,45 @@ mod tests {
         for result in results.iter() {
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn identity_from_string() {
+        assert_eq!(
+            Identity::from_str("spiffe://cluster.local/ns/namespace/sa/service-account").ok(),
+            Some(Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "namespace".to_string(),
+                service_account: "service-account".to_string(),
+            })
+        );
+        assert_eq!(
+            Identity::from_str("spiffe://td/ns/ns/sa/sa").ok(),
+            Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "ns".to_string(),
+                service_account: "sa".to_string(),
+            })
+        );
+        assert_eq!(
+            Identity::from_str("spiffe://td.with.dots/ns/ns.with.dots/sa/sa.with.dots").ok(),
+            Some(Identity::Spiffe {
+                trust_domain: "td.with.dots".to_string(),
+                namespace: "ns.with.dots".to_string(),
+                service_account: "sa.with.dots".to_string(),
+            })
+        );
+        assert_eq!(
+            Identity::from_str("spiffe://td/ns//sa/").ok(),
+            Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "".to_string(),
+                service_account: "".to_string()
+            })
+        );
+        assert_matches!(Identity::from_str("td/ns/ns/sa/sa"), Err(_));
+        assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa"), Err(_));
+        assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa/sa/"), Err(_));
+        assert_matches!(Identity::from_str("spiffe://td/ns/ns/foobar/sa/"), Err(_));
     }
 }
