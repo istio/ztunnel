@@ -126,7 +126,7 @@ impl Rbac {
                         "principals",
                         &mg.principals,
                         &mg.not_principals,
-                        |p| p.matches(&id),
+                        |p| p.matches_principal(&id),
                     );
                     m &= Self::matches_internal(
                         "namespaces",
@@ -166,7 +166,7 @@ impl Rbac {
             trace!(matches = true, "type" = "negative", "no match declared");
             true
         } else {
-            let matches = negative.iter().any(&mut predicate);
+            let matches = !negative.iter().any(&mut predicate);
             trace!(%matches, "type"="negative", "{negative:?}");
             matches
         };
@@ -174,7 +174,7 @@ impl Rbac {
     }
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RbacMatch {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub namespaces: Vec<StringMatch>,
@@ -222,13 +222,17 @@ pub enum StringMatch {
 }
 
 impl StringMatch {
-    pub fn matches(&self, check: &str) -> bool {
+    pub fn matches_principal(&self, check: &str) -> bool {
         // Istio matches all assumes spiffe:// prefix. This includes prefix matches.
         // A prefix match for "*foo" means "spiffe://*foo".
         // So we strip it, and fail if it isn't present.
         let Some(check) = check.strip_prefix("spiffe://") else {
             return false
         };
+        self.matches(check)
+    }
+
+    pub fn matches(&self, check: &str) -> bool {
         match self {
             StringMatch::Prefix(pre) => check.starts_with(pre),
             StringMatch::Suffix(suf) => check.ends_with(suf),
@@ -381,5 +385,144 @@ impl From<&XdsStringMatch> for Option<StringMatch> {
             MatchType::Suffix(s) => StringMatch::Suffix(s.clone()),
             MatchType::Presence(_) => StringMatch::Presence(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use test_case::test_case;
+
+    use super::*;
+
+    macro_rules! rbac_test{
+        ($name:ident, $m:expr, $($con:expr => $res:expr),*) => {
+            rbac_test!($name, $name, $m, $($con => $res),*);
+        };
+        ($test_name:ident, $name:ident, $m:expr, $($con:expr => $res:expr),*) => {
+            #[test]
+            fn $test_name() {
+                let m = RbacMatch {
+                    $name: $m,
+                    ..Default::default()
+                };
+                let pol = allow_policy(stringify!($name).to_string(), vec![vec![vec![m]]]);
+                $(
+                    assert_eq!(pol.matches($con), $res, "{}", $con);
+                )*
+            }
+        };
+    }
+
+    fn allow_policy(name: String, group: Vec<Vec<Vec<RbacMatch>>>) -> Rbac {
+        Rbac {
+            name,
+            namespace: "namespace".to_string(),
+            scope: RbacScope::Global,
+            action: RbacAction::Allow,
+            groups: group,
+        }
+    }
+
+    fn plaintext_conn() -> Connection {
+        Connection {
+            src_identity: None,
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst: "127.0.0.2:8080".parse().unwrap(),
+        }
+    }
+
+    fn tls_conn() -> Connection {
+        Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "namespace".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst: "127.0.0.2:8080".parse().unwrap(),
+        }
+    }
+
+    fn tls_conn_alt() -> Connection {
+        Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td-alt".to_string(),
+                namespace: "ns-alt".to_string(),
+                service_account: "sa=alt".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 3]),
+            dst: "127.0.0.4:9090".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn rbac_empty_policy() {
+        assert!(allow_policy("empty".to_string(), vec![vec![vec![]]]).matches(&plaintext_conn()));
+        assert!(allow_policy("empty".to_string(), vec![vec![]]).matches(&plaintext_conn()));
+        assert!(!allow_policy("empty".to_string(), vec![]).matches(&plaintext_conn()));
+    }
+
+    rbac_test!(namespaces, vec![StringMatch::Exact("namespace".to_string())],
+        &plaintext_conn() => false,
+        &tls_conn() => true,
+        &tls_conn_alt() => false);
+    rbac_test!(not_namespaces, vec![StringMatch::Exact("namespace".to_string())],
+        &plaintext_conn() => true,
+        &tls_conn() => false,
+        &tls_conn_alt() => true);
+
+    rbac_test!(principals, vec![StringMatch::Exact("td/ns/namespace/sa/account".to_string())],
+        &plaintext_conn() => false,
+        &tls_conn() => true,
+        &tls_conn_alt() => false);
+    rbac_test!(not_principals, vec![StringMatch::Exact("td/ns/namespace/sa/account".to_string())],
+        &plaintext_conn() => true,
+        &tls_conn() => false,
+        &tls_conn_alt() => true);
+
+    rbac_test!(source_ips, vec![IpNet::new("127.0.0.1".parse().unwrap(), 32).unwrap()],
+        &plaintext_conn() => true,
+        &tls_conn() => true,
+        &tls_conn_alt() => false);
+    rbac_test!(not_source_ips, vec![IpNet::new("127.0.0.1".parse().unwrap(), 32).unwrap()],
+        &plaintext_conn() => false,
+        &tls_conn() => false,
+        &tls_conn_alt() => true);
+
+    rbac_test!(destination_ips, vec![IpNet::new("127.0.0.2".parse().unwrap(), 32).unwrap()],
+        &plaintext_conn() => true,
+        &tls_conn() => true,
+        &tls_conn_alt() => false);
+    rbac_test!(not_destination_ips, vec![IpNet::new("127.0.0.2".parse().unwrap(), 32).unwrap()],
+        &plaintext_conn() => false,
+        &tls_conn() => false,
+        &tls_conn_alt() => true);
+    rbac_test!(cidr_range, destination_ips, vec![IpNet::new("127.0.0.1".parse().unwrap(), 24).unwrap()],
+        &plaintext_conn() => true,
+        &tls_conn() => true,
+        &tls_conn_alt() => true);
+
+    rbac_test!(destination_ports, vec![8080],
+        &plaintext_conn() => true,
+        &tls_conn() => true,
+        &tls_conn_alt() => false);
+    rbac_test!(not_destination_ports, vec![8080],
+        &plaintext_conn() => false,
+        &tls_conn() => false,
+        &tls_conn_alt() => true);
+
+    #[test_case(StringMatch::Exact("foo".to_string()), "foo", true; "exact match")]
+    #[test_case(StringMatch::Exact("foo".to_string()), "not", false; "exact mismatch")]
+    #[test_case(StringMatch::Exact("foo".to_string()), "", false; "exact empty mismatch")]
+    #[test_case(StringMatch::Prefix("foo".to_string()), "foobar", true; "prefix match")]
+    #[test_case(StringMatch::Prefix("foo".to_string()), "notfoo", false; "prefix mismatch")]
+    #[test_case(StringMatch::Prefix("foo".to_string()), "", false; "prefix empty mismatch")]
+    #[test_case(StringMatch::Suffix("foo".to_string()), "barfoo", true; "suffix match")]
+    #[test_case(StringMatch::Suffix("foo".to_string()), "foonot", false; "suffix mismatch")]
+    #[test_case(StringMatch::Suffix("foo".to_string()), "", false; "suffix empty mismatch")]
+    #[test_case(StringMatch::Presence(), "foo", true; "presence match")]
+    #[test_case(StringMatch::Presence(), "", false; "presence mismatch")]
+    fn string_match(matcher: StringMatch, matchee: &str, expect: bool) {
+        assert_eq!(matcher.matches(matchee), expect)
     }
 }

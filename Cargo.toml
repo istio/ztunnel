@@ -87,4 +87,5 @@ incremental = true
 [dev-dependencies]
 criterion = { version = "0.4.0", features = ["async_tokio", "html_reports"] }
 matches = "0.1.9"
+test-case = "2.2.2"
 #debug = true
