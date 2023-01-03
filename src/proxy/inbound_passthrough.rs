@@ -17,21 +17,24 @@ use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
-use crate::config::Config;
-use crate::proxy::util;
-use crate::proxy::Error;
+use crate::proxy::outbound::OutboundConnection;
+use crate::proxy::{util, ProxyInputs};
+use crate::proxy::{Error, TraceParent};
 use crate::socket;
 use crate::socket::relay;
 
-pub struct InboundPassthrough {
+use crate::rbac;
+
+pub(super) struct InboundPassthrough {
     listener: TcpListener,
+    pi: ProxyInputs,
 }
 
 impl InboundPassthrough {
-    pub async fn new(cfg: Config) -> Result<InboundPassthrough, Error> {
-        let listener: TcpListener = TcpListener::bind(cfg.inbound_plaintext_addr)
+    pub(super) async fn new(pi: ProxyInputs) -> Result<InboundPassthrough, Error> {
+        let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_plaintext_addr)
             .await
-            .map_err(|e| Error::Bind(cfg.inbound_plaintext_addr, e))?;
+            .map_err(|e| Error::Bind(pi.cfg.inbound_plaintext_addr, e))?;
         let transparent = socket::set_transparent(&listener).is_ok();
 
         info!(
@@ -40,19 +43,23 @@ impl InboundPassthrough {
             transparent,
             "listener established",
         );
-        Ok(InboundPassthrough { listener })
+        Ok(InboundPassthrough { listener, pi })
     }
 
     pub(super) async fn run(self) {
         loop {
             // Asynchronously wait for an inbound socket.
             let socket = self.listener.accept().await;
+            let pi = self.pi.clone();
             match socket {
-                Ok((mut stream, remote)) => {
+                Ok((stream, remote)) => {
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            Self::proxy_inbound_plaintext(socket::to_canonical(remote), &mut stream)
-                                .await
+                        if let Err(e) = Self::proxy_inbound_plaintext(
+                            pi.clone(),
+                            socket::to_canonical(remote),
+                            stream,
+                        )
+                        .await
                         {
                             warn!("plaintext proxying failed: {}", e)
                         }
@@ -69,13 +76,43 @@ impl InboundPassthrough {
     }
 
     async fn proxy_inbound_plaintext(
+        pi: ProxyInputs,
         source: SocketAddr,
-        inbound: &mut TcpStream,
+        mut inbound: TcpStream,
     ) -> Result<(), Error> {
-        let orig = socket::orig_dst_addr_or_default(inbound);
+        let orig = socket::orig_dst_addr_or_default(&inbound);
+        let Some(upstream) = pi.workloads.fetch_workload(&orig.ip()).await else {
+            return Err(Error::UnknownDestination(orig.ip()))
+        };
+        if !upstream.waypoint_addresses.is_empty() {
+            // This is an inbound request not over HBONE, but we have a waypoint.
+            // The request needs to go through the waypoint for policy enforcement.
+            // This can happen from clients that are not part of the mesh; they won't know to send
+            // to the waypoint.
+            // To handle this, we forward it to the waypoint ourselves, which will hairpin back to us.
+            let mut oc = OutboundConnection {
+                pi: pi.clone(),
+                id: TraceParent::new(),
+            };
+            return oc.proxy_to(inbound, source.ip(), orig).await;
+        }
+
+        // We enforce RBAC only for non-hairpin cases. This is because we may not be able to properly
+        // enforce the policy (for example, if it has L7 attributes), while waypoint will.
+        // Instead, we skip enforcement and forward to the waypoint to enforce.
+        // On the inbound HBONE side, we will validate it came from the waypoint (and therefor had enforcemen).
+        let conn = rbac::Connection {
+            src_identity: None,
+            src_ip: source.ip(),
+            dst: orig,
+        };
+        if !pi.workloads.assert_rbac(&conn).await {
+            info!(%conn, "RBAC rejected");
+            return Ok(());
+        }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let mut outbound = TcpStream::connect(orig).await?;
-        relay(inbound, &mut outbound, true).await?;
+        relay(&mut inbound, &mut outbound, true).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }

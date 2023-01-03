@@ -27,7 +27,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
-use crate::proxy::{TraceParent, TRACEPARENT_HEADER};
+use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac;
 use crate::socket::{relay, to_canonical};
 use crate::tls::TlsError;
@@ -35,7 +35,7 @@ use crate::workload::WorkloadInformation;
 
 use super::Error;
 
-pub struct Inbound {
+pub(super) struct Inbound {
     cfg: Config,
     listener: TcpListener,
     cert_manager: Box<dyn CertificateProvider>,
@@ -44,15 +44,10 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    pub async fn new(
-        cfg: Config,
-        workloads: WorkloadInformation,
-        cert_manager: Box<dyn CertificateProvider>,
-        drain: Watch,
-    ) -> Result<Inbound, Error> {
-        let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
+    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
+        let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_addr)
             .await
-            .map_err(|e| Error::Bind(cfg.inbound_addr, e))?;
+            .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
         let transparent = crate::socket::set_transparent(&listener).is_ok();
 
         info!(
@@ -62,10 +57,10 @@ impl Inbound {
             "listener established",
         );
         Ok(Inbound {
-            cfg,
-            workloads,
+            cfg: pi.cfg,
+            workloads: pi.workloads,
             listener,
-            cert_manager,
+            cert_manager: pi.cert_manager,
             drain,
         })
     }
@@ -229,7 +224,29 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
-                let status_code = match Self::handle_inbound(InboundConnect::Hbone(req), addr)
+
+                let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
+                    info!(%conn, "unknown destination");
+                    return Ok(Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::empty())
+                        .unwrap());
+                };
+                if !upstream.waypoint_addresses.is_empty() {
+                    let from_waypoint = conn
+                        .src_identity
+                        .as_ref()
+                        .map(|i| i == &upstream.identity())
+                        .unwrap_or(false);
+                    if !from_waypoint {
+                        info!(%conn, "bypassed waypoint");
+                        return Ok(Response::builder()
+                            .status(StatusCode::UNAUTHORIZED)
+                            .body(Body::empty())
+                            .unwrap());
+                    }
+                }
+                let status_code = match Self::handle_inbound(Hbone(req), addr)
                     .instrument(tracing::span::Span::current())
                     .await
                 {

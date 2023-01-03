@@ -410,8 +410,10 @@ impl WorkloadInformation {
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
-                debug!("deny policy match");
+                debug!(policy = pol.to_key(), "deny policy match");
                 return false;
+            } else {
+                trace!(policy = pol.to_key(), "deny policy does not match");
             }
         }
         // "If there are no ALLOW policies for the workload, allow the request."
@@ -422,8 +424,10 @@ impl WorkloadInformation {
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
-                debug!("allow policy match");
+                debug!(policy = pol.to_key(), "allow policy match");
                 return true;
+            } else {
+                trace!(policy = pol.to_key(), "allow policy does not match");
             }
         }
         // "Deny the request."
