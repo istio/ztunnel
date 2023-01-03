@@ -130,6 +130,9 @@ pub enum Error {
     #[error("http handshake failed: {0}")]
     HttpHandshake(#[source] hyper::Error),
 
+    #[error("dropped")]
+    Dropped,
+
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
 
@@ -147,6 +150,9 @@ pub enum Error {
 
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
+
+    #[error("{0}")]
+    Generic(Box<dyn std::error::Error + Send + Sync>),
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
