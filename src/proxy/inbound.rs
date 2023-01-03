@@ -88,8 +88,6 @@ impl Inbound {
             };
             let workloads = self.workloads.clone();
             async move {
-                let conn = conn.clone();
-                let workloads = workloads.clone();
                 Ok::<_, hyper::Error>(service_fn(move |req| {
                     Self::serve_connect(workloads.clone(), conn.clone(), req)
                 }))
