@@ -457,6 +457,7 @@ mod tests {
 
     #[test]
     fn rbac_empty_policy() {
+        assert!(!allow_policy("empty".to_string(), vec![vec![vec![RbacMatch{..Default::default()}]]]).matches(&plaintext_conn()));
         assert!(allow_policy("empty".to_string(), vec![vec![vec![]]]).matches(&plaintext_conn()));
         assert!(allow_policy("empty".to_string(), vec![vec![]]).matches(&plaintext_conn()));
         assert!(!allow_policy("empty".to_string(), vec![]).matches(&plaintext_conn()));
