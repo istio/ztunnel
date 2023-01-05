@@ -17,6 +17,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::ops::Add;
 use std::str::FromStr;
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use hyper::{Body, Client, Method, Request};
@@ -25,12 +26,14 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
+use tracing::info;
 use tracing::{error, trace};
 
 use ztunnel::identity::mock::MockCaClient;
 use ztunnel::identity::CertificateProvider;
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::tcp::HboneTestServer;
 use ztunnel::test_helpers::*;
 use ztunnel::{config, identity};
@@ -479,4 +482,31 @@ async fn admin_shutdown(addr: SocketAddr) {
     let client = Client::new();
     let resp = client.request(req).await.expect("admin shutdown request");
     assert_eq!(resp.status(), hyper::StatusCode::OK);
+}
+
+#[test]
+fn test_netns() {
+    initialize_telemetry();
+    let client = thread::spawn(|| {
+        let _client = netns_rs::NetNs::new("client").unwrap();
+    });
+    let server = thread::spawn(|| {
+        let server = netns_rs::NetNs::new("server").unwrap();
+        server
+            .run(|_| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+                    let echo_addr = echo.address();
+                    info!("running at {echo_addr}");
+                    echo.run().await
+                })
+            })
+            .unwrap();
+    });
+    client.join().unwrap();
+    server.join().unwrap();
 }

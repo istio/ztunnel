@@ -87,5 +87,7 @@ incremental = true
 [dev-dependencies]
 criterion = { version = "0.4.0", features = ["async_tokio", "html_reports"] }
 matches = "0.1.9"
+netns-rs = "0.1.0"
+rtnetlink = "0.11.0"
 test-case = "2.2.2"
 #debug = true
