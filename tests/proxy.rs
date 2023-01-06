@@ -14,11 +14,15 @@
 
 use std::fmt::Debug;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Add;
+use std::process::Command;
 use std::str::FromStr;
-use std::thread;
+use std::sync::mpsc::SyncSender;
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
+use std::{sync, thread};
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,6 +32,7 @@ use tokio::time;
 use tokio::time::timeout;
 use tracing::info;
 use tracing::{error, trace};
+use ztunnel::identity;
 
 use ztunnel::identity::mock::MockCaClient;
 use ztunnel::identity::CertificateProvider;
@@ -484,9 +489,139 @@ async fn admin_shutdown(addr: SocketAddr) {
     assert_eq!(resp.status(), hyper::StatusCode::OK);
 }
 
+struct NamespaceManager {
+    prefix: String,
+    namespaces: u8,
+    // namespaces: Vec<netns_rs::NetNs>,
+}
+
+impl NamespaceManager {
+    pub fn new(prefix: &str) -> anyhow::Result<Self> {
+        let _ = netns_rs::NetNs::new(prefix)?;
+        Ok(Self {
+            prefix: prefix.to_string(),
+            namespaces: 1,
+            // namespaces: vec![netns_rs::NetNs::new(prefix)?],
+        })
+    }
+
+    pub fn attach<F, Fut, O>(&mut self, f: F) -> anyhow::Result<(JoinHandle<()>, O)>
+    where
+        F: FnOnce(IpAddr, SyncSender<O>) -> Fut + Send + 'static,
+        Fut: Future<Output = ()>,
+        O: Send + 'static,
+    {
+        let next = self.namespaces;
+        assert!(next <= 255, "only 255 networks allowed");
+        let prefix = &self.prefix;
+        let veth = format!("veth{next}");
+        let net = format!("{}_inner_{next}", self.prefix);
+        let addr = format!("10.0.{next}.1");
+        let ip = addr.parse()?;
+        let netns = netns_rs::NetNs::new(net.clone())?;
+        self.namespaces += 1;
+        // self.namespaces.push(netns);
+        Self::run(&format!(
+            "
+ip -n {prefix} link add {veth} type veth peer name eth0 netns {net}
+ip -n {prefix} link set dev {veth} up
+ip -n {prefix} addr add 10.0.0.1 dev {veth}
+ip -n {prefix} route add {addr} dev {veth} scope host
+
+ip -n {net} link set dev lo up
+ip -n {net} link set dev eth0 up
+ip -n {net} addr add {addr}/16 dev eth0
+ip -n {net} route add default via 10.0.0.1
+ip -n {net} route add 10.0.0.1 dev eth0 scope link src {addr}
+ip -n {net} route del 10.0.0.0/16 # remove auto-kernel route
+ip -n {net} route add 10.0.0.0/16 via 10.0.0.1 src {addr}
+"
+        ))?;
+        let (tx, rx) = sync::mpsc::sync_channel::<O>(0);
+        // Change network namespaces changes the entire thread, so we want to run each network in its own thread
+        let j = thread::spawn(move || {
+            netns
+                .run(|n| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    rt.block_on(f(ip, tx))
+                })
+                .unwrap()
+        });
+        Ok((j, rx.recv().unwrap()))
+    }
+
+    fn run(cmd: &str) -> anyhow::Result<()> {
+        info!("running command {cmd}");
+        let output = Command::new("sh").arg("-c").arg(cmd).output()?;
+        info!(
+            "complete! code={}, stdout={}, stderr={}",
+            output.status,
+            std::str::from_utf8(&output.stdout)?,
+            std::str::from_utf8(&output.stdout)?
+        );
+        println!("status: {}", output.status);
+        std::io::stdout().write_all(&output.stdout).unwrap();
+        std::io::stderr().write_all(&output.stderr).unwrap();
+        Ok(())
+    }
+}
+
 #[test]
 fn test_netns() {
     initialize_telemetry();
+    let mut namespaces = NamespaceManager::new("outer").unwrap();
+    let (sh, echo_addr) = namespaces
+        .attach(|ip, ready| async move {
+            let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+            let echo_addr = helpers::with_ip(echo.address(), ip);
+            info!("running in namespace 1..");
+            ready.send(echo_addr).unwrap();
+            info!("sent address {echo_addr}");
+            echo.run().await;
+        })
+        .unwrap();
+    let (zh, app) = namespaces
+        .attach(move |ip, ready| async move {
+            info!("running in namespace 2 (ztunnel, {ip})..");
+            let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
+            let app = ztunnel::app::build_with_cert(test_config(), cert_manager).await.unwrap();
+
+            let ta = TestApp {
+                admin_address: app.admin_address,
+                proxy_addresses: app.proxy_addresses,
+                readiness_address: app.readiness_address,
+            };
+            info!("initialized");
+            ta.ready().await;
+            info!("ready");
+            ready.send(ta).unwrap();
+
+            app.wait_termination().await.unwrap();
+            info!("terminated");
+        })
+        .unwrap();
+    info!("got address {echo_addr}");
+    let (ch, _) = namespaces
+        .attach(move |_ip, ready| async move {
+            info!("running in namespace 3.. {echo_addr}");
+            let mut stream = TcpStream::connect(echo_addr).await.unwrap();
+            info!("connected");
+            read_write_stream(&mut stream).await;
+            info!("r/w");
+            ready.send(()).unwrap();
+            info!("client sent.");
+        })
+        .unwrap();
+    ch.join();
+    info!("client done");
+    // sh.join(); // No need to wait for server
+    return;
+    netns_rs::NetNs::new("outer").unwrap();
+    netns_rs::NetNs::new("outer").unwrap();
+    netns_rs::NetNs::new("outer").unwrap();
     let client = thread::spawn(|| {
         let _client = netns_rs::NetNs::new("client").unwrap();
     });
