@@ -204,22 +204,7 @@ pub fn metrics(c: &mut Criterion) {
         b.iter(|| {
             metrics.record(&ConnectionOpen {
                 reporter: Default::default(),
-                source: Workload {
-                    workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-                    waypoint_addresses: Default::default(),
-                    gateway_address: Default::default(),
-                    protocol: Default::default(),
-                    name: Default::default(),
-                    namespace: Default::default(),
-                    service_account: Default::default(),
-                    workload_name: Default::default(),
-                    workload_type: Default::default(),
-                    canonical_name: Default::default(),
-                    canonical_revision: Default::default(),
-                    node: Default::default(),
-                    native_hbone: Default::default(),
-                    authorization_policies: Default::default(),
-                },
+                source: test_helpers::test_default_workload(),
                 destination: None,
                 destination_service: None,
                 connection_security_policy: Default::default(),

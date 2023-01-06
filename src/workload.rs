@@ -678,6 +678,7 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use bytes::Bytes;
+    use crate::test_helpers;
 
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;
@@ -764,23 +765,6 @@ mod tests {
 
     #[test]
     fn workload_information() {
-        let default = Workload {
-            workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            waypoint_addresses: Vec::new(),
-            gateway_address: None,
-            protocol: Default::default(),
-            name: "".to_string(),
-            namespace: "".to_string(),
-            service_account: "default".to_string(),
-            workload_name: "".to_string(),
-            workload_type: "deployment".to_string(),
-            canonical_name: "".to_string(),
-            canonical_revision: "".to_string(),
-            node: "".to_string(),
-
-            authorization_policies: Default::default(),
-            native_hbone: false,
-        };
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
@@ -801,7 +785,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default.clone()
+                ..test_helpers::test_default_workload()
             })
         );
 
@@ -811,7 +795,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default.clone()
+                ..test_helpers::test_default_workload()
             })
         );
 
@@ -821,7 +805,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default
+                ..test_helpers::test_default_workload()
             })
         );
 

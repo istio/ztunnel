@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv6Addr};
+use std::time::Duration;
 use std::{cmp, io};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use hyper::service::{make_service_fn, service_fn};
+use hyper::{Body, Response, Server};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
+
+use crate::{identity, tls};
 
 #[derive(Copy, Clone, Debug)]
 pub enum Mode {
@@ -96,32 +102,95 @@ impl TestServer {
             let (mut socket, _) = self.listener.accept().await.unwrap();
 
             tokio::spawn(async move {
-                match self.mode {
-                    Mode::ReadWrite => {
-                        let (mut r, mut w) = socket.split();
-                        let mut r = tokio::io::BufReader::with_capacity(BUFFER_SIZE, &mut r);
-                        tokio::io::copy_buf(&mut r, &mut w).await.expect("tcp copy");
-                    }
-                    Mode::Write => {
-                        let buffer = vec![0; BUFFER_SIZE];
-                        loop {
-                            let read = socket.write(&buffer).await.expect("tcp ready");
-                            if read == 0 {
-                                break;
-                            }
-                        }
-                    }
-                    Mode::Read => {
-                        let mut buffer = vec![0; BUFFER_SIZE];
-                        loop {
-                            let read = socket.read(&mut buffer).await.expect("tcp ready");
-                            if read == 0 {
-                                break;
-                            }
-                        }
-                    }
-                }
+                let (mut r, mut w) = socket.split();
+                handle_stream(self.mode, &mut r, &mut w).await;
             });
         }
+    }
+}
+
+pub async fn handle_stream<R, W>(mode: Mode, r: &mut R, w: &mut W)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    match mode {
+        Mode::ReadWrite => {
+            let mut r = tokio::io::BufReader::with_capacity(BUFFER_SIZE, r);
+            tokio::io::copy_buf(&mut r, w).await.expect("tcp copy");
+        }
+        Mode::Write => {
+            let buffer = vec![0; BUFFER_SIZE];
+            loop {
+                let read = w.write(&buffer).await.expect("tcp ready");
+                if read == 0 {
+                    break;
+                }
+            }
+        }
+        Mode::Read => {
+            let mut buffer = vec![0; BUFFER_SIZE];
+            loop {
+                let read = r.read(&mut buffer).await.expect("tcp ready");
+                if read == 0 {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+pub struct HboneTestServer {
+    listener: TcpListener,
+    mode: Mode,
+}
+
+impl HboneTestServer {
+    pub async fn new(mode: Mode) -> Self {
+        let addr = SocketAddr::new("127.0.0.9".parse().unwrap(), 15008);
+        let listener = TcpListener::bind(addr).await.unwrap();
+        Self { listener, mode }
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.listener.local_addr().unwrap()
+    }
+
+    pub async fn run(self) {
+        let certs = tls::generate_test_certs(
+            &identity::Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "default".to_string(),
+                service_account: "default".to_string(),
+            }
+            .into(),
+            Duration::from_secs(0),
+            Duration::from_secs(100),
+        );
+        let acceptor = tls::ControlPlaneCertProvider(certs);
+        let tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
+        let incoming = hyper::server::accept::from_stream(tls_stream);
+        let mode = self.mode;
+        Server::builder(incoming)
+            .http2_only(true)
+            .serve(make_service_fn(|_| async move {
+                let mode = mode.clone();
+                Ok::<_, Infallible>(service_fn(move |req| async move {
+                    info!("waypoint: received request");
+                    let mode = mode.clone();
+                    tokio::task::spawn(async move {
+                        match hyper::upgrade::on(req).await {
+                            Ok(mut upgraded) => {
+                                let (mut ri, mut wi) = tokio::io::split(upgraded);
+                                handle_stream(mode, &mut ri, &mut wi).await;
+                            }
+                            Err(e) => error!("No upgrade {e}"),
+                        }
+                    });
+                    Ok::<_, Infallible>(Response::new(Body::from("streaming...")))
+                }))
+            }))
+            .await
+            .unwrap();
     }
 }

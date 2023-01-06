@@ -26,10 +26,12 @@ use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
 use tracing::trace;
+use ztunnel::config;
 
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::*;
+use ztunnel::test_helpers::tcp::HboneTestServer;
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
@@ -176,44 +178,61 @@ async fn test_quit_lifecycle() {
 }
 
 #[track_caller]
-async fn run_request_test(target: &str) {
+async fn run_request_test(target: &str, node: &str) {
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
     let echo_addr = echo.address();
+    let cfg = config::Config{
+        local_node: (!node.is_empty()).then(|| node.to_string()),
+        ..test_config_with_port(echo_addr.port())
+    };
     tokio::spawn(echo.run());
-    testapp::with_app(test_config_with_port(echo_addr.port()), |app| async move {
+    testapp::with_app(cfg, |app| async move {
         let dst = SocketAddr::from_str(target)
             .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
         let mut stream = app.socks5_connect(dst).await;
         read_write_stream(&mut stream).await;
     })
     .await;
-    testapp::with_app(
-        test_config_with_port_and_node(echo_addr.port(), Some(String::from("local"))),
-        |app| async move {
-            let dst = SocketAddr::from_str(target)
-                .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
-            let mut stream = app.socks5_connect(dst).await;
-            read_write_stream(&mut stream).await;
-        },
-    )
-    .await;
 }
 
 #[tokio::test]
 async fn test_hbone_request() {
-    run_request_test(TEST_WORKLOAD_HBONE).await;
+    run_request_test(TEST_WORKLOAD_HBONE, "").await;
 }
 
 #[tokio::test]
 async fn test_tcp_request() {
-    run_request_test(TEST_WORKLOAD_TCP).await;
+    run_request_test(TEST_WORKLOAD_TCP, "").await;
 }
 
 #[tokio::test]
 async fn test_vip_request() {
-    run_request_test(&format!("{TEST_VIP}:80")).await;
+    run_request_test(&format!("{TEST_VIP}:80"), "").await;
 }
+
+#[tokio::test]
+async fn test_hbone_request_local() {
+    run_request_test(TEST_WORKLOAD_HBONE, "local").await;
+}
+
+#[tokio::test]
+async fn test_tcp_request_local() {
+    run_request_test(TEST_WORKLOAD_TCP, "local").await;
+}
+
+#[tokio::test]
+async fn test_vip_request_local() {
+    run_request_test(&format!("{TEST_VIP}:80"), "local").await;
+}
+
+#[tokio::test]
+async fn test_waypoint() {
+    let waypoint = HboneTestServer::new(tcp::Mode::ReadWrite).await;
+    tokio::spawn(waypoint.run());
+    run_request_test(TEST_WORKLOAD_WAYPOINT, "").await;
+}
+
 
 #[tokio::test]
 async fn test_stats_exist() {
