@@ -29,5 +29,4 @@ pub mod workload;
 pub mod xds;
 
 pub mod hyper_util;
-pub mod prost_serde;
 pub mod test_helpers;

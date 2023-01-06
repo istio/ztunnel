@@ -306,8 +306,6 @@ fn node(&self) -> Node {
     let ns = ns.as_deref().unwrap_or("");
     let node = std::env::var("NODE_NAME");
     let node = node.as_deref().unwrap_or("");
-        let ambient_type = std::env::var("AMBIENT_TYPE");
-        let ambient_type = ambient_type.as_deref().unwrap_or("");
         let mut metadata = Self::build_struct([
             ("NAME", pod_name),
             ("NAMESPACE", ns),

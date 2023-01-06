@@ -22,10 +22,8 @@ use std::time::Duration;
 use anyhow::anyhow;
 use bytes::Bytes;
 use tokio::time;
-use tracing::warn;
 
 use crate::identity;
-use crate::xds::istio::mesh::{MeshConfig, ProxyConfig};
 
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
@@ -38,9 +36,9 @@ const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
-const DEFAULT_WORKER_THREADS: i32 = 2;
-const DEFAULT_ADMIN_PORT: i32 = 15021;
-const DEFAULT_STATUS_PORT: i32 = 15020;
+const DEFAULT_WORKER_THREADS: u16 = 2;
+const DEFAULT_ADMIN_PORT: u16 = 15021;
+const DEFAULT_STATUS_PORT: u16 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
@@ -156,20 +154,27 @@ pub fn parse_config() -> Result<Config, Error> {
 
 fn parse_proxy_config() -> Result<ProxyConfig, Error> {
     let mesh_config_path = "./etc/istio/config/mesh";
-    let pc_env = parse::<String>("PROXY_CONFIG")?;
+    let pc_env = parse::<String>(PROXY_CONFIG)?;
     let pc_env = pc_env.as_deref();
     construct_proxy_config(mesh_config_path, pc_env).map_err(Error::ProxyConfig)
 }
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
-    let xds_address =
-        Some(parse_default(XDS_ADDRESS, pc.discovery_address.clone())?).filter(|s| !s.is_empty());
+    let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
+        "https://istiod.istio-system.svc:15012".to_string()
+    } else {
+        "https://localhost:15012".to_string()
+    };
+
+    let xds_address = parse(XDS_ADDRESS)?
+        .or(pc.discovery_address)
+        .or_else(|| Some(default_istiod_address.clone()));
 
     let fake_ca = parse_default(FAKE_CA, false)?;
     let ca_address = if fake_ca {
         None
     } else {
-        Some(parse_default(CA_ADDRESS, pc.discovery_address)?)
+        Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     };
 
     Ok(Config {
@@ -177,28 +182,19 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
 
-        termination_grace_period: parse_default(
-            TERMINATION_GRACE_PERIOD,
-            GoDuration(
-                pc.termination_drain_duration
-                    .map(|v| v.try_into().unwrap())
-                    .unwrap_or(DEFAULT_DRAIN_DURATION),
-            ),
-        )?
-        .0,
+        termination_grace_period: parse(TERMINATION_GRACE_PERIOD)?
+            .map(|gd: GoDuration| gd.0)
+            .or(pc.termination_drain_duration)
+            .unwrap_or(DEFAULT_DRAIN_DURATION),
 
         // admin API should only be accessible over localhost
         admin_addr: SocketAddr::new(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            pc.proxy_admin_port
-                .try_into()
-                .expect("proxy_admin_port is a valid port number"),
+            pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
         ),
         readiness_addr: SocketAddr::new(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            pc.status_port
-                .try_into()
-                .expect("status_port is a valid port number"),
+            pc.status_port.unwrap_or(DEFAULT_STATUS_PORT),
         ),
 
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
@@ -233,25 +229,43 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     })
 }
 
-pub fn default_proxy_config() -> ProxyConfig {
-    ProxyConfig {
-        proxy_admin_port: DEFAULT_ADMIN_PORT,
-        status_port: DEFAULT_STATUS_PORT,
-        concurrency: Some(DEFAULT_WORKER_THREADS),
-        discovery_address: if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
-            "https://istiod.istio-system.svc:15012".to_string()
-        } else {
-            "https://localhost:15012".to_string()
-        },
-        termination_drain_duration: Some(DEFAULT_DRAIN_DURATION.try_into().unwrap()),
-        ..Default::default()
+#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshConfig {
+    pub default_config: Option<ProxyConfig>,
+}
+
+#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyConfig {
+    pub discovery_address: Option<String>,
+    pub proxy_admin_port: Option<u16>,
+    pub status_port: Option<u16>,
+    pub concurrency: ::core::option::Option<u16>,
+    pub termination_drain_duration: Option<time::Duration>,
+    pub proxy_metadata: std::collections::HashMap<String, String>,
+}
+
+impl ProxyConfig {
+    fn merge(mut self, other: Self) -> Self {
+        self.discovery_address = other
+            .discovery_address
+            .or_else(|| self.discovery_address.clone());
+        self.proxy_admin_port = other.proxy_admin_port.or(self.proxy_admin_port);
+        self.status_port = other.status_port.or(self.status_port);
+        self.concurrency = other.concurrency.or(self.concurrency);
+        self.proxy_metadata.extend(other.proxy_metadata);
+        self.termination_drain_duration = other
+            .termination_drain_duration
+            .or(self.termination_drain_duration);
+        self
     }
 }
 
 fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result<ProxyConfig> {
-    let mesh_config: Option<serde_yaml::Value> = match fs::File::open(mc_path) {
+    let mesh_config = match fs::File::open(mc_path) {
         Ok(f) => serde_yaml::from_reader(f)
-            .map(Some)
+            .map(|v: MeshConfig| v.default_config)
             .map_err(anyhow::Error::new),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -262,13 +276,8 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
         }
     }
     .map_err(|e| anyhow!("failed parsing mesh config file {}: {}", mc_path, e))?;
-    let mesh_config = if let Some(mesh_config) = &mesh_config {
-        mesh_config.get("defaultConfig").cloned()
-    } else {
-        None
-    };
 
-    let proxy_config_env: Option<serde_yaml::Value> = pc_env
+    let proxy_config_env = pc_env
         .map(|pc_env| {
             if pc_env.is_empty() {
                 Ok(None)
@@ -279,52 +288,32 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
         .unwrap_or(Ok(None))
         .map_err(|e| anyhow!("failed parsing proxy config env: {}", e))?;
 
-    let yaml = match (mesh_config, proxy_config_env) {
-        (Some(mut mc), Some(pc_env)) => {
-            merge_yaml(&mut mc, pc_env);
-            Some(mc)
-        }
-        (Some(mc), None) => Some(mc),
-        (None, Some(pc_env)) => Some(pc_env),
-        (None, None) => None,
-    };
+    let mut pc = [mesh_config, proxy_config_env]
+        .into_iter()
+        .flatten()
+        .fold(ProxyConfig::default(), |pc, v| pc.merge(v));
 
-    if let Some(yaml) = yaml {
-        serde_yaml::from_value(yaml).map_err(anyhow::Error::new)
-    } else {
-        Ok(default_proxy_config())
-    }
-}
+    // only include ISTIO_META_ prefixed fields in this map
+    // TODO we could use any other items here for the various env vars for construct_config?
+    // https://istio.io/latest/docs/reference/config/istio.mesh.v1alpha1/#:~:text=Additional%20environment%20variables
+    pc.proxy_metadata = pc
+        .proxy_metadata
+        .into_iter()
+        .filter_map(|(k, v)| Some((k.strip_prefix("")?.to_string(), v)))
+        .collect();
 
-fn merge_yaml(a: &mut serde_yaml::Value, b: serde_yaml::Value) {
-    match (a, b) {
-        (a @ &mut serde_yaml::Value::Mapping(_), serde_yaml::Value::Mapping(b)) => {
-            let a = a.as_mapping_mut().unwrap();
-            for (k, v) in b {
-                if v.is_sequence() && a.contains_key(&k) && a[&k].is_sequence() {
-                    let mut _b = a.get(&k).unwrap().as_sequence().unwrap().to_owned();
-                    _b.append(&mut v.as_sequence().unwrap().to_owned());
-                    a[&k] = serde_yaml::Value::from(_b);
-                    continue;
-                }
-                if !a.contains_key(&k) {
-                    a.insert(k.to_owned(), v.to_owned());
-                } else {
-                    merge_yaml(&mut a[&k], v);
-                }
-            }
-        }
-        (a, b) => *a = b,
-    }
+    Ok(pc)
 }
 
 #[cfg(test)]
 pub mod tests {
-    use super::{construct_config, construct_proxy_config, default_proxy_config};
-    use crate::xds::istio::mesh::ProxyConfig;
+    use super::*;
 
     #[test]
     fn config_from_proxyconfig() {
+        let default_config = construct_config(ProxyConfig::default())
+            .expect("could not build Config without ProxyConfig");
+
         // mesh config only
         let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
         let pc = construct_proxy_config(mesh_config_path, None).unwrap();
@@ -349,11 +338,14 @@ pub mod tests {
         let cfg = construct_config(pc).unwrap();
         assert_eq!(
             cfg.readiness_addr.port(),
-            default_proxy_config().status_port as u16
+            default_config.readiness_addr.port()
         );
         assert_eq!(cfg.xds_address.unwrap(), "istiod-rev0.istio-system-2:15012");
         assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOOBAR"], "foobar-overwritten");
+        assert_eq!(
+            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
+            "foobar-overwritten"
+        );
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
@@ -362,13 +354,9 @@ pub mod tests {
         assert_eq!(cfg.admin_addr.port(), 15999);
         assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
         assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOOBAR"], "foobar-overwritten");
-    }
-
-    #[test]
-    fn test_default_from_yaml() {
-        // this is sort of "testing a library" but it's nice to check it does what we expect
-        let from_yaml: ProxyConfig = serde_yaml::from_value(serde_yaml::Value::Null).unwrap();
-        assert_eq!(default_proxy_config().status_port, from_yaml.status_port);
+        assert_eq!(
+            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
+            "foobar-overwritten"
+        );
     }
 }
