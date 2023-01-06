@@ -302,6 +302,9 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
         .filter_map(|(k, v)| Some((k.strip_prefix("")?.to_string(), v)))
         .collect();
 
+    // TODO if certain fields like trustDomainAliases are added, make sure they merge like:
+    // https://github.com/istio/istio/blob/bdd47796d696ea5db604b623c51567d13ff7c11b/pkg/config/mesh/mesh.go#L244
+
     Ok(pc)
 }
 
