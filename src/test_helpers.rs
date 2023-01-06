@@ -27,11 +27,19 @@ pub mod ca;
 pub mod helpers;
 pub mod tcp;
 
+pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {
+    config::Config {
+        local_xds_config: Some(ConfigSource::Static(
+            local_xds_config(80, Some(addr)).unwrap(),
+        )),
+        ..test_config()
+    }
+}
 pub fn test_config_with_port(port: u16) -> config::Config {
     config::Config {
         xds_address: None,
         fake_ca: true,
-        local_xds_config: Some(ConfigSource::Static(local_xds_config(port).unwrap())),
+        local_xds_config: Some(ConfigSource::Static(local_xds_config(port, None).unwrap())),
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -75,9 +83,8 @@ pub fn test_default_workload() -> Workload {
     }
 }
 
-fn local_xds_config(echo_port: u16) -> anyhow::Result<Bytes> {
-    let mut b = bytes::BytesMut::new().writer();
-    let res: Vec<LocalWorkload> = vec![
+fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Result<Bytes> {
+    let mut res: Vec<LocalWorkload> = vec![
         LocalWorkload {
             workload: Workload {
                 workload_ip: TEST_WORKLOAD_HBONE.parse()?,
@@ -114,7 +121,9 @@ fn local_xds_config(echo_port: u16) -> anyhow::Result<Bytes> {
             },
             vips: Default::default(),
         },
-        LocalWorkload {
+    ];
+    if let Some(waypoint_ip) = waypoint_ip {
+        res.push(LocalWorkload {
             workload: Workload {
                 workload_ip: TEST_WORKLOAD_WAYPOINT.parse()?,
                 protocol: HBONE,
@@ -122,16 +131,17 @@ fn local_xds_config(echo_port: u16) -> anyhow::Result<Bytes> {
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
                 node: "local".to_string(),
-                waypoint_addresses: vec!["127.0.0.9".parse().unwrap()],
+                waypoint_addresses: vec![waypoint_ip],
                 ..test_default_workload()
             },
             vips: Default::default(),
-        },
-    ];
+        })
+    }
     let lc = LocalConfig {
         workloads: res,
         policies: vec![],
     };
+    let mut b = bytes::BytesMut::new().writer();
     serde_yaml::to_writer(&mut b, &lc)?;
     Ok(b.into_inner().freeze())
 }

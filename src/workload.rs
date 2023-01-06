@@ -677,8 +677,8 @@ pub enum WorkloadError {
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    use bytes::Bytes;
     use crate::test_helpers;
+    use bytes::Bytes;
 
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;

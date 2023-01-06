@@ -20,6 +20,7 @@ use std::{cmp, io};
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Response, Server};
+use rand::Rng;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
@@ -140,6 +141,8 @@ where
     }
 }
 
+/// HboneTestServer is like TestServer but listens over HBONE. Unlike the plain TCP test server, it will
+/// always write "waypoint/n" to allow tests to assert they reached the HBONE server.
 pub struct HboneTestServer {
     listener: TcpListener,
     mode: Mode,
@@ -147,9 +150,19 @@ pub struct HboneTestServer {
 
 impl HboneTestServer {
     pub async fn new(mode: Mode) -> Self {
-        let addr = SocketAddr::new("127.0.0.9".parse().unwrap(), 15008);
-        let listener = TcpListener::bind(addr).await.unwrap();
-        Self { listener, mode }
+        // Waypoints are assumed to always run on 15008, but we need to have a unique ip:port
+        // Linux doesn't offer a way to pick a random free ip, so we iterate until we find an open one
+        let mut rng = rand::thread_rng();
+        for _ in 0..1000 {
+            // lo has 127.0.0.1/8, so we will generate 2 u8's. That is enough to give us 65k
+            let attempt = SocketAddr::new(IpAddr::from([127, 137, rng.gen(), rng.gen()]), 15008);
+            let Ok(listener) = TcpListener::bind(attempt).await else {
+                // Try again...
+                continue
+            };
+            return Self { listener, mode };
+        }
+        panic!("failed to find a free IP after 1000 attempts");
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -174,14 +187,16 @@ impl HboneTestServer {
         Server::builder(incoming)
             .http2_only(true)
             .serve(make_service_fn(|_| async move {
-                let mode = mode.clone();
+                let mode = mode;
                 Ok::<_, Infallible>(service_fn(move |req| async move {
                     info!("waypoint: received request");
-                    let mode = mode.clone();
+                    let mode = mode;
                     tokio::task::spawn(async move {
                         match hyper::upgrade::on(req).await {
-                            Ok(mut upgraded) => {
+                            Ok(upgraded) => {
                                 let (mut ri, mut wi) = tokio::io::split(upgraded);
+                                // Signal we are the waypoint so tests can validate this
+                                wi.write_all(b"waypoint\n").await.unwrap();
                                 handle_stream(mode, &mut ri, &mut wi).await;
                             }
                             Err(e) => error!("No upgrade {e}"),

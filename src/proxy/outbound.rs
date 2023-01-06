@@ -201,7 +201,7 @@ impl OutboundConnection {
                 let id = &req.source.identity();
                 let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
-                    .connector(&req.destination_workload.map(|w| w.identity()))?
+                    .connector(req.destination_workload.map(|w| w.identity()).as_ref())?
                     .configure()
                     .expect("configure");
                 let tcp_stream = TcpStream::connect(req.gateway).await?;
@@ -379,7 +379,7 @@ enum RequestType {
     Passthrough,
 }
 
-async fn connect_tls(
+pub async fn connect_tls(
     mut connector: ConnectConfiguration,
     stream: TcpStream,
 ) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {

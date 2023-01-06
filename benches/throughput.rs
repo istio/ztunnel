@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +33,7 @@ use ztunnel::metrics::Recorder;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::{helpers, tcp};
-use ztunnel::workload::Workload;
+
 use ztunnel::{app, identity, test_helpers};
 
 const KB: usize = 1024;
@@ -61,9 +61,8 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
         .unwrap();
     // Global setup: spin up an echo server and ztunnel instance
     let (env, _) = rt.block_on(async move {
-        // let mut env = async_global_setup(|| async move {
         let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
-        let app = app::build_with_cert(test_helpers::test_config(), cert_manager)
+        let app = app::build_with_cert(test_helpers::test_config(), cert_manager.clone())
             .await
             .unwrap();
 
@@ -71,6 +70,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
             admin_address: app.admin_address,
             proxy_addresses: app.proxy_addresses,
             readiness_address: app.readiness_address,
+            cert_manager,
         };
         ta.ready().await;
         let echo = tcp::TestServer::new(mode).await;
