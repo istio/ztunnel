@@ -610,24 +610,3 @@ pub enum AdsError {
     MissingResource(),
 }
 
-// struct StructWrapper(Struct);
-//
-// impl<const N: usize> From<[(&str, &str); N]> for StructWrapper {
-//     fn from(a: [(&str, &str); N]) -> Self {
-//         let fields = BTreeMap::from(a.map(|(k, v)| {
-//             (
-//                 k.to_string(),
-//                 Value {
-//                     kind: Some(Kind::StringValue(v.to_string())),
-//                 },
-//             )
-//         }));
-//         StructWrapper(Struct{fields})
-//     }
-// }
-//
-// impl From<StructWrapper> for Struct {
-//     fn from(wrapper: StructWrapper) -> Self {
-//        wrapper.0
-//     }
-// }

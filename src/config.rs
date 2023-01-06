@@ -151,7 +151,8 @@ fn parse_args() -> String {
 
 pub fn parse_config() -> Result<Config, Error> {
     let mesh_config_path = "./etc/istio/config/mesh";
-    let pc = construct_proxy_config(mesh_config_path).map_err(Error::Other)?;
+    let pc_env = parse::<String>("PROXY_CONFIG")?;
+    let pc = construct_proxy_config(mesh_config_path, pc_env.as_deref()).map_err(Error::Other)?;
     construct_config(pc)
 }
 
@@ -242,45 +243,47 @@ pub fn default_proxy_config() -> ProxyConfig {
     }
 }
 
-fn construct_proxy_config(mesh_config_path: &str) -> anyhow::Result<ProxyConfig> {
-    let mesh_config: anyhow::Result<serde_yaml::Value> = fs::File::open(mesh_config_path)
-        .map_err(anyhow::Error::new)
-        .and_then(|f| serde_yaml::from_reader(f).map_err(anyhow::Error::new));
-
-    let proxy_config_env: anyhow::Result<serde_yaml::Value> =
-        parse_default::<String>(PROXY_CONFIG, "".to_string())
-            .map_err(anyhow::Error::new)
-            .and_then(|env_str| serde_yaml::from_str(&env_str).map_err(anyhow::Error::new));
+fn construct_proxy_config(
+    mesh_config_path: &str,
+    pc_env: Option<&str>,
+) -> anyhow::Result<ProxyConfig> {
+    let mesh_config:Option<serde_yaml::Value> = match fs::File::open(mesh_config_path) {
+        Ok(f) => serde_yaml::from_reader(f)
+            .map(Some)
+            .map_err(anyhow::Error::new),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(anyhow!(e))
+            }
+        }
+    }?;
+    let proxy_config_env = pc_env.map(serde_yaml::from_str).unwrap_or(Ok(None))?;
 
     let yaml = match (mesh_config, proxy_config_env) {
-        (Ok(mc), Ok(pc_env)) => {
+        (Some(mc), Some(pc_env)) => {
             let mut mc = mc
                 .get("defaultConfig")
                 .unwrap_or(&serde_yaml::Value::Null)
                 .clone();
             merge_yaml(&mut mc, pc_env);
-            Ok(mc)
+            Some(mc)
         }
-        (Ok(mc), Err(_)) => Ok(mc
-            .get("defaultConfig")
-            .unwrap_or(&serde_yaml::Value::Null)
-            .clone()),
-        (Err(_), Ok(pc_env)) => Ok(pc_env),
-        (Err(mc), Err(pc_env)) => Err(anyhow!("neither parsed: {mc}; {pc_env}")),
+        (Some(mc), None) => Some(
+            mc.get("defaultConfig")
+                .unwrap_or(&serde_yaml::Value::Null)
+                .clone(),
+        ),
+        (None, Some(pc_env)) => Some(pc_env),
+        (None, None) => None,
     };
-
-    let pc = match yaml {
-        Ok(yaml) => serde_yaml::from_value(yaml).map_err(anyhow::Error::new)?,
-        Err(e) => {
-            warn!("{}", e);
-            default_proxy_config()
-        }
-    };
-
-    // TODO add all env with ISTIO_META_ prefix
-    // TODO remove ISTIO_META_ prefix from proxy_metadata
-
-    Ok(pc)
+    
+    if let Some(yaml) = yaml {
+        serde_yaml::from_value(yaml).map_err(anyhow::Error::new)
+    } else {
+        Ok(default_proxy_config())
+    }
 }
 
 fn merge_yaml(a: &mut serde_yaml::Value, b: serde_yaml::Value) {
@@ -314,7 +317,7 @@ pub mod tests {
     fn config_from_proxyconfig() {
         // mesh config only
         let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
-        let pc = construct_proxy_config(mesh_config_path).unwrap();
+        let pc = construct_proxy_config(mesh_config_path, None).unwrap();
         let cfg = construct_config(pc).unwrap();
         assert_eq!(cfg.readiness_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15099);
@@ -322,12 +325,13 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "bar");
 
         // env only
-        let pc_env = "{ \
-            \"discoveryAddress\": \"istiod-rev0.istio-system-2:15012\", \
-            \"proxyAdminPort\": 15999 \
-        }";
-        std::env::set_var("PROXY_CONFIG", pc_env);
-        let pc = construct_proxy_config("").unwrap();
+        let pc_env = Some(
+            r#"{ 
+            "discoveryAddress": "istiod-rev0.istio-system-2:15012", 
+            "proxyAdminPort": 15999 
+        }"#,
+        );
+        let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
         assert_eq!(
             cfg.readiness_addr.port(),
@@ -336,7 +340,7 @@ pub mod tests {
         assert_eq!(cfg.xds_address.unwrap(), "istiod-rev0.istio-system-2:15012");
 
         // both (with one override)
-        let pc = construct_proxy_config(mesh_config_path).unwrap();
+        let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
         assert_eq!(cfg.readiness_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
