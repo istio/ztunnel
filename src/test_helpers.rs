@@ -27,6 +27,14 @@ pub mod ca;
 pub mod helpers;
 pub mod tcp;
 
+pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {
+    config::Config {
+        local_xds_config: Some(ConfigSource::Static(
+            local_xds_config(80, Some(addr)).unwrap(),
+        )),
+        ..test_config()
+    }
+}
 pub fn test_config_with_port(port: u16) -> config::Config {
     config::Config {
         xds_address: None,
