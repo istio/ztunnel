@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::fs;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use bytes::Bytes;
 use tokio::time;
 
@@ -31,17 +34,21 @@ const CA_ADDRESS: &str = "CA_ADDRESS";
 const TERMINATION_GRACE_PERIOD: &str = "TERMINATION_GRACE_PERIOD";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
-const DEFAULT_WORKER_THREADS: usize = 2;
+const DEFAULT_WORKER_THREADS: u16 = 2;
+const DEFAULT_ADMIN_PORT: u16 = 15021;
+const DEFAULT_STATUS_PORT: u16 = 15020;
+const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
     Static(Bytes),
     Default,
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigSource {
     File(PathBuf),
     Static(Bytes),
@@ -56,7 +63,7 @@ impl ConfigSource {
     }
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
@@ -93,6 +100,8 @@ pub struct Config {
     pub auth: identity::AuthSource,
     pub termination_grace_period: time::Duration,
 
+    pub proxy_metadata: HashMap<String, String>,
+
     /// Specify the number of worker threads the Tokio Runtime will use.
     pub num_worker_threads: usize,
 
@@ -104,6 +113,8 @@ pub struct Config {
 pub enum Error {
     #[error("invalid env var {0}={1}")]
     EnvVar(String, String),
+    #[error("error parsing proxy config: {0}")]
+    ProxyConfig(anyhow::Error),
 }
 
 /// GoDuration wraps a Duration to implement golang Duration parsing semantics
@@ -137,13 +148,27 @@ fn parse_args() -> String {
 }
 
 pub fn parse_config() -> Result<Config, Error> {
+    let pc = parse_proxy_config()?;
+    construct_config(pc)
+}
+
+fn parse_proxy_config() -> Result<ProxyConfig, Error> {
+    let mesh_config_path = "./etc/istio/config/mesh";
+    let pc_env = parse::<String>(PROXY_CONFIG)?;
+    let pc_env = pc_env.as_deref();
+    construct_proxy_config(mesh_config_path, pc_env).map_err(Error::ProxyConfig)
+}
+
+pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {
         "https://localhost:15012".to_string()
     };
-    let xds_address =
-        Some(parse_default(XDS_ADDRESS, default_istiod_address.clone())?).filter(|s| !s.is_empty());
+
+    let xds_address = parse(XDS_ADDRESS)?
+        .or(pc.discovery_address)
+        .or_else(|| Some(default_istiod_address.clone()));
 
     let fake_ca = parse_default(FAKE_CA, false)?;
     let ca_address = if fake_ca {
@@ -151,20 +176,27 @@ pub fn parse_config() -> Result<Config, Error> {
     } else {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     };
+
     Ok(Config {
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
 
-        termination_grace_period: parse_default(
-            TERMINATION_GRACE_PERIOD,
-            GoDuration(Duration::from_secs(5)),
-        )?
-        .0,
+        termination_grace_period: parse(TERMINATION_GRACE_PERIOD)?
+            .map(|gd: GoDuration| gd.0)
+            .or(pc.termination_drain_duration)
+            .unwrap_or(DEFAULT_DRAIN_DURATION),
 
         // admin API should only be accessible over localhost
-        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15000),
-        readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15021),
+        admin_addr: SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
+        ),
+        readiness_addr: SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            pc.status_port.unwrap_or(DEFAULT_STATUS_PORT),
+        ),
+
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
@@ -180,12 +212,154 @@ pub fn parse_config() -> Result<Config, Error> {
         ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
+        proxy_metadata: pc.proxy_metadata,
 
         fake_ca,
         auth: identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token")),
 
-        num_worker_threads: parse_default(ZTUNNEL_WORKER_THREADS, DEFAULT_WORKER_THREADS)?,
+        num_worker_threads: parse_default(
+            ZTUNNEL_WORKER_THREADS,
+            pc.concurrency
+                .unwrap_or(DEFAULT_WORKER_THREADS)
+                .try_into()
+                .expect("concurrency cannot be negative"),
+        )?,
 
         proxy_args: parse_args(),
     })
+}
+
+#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshConfig {
+    pub default_config: Option<ProxyConfig>,
+}
+
+#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyConfig {
+    pub discovery_address: Option<String>,
+    pub proxy_admin_port: Option<u16>,
+    pub status_port: Option<u16>,
+    pub concurrency: ::core::option::Option<u16>,
+    pub termination_drain_duration: Option<time::Duration>,
+    pub proxy_metadata: std::collections::HashMap<String, String>,
+}
+
+impl ProxyConfig {
+    fn merge(mut self, other: Self) -> Self {
+        self.discovery_address = other
+            .discovery_address
+            .or_else(|| self.discovery_address.clone());
+        self.proxy_admin_port = other.proxy_admin_port.or(self.proxy_admin_port);
+        self.status_port = other.status_port.or(self.status_port);
+        self.concurrency = other.concurrency.or(self.concurrency);
+        self.proxy_metadata.extend(other.proxy_metadata);
+        self.termination_drain_duration = other
+            .termination_drain_duration
+            .or(self.termination_drain_duration);
+        self
+    }
+}
+
+fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result<ProxyConfig> {
+    let mesh_config = match fs::File::open(mc_path) {
+        Ok(f) => serde_yaml::from_reader(f)
+            .map(|v: MeshConfig| v.default_config)
+            .map_err(anyhow::Error::new),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(anyhow!(e))
+            }
+        }
+    }
+    .map_err(|e| anyhow!("failed parsing mesh config file {}: {}", mc_path, e))?;
+
+    let proxy_config_env = pc_env
+        .map(|pc_env| {
+            if pc_env.is_empty() {
+                Ok(None)
+            } else {
+                serde_yaml::from_str(pc_env)
+            }
+        })
+        .unwrap_or(Ok(None))
+        .map_err(|e| anyhow!("failed parsing proxy config env: {}", e))?;
+
+    let mut pc = [mesh_config, proxy_config_env]
+        .into_iter()
+        .flatten()
+        .fold(ProxyConfig::default(), |pc, v| pc.merge(v));
+
+    // only include ISTIO_META_ prefixed fields in this map
+    // TODO we could use any other items here for the various env vars for construct_config?
+    // https://istio.io/latest/docs/reference/config/istio.mesh.v1alpha1/#:~:text=Additional%20environment%20variables
+    pc.proxy_metadata = pc
+        .proxy_metadata
+        .into_iter()
+        .filter_map(|(k, v)| Some((k.strip_prefix("")?.to_string(), v)))
+        .collect();
+
+    // TODO if certain fields like trustDomainAliases are added, make sure they merge like:
+    // https://github.com/istio/istio/blob/bdd47796d696ea5db604b623c51567d13ff7c11b/pkg/config/mesh/mesh.go#L244
+
+    Ok(pc)
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    #[test]
+    fn config_from_proxyconfig() {
+        let default_config = construct_config(ProxyConfig::default())
+            .expect("could not build Config without ProxyConfig");
+
+        // mesh config only
+        let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
+        let pc = construct_proxy_config(mesh_config_path, None).unwrap();
+        let cfg = construct_config(pc).unwrap();
+        assert_eq!(cfg.readiness_addr.port(), 15888);
+        assert_eq!(cfg.admin_addr.port(), 15099);
+        // TODO remove prefix
+        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
+
+        // env only
+        let pc_env = Some(
+            r#"{ 
+            "discoveryAddress": "istiod-rev0.istio-system-2:15012", 
+            "proxyAdminPort": 15999,
+            "proxyMetadata": {
+              "ISTIO_META_BAR": "bar",
+              "ISTIO_META_FOOBAR": "foobar-overwritten",
+            }
+        }"#,
+        );
+        let pc = construct_proxy_config("", pc_env).unwrap();
+        let cfg = construct_config(pc).unwrap();
+        assert_eq!(
+            cfg.readiness_addr.port(),
+            default_config.readiness_addr.port()
+        );
+        assert_eq!(cfg.xds_address.unwrap(), "istiod-rev0.istio-system-2:15012");
+        assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
+        assert_eq!(
+            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
+            "foobar-overwritten"
+        );
+
+        // both (with a field override and metadata override)
+        let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
+        let cfg = construct_config(pc).unwrap();
+        assert_eq!(cfg.readiness_addr.port(), 15888);
+        assert_eq!(cfg.admin_addr.port(), 15999);
+        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
+        assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
+        assert_eq!(
+            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
+            "foobar-overwritten"
+        );
+    }
 }

@@ -107,6 +107,7 @@ pub struct Config {
     address: String,
     root_cert: RootCert,
     auth: identity::AuthSource,
+    proxy_metadata: HashMap<String, String>,
 
     workload_handler: Box<dyn Handler<Workload>>,
     rbac_handler: Box<dyn Handler<Rbac>>,
@@ -124,6 +125,7 @@ impl Config {
             rbac_handler: Box::new(NopHandler {}),
             initial_watches: Vec::new(),
             on_demand: config.xds_on_demand,
+            proxy_metadata: config.proxy_metadata,
         }
     }
 
@@ -283,8 +285,8 @@ impl AdsClient {
         }
     }
 
-    fn build_struct<const N: usize>(a: [(&str, &str); N]) -> Struct {
-        let fields = BTreeMap::from(a.map(|(k, v)| {
+    fn build_struct<T: IntoIterator<Item = (S, S)>, S: ToString>(a: T) -> Struct {
+        let fields = BTreeMap::from_iter(a.into_iter().map(|(k, v)| {
             (
                 k.to_string(),
                 Value {
@@ -304,14 +306,19 @@ impl AdsClient {
         let ns = ns.as_deref().unwrap_or("");
         let node = std::env::var("NODE_NAME");
         let node = node.as_deref().unwrap_or("");
+        let mut metadata = Self::build_struct([
+            ("NAME", pod_name),
+            ("NAMESPACE", ns),
+            ("INSTANCE_IPS", ip),
+            ("NODE_NAME", node),
+        ]);
+        metadata
+            .fields
+            .append(&mut Self::build_struct(self.config.proxy_metadata.clone()).fields);
+
         Node {
             id: format!("ztunnel~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
-            metadata: Some(Self::build_struct([
-                ("NAME", pod_name),
-                ("NAMESPACE", ns),
-                ("INSTANCE_IPS", ip),
-                ("NODE_NAME", node),
-            ])),
+            metadata: Some(metadata),
             ..Default::default()
         }
     }
