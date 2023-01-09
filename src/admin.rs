@@ -285,7 +285,7 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
 
 //mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
 //NOTE: multiple query parameters is not supported, for example
-//curl -X POST http://127.0.0.1:15021/logging?"tap=debug&router=debug"
+//curl -X POST http://127.0.0.1:15000/logging?"tap=debug&router=debug"
 static HELP_STRING: &str = "
 usage: POST /logging\t\t\t\t\t\t(To list current level)
 usage: POST /logging?level=<level>\t\t\t\t(To change global levels)
