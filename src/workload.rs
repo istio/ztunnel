@@ -18,6 +18,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::{fmt, net};
+use std::time::Duration;
 use futures::executor::block_on;
 
 use rand::prelude::IteratorRandom;
@@ -38,6 +39,7 @@ use crate::rbac::{Rbac, RbacScope};
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
 use crate::config::RootCert::Default;
+use crate::identity::mock::MockCaClient;
 use crate::tls::Certs;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -263,7 +265,10 @@ impl WorkloadManager {
         awaiting_ready: readiness::BlockReady,
         cert_manager: Box<dyn CertificateProvider>
     ) -> anyhow::Result<WorkloadManager> {
-        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
+            cert_manager,
+            ..Default::default()
+        }));
         let xds_workloads = workloads.clone();
         let xds_rbac = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
@@ -513,7 +518,10 @@ pub struct WorkloadStore {
 impl WorkloadStore {
     #[cfg(test)]
     pub fn test_store(workloads: Vec<XdsWorkload>) -> anyhow::Result<WorkloadStore> {
-        let mut store = WorkloadStore::default();
+        let mut store = WorkloadStore {
+            cert_manager: Box::new(MockCaClient::new(Duration::from_secs(5))),
+            ..Default::default()
+        };
         for w in workloads {
             store.insert_xds_workload(w)?;
         }
@@ -687,6 +695,7 @@ pub enum WorkloadError {
 
 #[cfg(test)]
 mod tests {
+    use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use bytes::Bytes;
