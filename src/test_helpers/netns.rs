@@ -1,3 +1,14 @@
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
+use std::io::Write;
+use std::net::IpAddr;
+use std::process::Command;
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::{sync, thread};
+
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,20 +23,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use futures::FutureExt;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::future::Future;
-use std::io::Write;
-use std::net::IpAddr;
-use std::process::Command;
-use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::{sync, thread};
-
 use netns_rs::NetNs;
 use tokio::runtime::{Handle, RuntimeFlavor};
-use tracing::{debug, info, warn, Instrument};
+use tracing::{debug, warn, Instrument};
 
 pub struct NamespaceManager {
     prefix: String,
@@ -53,18 +53,19 @@ impl Namespace {
     }
 
     pub fn run<F, Fut>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
-        where
-            F: FnOnce(IpAddr) -> Fut + Send + 'static,
-            Fut: Future<Output = anyhow::Result<()>> {
-        self.run_ready(|ip, ready| async move {
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>>,
+    {
+        self.run_ready(|ready| async move {
             ready.set_ready();
-            f(ip).await
+            f().await
         })
     }
 
     pub fn run_ready<F, Fut>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
     where
-        F: FnOnce(IpAddr, Ready) -> Fut + Send + 'static,
+        F: FnOnce(Ready) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<()>>,
     {
         let name = self.name.clone();
@@ -78,16 +79,15 @@ impl Namespace {
                         .build()
                         .unwrap();
                     rt.block_on(
-                        f(id_to_ip(self.id), Ready(tx))
-                            .instrument(tracing::info_span!("run", namespace = self.name)),
+                        f(Ready(tx)).instrument(tracing::info_span!("run", namespace = self.name)),
                     )
                 })
                 .unwrap()
         });
-        debug!(namespace=name, "awaiting ready");
+        debug!(namespace = name, "awaiting ready");
         // Await readiness
         let _ = rx.recv();
-        debug!(namespace=name, "ready");
+        debug!(namespace = name, "ready");
         Ok(j)
     }
 }
@@ -114,7 +114,7 @@ impl Drop for NamespaceManager {
         // Drop the root namespace
         drop_namespace(&self.prefix);
         for (name, _) in self.namespaces.lock().unwrap().iter() {
-            drop_namespace( &format!("{}_inner_{name}", self.prefix));
+            drop_namespace(&format!("{}_inner_{name}", self.prefix));
         }
     }
 }
@@ -166,8 +166,8 @@ impl NamespaceManager {
         let mut namespaces = self.namespaces.lock().unwrap();
         // Namespaces are never removed, so its safe (for now) to use the size
         // 10.0.0.x is the host namespace, so skip 0
+        assert!(namespaces.len() < 255, "only 255 networks allowed");
         let id = namespaces.len() as u8 + 1;
-        assert!(id <= 255, "only 255 networks allowed");
         let prefix = &self.prefix;
         let veth = format!("veth{id}");
         let net = format!("{}_inner_{name}", prefix);

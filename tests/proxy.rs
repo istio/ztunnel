@@ -14,15 +14,14 @@
 
 use std::fmt::Debug;
 use std::future::Future;
-use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Add;
-use std::process::Command;
+
 use std::str::FromStr;
-use std::sync::mpsc::SyncSender;
-use std::thread::JoinHandle;
+
 use std::time::{Duration, SystemTime};
-use std::{sync, thread};
+
+use bytes::BufMut;
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,13 +32,16 @@ use tokio::time::timeout;
 use tracing::info;
 use tracing::{error, trace};
 
+use ztunnel::config::ConfigSource;
 use ztunnel::identity::mock::MockCaClient;
 use ztunnel::identity::CertificateProvider;
 use ztunnel::test_helpers::app as testapp;
-use ztunnel::test_helpers::app::{TestApp, Ztunnel};
+use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
+use ztunnel::test_helpers::netns::Namespace;
 use ztunnel::test_helpers::tcp::HboneTestServer;
 use ztunnel::test_helpers::*;
+use ztunnel::workload::{LocalConfig, LocalWorkload, Workload};
 use ztunnel::{config, identity};
 
 #[tokio::test]
@@ -488,134 +490,114 @@ async fn admin_shutdown(addr: SocketAddr) {
     assert_eq!(resp.status(), hyper::StatusCode::OK);
 }
 
-struct NamespaceManager {
-    prefix: String,
-    namespaces: u8,
-    // namespaces: Vec<netns_rs::NetNs>,
+pub struct TestWorkloadBuilder<'a> {
+    w: LocalWorkload,
+    manager: &'a mut WorkloadManager,
 }
 
-impl NamespaceManager {
-    pub fn new(prefix: &str) -> anyhow::Result<Self> {
-        let _ = netns_rs::NetNs::new(prefix)?;
+impl<'a> TestWorkloadBuilder<'a> {
+    pub fn new(name: &str, manager: &'a mut WorkloadManager) -> TestWorkloadBuilder<'a> {
+        TestWorkloadBuilder {
+            w: LocalWorkload {
+                workload: Workload {
+                    name: name.to_string(),
+                    ..test_default_workload()
+                },
+                vips: Default::default(),
+            },
+            manager,
+        }
+    }
+
+    pub fn register(mut self) -> anyhow::Result<Namespace> {
+        let network_namespace = self.manager.namespaces.child(&self.w.workload.name)?;
+        self.w.workload.workload_ip = network_namespace.ip();
+        self.manager.workloads.push(self.w);
+        Ok(network_namespace)
+    }
+}
+
+pub struct WorkloadManager {
+    namespaces: netns::NamespaceManager,
+    name: String,
+    /// workloads that we have constructed
+    workloads: Vec<LocalWorkload>,
+}
+
+impl WorkloadManager {
+    pub fn new(name: &str) -> anyhow::Result<Self> {
         Ok(Self {
-            prefix: prefix.to_string(),
-            namespaces: 1,
-            // namespaces: vec![netns_rs::NetNs::new(prefix)?],
+            namespaces: netns::NamespaceManager::new(name)?,
+            name: name.to_string(),
+            workloads: vec![],
         })
     }
 
-    pub fn attach<F, Fut, O>(&mut self, f: F) -> anyhow::Result<(JoinHandle<()>, O)>
-    where
-        F: FnOnce(IpAddr, SyncSender<O>) -> Fut + Send + 'static,
-        Fut: Future<Output = ()>,
-        O: Send + 'static,
-    {
-        let next = self.namespaces;
-        assert!(next <= 255, "only 255 networks allowed");
-        let prefix = &self.prefix;
-        let veth = format!("veth{next}");
-        let net = format!("{}_inner_{next}", self.prefix);
-        let addr = format!("10.0.{next}.1");
-        let ip = addr.parse()?;
-        let netns = netns_rs::NetNs::new(net.clone())?;
-        self.namespaces += 1;
-        // self.namespaces.push(netns);
-        Self::run(&format!(
-            "
-ip -n {prefix} link add {veth} type veth peer name eth0 netns {net}
-ip -n {prefix} link set dev {veth} up
-ip -n {prefix} addr add 10.0.0.1 dev {veth}
-ip -n {prefix} route add {addr} dev {veth} scope host
+    pub fn ztunnel(&mut self) -> anyhow::Result<()> {
+        let ns = TestWorkloadBuilder::new("ztunnel", self).register()?;
+        let lc = LocalConfig {
+            workloads: self.workloads.clone(),
+            policies: vec![],
+        };
+        let mut b = bytes::BytesMut::new().writer();
+        serde_yaml::to_writer(&mut b, &lc)?;
 
-ip -n {net} link set dev lo up
-ip -n {net} link set dev eth0 up
-ip -n {net} addr add {addr}/16 dev eth0
-ip -n {net} route add default via 10.0.0.1
-ip -n {net} route add 10.0.0.1 dev eth0 scope link src {addr}
-ip -n {net} route del 10.0.0.0/16 # remove auto-kernel route
-ip -n {net} route add 10.0.0.0/16 via 10.0.0.1 src {addr}
-"
-        ))?;
-        let (tx, rx) = sync::mpsc::sync_channel::<O>(0);
-        // Change network namespaces changes the entire thread, so we want to run each network in its own thread
-        let j = thread::spawn(move || {
-            netns
-                .run(|_n| {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
-                    rt.block_on(f(ip, tx))
-                })
-                .unwrap()
-        });
-        Ok((j, rx.recv().unwrap()))
+        let cfg = ztunnel::config::Config {
+            xds_address: None,
+            fake_ca: true,
+            local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
+            local_node: Some("local".to_string()),
+            ..config::parse_config().unwrap()
+        };
+        ns.run_ready(|ready| async move {
+            let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
+            let app = ztunnel::app::build_with_cert(cfg, cert_manager.clone())
+                .await
+                .unwrap();
+
+            let ta = TestApp {
+                admin_address: app.admin_address,
+                proxy_addresses: app.proxy_addresses,
+                readiness_address: app.readiness_address,
+                cert_manager,
+            };
+            ta.ready().await;
+            info!("ready");
+            ready.set_ready();
+
+            app.wait_termination().await
+        })?;
+        Ok(())
     }
 
-    fn run(cmd: &str) -> anyhow::Result<()> {
-        info!("running command {cmd}");
-        let output = Command::new("sh").arg("-c").arg(cmd).output()?;
-        info!(
-            "complete! code={}, stdout={}, stderr={}",
-            output.status,
-            std::str::from_utf8(&output.stdout)?,
-            std::str::from_utf8(&output.stdout)?
-        );
-        println!("status: {}", output.status);
-        std::io::stdout().write_all(&output.stdout).unwrap();
-        std::io::stderr().write_all(&output.stderr).unwrap();
-        Ok(())
+    pub fn workload_builder(&mut self, name: &str) -> TestWorkloadBuilder {
+        TestWorkloadBuilder::new(name, self)
+    }
+
+    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
+        self.namespaces.resolve(name)
     }
 }
 
 #[tokio::test]
-async fn test_netns() -> anyhow::Result<()> {
+async fn test_new() -> anyhow::Result<()> {
     initialize_telemetry();
-    let namespaces = netns::NamespaceManager::new("outer")?;
-    let server = namespaces.child("server")?;
-    // let workload = LocalWorkload {
-    //     workload: Workload {
-    //         workload_ip: TEST_WORKLOAD_HBONE.parse()?,
-    //         protocol: HBONE,
-    //         name: "local-hbone".to_string(),
-    //         namespace: "default".to_string(),
-    //         service_account: "default".to_string(),
-    //         node: "local".to_string(),
-    //
-    //         waypoint_addresses: vec![],
-    //         authorization_policies: vec![],
-    //         gateway_address: None,
-    //         workload_name: "".to_string(),
-    //         workload_type: "".to_string(),
-    //         canonical_name: "".to_string(),
-    //         canonical_revision: "".to_string(),
-    //         native_hbone: false,
-    //     },
-    //     vips: HashMap::from([(TEST_VIP.to_string(), HashMap::from([(80u16, echo_port)]))]),
-    // }
-    server.run_ready(|ip, ready| async move {
+    let mut manager = WorkloadManager::new("test_new")?;
+    let server = manager.workload_builder("server").register()?;
+    server.run_ready(|ready| async move {
         let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 8080).await;
-        info!("Running echo at {ip}:8080, {}", echo.address());
+        info!("Running echo");
         ready.set_ready();
-        Ok(echo.run().await)
+        echo.run().await;
+        Ok(())
     })?;
-    // namespaces
-    //     .child("ztunnel")?
-    //     .run_ready(move |ip, ready| async move {
-    //        Ztunnel::new().run_in_namespace(ready).await
-    //     })
-    //     .unwrap();
-    namespaces
-        .child("client")?
-        .run(move |_ip| async move {
-            let srv = SocketAddr::new(namespaces.resolve("server").unwrap(), 8080);
+    let client = manager.workload_builder("client").register()?;
+    manager.ztunnel()?;
+    client
+        .run(|| async move {
+            let srv = SocketAddr::new(manager.resolve("server").unwrap(), 8080);
             info!("Running client to {srv}");
-            // tokio::time::sleep(Duration::from_secs(30)).await;
-            let mut stream =
-                TcpStream::connect(srv)
-                    .await
-                    .unwrap();
-            info!("connected");
+            let mut stream = TcpStream::connect(srv).await.unwrap();
             read_write_stream(&mut stream).await;
             Ok(())
         })?

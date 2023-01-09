@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::convert::Infallible;
+use std::net::IpAddr;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use std::{cmp, io};
 
