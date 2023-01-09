@@ -32,12 +32,11 @@ use tokio::time;
 use tokio::time::timeout;
 use tracing::info;
 use tracing::{error, trace};
-use ztunnel::identity;
 
 use ztunnel::identity::mock::MockCaClient;
 use ztunnel::identity::CertificateProvider;
 use ztunnel::test_helpers::app as testapp;
-use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::app::{TestApp, Ztunnel};
 use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::tcp::HboneTestServer;
 use ztunnel::test_helpers::*;
@@ -108,7 +107,7 @@ async fn test_shutdown_drain() {
         readiness_address: app.readiness_address,
         cert_manager,
     };
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     let shutdown = app.shutdown.trigger().clone();
@@ -155,7 +154,7 @@ async fn test_shutdown_forced_drain() {
         readiness_address: app.readiness_address,
         cert_manager,
     };
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     let shutdown = app.shutdown.trigger().clone();
@@ -199,7 +198,7 @@ async fn test_quit_lifecycle() {
 #[track_caller]
 async fn run_request_test(target: &str, node: &str) {
     // Test a round trip outbound call (via socks5)
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     let cfg = config::Config {
         local_node: (!node.is_empty()).then(|| node.to_string()),
@@ -344,7 +343,7 @@ async fn test_stats_exist() {
 #[tokio::test]
 async fn test_tcp_connections_metrics() {
     // Test a round trip outbound call (via socks5)
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
@@ -541,7 +540,7 @@ ip -n {net} route add 10.0.0.0/16 via 10.0.0.1 src {addr}
         // Change network namespaces changes the entire thread, so we want to run each network in its own thread
         let j = thread::spawn(move || {
             netns
-                .run(|n| {
+                .run(|_n| {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -569,79 +568,56 @@ ip -n {net} route add 10.0.0.0/16 via 10.0.0.1 src {addr}
     }
 }
 
-#[test]
-fn test_netns() {
+#[tokio::test]
+async fn test_netns() -> anyhow::Result<()> {
     initialize_telemetry();
-    let mut namespaces = NamespaceManager::new("outer").unwrap();
-    let (sh, echo_addr) = namespaces
-        .attach(|ip, ready| async move {
-            let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
-            let echo_addr = helpers::with_ip(echo.address(), ip);
-            info!("running in namespace 1..");
-            ready.send(echo_addr).unwrap();
-            info!("sent address {echo_addr}");
-            echo.run().await;
-        })
-        .unwrap();
-    let (zh, app) = namespaces
-        .attach(move |ip, ready| async move {
-            info!("running in namespace 2 (ztunnel, {ip})..");
-            let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
-            let app = ztunnel::app::build_with_cert(test_config(), cert_manager).await.unwrap();
-
-            let ta = TestApp {
-                admin_address: app.admin_address,
-                proxy_addresses: app.proxy_addresses,
-                readiness_address: app.readiness_address,
-            };
-            info!("initialized");
-            ta.ready().await;
-            info!("ready");
-            ready.send(ta).unwrap();
-
-            app.wait_termination().await.unwrap();
-            info!("terminated");
-        })
-        .unwrap();
-    info!("got address {echo_addr}");
-    let (ch, _) = namespaces
-        .attach(move |_ip, ready| async move {
-            info!("running in namespace 3.. {echo_addr}");
-            let mut stream = TcpStream::connect(echo_addr).await.unwrap();
+    let namespaces = netns::NamespaceManager::new("outer")?;
+    let server = namespaces.child("server")?;
+    // let workload = LocalWorkload {
+    //     workload: Workload {
+    //         workload_ip: TEST_WORKLOAD_HBONE.parse()?,
+    //         protocol: HBONE,
+    //         name: "local-hbone".to_string(),
+    //         namespace: "default".to_string(),
+    //         service_account: "default".to_string(),
+    //         node: "local".to_string(),
+    //
+    //         waypoint_addresses: vec![],
+    //         authorization_policies: vec![],
+    //         gateway_address: None,
+    //         workload_name: "".to_string(),
+    //         workload_type: "".to_string(),
+    //         canonical_name: "".to_string(),
+    //         canonical_revision: "".to_string(),
+    //         native_hbone: false,
+    //     },
+    //     vips: HashMap::from([(TEST_VIP.to_string(), HashMap::from([(80u16, echo_port)]))]),
+    // }
+    server.run_ready(|ip, ready| async move {
+        let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 8080).await;
+        info!("Running echo at {ip}:8080");
+        ready.set_ready();
+        Ok(echo.run().await)
+    })?;
+    // namespaces
+    //     .child("ztunnel")?
+    //     .run_ready(move |ip, ready| async move {
+    //        Ztunnel::new().run_in_namespace(ready).await
+    //     })
+    //     .unwrap();
+    namespaces
+        .child("client")?
+        .run(move |_ip| async move {
+            info!("Running client");
+            let mut stream =
+                TcpStream::connect(SocketAddr::new(namespaces.resolve("server").unwrap(), 8080))
+                    .await
+                    .unwrap();
             info!("connected");
             read_write_stream(&mut stream).await;
-            info!("r/w");
-            ready.send(()).unwrap();
-            info!("client sent.");
-        })
-        .unwrap();
-    ch.join();
-    info!("client done");
-    // sh.join(); // No need to wait for server
-    return;
-    netns_rs::NetNs::new("outer").unwrap();
-    netns_rs::NetNs::new("outer").unwrap();
-    netns_rs::NetNs::new("outer").unwrap();
-    let client = thread::spawn(|| {
-        let _client = netns_rs::NetNs::new("client").unwrap();
-    });
-    let server = thread::spawn(|| {
-        let server = netns_rs::NetNs::new("server").unwrap();
-        server
-            .run(|_| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                rt.block_on(async {
-                    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
-                    let echo_addr = echo.address();
-                    info!("running at {echo_addr}");
-                    echo.run().await
-                })
-            })
-            .unwrap();
-    });
-    client.join().unwrap();
-    server.join().unwrap();
+            Ok(())
+        })?
+        .join()
+        .unwrap()?;
+    Ok(())
 }

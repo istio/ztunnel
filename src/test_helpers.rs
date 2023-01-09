@@ -25,6 +25,7 @@ use std::default::Default;
 pub mod app;
 pub mod ca;
 pub mod helpers;
+pub mod netns;
 pub mod tcp;
 
 pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {

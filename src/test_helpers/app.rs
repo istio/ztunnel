@@ -23,10 +23,12 @@ use hyper::{body, Body, Client, Method, Request, Response};
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
+use tracing::info;
 
 use crate::identity::mock::MockCaClient;
 use crate::identity::SecretManager;
-use crate::test_helpers::TEST_WORKLOAD_SOURCE;
+use crate::config::Config;
+use crate::test_helpers::{netns, TEST_WORKLOAD_SOURCE};
 use crate::*;
 
 use super::helpers::*;
@@ -183,6 +185,42 @@ impl TestApp {
         stream.read_exact(&mut resp).await.unwrap();
 
         stream
+    }
+}
+
+pub struct Ztunnel {
+    cfg: Config,
+}
+
+impl Ztunnel {
+    pub fn new() -> Self {
+        Self {
+            cfg: Config {
+                xds_address: None,
+                fake_ca: true,
+                local_xds_config: None,
+                local_node: Some("local".to_string()),
+                ..config::parse_config().unwrap()
+            },
+        }
+    }
+
+    pub async fn run_in_namespace(self, ready: netns::Ready) -> anyhow::Result<()> {
+        info!("Running ztunnel");
+        let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
+        let app = app::build_with_cert(self.cfg, cert_manager).await.unwrap();
+
+        let ta = TestApp {
+            admin_address: app.admin_address,
+            proxy_addresses: app.proxy_addresses,
+            readiness_address: app.readiness_address,
+        };
+        info!("initialized");
+        ta.ready().await;
+        info!("ready");
+        ready.set_ready();
+
+        app.wait_termination().await
     }
 }
 
