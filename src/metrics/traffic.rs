@@ -102,9 +102,9 @@ impl<T: Encode> Encode for DefaultedUnknown<T> {
 
 pub struct ConnectionClose<'a>(&'a ConnectionOpen);
 
-pub struct ReceivedBytes<'a>(pub &'a ConnectionOpen);
+pub struct ReceivedBytes<'a>(&'a ConnectionOpen);
 
-pub struct SentBytes<'a>(pub &'a ConnectionOpen);
+pub struct SentBytes<'a>(&'a ConnectionOpen);
 
 #[derive(Clone)]
 pub struct ConnectionOpen {
@@ -118,6 +118,18 @@ pub struct ConnectionOpen {
 impl<'a> From<&'a ConnectionOpen> for ConnectionClose<'a> {
     fn from(c: &'a ConnectionOpen) -> Self {
         ConnectionClose(c)
+    }
+}
+
+impl<'a> From<&'a ConnectionOpen> for ReceivedBytes<'a> {
+    fn from(c: &'a ConnectionOpen) -> Self {
+        ReceivedBytes(c)
+    }
+}
+
+impl<'a> From<&'a ConnectionOpen> for SentBytes<'a> {
+    fn from(c: &'a ConnectionOpen) -> Self {
+        SentBytes(c)
     }
 }
 

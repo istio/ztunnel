@@ -172,8 +172,8 @@ impl OutboundConnection {
             destination_service: None,
         };
 
-        let received_bytes = traffic::ReceivedBytes(&connection_metrics);
-        let sent_bytes = traffic::SentBytes(&connection_metrics);
+        let received_bytes = traffic::ReceivedBytes::from(&connection_metrics);
+        let sent_bytes = traffic::SentBytes::from(&connection_metrics);
 
         // _connection_close will record once dropped
         let _connection_close = self
