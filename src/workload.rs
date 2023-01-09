@@ -356,7 +356,7 @@ impl LocalClient {
         let policies = r.policies.len();
         for wl in r.workloads {
             let wip = wl.workload.workload_ip;
-            debug!("inserting local workloads {wip}");
+            debug!("inserting local workloads {wip} ({}/{})", &wl.workload.namespace, &wl.workload.name);
             wli.insert_workload(wl.workload);
             for (vip, ports) in wl.vips {
                 let ip = vip.parse::<IpAddr>()?;

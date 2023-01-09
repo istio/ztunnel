@@ -535,6 +535,7 @@ impl WorkloadManager {
 
     pub fn ztunnel(&mut self) -> anyhow::Result<()> {
         let ns = TestWorkloadBuilder::new("ztunnel", self).register()?;
+        let ip = self.namespaces.resolve("ztunnel").unwrap();
         let lc = LocalConfig {
             workloads: self.workloads.clone(),
             policies: vec![],
@@ -549,7 +550,8 @@ impl WorkloadManager {
             local_node: Some("local".to_string()),
             ..config::parse_config().unwrap()
         };
-        ns.run_ready(|ready| async move {
+        ns.run_ready(move |ready| async move {
+            helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
             let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
             let app = ztunnel::app::build_with_cert(cfg, cert_manager.clone())
                 .await
@@ -567,6 +569,8 @@ impl WorkloadManager {
 
             app.wait_termination().await
         })?;
+        // We should be in the fake namespace, not root namespace
+        helpers::run_command(&format!("scripts/node-redirect.sh {ip}"))?;
         Ok(())
     }
 
@@ -578,19 +582,12 @@ impl WorkloadManager {
         self.namespaces.resolve(name)
     }
 }
-
+// TODO: all threads must terminate... somehow.
 #[tokio::test]
 async fn test_new() -> anyhow::Result<()> {
     initialize_telemetry();
     let mut manager = WorkloadManager::new("test_new")?;
-    let server = manager.workload_builder("server").register()?;
-    server.run_ready(|ready| async move {
-        let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 8080).await;
-        info!("Running echo");
-        ready.set_ready();
-        echo.run().await;
-        Ok(())
-    })?;
+    tcp_server(&mut manager, "server")?;
     let client = manager.workload_builder("client").register()?;
     manager.ztunnel()?;
     client
@@ -599,9 +596,22 @@ async fn test_new() -> anyhow::Result<()> {
             info!("Running client to {srv}");
             let mut stream = TcpStream::connect(srv).await.unwrap();
             read_write_stream(&mut stream).await;
+            // tokio::time::sleep(Duration::from_secs(1000)).await;
             Ok(())
         })?
         .join()
         .unwrap()?;
+    Ok(())
+}
+
+fn tcp_server(manager: &mut WorkloadManager, name: &str) -> anyhow::Result<()> {
+    let server = manager.workload_builder(name).register()?;
+    server.run_ready(|ready| async move {
+        let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 8080).await;
+        info!("Running echo server");
+        ready.set_ready();
+        echo.run().await;
+        Ok(())
+    })?;
     Ok(())
 }
