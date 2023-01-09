@@ -149,7 +149,7 @@ impl Inbound {
                     (async move {
                         match request_type {
                             InboundConnect::DirectPath(mut incoming) => {
-                                if let Err(e) = relay(&mut incoming, &mut stream).await {
+                                if let Err(e) = relay(&mut incoming, &mut stream, true).await {
                                     error!(dur=?start.elapsed(), "internal server copy: {}", e);
                                 }
                             }

@@ -25,7 +25,7 @@ use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::traffic::Reporter;
-use crate::metrics::{traffic, Metrics};
+use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::{util, Error, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::socket::relay;
@@ -171,6 +171,10 @@ impl OutboundConnection {
             connection_security_policy: traffic::SecurityPolicy::unknown,
             destination_service: None,
         };
+
+        let received_bytes = traffic::ReceivedBytes(&connection_metrics);
+        let sent_bytes = traffic::SentBytes(&connection_metrics);
+        
         // _connection_close will record once dropped
         let _connection_close = self
             .metrics
@@ -260,9 +264,18 @@ impl OutboundConnection {
                 // Create a TCP connection to upstream
                 let mut outbound = TcpStream::connect(req.gateway).await?;
                 // Proxying data between downstrean and upstream
-                relay(&mut stream, &mut outbound).await?;
-
-                Ok(())
+                match relay(&mut stream, &mut outbound, self.cfg.zero_copy_enabled).await {
+                    // Connection closed with count of bytes transferred between streams
+                    Ok(Some(r)) => {
+                        // r.0 is number of bytes transffered from downstream to upstream
+                        // r.1 is number of bytes transffered from upstream to downstream
+                        self.metrics.record_count(&sent_bytes, r.0);
+                        self.metrics.record_count(&received_bytes, r.1);
+                        return Ok(());
+                    },                    
+                    Ok(None) => return Ok(()),
+                    Err(e) => return Err(Error::Io(e)),
+                };
             }
         }
     }

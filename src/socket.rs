@@ -142,24 +142,32 @@ const EINVAL: i32 = 22;
 pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
-) -> Result<(), Error> {
+    zero_copy_enabled: bool,
+) -> Result<Option<(u64, u64)>, Error> {
     #[cfg(all(target_os = "linux"))]
     {
-        match realm_io::bidi_zero_copy(downstream, upstream).await {
-            Ok(()) => Ok(()),
-            Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
-                tokio::io::copy_bidirectional(downstream, upstream)
-                    .await
-                    .map(|_| ())
+        if zero_copy_enabled {
+            match realm_io::bidi_zero_copy(downstream, upstream).await {
+                Ok(()) => Ok(None),
+                Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
+                    tokio::io::copy_bidirectional(downstream, upstream)
+                        .await
+                        .map(|r| Some(r))
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
+        } else {
+            tokio::io::copy_bidirectional(downstream, upstream)
+                        .await
+                        .map(|r| Some(r))
         }
+        
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         tokio::io::copy_bidirectional(downstream, upstream)
             .await
-            .map(|_| ())
+            .map(|r| Some(r))
     }
 }
