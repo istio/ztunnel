@@ -1,0 +1,7 @@
+defaultConfig:
+  statusPort: 15888
+  proxyAdminPort: 15099
+  proxyMetadata:
+    ISTIO_META_FOO: "foo"
+    ISTIO_META_FOOBAR: "foobar"
+

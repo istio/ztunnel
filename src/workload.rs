@@ -21,19 +21,22 @@ use std::{fmt, net};
 use futures::executor::block_on;
 
 use rand::prelude::IteratorRandom;
-
 use thiserror::Error;
 use tokio::runtime::Handle;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, trace};
+
+use xds::istio::workload::Rbac as XdsRbac;
 
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
 use crate::identity::{CertificateProvider, Error, Identity, SecretManager};
 use crate::metrics::Metrics;
-use crate::workload::WorkloadError::ProtocolParse;
+use crate::workload::WorkloadError::EnumParse;
+
+use crate::rbac::{Rbac, RbacScope};
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
-use crate::{config, readiness, xds};
+use crate::{config, rbac, readiness, xds};
 use crate::config::RootCert::Default;
 use crate::tls::Certs;
 
@@ -56,7 +59,7 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
         match value {
             Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::HBONE),
             Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::TCP),
-            None => Err(ProtocolParse("unknown type".into())),
+            None => Err(EnumParse("unknown type".into())),
         }
     }
 }
@@ -93,6 +96,9 @@ pub struct Workload {
 
     #[serde(default)]
     pub native_hbone: bool,
+
+    #[serde(default)]
+    pub authorization_policies: Vec<String>,
 }
 
 impl Workload {
@@ -150,7 +156,7 @@ impl fmt::Display for Upstream {
     }
 }
 
-fn byte_to_ip(b: &bytes::Bytes) -> Result<IpAddr, WorkloadError> {
+pub fn byte_to_ip(b: &bytes::Bytes) -> Result<IpAddr, WorkloadError> {
     match b.len() {
         0 => Err(WorkloadError::ByteAddressParse(0)),
         4 => {
@@ -203,6 +209,7 @@ impl TryFrom<&XdsWorkload> for Workload {
             canonical_revision: resource.canonical_revision,
 
             native_hbone: resource.native_hbone,
+            authorization_policies: resource.authorization_policies,
         })
     }
 }
@@ -229,6 +236,26 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
     }
 }
 
+impl xds::Handler<XdsRbac> for Arc<Mutex<WorkloadStore>> {
+    fn handle(&self, updates: Vec<XdsUpdate<XdsRbac>>) -> Result<(), Vec<RejectedConfig>> {
+        let mut wli = self.lock().unwrap();
+        let handle = |res: XdsUpdate<XdsRbac>| {
+            match res {
+                XdsUpdate::Update(w) => {
+                    info!("handling RBAC update {}", w.name);
+                    wli.insert_xds_rbac(w.resource)?;
+                }
+                XdsUpdate::Remove(name) => {
+                    info!("handling RBAC delete {}", name);
+                    wli.remove_rbac(name);
+                }
+            }
+            Ok(())
+        };
+        xds::handle_single_resource(updates, handle)
+    }
+}
+
 impl WorkloadManager {
     pub async fn new(
         config: config::Config,
@@ -238,11 +265,14 @@ impl WorkloadManager {
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
+        let xds_rbac = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
             Some(
                 xds::Config::new(config.clone())
                     .with_workload_handler(xds_workloads)
+                    .with_rbac_handler(xds_rbac)
                     .watch(xds::WORKLOAD_TYPE.into())
+                    .watch(xds::RBAC_TYPE.into())
                     .build(metrics, awaiting_ready.subtask("ads client")),
             )
         } else {
@@ -292,18 +322,26 @@ pub struct LocalWorkload {
     pub vips: HashMap<String, HashMap<u16, u16>>,
 }
 
+#[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalConfig {
+    pub workloads: Vec<LocalWorkload>,
+    pub policies: Vec<Rbac>,
+}
+
 impl LocalClient {
     #[instrument(skip_all, name = "local_client")]
     async fn run(self) -> Result<(), anyhow::Error> {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = self.cfg.read_to_string().await?;
-        let r: Vec<LocalWorkload> = serde_yaml::from_str(&data)?;
+        let r: LocalConfig = serde_yaml::from_str(&data)?;
         let mut wli = self.workloads.lock().unwrap();
-        let l = r.len();
-        for wl in r {
+        let workloads = r.workloads.len();
+        let policies = r.policies.len();
+        for wl in r.workloads {
             let wip = wl.workload.workload_ip;
             debug!("inserting local workloads {wip}");
-            wli.insert(wl.workload);
+            wli.insert_workload(wl.workload);
             for (vip, ports) in wl.vips {
                 let ip = vip.parse::<IpAddr>()?;
                 for (service_port, target_port) in ports {
@@ -316,7 +354,10 @@ impl LocalClient {
                 }
             }
         }
-        info!("inserted {} local workloads", l);
+        for rbac in r.policies {
+            wli.insert_rbac(rbac);
+        }
+        info!(%workloads, %policies, "local config initialized");
         Ok(())
     }
 }
@@ -334,6 +375,67 @@ pub struct WorkloadInformation {
 }
 
 impl WorkloadInformation {
+    pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {
+        let Some(wl) = self.fetch_workload(&conn.dst.ip()).await else {
+            debug!("destination workload not found");
+            return false;
+        };
+
+        if wl.waypoint_addresses.contains(&conn.src_ip) && conn.src_identity == Some(wl.identity())
+        {
+            debug!("request from waypoint, skipping policy");
+            return true;
+        }
+        let wli = self.info.lock().unwrap();
+
+        // We can get policies from namespace, global, and workload...
+        let ns = wli
+            .policies_by_namespace
+            .get(&wl.namespace)
+            .into_iter()
+            .flatten();
+        let global = wli.policies_by_namespace.get("").into_iter().flatten();
+        let workload = wl.authorization_policies.iter();
+
+        // Aggregate all of them based on type
+        let (allow, deny): (Vec<_>, Vec<_>) = ns
+            .chain(global)
+            .chain(workload)
+            .filter_map(|k| wli.policies.get(k))
+            .partition(|p| p.action == rbac::RbacAction::Allow);
+
+        trace!(
+            allow = allow.len(),
+            deny = deny.len(),
+            "checking connection"
+        );
+
+        // Allow and deny logic follows https://istio.io/latest/docs/reference/config/security/authorization-policy/
+
+        // "If there are any DENY policies that match the request, deny the request."
+        for pol in deny.iter() {
+            if pol.matches(conn) {
+                debug!("deny policy match");
+                return false;
+            }
+        }
+        // "If there are no ALLOW policies for the workload, allow the request."
+        if allow.is_empty() {
+            debug!("no allow policies, allow");
+            return true;
+        }
+        // "If any of the ALLOW policies match the request, allow the request."
+        for pol in allow.iter() {
+            if pol.matches(conn) {
+                debug!("allow policy match");
+                return true;
+            }
+        }
+        // "Deny the request."
+        debug!("no allow policies matched");
+        false
+    }
+
     // only support workload
     pub async fn fetch_workload(&self, addr: &IpAddr) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
@@ -394,11 +496,16 @@ impl WorkloadInformation {
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
     workloads: HashMap<IpAddr, Workload>,
-    // workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
+    /// workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
     workload_to_vip: HashMap<IpAddr, HashSet<(SocketAddr, u16)>>,
-    // vips maintains a mapping of socket address with service port to workload ip and socket address
-    // with target ports in hashset.
+    /// vips maintains a mapping of socket address with service port to workload ip and socket address
+    /// with target ports in hashset.
     vips: HashMap<SocketAddr, HashSet<(IpAddr, u16)>>,
+
+    /// policies maintains a mapping of ns/name to policy.
+    policies: HashMap<String, rbac::Rbac>,
+    // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
+    policies_by_namespace: HashMap<String, HashSet<String>>,
     // cert_manager allows for the prefetching of certificates on workload discovery.
     cert_manager: Box<dyn CertificateProvider>,
 }
@@ -416,7 +523,7 @@ impl WorkloadStore {
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
         let wip = workload.workload_ip;
-        self.insert(workload);
+        self.insert_workload(workload);
         for (vip, pl) in &w.virtual_ips {
             let ip = vip.parse::<IpAddr>()?;
             for port in &pl.ports {
@@ -443,7 +550,52 @@ impl WorkloadStore {
         Ok(())
     }
 
-    fn insert(&mut self, w: Workload) {
+    fn insert_xds_rbac(&mut self, r: XdsRbac) -> anyhow::Result<()> {
+        let rbac = rbac::Rbac::try_from(&r)?;
+        trace!("insert policy {}", serde_json::to_string(&rbac)?);
+        self.insert_rbac(rbac);
+        Ok(())
+    }
+
+    fn insert_rbac(&mut self, rbac: Rbac) {
+        let key = rbac.to_key();
+        match rbac.scope {
+            RbacScope::Global => {
+                self.policies_by_namespace
+                    .entry("".to_string())
+                    .or_default()
+                    .insert(key.clone());
+            }
+            RbacScope::Namespace => {
+                self.policies_by_namespace
+                    .entry(rbac.namespace.clone())
+                    .or_default()
+                    .insert(key.clone());
+            }
+            RbacScope::WorkloadSelector => {}
+        }
+        self.policies.insert(key, rbac);
+    }
+
+    fn remove_rbac(&mut self, name: String) {
+        let Some(rbac) = self.policies.remove(&name) else {
+            return;
+        };
+        if let Some(key) = match rbac.scope {
+            RbacScope::Global => Some("".to_string()),
+            RbacScope::Namespace => Some(rbac.namespace),
+            RbacScope::WorkloadSelector => None,
+        } {
+            if let Some(pl) = self.policies_by_namespace.get_mut(&key) {
+                pl.remove(&name);
+                if pl.is_empty() {
+                    self.policies_by_namespace.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn insert_workload(&mut self, w: Workload) {
         let wip = w.workload_ip;
         self.workloads.insert(wip, w);
     }
@@ -527,8 +679,10 @@ pub enum WorkloadError {
     AddressParse(#[from] net::AddrParseError),
     #[error("failed to parse address, had {0} bytes")]
     ByteAddressParse(usize),
-    #[error("unknown protocol {0}")]
-    ProtocolParse(String),
+    #[error("invalid cidr: {0}")]
+    PrefixParse(#[from] ipnet::PrefixLenError),
+    #[error("unknown enum: {0}")]
+    EnumParse(String),
 }
 
 #[cfg(test)]
@@ -636,6 +790,7 @@ mod tests {
             canonical_revision: "".to_string(),
             node: "".to_string(),
 
+            authorization_policies: Default::default(),
             native_hbone: false,
         };
         let mut wi = WorkloadStore::default();

@@ -30,7 +30,7 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use crate::config::RootCert;
 use crate::metrics::xds::*;
 use crate::metrics::{Metrics, Recorder};
-use crate::xds::istio::workload::{Authorization, Workload};
+use crate::xds::istio::workload::{Rbac, Workload};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
@@ -107,9 +107,10 @@ pub struct Config {
     address: String,
     root_cert: RootCert,
     auth: identity::AuthSource,
+    proxy_metadata: HashMap<String, String>,
 
     workload_handler: Box<dyn Handler<Workload>>,
-    rbac_handler: Box<dyn Handler<Authorization>>,
+    rbac_handler: Box<dyn Handler<Rbac>>,
     initial_watches: Vec<String>,
     on_demand: bool,
 }
@@ -124,6 +125,7 @@ impl Config {
             rbac_handler: Box::new(NopHandler {}),
             initial_watches: Vec::new(),
             on_demand: config.xds_on_demand,
+            proxy_metadata: config.proxy_metadata,
         }
     }
 
@@ -132,7 +134,7 @@ impl Config {
         self
     }
 
-    pub fn with_rbac_handler(mut self, f: impl Handler<Authorization>) -> Config {
+    pub fn with_rbac_handler(mut self, f: impl Handler<Rbac>) -> Config {
         self.rbac_handler = Box::new(f);
         self
     }
@@ -283,8 +285,8 @@ impl AdsClient {
         }
     }
 
-    fn build_struct<const N: usize>(a: [(&str, &str); N]) -> Struct {
-        let fields = BTreeMap::from(a.map(|(k, v)| {
+    fn build_struct<T: IntoIterator<Item = (S, S)>, S: ToString>(a: T) -> Struct {
+        let fields = BTreeMap::from_iter(a.into_iter().map(|(k, v)| {
             (
                 k.to_string(),
                 Value {
@@ -304,14 +306,19 @@ impl AdsClient {
         let ns = ns.as_deref().unwrap_or("");
         let node = std::env::var("NODE_NAME");
         let node = node.as_deref().unwrap_or("");
+        let mut metadata = Self::build_struct([
+            ("NAME", pod_name),
+            ("NAMESPACE", ns),
+            ("INSTANCE_IPS", ip),
+            ("NODE_NAME", node),
+        ]);
+        metadata
+            .fields
+            .append(&mut Self::build_struct(self.config.proxy_metadata.clone()).fields);
+
         Node {
-            id: format!("sidecar~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
-            metadata: Some(Self::build_struct([
-                ("POD_NAME", pod_name),
-                ("POD_NAMESPACE", ns),
-                ("INSTANCE_IP", ip),
-                ("NODE_NAME", node),
-            ])),
+            id: format!("ztunnel~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
+            metadata: Some(metadata),
             ..Default::default()
         }
     }
@@ -436,7 +443,7 @@ impl AdsClient {
                 self.decode_and_handle::<Workload, _>(|a| &a.config.workload_handler, response)
             }
             xds::RBAC_TYPE => {
-                self.decode_and_handle::<Authorization, _>(|a| &a.config.rbac_handler, response)
+                self.decode_and_handle::<Rbac, _>(|a| &a.config.rbac_handler, response)
             }
             _ => {
                 error!("unknown type");
@@ -516,7 +523,7 @@ impl AdsClient {
                     name: res.clone(),
                     type_url: resp.type_url.clone(),
                 };
-                debug!("received delete resource {:#?}", k);
+                debug!("received delete resource {k}");
                 self.known_resources.remove(res);
                 self.notify_on_demand(&k);
                 k.name

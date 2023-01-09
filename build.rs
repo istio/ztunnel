@@ -20,6 +20,7 @@ fn main() -> Result<(), anyhow::Error> {
     let proto_files = vec![
         "proto/xds.proto",
         "proto/workload.proto",
+        "proto/networkpolicy.proto",
         "proto/citadel.proto",
     ]
     .iter()
@@ -32,7 +33,7 @@ fn main() -> Result<(), anyhow::Error> {
     let config = {
         let mut c = prost_build::Config::new();
         c.disable_comments(Some("."));
-        c.bytes([".istio.workload.Workload"]);
+        c.bytes([".istio.workload.Workload", ".istio.workload.Address"]);
         c
     };
     tonic_build::configure()

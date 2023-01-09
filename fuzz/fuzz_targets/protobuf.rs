@@ -12,21 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod admin;
-pub mod app;
-pub mod config;
-pub mod identity;
-pub mod metrics;
-pub mod proxy;
-pub mod rbac;
-pub mod readiness;
-pub mod signal;
-pub mod socket;
-pub mod telemetry;
-pub mod tls;
-pub mod version;
-pub mod workload;
-pub mod xds;
+#![no_main]
 
-pub mod hyper_util;
-pub mod test_helpers;
+use libfuzzer_sys::fuzz_target;
+use ztunnel::xds::istio::workload::Workload as XdsWorkload;
+use ztunnel::xds::istio::workload::Rbac as XdsRbac;
+use prost::Message;
+use ztunnel::workload::Workload;
+use ztunnel::rbac::Rbac;
+
+fuzz_target!(|data: &[u8]| {
+    let _ = run_workload(data);
+    let _ = run_rbac(data);
+});
+
+fn run_workload(data: &[u8]) -> anyhow::Result<()> {
+    Workload::try_from(&XdsWorkload::decode(data)?)?;
+    Ok(())
+}
+
+fn run_rbac(data: &[u8]) -> anyhow::Result<()> {
+    Rbac::try_from(&XdsRbac::decode(data)?)?;
+    Ok(())
+}

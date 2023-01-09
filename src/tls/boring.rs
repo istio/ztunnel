@@ -1,3 +1,7 @@
+use std::fmt::Debug;
+use std::future::Future;
+use std::net::IpAddr;
+use std::pin::Pin;
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,11 +15,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-use std::fmt::Debug;
-use std::future::Future;
-use std::net::IpAddr;
-use std::pin::Pin;
+use std::str::FromStr;
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -348,13 +348,21 @@ impl SanChecker for Certs {
     }
 }
 
+pub fn extract_sans(cert: &x509::X509) -> Vec<Identity> {
+    cert.subject_alt_names()
+        .iter()
+        .flat_map(|sans| sans.iter())
+        .filter_map(|s| s.uri())
+        .map(Identity::from_str)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default()
+}
+
 impl SanChecker for x509::X509 {
     fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
-        let want_san = format!("{identity}");
-        self.subject_alt_names()
-            .ok_or(TlsError::SanError)?
-            .iter()
-            .find(|san| san.uri().unwrap_or("<non-uri>") == want_san)
+        extract_sans(self)
+            .into_iter()
+            .find(|id| id == identity)
             .ok_or(TlsError::SanError)
             .map(|_| ())
     }

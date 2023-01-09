@@ -38,4 +38,4 @@ pub mod istio {
 }
 
 pub const WORKLOAD_TYPE: &str = "type.googleapis.com/istio.workload.Workload";
-pub const RBAC_TYPE: &str = "type.googleapis.com/istio.workload.Authorization";
+pub const RBAC_TYPE: &str = "type.googleapis.com/istio.workload.RBAC";
