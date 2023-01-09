@@ -89,8 +89,8 @@ pub struct TestServer {
 static BUFFER_SIZE: usize = 2 * 1024 * 1024;
 
 impl TestServer {
-    pub async fn new(mode: Mode) -> TestServer {
-        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+    pub async fn new(mode: Mode, port: u16) -> TestServer {
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
         let listener = TcpListener::bind(addr).await.unwrap();
         TestServer { listener, mode }
     }
