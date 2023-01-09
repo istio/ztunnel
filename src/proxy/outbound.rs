@@ -266,11 +266,9 @@ impl OutboundConnection {
                 // Proxying data between downstrean and upstream
                 match relay(&mut stream, &mut outbound, self.cfg.zero_copy_enabled).await {
                     // Connection closed with count of bytes transferred between streams
-                    Ok(Some(r)) => {
-                        // r.0 is number of bytes transffered from downstream to upstream
-                        // r.1 is number of bytes transffered from upstream to downstream
-                        self.metrics.record_count(&sent_bytes, r.0);
-                        self.metrics.record_count(&received_bytes, r.1);
+                    Ok(Some((sent, recv))) => {
+                        self.metrics.record_count(&sent_bytes, sent);
+                        self.metrics.record_count(&received_bytes, recv);
                         Ok(())
                     }
                     Ok(None) => Ok(()),

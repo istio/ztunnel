@@ -51,9 +51,6 @@ impl Metrics {
 }
 
 impl Recorder<ConnectionTerminationReason> for super::Metrics {
-    fn record(&self, reason: &ConnectionTerminationReason) {
-        self.record_count(reason, 1)
-    }
     fn record_count(&self, reason: &ConnectionTerminationReason, count: u64) {
         self.xds
             .connection_terminations
