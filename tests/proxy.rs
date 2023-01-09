@@ -236,7 +236,7 @@ async fn test_stats_exist() {
 }
 
 #[tokio::test]
-async fn test_tcp_metrics() {
+async fn test_tcp_connections_metrics() {
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
     let echo_addr = echo.address();
@@ -289,6 +289,44 @@ async fn test_tcp_metrics() {
     .await;
 }
 
+#[tokio::test]
+async fn test_tcp_bytes_metrics() {
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo_addr = echo.address();
+    tokio::spawn(echo.run());
+    let mut cfg = test_config();
+    cfg.zero_copy_enabled = false;
+    testapp::with_app(cfg, |app| async move {
+        let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
+        let mut stream = app.socks5_connect(dst).await;
+        let size = read_write_stream(&mut stream).await as u64;
+        drop(stream);
+
+        // Verify the bytes sent and received counters are correct
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                app.metrics()
+                    .await
+                    .query_sum("istio_tcp_received_bytes_total", Default::default())
+            },
+            size,
+        )
+        .await;
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                app.metrics()
+                    .await
+                    .query_sum("istio_tcp_sent_bytes_total", Default::default())
+            },
+            size,
+        )
+        .await;
+    })
+    .await;
+}
+
 async fn assert_eventually<F, T, Fut>(dur: Duration, f: F, expected: T)
 where
     F: Fn() -> Fut,
@@ -314,12 +352,13 @@ where
     }
 }
 
-async fn read_write_stream(stream: &mut TcpStream) {
+async fn read_write_stream(stream: &mut TcpStream) -> usize {
     const BODY: &[u8] = "hello world".as_bytes();
     stream.write_all(BODY).await.unwrap();
     let mut buf: [u8; BODY.len()] = [0; BODY.len()];
     stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(BODY, buf);
+    BODY.len()
 }
 
 /// admin_shutdown triggers a shutdown - from the admin server

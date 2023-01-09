@@ -102,5 +102,10 @@ where
 /// Recorder that can record events
 pub trait Recorder<E> {
     /// Record the given event.
-    fn record(&self, event: &E);
+    fn record(&self, event: &E) {
+        self.record_count(event, 1)
+    }
+
+    /// Record the given event by incrementing the counter by count
+    fn record_count(&self, event: &E, count: u64);
 }
