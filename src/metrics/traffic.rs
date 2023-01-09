@@ -26,6 +26,8 @@ use crate::workload::Workload;
 pub(super) struct Metrics {
     pub(super) connection_opens: Family<ConnectionInternal, Counter>,
     pub(super) connection_close: Family<ConnectionInternal, Counter>,
+    pub(super) received_bytes: Family<ConnectionInternal, Counter>,
+    pub(super) sent_bytes: Family<ConnectionInternal, Counter>,
 }
 
 #[derive(Clone, Copy, Default, Hash, PartialEq, Eq, Encode)]
@@ -100,6 +102,10 @@ impl<T: Encode> Encode for DefaultedUnknown<T> {
 
 pub struct ConnectionClose<'a>(&'a ConnectionOpen);
 
+pub struct ReceivedBytes<'a>(&'a ConnectionOpen);
+
+pub struct SentBytes<'a>(&'a ConnectionOpen);
+
 #[derive(Clone)]
 pub struct ConnectionOpen {
     pub reporter: Reporter,
@@ -115,11 +121,36 @@ impl<'a> From<&'a ConnectionOpen> for ConnectionClose<'a> {
     }
 }
 
+impl<'a> From<&'a ConnectionOpen> for ReceivedBytes<'a> {
+    fn from(c: &'a ConnectionOpen) -> Self {
+        ReceivedBytes(c)
+    }
+}
+
+impl<'a> From<&'a ConnectionOpen> for SentBytes<'a> {
+    fn from(c: &'a ConnectionOpen) -> Self {
+        SentBytes(c)
+    }
+}
+
 impl From<ConnectionClose<'_>> for ConnectionInternal {
     fn from(c: ConnectionClose) -> Self {
         c.0.into()
     }
 }
+
+impl From<ReceivedBytes<'_>> for ConnectionInternal {
+    fn from(c: ReceivedBytes) -> Self {
+        c.0.into()
+    }
+}
+
+impl From<SentBytes<'_>> for ConnectionInternal {
+    fn from(c: SentBytes) -> Self {
+        c.0.into()
+    }
+}
+
 impl From<&ConnectionOpen> for ConnectionInternal {
     fn from(c: &ConnectionOpen) -> Self {
         let mut co = ConnectionInternal {
@@ -199,27 +230,60 @@ impl Metrics {
             Box::new(connection_close.clone()),
         );
 
+        let received_bytes = Family::default();
+        registry.register(
+            "tcp_received_bytes",
+            "The size of total bytes received during request in case of a TCP connection",
+            Box::new(received_bytes.clone()),
+        );
+        let sent_bytes = Family::default();
+        registry.register(
+            "tcp_sent_bytes",
+            "The size of total bytes sent during response in case of a TCP connection",
+            Box::new(sent_bytes.clone()),
+        );
+
         Self {
             connection_opens,
             connection_close,
+            received_bytes,
+            sent_bytes,
         }
     }
 }
 
 impl Recorder<ConnectionOpen> for super::Metrics {
-    fn record(&self, reason: &ConnectionOpen) {
+    fn record_count(&self, reason: &ConnectionOpen, count: u64) {
         self.traffic
             .connection_opens
             .get_or_create(&ConnectionInternal::from(reason))
-            .inc();
+            .inc_by(count);
     }
 }
 
 impl Recorder<ConnectionClose<'_>> for super::Metrics {
-    fn record(&self, reason: &ConnectionClose) {
+    fn record_count(&self, reason: &ConnectionClose, count: u64) {
         self.traffic
             .connection_close
             .get_or_create(&ConnectionInternal::from(reason.0))
-            .inc();
+            .inc_by(count);
+    }
+}
+
+impl Recorder<ReceivedBytes<'_>> for super::Metrics {
+    fn record_count(&self, reason: &ReceivedBytes, count: u64) {
+        self.traffic
+            .received_bytes
+            .get_or_create(&ConnectionInternal::from(reason.0))
+            .inc_by(count);
+    }
+}
+
+impl Recorder<SentBytes<'_>> for super::Metrics {
+    fn record_count(&self, reason: &SentBytes, count: u64) {
+        self.traffic
+            .sent_bytes
+            .get_or_create(&ConnectionInternal::from(reason.0))
+            .inc_by(count);
     }
 }

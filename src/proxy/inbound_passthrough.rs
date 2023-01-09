@@ -75,7 +75,7 @@ impl InboundPassthrough {
         let orig = socket::orig_dst_addr_or_default(inbound);
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let mut outbound = TcpStream::connect(orig).await?;
-        relay(inbound, &mut outbound).await?;
+        relay(inbound, &mut outbound, true).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }

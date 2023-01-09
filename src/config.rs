@@ -37,8 +37,8 @@ const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
-const DEFAULT_ADMIN_PORT: u16 = 15021;
-const DEFAULT_STATUS_PORT: u16 = 15020;
+const DEFAULT_ADMIN_PORT: u16 = 15000;
+const DEFAULT_STATUS_PORT: u16 = 15021;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
@@ -107,6 +107,11 @@ pub struct Config {
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
+
+    // For testing purposes the use of zero copy can be disabled to test with
+    // buffered copy in downstream/upstream relay.
+    // Can be removed when we support metrics for zero copy as well.
+    pub zero_copy_enabled: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -226,6 +231,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         )?,
 
         proxy_args: parse_args(),
+        zero_copy_enabled: true,
     })
 }
 
