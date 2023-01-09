@@ -33,6 +33,7 @@ pub async fn build_with_cert(
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
     let metrics = Arc::new(Metrics::from(&mut registry));
+    let certificate_manager = Arc::new(Box::new(cert_manager));
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
@@ -48,6 +49,7 @@ pub async fn build_with_cert(
         config.clone(),
         metrics.clone(),
         ready.register_task("workload manager"),
+        certificate_manager.clone(),
     )
     .await?;
 
@@ -65,7 +67,7 @@ pub async fn build_with_cert(
     let proxy = proxy::Proxy::new(
         config.clone(),
         workload_manager.workloads(),
-        Box::new(cert_manager),
+        certificate_manager.clone(),
         metrics.clone(),
         drain_rx.clone(),
     )

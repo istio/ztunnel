@@ -50,7 +50,7 @@ impl Proxy {
     pub async fn new(
         cfg: config::Config,
         workloads: WorkloadInformation,
-        cert_manager: Box<dyn CertificateProvider>,
+        cert_manager: Arc<Box<dyn CertificateProvider>>,
         metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Proxy, Error> {

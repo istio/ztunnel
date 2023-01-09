@@ -29,6 +29,7 @@ use tracing::{debug, error, info, instrument, trace};
 use xds::istio::workload::Rbac as XdsRbac;
 
 use xds::istio::workload::Workload as XdsWorkload;
+use std::default::Default;
 
 use crate::config::ConfigSource;
 use crate::identity::{CertificateProvider, Error, Identity, SecretManager};
@@ -38,7 +39,6 @@ use crate::workload::WorkloadError::EnumParse;
 use crate::rbac::{Rbac, RbacScope};
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
-use crate::config::RootCert::Default;
 use crate::identity::mock::MockCaClient;
 use crate::tls::Certs;
 
@@ -263,7 +263,7 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
-        cert_manager: Box<dyn CertificateProvider>
+        cert_manager: Arc<Box<dyn CertificateProvider>>
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
             cert_manager,
@@ -512,14 +512,14 @@ pub struct WorkloadStore {
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     policies_by_namespace: HashMap<String, HashSet<String>>,
     // cert_manager allows for the prefetching of certificates on workload discovery.
-    cert_manager: Box<dyn CertificateProvider>,
+    cert_manager: Arc<Box<dyn CertificateProvider>>,
 }
 
 impl WorkloadStore {
     #[cfg(test)]
     pub fn test_store(workloads: Vec<XdsWorkload>) -> anyhow::Result<WorkloadStore> {
         let mut store = WorkloadStore {
-            cert_manager: Box::new(MockCaClient::new(Duration::from_secs(5))),
+            cert_manager: Arc::new(Box::new(MockCaClient::new(Duration::from_secs(5)))),
             ..Default::default()
         };
         for w in workloads {

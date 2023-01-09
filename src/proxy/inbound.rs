@@ -15,6 +15,7 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use drain::Watch;
@@ -38,7 +39,7 @@ use super::Error;
 pub struct Inbound {
     cfg: Config,
     listener: TcpListener,
-    cert_manager: Box<dyn CertificateProvider>,
+    cert_manager: Arc<Box<dyn CertificateProvider>>,
     workloads: WorkloadInformation,
     drain: Watch,
 }
@@ -47,7 +48,7 @@ impl Inbound {
     pub async fn new(
         cfg: Config,
         workloads: WorkloadInformation,
-        cert_manager: Box<dyn CertificateProvider>,
+        cert_manager: Arc<Box<dyn CertificateProvider>>,
         drain: Watch,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
@@ -276,7 +277,7 @@ pub(super) enum InboundConnect {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: Box<dyn CertificateProvider>,
+    cert_manager: Arc<Box<dyn CertificateProvider>>,
     workloads: WorkloadInformation,
 }
 
