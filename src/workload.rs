@@ -263,7 +263,7 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
-        cert_manager: Arc<Box<dyn CertificateProvider>>
+        cert_manager: Arc<tokio::sync::Mutex<Box<dyn CertificateProvider>>>
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
             cert_manager,
@@ -512,14 +512,14 @@ pub struct WorkloadStore {
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     policies_by_namespace: HashMap<String, HashSet<String>>,
     // cert_manager allows for the prefetching of certificates on workload discovery.
-    cert_manager: Arc<Box<dyn CertificateProvider>>,
+    cert_manager: Arc<tokio::sync::Mutex<Box<dyn CertificateProvider>>>,
 }
 
 impl WorkloadStore {
     #[cfg(test)]
     pub fn test_store(workloads: Vec<XdsWorkload>) -> anyhow::Result<WorkloadStore> {
         let mut store = WorkloadStore {
-            cert_manager: Arc::new(Box::new(MockCaClient::new(Duration::from_secs(5)))),
+            cert_manager: Arc::new(tokio::sync::Mutex::new(Box::new(MockCaClient::new(Duration::from_secs(5))))),
             ..Default::default()
         };
         for w in workloads {
@@ -551,7 +551,7 @@ impl WorkloadStore {
         let handle = Handle::current();
         let _ = handle.enter();
         // we just need to call fetch_certificate to cache, don't care about the actual cert
-        match block_on(self.cert_manager.fetch_certificate(&workload.identity())) {
+        match block_on(self.cert_manager.blocking_lock().fetch_certificate(&workload.identity())) {
             Ok(_) => debug!("cert for workload {} cached.", workload.workload_name),
             Err(e) => error!("unable to cache cert for workload {} , ignoring: {}", workload.workload_name, e),
         }

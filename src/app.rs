@@ -15,11 +15,12 @@
 use anyhow::Context;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc};
 use std::thread;
 use std::time::Duration;
 
 use prometheus_client::registry::Registry;
+use tokio::sync::Mutex;
 use tokio::time;
 use tracing::{error, info, warn};
 
@@ -33,7 +34,7 @@ pub async fn build_with_cert(
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
     let metrics = Arc::new(Metrics::from(&mut registry));
-    let certificate_manager = Arc::new(Box::new(cert_manager));
+    let certificate_manager: Arc<Mutex<Box<dyn CertificateProvider>>> = Arc::new(Mutex::new(Box::new(cert_manager)));
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete

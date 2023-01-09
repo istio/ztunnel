@@ -15,14 +15,14 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc};
 use std::time::Instant;
 
 use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{Mutex, oneshot};
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 use crate::config::Config;
@@ -39,7 +39,7 @@ use super::Error;
 pub struct Inbound {
     cfg: Config,
     listener: TcpListener,
-    cert_manager: Arc<Box<dyn CertificateProvider>>,
+    cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
     workloads: WorkloadInformation,
     drain: Watch,
 }
@@ -48,7 +48,7 @@ impl Inbound {
     pub async fn new(
         cfg: Config,
         workloads: WorkloadInformation,
-        cert_manager: Arc<Box<dyn CertificateProvider>>,
+        cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
         drain: Watch,
     ) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
@@ -277,7 +277,7 @@ pub(super) enum InboundConnect {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: Arc<Box<dyn CertificateProvider>>,
+    cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
     workloads: WorkloadInformation,
 }
 
@@ -298,7 +298,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
             %identity,
             "fetching cert"
         );
-        let cert = self.cert_manager.fetch_certificate(&identity).await?;
+        let cert = self.cert_manager.lock().await.fetch_certificate(&identity).await?;
         let acc = cert.mtls_acceptor()?;
         Ok(acc)
     }

@@ -14,13 +14,14 @@
 
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc};
 use std::{fmt, io};
 
 use boring::error::ErrorStack;
 use drain::Watch;
 use rand::Rng;
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tracing::{error, trace};
 
 use inbound::Inbound;
@@ -50,7 +51,7 @@ impl Proxy {
     pub async fn new(
         cfg: config::Config,
         workloads: WorkloadInformation,
-        cert_manager: Arc<Box<dyn CertificateProvider>>,
+        cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
         metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Proxy, Error> {
