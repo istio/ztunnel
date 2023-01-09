@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
-use std::io::Write;
 use std::net::IpAddr;
-use std::process::Command;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -27,6 +25,8 @@ use netns_rs::NetNs;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::{debug, warn, Instrument};
 
+use crate::test_helpers::helpers;
+
 pub struct NamespaceManager {
     prefix: String,
     namespaces: Arc<Mutex<HashMap<String, u8>>>,
@@ -43,8 +43,9 @@ pub struct Namespace {
 pub struct Ready(SyncSender<()>);
 
 impl Ready {
-    // This is the same as drop(ready) but more explicit
-    pub fn set_ready(self) {}
+    pub fn set_ready(self) {
+        let _ = self.0.send(());
+    }
 }
 
 impl Namespace {
@@ -86,7 +87,11 @@ impl Namespace {
         });
         debug!(namespace = name, "awaiting ready");
         // Await readiness
-        let _ = rx.recv();
+        if let Err(_) = rx.recv() {
+            debug!(namespace = name, "failed ready");
+            j.join().unwrap()?;
+            anyhow::bail!("readiness dropped; used ready.set_ready() instead");
+        }
         debug!(namespace = name, "ready");
         Ok(j)
     }
@@ -114,31 +119,12 @@ impl Drop for NamespaceManager {
         // Drop the root namespace
         drop_namespace(&self.prefix);
         for (name, _) in self.namespaces.lock().unwrap().iter() {
-            drop_namespace(&format!("{}_inner_{name}", self.prefix));
+            drop_namespace(&format!("{}-{name}", self.prefix));
         }
     }
 }
 
 impl NamespaceManager {
-    // pub async fn run<F, O, Fut>(prefix: &str, f: F) -> anyhow::Result<O>
-    // where
-    // F: FnOnce(&Self) -> Fut + Send + 'static,
-    // Fut: Future<Output = anyhow::Result<O>> + std::panic::UnwindSafe,
-    // {
-    //     if let Ok(h) = Handle::try_current() {
-    //         assert_eq!(
-    //             h.runtime_flavor(),
-    //             RuntimeFlavor::CurrentThread,
-    //             "Namespaces require single threaded"
-    //         );
-    //     }
-    //     let _ = NetNs::new(prefix)?;
-    //     let n = Self {
-    //         prefix: prefix.to_string(),
-    //         namespaces: Default::default(),
-    //     };
-    //     f(&n)
-    // }
     pub fn new(prefix: &str) -> anyhow::Result<Self> {
         if let Ok(h) = Handle::try_current() {
             assert_eq!(
@@ -147,11 +133,24 @@ impl NamespaceManager {
                 "Namespaces require single threaded"
             );
         }
-        let _ = NetNs::new(prefix)?;
-        Ok(Self {
+        let ns = NetNs::new(prefix)?;
+        // Build Self early so we cleanup if later commands fail
+        let res = Self {
             prefix: prefix.to_string(),
             namespaces: Default::default(),
-        })
+        };
+        // Setup the root namespace with some interfaces
+        helpers::run_command(&format!(
+            "
+set -ex
+ip -n {prefix} link add veth_{prefix} type veth peer name eth0 netns {prefix}
+ip -n {prefix} link set dev lo up
+ip -n {prefix} link set dev eth0 up
+ip -n {prefix} addr add 10.0.0.0 dev eth0
+"
+        ))?;
+        ns.enter()?;
+        Ok(res)
     }
 
     pub fn resolve(&self, name: &str) -> Option<IpAddr> {
@@ -170,7 +169,7 @@ impl NamespaceManager {
         let id = namespaces.len() as u8 + 1;
         let prefix = &self.prefix;
         let veth = format!("veth{id}");
-        let net = format!("{}_inner_{name}", prefix);
+        let net = format!("{}-{name}", prefix);
         let netns = NetNs::new(&net)?;
         let ns = Namespace {
             id,
@@ -179,7 +178,7 @@ impl NamespaceManager {
             namespace_name: net.clone(),
         };
         let ip = ns.ip();
-        Self::run_command(&format!(
+        helpers::run_command(&format!(
             "
 ip -n {prefix} link add {veth} type veth peer name eth0 netns {net}
 ip -n {prefix} link set dev {veth} up
@@ -197,20 +196,5 @@ ip -n {net} route add 10.0.0.0/16 via 10.0.0.1 src {ip}
         ))?;
         namespaces.insert(name.to_string(), id);
         Ok(ns)
-    }
-
-    fn run_command(cmd: &str) -> anyhow::Result<()> {
-        debug!("running command {cmd}");
-        let output = Command::new("sh").arg("-c").arg(cmd).output()?;
-        debug!(
-            "complete! code={}, stdout={}, stderr={}",
-            output.status,
-            std::str::from_utf8(&output.stdout)?,
-            std::str::from_utf8(&output.stdout)?
-        );
-        println!("status: {}", output.status);
-        std::io::stdout().write_all(&output.stdout).unwrap();
-        std::io::stderr().write_all(&output.stderr).unwrap();
-        Ok(())
     }
 }
