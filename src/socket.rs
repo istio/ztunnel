@@ -152,14 +152,14 @@ pub async fn relay(
                 Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
                     tokio::io::copy_bidirectional(downstream, upstream)
                         .await
-                        .map(|r| Some(r))
+                        .map(Some)
                 }
                 Err(e) => Err(e),
             }
         } else {
             tokio::io::copy_bidirectional(downstream, upstream)
                         .await
-                        .map(|r| Some(r))
+                        .map(Some)
         }
         
     }
@@ -168,6 +168,6 @@ pub async fn relay(
     {
         tokio::io::copy_bidirectional(downstream, upstream)
             .await
-            .map(|r| Some(r))
+            .map(Some)
     }
 }

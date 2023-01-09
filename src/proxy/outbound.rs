@@ -271,11 +271,11 @@ impl OutboundConnection {
                         // r.1 is number of bytes transffered from upstream to downstream
                         self.metrics.record_count(&sent_bytes, r.0);
                         self.metrics.record_count(&received_bytes, r.1);
-                        return Ok(());
+                        Ok(())
                     },                    
-                    Ok(None) => return Ok(()),
-                    Err(e) => return Err(Error::Io(e)),
-                };
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(Error::Io(e)),
+                }
             }
         }
     }
