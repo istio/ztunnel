@@ -158,10 +158,9 @@ pub async fn relay(
             }
         } else {
             tokio::io::copy_bidirectional(downstream, upstream)
-                        .await
-                        .map(Some)
+                .await
+                .map(Some)
         }
-        
     }
 
     #[cfg(not(target_os = "linux"))]

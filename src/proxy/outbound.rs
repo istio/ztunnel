@@ -174,7 +174,7 @@ impl OutboundConnection {
 
         let received_bytes = traffic::ReceivedBytes(&connection_metrics);
         let sent_bytes = traffic::SentBytes(&connection_metrics);
-        
+
         // _connection_close will record once dropped
         let _connection_close = self
             .metrics
@@ -272,7 +272,7 @@ impl OutboundConnection {
                         self.metrics.record_count(&sent_bytes, r.0);
                         self.metrics.record_count(&received_bytes, r.1);
                         Ok(())
-                    },                    
+                    }
                     Ok(None) => Ok(()),
                     Err(e) => Err(Error::Io(e)),
                 }

@@ -235,7 +235,7 @@ impl Metrics {
             connection_opens,
             connection_close,
             received_bytes,
-            sent_bytes
+            sent_bytes,
         }
     }
 }
