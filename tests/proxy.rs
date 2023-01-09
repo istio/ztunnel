@@ -595,7 +595,7 @@ async fn test_netns() -> anyhow::Result<()> {
     // }
     server.run_ready(|ip, ready| async move {
         let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 8080).await;
-        info!("Running echo at {ip}:8080");
+        info!("Running echo at {ip}:8080, {}", echo.address());
         ready.set_ready();
         Ok(echo.run().await)
     })?;
@@ -608,9 +608,11 @@ async fn test_netns() -> anyhow::Result<()> {
     namespaces
         .child("client")?
         .run(move |_ip| async move {
-            info!("Running client");
+            let srv = SocketAddr::new(namespaces.resolve("server").unwrap(), 8080);
+            info!("Running client to {srv}");
+            // tokio::time::sleep(Duration::from_secs(30)).await;
             let mut stream =
-                TcpStream::connect(SocketAddr::new(namespaces.resolve("server").unwrap(), 8080))
+                TcpStream::connect(srv)
                     .await
                     .unwrap();
             info!("connected");

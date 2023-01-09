@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+use futures::FutureExt;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
@@ -120,10 +120,26 @@ impl Drop for NamespaceManager {
 }
 
 impl NamespaceManager {
-    pub fn run<F, O>(prefix: &str, f: F) -> anyhow::Result<O>
-    where
-    F: FnOnce(Self) -> O,
-    {
+    // pub async fn run<F, O, Fut>(prefix: &str, f: F) -> anyhow::Result<O>
+    // where
+    // F: FnOnce(&Self) -> Fut + Send + 'static,
+    // Fut: Future<Output = anyhow::Result<O>> + std::panic::UnwindSafe,
+    // {
+    //     if let Ok(h) = Handle::try_current() {
+    //         assert_eq!(
+    //             h.runtime_flavor(),
+    //             RuntimeFlavor::CurrentThread,
+    //             "Namespaces require single threaded"
+    //         );
+    //     }
+    //     let _ = NetNs::new(prefix)?;
+    //     let n = Self {
+    //         prefix: prefix.to_string(),
+    //         namespaces: Default::default(),
+    //     };
+    //     f(&n)
+    // }
+    pub fn new(prefix: &str) -> anyhow::Result<Self> {
         if let Ok(h) = Handle::try_current() {
             assert_eq!(
                 h.runtime_flavor(),
@@ -135,7 +151,6 @@ impl NamespaceManager {
         Ok(Self {
             prefix: prefix.to_string(),
             namespaces: Default::default(),
-            // namespaces: vec![netns_rs::NetNs::new(prefix)?],
         })
     }
 
@@ -150,7 +165,8 @@ impl NamespaceManager {
     pub fn child(&self, name: &str) -> anyhow::Result<Namespace> {
         let mut namespaces = self.namespaces.lock().unwrap();
         // Namespaces are never removed, so its safe (for now) to use the size
-        let id = namespaces.len() as u8;
+        // 10.0.0.x is the host namespace, so skip 0
+        let id = namespaces.len() as u8 + 1;
         assert!(id <= 255, "only 255 networks allowed");
         let prefix = &self.prefix;
         let veth = format!("veth{id}");
@@ -163,7 +179,7 @@ impl NamespaceManager {
             namespace_name: net.clone(),
         };
         let ip = ns.ip();
-        Self::run(&format!(
+        Self::run_command(&format!(
             "
 ip -n {prefix} link add {veth} type veth peer name eth0 netns {net}
 ip -n {prefix} link set dev {veth} up
@@ -183,7 +199,7 @@ ip -n {net} route add 10.0.0.0/16 via 10.0.0.1 src {ip}
         Ok(ns)
     }
 
-    fn run(cmd: &str) -> anyhow::Result<()> {
+    fn run_command(cmd: &str) -> anyhow::Result<()> {
         debug!("running command {cmd}");
         let output = Command::new("sh").arg("-c").arg(cmd).output()?;
         debug!(

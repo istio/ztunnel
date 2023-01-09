@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use std::{cmp, io};
@@ -90,7 +90,7 @@ static BUFFER_SIZE: usize = 2 * 1024 * 1024;
 
 impl TestServer {
     pub async fn new(mode: Mode, port: u16) -> TestServer {
-        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let listener = TcpListener::bind(addr).await.unwrap();
         TestServer { listener, mode }
     }
