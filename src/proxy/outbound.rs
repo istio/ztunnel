@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -448,7 +448,9 @@ mod tests {
             demand: None,
         };
         let outbound = OutboundConnection {
-            cert_manager: Arc::new(Mutex::new(Box::new(identity::mock::MockCaClient::new(Duration::from_secs(10))))),
+            cert_manager: Arc::new(Mutex::new(Box::new(identity::mock::MockCaClient::new(
+                Duration::from_secs(10),
+            )))),
             workloads: wi,
             hbone_port: 15008,
             cfg,

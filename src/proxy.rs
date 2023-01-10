@@ -14,7 +14,7 @@
 
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::{fmt, io};
 
 use boring::error::ErrorStack;

@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::executor::block_on;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use std::{fmt, net};
 use std::time::Duration;
-use futures::executor::block_on;
+use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
@@ -28,19 +28,19 @@ use tracing::{debug, error, info, instrument, trace};
 
 use xds::istio::workload::Rbac as XdsRbac;
 
-use xds::istio::workload::Workload as XdsWorkload;
 use std::default::Default;
+use std::fmt::Formatter;
+use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
-use crate::identity::{CertificateProvider, Error, Identity, SecretManager};
+use crate::identity::{CertificateProvider, Identity};
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::EnumParse;
 
+use crate::identity::mock::MockCaClient;
 use crate::rbac::{Rbac, RbacScope};
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
-use crate::identity::mock::MockCaClient;
-use crate::tls::Certs;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Protocol {
@@ -263,7 +263,7 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
-        cert_manager: Arc<tokio::sync::Mutex<Box<dyn CertificateProvider>>>
+        cert_manager: Arc<tokio::sync::Mutex<Box<dyn CertificateProvider>>>,
     ) -> anyhow::Result<WorkloadManager> {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
             cert_manager,
@@ -497,6 +497,18 @@ impl WorkloadInformation {
     }
 }
 
+impl Default for Box<dyn CertificateProvider> {
+    fn default() -> Self {
+        Box::new(MockCaClient::new(Duration::from_secs(5)))
+    }
+}
+
+impl std::fmt::Debug for Box<dyn CertificateProvider> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "")
+    }
+}
+
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
@@ -512,6 +524,7 @@ pub struct WorkloadStore {
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     policies_by_namespace: HashMap<String, HashSet<String>>,
     // cert_manager allows for the prefetching of certificates on workload discovery.
+    #[serde(skip_serializing)]
     cert_manager: Arc<tokio::sync::Mutex<Box<dyn CertificateProvider>>>,
 }
 
@@ -519,7 +532,9 @@ impl WorkloadStore {
     #[cfg(test)]
     pub fn test_store(workloads: Vec<XdsWorkload>) -> anyhow::Result<WorkloadStore> {
         let mut store = WorkloadStore {
-            cert_manager: Arc::new(tokio::sync::Mutex::new(Box::new(MockCaClient::new(Duration::from_secs(5))))),
+            cert_manager: Arc::new(tokio::sync::Mutex::new(Box::new(MockCaClient::new(
+                Duration::from_secs(5),
+            )))),
             ..Default::default()
         };
         for w in workloads {
@@ -531,6 +546,8 @@ impl WorkloadStore {
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
         let wip = workload.workload_ip;
+        let widentity = workload.clone().identity();
+        let wname = workload.clone().name;
         self.insert_workload(workload);
         for (vip, pl) in &w.virtual_ips {
             let ip = vip.parse::<IpAddr>()?;
@@ -551,9 +568,16 @@ impl WorkloadStore {
         let handle = Handle::current();
         let _ = handle.enter();
         // we just need to call fetch_certificate to cache, don't care about the actual cert
-        match block_on(self.cert_manager.blocking_lock().fetch_certificate(&workload.identity())) {
-            Ok(_) => debug!("cert for workload {} cached.", workload.workload_name),
-            Err(e) => error!("unable to cache cert for workload {} , ignoring: {}", workload.workload_name, e),
+        match block_on(
+            self.cert_manager
+                .blocking_lock()
+                .fetch_certificate(&widentity),
+        ) {
+            Ok(_) => debug!("cert for workload {} cached.", wname),
+            Err(e) => error!(
+                "unable to cache cert for workload {} , ignoring: {}",
+                wname, e
+            ),
         }
         Ok(())
     }

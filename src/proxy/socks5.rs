@@ -16,7 +16,7 @@ use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};

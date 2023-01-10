@@ -15,14 +15,14 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::Instant;
 
 use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 use crate::config::Config;
@@ -298,7 +298,12 @@ impl crate::tls::CertProvider for InboundCertProvider {
             %identity,
             "fetching cert"
         );
-        let cert = self.cert_manager.lock().await.fetch_certificate(&identity).await?;
+        let cert = self
+            .cert_manager
+            .lock()
+            .await
+            .fetch_certificate(&identity)
+            .await?;
         let acc = cert.mtls_acceptor()?;
         Ok(acc)
     }
