@@ -14,16 +14,16 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use hyper::{Body, Method};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
 use tokio::net::TcpStream;
+use tracing::{error, info};
 
-use tracing::info;
-
+use ztunnel::identity;
+use ztunnel::identity::CertificateProvider;
 use ztunnel::test_helpers::components::WorkloadManager;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::netns::{Namespace, Resolver};
-
 use ztunnel::test_helpers::*;
 
 macro_rules! function {
@@ -129,7 +129,7 @@ async fn test_waypoint() -> anyhow::Result<()> {
     let waypoint = manager.register_waypoint("waypoint")?;
     let ip = waypoint.ip();
     run_hbone_server(waypoint)?;
-    let server = manager
+    let _ = manager
         .workload_builder("server")
         .hbone()
         .waypoint(ip)
@@ -141,8 +141,121 @@ async fn test_waypoint() -> anyhow::Result<()> {
         .register()?;
     manager.deploy_ztunnel()?;
 
-    run_tcp_server(server)?;
     run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+// This is currently broken since our redirection hacks are not sophisticated enough to bypass the outbound
+// but not inbound
+async fn test_waypoint_bypass() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let waypoint = manager.register_waypoint("waypoint")?;
+    let ip = waypoint.ip();
+    run_hbone_server(waypoint)?;
+    let _ = manager
+        .workload_builder("server")
+        .waypoint(ip)
+        .on_local_node()
+        .register()?;
+    let client = manager.workload_builder("client").register()?;
+    let mut app = manager.deploy_ztunnel()?;
+
+    let srv = resolve_target(manager.resolver(), "server");
+    client
+        .run(move || async move {
+            let mut builder = hyper::client::conn::Builder::new();
+            let builder = builder.http2_only(true);
+
+            let request = hyper::Request::builder()
+                .uri(&srv.to_string())
+                .method(Method::CONNECT)
+                .version(hyper::Version::HTTP_2)
+                .body(Body::empty())
+                .unwrap();
+
+            let id = &identity::Identity::default();
+            let cert = app.cert_manager.fetch_certificate(id).await?;
+            let mut connector = cert
+                .connector(None)
+                .unwrap()
+                .configure()
+                .expect("configure");
+            connector.set_verify_hostname(false);
+            connector.set_use_server_name_indication(false);
+            let hbone = SocketAddr::new(srv.ip(), 15008);
+            let tcp_stream = TcpStream::connect(hbone).await.unwrap();
+            let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
+                .await
+                .unwrap();
+            let (mut request_sender, connection) = builder.handshake(tls_stream).await.unwrap();
+            // spawn a task to poll the connection and drive the HTTP state
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    error!("Error in HBONE connection handshake: {:?}", e);
+                }
+            });
+
+            let response = request_sender.send_request(request).await.unwrap();
+            assert_eq!(response.status(), hyper::StatusCode::UNAUTHORIZED);
+            Ok(())
+        })?
+        .join()
+        .unwrap()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let _ = manager.workload_builder("server").register()?;
+    let client = manager.workload_builder("client").register()?;
+    let mut app = manager.deploy_ztunnel()?;
+
+    let srv = resolve_target(manager.resolver(), "server");
+    client
+        .run(move || async move {
+            let mut builder = hyper::client::conn::Builder::new();
+            let builder = builder.http2_only(true);
+
+            let request = hyper::Request::builder()
+                .uri(&srv.to_string())
+                .method(Method::CONNECT)
+                .version(hyper::Version::HTTP_2)
+                .body(Body::empty())
+                .unwrap();
+
+            let id = &identity::Identity::default();
+            let cert = app.cert_manager.fetch_certificate(id).await?;
+            let mut connector = cert
+                .connector(None)
+                .unwrap()
+                .configure()
+                .expect("configure");
+            connector.set_verify_hostname(false);
+            connector.set_use_server_name_indication(false);
+            let tcp_stream = TcpStream::connect(app.proxy_addresses.inbound)
+                .await
+                .unwrap();
+            let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
+                .await
+                .unwrap();
+            let (mut request_sender, connection) = builder.handshake(tls_stream).await.unwrap();
+            // spawn a task to poll the connection and drive the HTTP state
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    error!("Error in HBONE connection handshake: {:?}", e);
+                }
+            });
+
+            let response = request_sender.send_request(request).await.unwrap();
+            // We sent to ztunnel IP directly but requested server IP. Should be rejected
+            assert_eq!(response.status(), hyper::StatusCode::BAD_REQUEST);
+            Ok(())
+        })?
+        .join()
+        .unwrap()?;
     Ok(())
 }
 
