@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use prometheus_client::encoding::text::Encode;
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
@@ -23,12 +23,12 @@ pub(super) struct Metrics {
     pub(super) connection_terminations: Family<ConnectionTermination, Counter>,
 }
 
-#[derive(Clone, Hash, PartialEq, Eq, Encode)]
+#[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct ConnectionTermination {
     pub reason: ConnectionTerminationReason,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq, Encode)]
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, EncodeLabelValue)]
 pub enum ConnectionTerminationReason {
     ConnectionError,
     Error,
@@ -41,7 +41,7 @@ impl Metrics {
         registry.register(
             "connection_terminations",
             "The total number of completed connections to xds server",
-            Box::new(connection_terminations.clone()),
+            connection_terminations.clone(),
         );
 
         Self {

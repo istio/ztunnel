@@ -14,11 +14,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Write;
+use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, instrument};
@@ -41,9 +42,9 @@ pub enum Identity {
     },
 }
 
-impl prometheus_client::encoding::text::Encode for Identity {
-    fn encode(&self, writer: &mut dyn Write) -> Result<(), std::io::Error> {
-        writer.write_all(self.to_string().as_bytes())
+impl EncodeLabelValue for Identity {
+    fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+        writer.write_str(&self.to_string())
     }
 }
 

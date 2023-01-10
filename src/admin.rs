@@ -269,7 +269,7 @@ async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Respon
 }
 
 async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Response<Body> {
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf = String::new();
     let reg = reg.lock().unwrap();
     encode(&mut buf, &reg).unwrap();
 

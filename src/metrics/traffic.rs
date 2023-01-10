@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::{Error, Write};
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
+use std::fmt::Write;
 
-use prometheus_client::encoding::text::Encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
@@ -24,13 +24,13 @@ use crate::metrics::Recorder;
 use crate::workload::Workload;
 
 pub(super) struct Metrics {
-    pub(super) connection_opens: Family<ConnectionInternal, Counter>,
-    pub(super) connection_close: Family<ConnectionInternal, Counter>,
-    pub(super) received_bytes: Family<ConnectionInternal, Counter>,
-    pub(super) sent_bytes: Family<ConnectionInternal, Counter>,
+    pub(super) connection_opens: Family<CommonTrafficLabels, Counter>,
+    pub(super) connection_close: Family<CommonTrafficLabels, Counter>,
+    pub(super) received_bytes: Family<CommonTrafficLabels, Counter>,
+    pub(super) sent_bytes: Family<CommonTrafficLabels, Counter>,
 }
 
-#[derive(Clone, Copy, Default, Hash, PartialEq, Eq, Encode)]
+#[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Reporter {
     #[default]
     source,
@@ -38,7 +38,7 @@ pub enum Reporter {
     destination,
 }
 
-#[derive(Clone, Copy, Default, Hash, PartialEq, Eq, Encode)]
+#[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum RequestProtocol {
     #[default]
     tcp,
@@ -46,25 +46,26 @@ pub enum RequestProtocol {
     http,
 }
 
-#[derive(Default, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Default, Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ResponseFlags {
     #[default]
     none,
 }
 
-impl Encode for ResponseFlags {
-    fn encode(&self, writer: &mut dyn Write) -> Result<(), Error> {
+impl EncodeLabelValue for ResponseFlags {
+    fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
         match self {
-            ResponseFlags::none => writer.write_all(b"-"),
+            ResponseFlags::none => writer.write_str("-"),
         }
     }
 }
 
-#[derive(Default, Copy, Clone, Hash, PartialEq, Eq, Encode)]
+#[derive(Default, Copy, Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum SecurityPolicy {
     #[default]
     unknown,
 }
+
 #[derive(Default, Hash, PartialEq, Eq, Clone, Debug)]
 // DefaultedUnknown is a wrapper around an Option that encodes as "unknown" when missing, rather than ""
 struct DefaultedUnknown<T>(Option<T>);
@@ -91,11 +92,11 @@ impl From<Identity> for DefaultedUnknown<Identity> {
     }
 }
 
-impl<T: Encode> Encode for DefaultedUnknown<T> {
-    fn encode(&self, writer: &mut dyn Write) -> Result<(), Error> {
+impl<T: EncodeLabelValue> EncodeLabelValue for DefaultedUnknown<T> {
+    fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
         match self {
             DefaultedUnknown(Some(i)) => i.encode(writer),
-            DefaultedUnknown(None) => writer.write_all(b"unknown"),
+            DefaultedUnknown(None) => writer.write_str("unknown"),
         }
     }
 }
@@ -133,61 +134,67 @@ impl<'a> From<&'a ConnectionOpen> for SentBytes<'a> {
     }
 }
 
-impl From<ConnectionClose<'_>> for ConnectionInternal {
-    fn from(c: ConnectionClose) -> Self {
-        c.0.into()
+impl CommonTrafficLabels {
+    fn new() -> Self {
+        Default::default()
+    }
+
+    fn with_source(mut self, w: &Workload) -> Self {
+        self.source_workload = w.workload_name.clone().into();
+        self.source_canonical_service = w.canonical_name.clone().into();
+        self.source_canonical_revision = w.canonical_revision.clone().into();
+        self.source_workload_namespace = w.namespace.clone().into();
+        self.source_principal = w.identity().into();
+        self.source_app = w.canonical_name.clone().into();
+        self.source_version = w.canonical_revision.clone().into();
+        self.source_cluster = "Kubernetes".to_string().into(); // TODO
+        self
+    }
+
+    fn with_destination(mut self, w: Option<&Workload>) -> Self {
+        let Some(w) = w else {
+            return self
+        };
+        self.destination_workload = w.workload_name.clone().into();
+        self.destination_canonical_service = w.canonical_name.clone().into();
+        self.destination_canonical_revision = w.canonical_revision.clone().into();
+        self.destination_workload_namespace = w.namespace.clone().into();
+        self.destination_principal = w.identity().into();
+        self.destination_app = w.canonical_name.clone().into();
+        self.destination_version = w.canonical_revision.clone().into();
+        self.destination_cluster = "Kubernetes".to_string().into(); // TODO
+        self
     }
 }
 
-impl From<ReceivedBytes<'_>> for ConnectionInternal {
+impl From<ReceivedBytes<'_>> for CommonTrafficLabels {
     fn from(c: ReceivedBytes) -> Self {
         c.0.into()
     }
 }
 
-impl From<SentBytes<'_>> for ConnectionInternal {
+impl From<SentBytes<'_>> for CommonTrafficLabels {
     fn from(c: SentBytes) -> Self {
         c.0.into()
     }
 }
 
-impl From<&ConnectionOpen> for ConnectionInternal {
+impl From<&ConnectionOpen> for CommonTrafficLabels {
     fn from(c: &ConnectionOpen) -> Self {
-        let mut co = ConnectionInternal {
+        CommonTrafficLabels {
             reporter: c.reporter,
-
-            source_workload: c.source.workload_name.clone().into(),
-            source_canonical_service: c.source.canonical_name.clone().into(),
-            source_canonical_revision: c.source.canonical_revision.clone().into(),
-            source_workload_namespace: c.source.namespace.clone().into(),
-            source_principal: c.source.identity().into(),
-            source_app: c.source.canonical_name.clone().into(),
-            source_version: c.source.canonical_revision.clone().into(),
-            source_cluster: "Kubernetes".to_string().into(), // TODO
-
-            destination_service: c.destination_service.clone().into(),
             request_protocol: RequestProtocol::tcp,
             response_flags: ResponseFlags::none,
             connection_security_policy: c.connection_security_policy,
-
-            ..Default::default()
-        };
-        if let Some(w) = c.destination.as_ref() {
-            co.destination_workload = w.workload_name.clone().into();
-            co.destination_canonical_service = w.canonical_name.clone().into();
-            co.destination_canonical_revision = w.canonical_revision.clone().into();
-            co.destination_workload_namespace = w.namespace.clone().into();
-            co.destination_principal = w.identity().into();
-            co.destination_app = w.canonical_name.clone().into();
-            co.destination_version = w.canonical_revision.clone().into();
-            co.destination_cluster = "Kubernetes".to_string().into(); // TODO
+            ..CommonTrafficLabels::new()
+                .with_source(&c.source)
+                .with_destination(c.destination.as_ref())
         }
-        co
     }
 }
 
-#[derive(Clone, Hash, Default, PartialEq, Eq, Encode)]
-pub(super) struct ConnectionInternal {
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
+pub(super) struct CommonTrafficLabels {
     reporter: Reporter,
 
     source_workload: DefaultedUnknown<String>,
@@ -221,26 +228,26 @@ impl Metrics {
         registry.register(
             "tcp_connections_opened",
             "The total number of TCP connections opened",
-            Box::new(connection_opens.clone()),
+            connection_opens.clone(),
         );
         let connection_close = Family::default();
         registry.register(
             "tcp_connections_closed",
             "The total number of TCP connections closed",
-            Box::new(connection_close.clone()),
+            connection_close.clone(),
         );
 
         let received_bytes = Family::default();
         registry.register(
             "tcp_received_bytes",
             "The size of total bytes received during request in case of a TCP connection",
-            Box::new(received_bytes.clone()),
+            received_bytes.clone(),
         );
         let sent_bytes = Family::default();
         registry.register(
             "tcp_sent_bytes",
             "The size of total bytes sent during response in case of a TCP connection",
-            Box::new(sent_bytes.clone()),
+            sent_bytes.clone(),
         );
 
         Self {
@@ -256,7 +263,7 @@ impl Recorder<ConnectionOpen> for super::Metrics {
     fn record_count(&self, reason: &ConnectionOpen, count: u64) {
         self.traffic
             .connection_opens
-            .get_or_create(&ConnectionInternal::from(reason))
+            .get_or_create(&CommonTrafficLabels::from(reason))
             .inc_by(count);
     }
 }
@@ -265,7 +272,7 @@ impl Recorder<ConnectionClose<'_>> for super::Metrics {
     fn record_count(&self, reason: &ConnectionClose, count: u64) {
         self.traffic
             .connection_close
-            .get_or_create(&ConnectionInternal::from(reason.0))
+            .get_or_create(&CommonTrafficLabels::from(reason.0))
             .inc_by(count);
     }
 }
@@ -274,7 +281,7 @@ impl Recorder<ReceivedBytes<'_>> for super::Metrics {
     fn record_count(&self, reason: &ReceivedBytes, count: u64) {
         self.traffic
             .received_bytes
-            .get_or_create(&ConnectionInternal::from(reason.0))
+            .get_or_create(&CommonTrafficLabels::from(reason.0))
             .inc_by(count);
     }
 }
@@ -283,7 +290,7 @@ impl Recorder<SentBytes<'_>> for super::Metrics {
     fn record_count(&self, reason: &SentBytes, count: u64) {
         self.traffic
             .sent_bytes
-            .get_or_create(&ConnectionInternal::from(reason.0))
+            .get_or_create(&CommonTrafficLabels::from(reason.0))
             .inc_by(count);
     }
 }
