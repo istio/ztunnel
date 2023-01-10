@@ -228,7 +228,7 @@ pub fn metrics(c: &mut Criterion) {
     });
     c.bench_function("encode", |b| {
         b.iter(|| {
-            let mut buf: Vec<u8> = Vec::new();
+            let mut buf = String::new();
             prometheus_client::encoding::text::encode(&mut buf, &registry).unwrap();
         })
     });
