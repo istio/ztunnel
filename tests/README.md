@@ -33,6 +33,12 @@ Running these tests requires root. To run tests under sudo, `make test-root` can
 When not running as root, the tests are skipped. 
 Warning: rust doesn't allow reporting a test was skipped, so it just appears to pass; in CI we enforce it always runs as root to avoid missing tests.
 
+If namespaces get in a broken state, they can be cleaned up with:
+
+```shell
+ip -j netns ls | jq -r '.[].name' | grep '^test_' | xargs -n1 sudo ip netns del
+```
+
 ## Kubernetes
 
 Tests run in a full Kubernetes environment are handled in [`istio/istio`](https://github.com/istio/istio).

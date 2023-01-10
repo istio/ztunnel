@@ -6,9 +6,10 @@ set -ex
 HOST_IP="10.0.0.1"
 ZTUNNEL_IP="${1:?ztunnel IP}"
 ZTUNNEL_INTERFACE="${2:?ztunnel interface}"
+shift; shift;
 ipset create ztunnel-pods-ips hash:ip
-for i in `seq 1 ${3:?ip count}`; do
-  ipset add ztunnel-pods-ips 10.0."${i}".1
+for ip in $@; do
+  ipset add ztunnel-pods-ips "${ip}"
 done
 
 # Setup interfaces
@@ -81,3 +82,19 @@ ip rule add priority 100 fwmark 0x200/0x200 goto 32766
 ip rule add priority 101 fwmark 0x100/0x100 lookup 101
 ip rule add priority 102 fwmark 0x040/0x040 lookup 102
 ip rule add priority 103 table 100
+
+#IPTABLES=iptables-legacy
+#$IPTABLES -t mangle -I PREROUTING -j LOG --log-prefix "mangle pre [node] "
+#$IPTABLES -t mangle -I POSTROUTING -j LOG --log-prefix "mangle post [node] "
+#$IPTABLES -t mangle -I INPUT -j LOG --log-prefix "mangle inp [node] "
+#$IPTABLES -t mangle -I OUTPUT -j LOG --log-prefix "mangle out [node] "
+#$IPTABLES -t mangle -I FORWARD -j LOG --log-prefix "mangle fw [node] "
+#$IPTABLES -t nat -I POSTROUTING -j LOG --log-prefix "nat post [node] "
+#$IPTABLES -t nat -I INPUT -j LOG --log-prefix "nat inp [node] "
+#$IPTABLES -t nat -I OUTPUT -j LOG --log-prefix "nat out [node] "
+#$IPTABLES -t nat -I PREROUTING -j LOG --log-prefix "nat pre [node] "
+#$IPTABLES -t raw -I PREROUTING -j LOG --log-prefix "raw pre [node] "
+#$IPTABLES -t raw -I OUTPUT -j LOG --log-prefix "raw out [node] "
+#$IPTABLES -t filter -I FORWARD -j LOG --log-prefix "filt fw [node] "
+#$IPTABLES -t filter -I OUTPUT -j LOG --log-prefix "filt out [node] "
+#$IPTABLES -t filter -I INPUT -j LOG --log-prefix "filt inp [node] "

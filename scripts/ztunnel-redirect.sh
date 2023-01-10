@@ -125,3 +125,18 @@ $IPTABLES -t nat -A OUTPUT -p tcp --dport 15008 -m set '!' --match-set waypoint-
 echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
 echo 0 > /proc/sys/net/ipv4/conf/default/rp_filter
 echo 0 > /proc/sys/net/ipv4/conf/eth0/rp_filter
+
+#$IPTABLES -t mangle -I PREROUTING -j LOG --log-prefix "mangle pre [zt] "
+#$IPTABLES -t mangle -I POSTROUTING -j LOG --log-prefix "mangle post [zt] "
+#$IPTABLES -t mangle -I INPUT -j LOG --log-prefix "mangle inp [zt] "
+#$IPTABLES -t mangle -I OUTPUT -j LOG --log-prefix "mangle out [zt] "
+#$IPTABLES -t mangle -I FORWARD -j LOG --log-prefix "mangle fw [zt] "
+#$IPTABLES -t nat -I POSTROUTING -j LOG --log-prefix "nat post [zt] "
+#$IPTABLES -t nat -I INPUT -j LOG --log-prefix "nat inp [zt] "
+#$IPTABLES -t nat -I OUTPUT -j LOG --log-prefix "nat out [zt] "
+#$IPTABLES -t nat -I PREROUTING -j LOG --log-prefix "nat pre [zt] "
+#$IPTABLES -t raw -I PREROUTING -j LOG --log-prefix "raw pre [zt] "
+#$IPTABLES -t raw -I OUTPUT -j LOG --log-prefix "raw out [zt] "
+#$IPTABLES -t filter -I FORWARD -j LOG --log-prefix "filt fw [zt] "
+#$IPTABLES -t filter -I OUTPUT -j LOG --log-prefix "filt out [zt] "
+#$IPTABLES -t filter -I INPUT -j LOG --log-prefix "filt inp [zt] "

@@ -86,7 +86,7 @@ impl TestApp {
             .method(Method::GET)
             .uri(format!(
                 "http://localhost:{}/healthz/ready",
-                self.readiness_address
+                self.readiness_address.port()
             ))
             .body(Body::default())
             .unwrap();

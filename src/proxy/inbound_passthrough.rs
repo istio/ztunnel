@@ -81,6 +81,7 @@ impl InboundPassthrough {
         mut inbound: TcpStream,
     ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(&inbound);
+        info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let Some(upstream) = pi.workloads.fetch_workload(&orig.ip()).await else {
             return Err(Error::UnknownDestination(orig.ip()))
         };
@@ -110,7 +111,6 @@ impl InboundPassthrough {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }
-        info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let orig_src = if pi.cfg.enable_original_source {
             super::get_original_src_from_stream(&inbound)
         } else {

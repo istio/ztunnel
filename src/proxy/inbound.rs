@@ -82,6 +82,7 @@ impl Inbound {
                 dst,
             };
             let workloads = self.workloads.clone();
+            debug!(%conn, "accepted connection");
             let enable_original_source = self.cfg.enable_original_source;
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
@@ -215,6 +216,7 @@ impl Inbound {
         enable_original_source: bool,
         req: Request<Body>,
     ) -> Result<Response<Body>, hyper::Error> {
+        warn!("serve");
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
