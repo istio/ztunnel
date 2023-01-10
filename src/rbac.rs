@@ -20,20 +20,20 @@ use std::net::{IpAddr, SocketAddr};
 use ipnet::IpNet;
 use tracing::{instrument, trace};
 
-use xds::istio::workload::Address as XdsAddress;
-use xds::istio::workload::Rbac as XdsRbac;
-use xds::istio::workload::StringMatch as XdsStringMatch;
+use xds::istio::security::Address as XdsAddress;
+use xds::istio::security::Authorization as XdsRbac;
+use xds::istio::security::StringMatch as XdsStringMatch;
 
 use crate::identity::Identity;
 use crate::workload::WorkloadError;
 use crate::workload::WorkloadError::EnumParse;
-use crate::xds::istio::workload::string_match::MatchType;
-use crate::xds::istio::workload::RbacPolicyRuleMatch;
+use xds::istio::security::string_match::MatchType;
+use xds::istio::security::Match;
 use crate::{workload, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Rbac {
+pub struct Authorization {
     pub name: String,
     pub namespace: String,
     pub scope: RbacScope,
@@ -71,7 +71,7 @@ impl Display for Connection {
     }
 }
 
-impl Rbac {
+impl Authorization {
     pub fn to_key(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
@@ -249,16 +249,16 @@ pub enum RbacScope {
     WorkloadSelector,
 }
 
-impl TryFrom<Option<xds::istio::workload::RbacScope>> for RbacScope {
+impl TryFrom<Option<xds::istio::security::Scope>> for RbacScope {
     type Error = WorkloadError;
 
-    fn try_from(value: Option<xds::istio::workload::RbacScope>) -> Result<Self, Self::Error> {
+    fn try_from(value: Option<xds::istio::security::Scope>) -> Result<Self, Self::Error> {
         match value {
-            Some(xds::istio::workload::RbacScope::WorkloadSelector) => {
+            Some(xds::istio::security::Scope::WorkloadSelector) => {
                 Ok(RbacScope::WorkloadSelector)
             }
-            Some(xds::istio::workload::RbacScope::Namespace) => Ok(RbacScope::Namespace),
-            Some(xds::istio::workload::RbacScope::Global) => Ok(RbacScope::Global),
+            Some(xds::istio::security::Scope::Namespace) => Ok(RbacScope::Namespace),
+            Some(xds::istio::security::Scope::Global) => Ok(RbacScope::Global),
             None => Err(EnumParse("unknown type".into())),
         }
     }
@@ -270,21 +270,21 @@ pub enum RbacAction {
     Deny,
 }
 
-impl TryFrom<Option<xds::istio::workload::RbacPolicyAction>> for RbacAction {
+impl TryFrom<Option<xds::istio::security::Action>> for RbacAction {
     type Error = WorkloadError;
 
     fn try_from(
-        value: Option<xds::istio::workload::RbacPolicyAction>,
+        value: Option<xds::istio::security::Action>,
     ) -> Result<Self, Self::Error> {
         match value {
-            Some(xds::istio::workload::RbacPolicyAction::Allow) => Ok(RbacAction::Allow),
-            Some(xds::istio::workload::RbacPolicyAction::Deny) => Ok(RbacAction::Deny),
+            Some(xds::istio::security::Action::Allow) => Ok(RbacAction::Allow),
+            Some(xds::istio::security::Action::Deny) => Ok(RbacAction::Deny),
             None => Err(EnumParse("unknown type".into())),
         }
     }
 }
 
-impl TryFrom<&XdsRbac> for Rbac {
+impl TryFrom<&XdsRbac> for Authorization {
     type Error = WorkloadError;
 
     fn try_from(resource: &XdsRbac) -> Result<Self, Self::Error> {
@@ -304,11 +304,11 @@ impl TryFrom<&XdsRbac> for Rbac {
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Rbac {
+        Ok(Authorization {
             name: resource.name,
             namespace: resource.namespace,
-            scope: RbacScope::try_from(xds::istio::workload::RbacScope::from_i32(resource.scope))?,
-            action: RbacAction::try_from(xds::istio::workload::RbacPolicyAction::from_i32(
+            scope: RbacScope::try_from(xds::istio::security::Scope::from_i32(resource.scope))?,
+            action: RbacAction::try_from(xds::istio::security::Action::from_i32(
                 resource.action,
             ))?,
             groups,
@@ -316,10 +316,10 @@ impl TryFrom<&XdsRbac> for Rbac {
     }
 }
 
-impl TryFrom<&RbacPolicyRuleMatch> for RbacMatch {
+impl TryFrom<&Match> for RbacMatch {
     type Error = WorkloadError;
 
-    fn try_from(resource: &RbacPolicyRuleMatch) -> Result<Self, Self::Error> {
+    fn try_from(resource: &Match) -> Result<Self, Self::Error> {
         Ok(RbacMatch {
             namespaces: resource.namespaces.iter().filter_map(From::from).collect(),
             not_namespaces: resource
@@ -413,8 +413,8 @@ mod tests {
         };
     }
 
-    fn allow_policy(name: String, group: Vec<Vec<Vec<RbacMatch>>>) -> Rbac {
-        Rbac {
+    fn allow_policy(name: String, group: Vec<Vec<Vec<RbacMatch>>>) -> Authorization {
+        Authorization {
             name,
             namespace: "namespace".to_string(),
             scope: RbacScope::Global,

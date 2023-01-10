@@ -32,10 +32,13 @@ pub mod istio {
     pub mod workload {
         tonic::include_proto!("istio.workload");
     }
+    pub mod security {
+        tonic::include_proto!("istio.security");
+    }
     pub mod ca {
         tonic::include_proto!("istio.v1.auth");
     }
 }
 
 pub const WORKLOAD_TYPE: &str = "type.googleapis.com/istio.workload.Workload";
-pub const RBAC_TYPE: &str = "type.googleapis.com/istio.workload.RBAC";
+pub const AUTHORIZATION_TYPE: &str = "type.googleapis.com/istio.security.Authorization";
