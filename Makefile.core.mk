@@ -3,6 +3,10 @@ include common/Makefile.common.mk
 test:
 	cargo test --benches --tests --bins
 
+test-root: export CARGO_TARGET_$(shell rustc -vV | sed -n 's|host: ||p' | tr [:lower:] [:upper:]| tr - _)_RUNNER = sudo -E
+test-root:
+	cargo test --benches --tests --bins
+
 build:
 	cargo build
 

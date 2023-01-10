@@ -48,6 +48,9 @@ use ztunnel::{config, identity};
 macro_rules! require_root {
     () => {
         if unsafe { libc::getuid() } != 0 {
+            if std::env::var("CI").is_ok() {
+                panic!("CI tests should run as root to have full coverage");
+            }
             eprintln!("This test requires root; skipping");
             return Ok(())
         }
