@@ -29,7 +29,23 @@ use crate::test_helpers::helpers;
 
 pub struct NamespaceManager {
     prefix: String,
+    root: NetNs,
     namespaces: Arc<Mutex<HashMap<String, u8>>>,
+}
+
+#[derive(Clone)]
+pub struct Resolver {
+    namespaces: Arc<Mutex<HashMap<String, u8>>>,
+}
+
+impl Resolver {
+    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
+        self.namespaces
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|i| id_to_ip(*i))
+    }
 }
 
 #[derive(Debug)]
@@ -51,6 +67,10 @@ impl Ready {
 impl Namespace {
     pub fn ip(&self) -> IpAddr {
         id_to_ip(self.id)
+    }
+
+    pub fn interface(&self) -> String {
+        format!("veth{}", self.id)
     }
 
     pub fn run<F, Fut>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
@@ -137,29 +157,32 @@ impl NamespaceManager {
         // Build Self early so we cleanup if later commands fail
         let res = Self {
             prefix: prefix.to_string(),
+            root: ns,
             namespaces: Default::default(),
         };
-        // Setup the root namespace with some interfaces
-        helpers::run_command(&format!(
-            "
-set -ex
-ip -n {prefix} link add veth_{prefix} type veth peer name eth0 netns {prefix}
-ip -n {prefix} link set dev lo up
-ip -n {prefix} link set dev eth0 up
-ip -n {prefix} addr add 10.0.0.0 dev eth0
-"
-        ))?;
-        ns.enter()?;
         Ok(res)
     }
 
-    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
-        self.namespaces
-            .lock()
-            .unwrap()
-            .get(name)
-            .map(|i| id_to_ip(*i))
+    pub(super) fn count(&self) -> u8 {
+        self.namespaces.lock().unwrap().len() as u8
     }
+
+    pub fn resolver(&self) -> Resolver {
+        Resolver {
+            namespaces: self.namespaces.clone(),
+        }
+    }
+
+    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
+        self.resolver().resolve(name)
+    }
+
+    pub(super) fn run_in_root_namespace(&self, f: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+        self.root.run(|_| {
+            f()
+        })?
+    }
+
 
     pub fn child(&self, name: &str) -> anyhow::Result<Namespace> {
         let mut namespaces = self.namespaces.lock().unwrap();
