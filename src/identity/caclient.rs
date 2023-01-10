@@ -36,7 +36,7 @@ pub struct CaClient {
 
 #[async_trait]
 pub trait CertificateProvider: DynClone + Send + Sync + 'static {
-    async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error>;
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error>;
 }
 
 dyn_clone::clone_trait_object!(CertificateProvider);
@@ -52,7 +52,7 @@ impl CaClient {
 #[async_trait]
 impl CertificateProvider for CaClient {
     #[instrument(skip_all)]
-    async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
         let cs = tls::CsrOptions {
             san: id.to_string(),
         }
@@ -73,7 +73,12 @@ impl CertificateProvider for CaClient {
                 )]),
             }),
         };
-        let resp = self.client.create_certificate(req).await?.into_inner();
+        let resp = self
+            .client
+            .clone()
+            .create_certificate(req)
+            .await?
+            .into_inner();
         let leaf = resp
             .cert_chain
             .first()
@@ -110,7 +115,7 @@ mod tests {
     async fn test_ca_client_with_response(
         res: IstioCertificateResponse,
     ) -> Result<tls::Certs, Error> {
-        let (mock, mut ca_client) = test_helpers::ca::CaServer::spawn().await;
+        let (mock, ca_client) = test_helpers::ca::CaServer::spawn().await;
         mock.send(Ok(res)).unwrap();
         ca_client.fetch_certificate(&Identity::default()).await
     }

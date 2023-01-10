@@ -97,6 +97,8 @@ impl Default for Identity {
     }
 }
 
+/// SecretManager provides a wrapper around a CertificateProvider with caching.
+/// It is designed to be cheap to clone.
 #[derive(Clone)]
 pub struct SecretManager<C: CertificateProvider>
 where
@@ -118,17 +120,12 @@ impl SecretManager<CaClient> {
 }
 
 impl<T: CertificateProvider + Clone> SecretManager<T> {
-    pub async fn refresh_handler(
-        id: Identity,
-        cache: Arc<RwLock<HashMap<Identity, watch::Receiver<Option<tls::Certs>>>>>,
-        mut ca_client: T,
-        tx: watch::Sender<Option<tls::Certs>>,
-    ) {
+    async fn refresh_handler(&self, id: Identity, tx: watch::Sender<Option<tls::Certs>>) {
         loop {
-            let sleep_dur = match ca_client.fetch_certificate(&id).await {
+            let sleep_dur = match self.client.fetch_certificate(&id).await {
                 Err(err) => {
                     warn!(identity=%id, ?err, "fail cert refresh");
-                    let mut write_locked_cache = cache.write().unwrap();
+                    let mut write_locked_cache = self.cache.write().unwrap();
                     let Some(certs_rx) = write_locked_cache.get(&id) else {
                         // Should not be possible, but if there is no receiver
                         // in the cache, then no one is using these certs that
@@ -147,7 +144,7 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
                     match tx.send(Some(fetched_certs.clone())) {
                         Err(_) => {
                             // This means no receivers left. Should not be possible.
-                            let mut locked_cache = cache.write().unwrap();
+                            let mut locked_cache = self.cache.write().unwrap();
                             locked_cache.remove(&id);
                             return;
                         }
@@ -166,7 +163,7 @@ impl<T: CertificateProvider + Clone> SecretManager<T> {
 #[async_trait]
 impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for SecretManager<T> {
     #[instrument(skip_all, fields(%id))]
-    async fn fetch_certificate(&mut self, id: &Identity) -> Result<tls::Certs, Error> {
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
         let mut cache_rx;
         {
             let read_locked_cache = self.cache.read().unwrap();
@@ -184,12 +181,9 @@ impl<T: CertificateProvider + Clone + Send + 'static> CertificateProvider for Se
                             let (tx, rx) = watch::channel(None);
                             write_locked_cache.insert(id.clone(), rx.clone());
                             drop(write_locked_cache);
-                            tokio::spawn(SecretManager::refresh_handler(
-                                id.clone(),
-                                self.cache.clone(),
-                                self.client.clone(),
-                                tx,
-                            ));
+                            let s = self.clone();
+                            let id = id.clone();
+                            tokio::spawn(async move { s.refresh_handler(id, tx).await });
                             cache_rx = rx;
                         }
                     };
@@ -239,7 +233,7 @@ pub mod mock {
 
     #[async_trait]
     impl CertificateProvider for MockCaClient {
-        async fn fetch_certificate(&mut self, id: &Identity) -> Result<Certs, Error> {
+        async fn fetch_certificate(&self, id: &Identity) -> Result<Certs, Error> {
             let certs = generate_test_certs(
                 &id.clone().into(),
                 Duration::from_secs(0),
@@ -271,7 +265,7 @@ mod tests {
 
     use super::*;
 
-    async fn stress_many_ids(mut sm: SecretManager<mock::MockCaClient>, iterations: u32) {
+    async fn stress_many_ids(sm: SecretManager<mock::MockCaClient>, iterations: u32) {
         for i in 0..iterations {
             let id = identity::Identity::Spiffe {
                 trust_domain: "cluster.local".to_string(),
@@ -284,11 +278,7 @@ mod tests {
         }
     }
 
-    async fn stress_single_id(
-        mut sm: SecretManager<mock::MockCaClient>,
-        id: Identity,
-        dur: Duration,
-    ) {
+    async fn stress_single_id(sm: SecretManager<mock::MockCaClient>, id: Identity, dur: Duration) {
         let start_time = time::Instant::now();
         loop {
             let current_time = time::Instant::now();
@@ -303,7 +293,7 @@ mod tests {
     }
 
     async fn verify_cert_updates(
-        mut sm: SecretManager<mock::MockCaClient>,
+        sm: SecretManager<mock::MockCaClient>,
         id: Identity,
         dur: Duration,
     ) {
