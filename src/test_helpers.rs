@@ -46,7 +46,6 @@ pub fn test_config_with_port(port: u16) -> config::Config {
         readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        local_node: node,
         zero_copy_enabled: true,
         ..config::parse_config().unwrap()
     }
