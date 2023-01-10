@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
 use std::net::IpAddr;
 use std::time::Duration;
 
 use bytes::BufMut;
+use itertools::Itertools;
 use tracing::info;
 
 use crate::config::ConfigSource;
@@ -53,8 +53,17 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
+    pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
+        self.w.workload.waypoint_addresses.push(waypoint);
+        self
+    }
+
     pub fn vip(mut self, ip: &str, server_port: u16, target_port: u16) -> Self {
-        self.w.vips.entry(ip.to_string()).or_default().insert(server_port, target_port);
+        self.w
+            .vips
+            .entry(ip.to_string())
+            .or_default()
+            .insert(server_port, target_port);
         self
     }
 
@@ -73,17 +82,17 @@ impl<'a> TestWorkloadBuilder<'a> {
 
 pub struct WorkloadManager {
     namespaces: netns::NamespaceManager,
-    name: String,
     /// workloads that we have constructed
     workloads: Vec<LocalWorkload>,
+    waypoints: Vec<IpAddr>,
 }
 
 impl WorkloadManager {
     pub fn new(name: &str) -> anyhow::Result<Self> {
         Ok(Self {
             namespaces: netns::NamespaceManager::new(name)?,
-            name: name.to_string(),
             workloads: vec![],
+            waypoints: vec![],
         })
     }
 
@@ -106,9 +115,10 @@ impl WorkloadManager {
             local_node: Some("local".to_string()),
             ..config::parse_config().unwrap()
         };
+        let waypoints = self.waypoints.iter().map(|i| i.to_string()).join(" ");
         // Setup the ztunnel...
         ns.run_ready(move |ready| async move {
-            helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
+            helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip} {waypoints}"))?;
             let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
             let app = crate::app::build_with_cert(cfg, cert_manager.clone())
                 .await
@@ -135,6 +145,12 @@ impl WorkloadManager {
 
     pub fn workload_builder(&mut self, name: &str) -> TestWorkloadBuilder {
         TestWorkloadBuilder::new(name, self)
+    }
+
+    pub fn register_waypoint(&mut self, name: &str) -> anyhow::Result<Namespace> {
+        let ns = TestWorkloadBuilder::new(name, self).hbone().register()?;
+        self.waypoints.push(ns.ip());
+        Ok(ns)
     }
 
     pub fn resolver(&self) -> Resolver {

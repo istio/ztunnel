@@ -1,6 +1,8 @@
 #!/bin/bash
 
+# This script sets up redirection in the host network namespace for namespaced tests (tests/README.md)
 set -ex
+
 HOST_IP="10.0.0.1"
 ZTUNNEL_IP="${1:?ztunnel IP}"
 ZTUNNEL_INTERFACE="${2:?ztunnel interface}"

@@ -14,7 +14,7 @@
 
 use std::fmt::Debug;
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::ops::Add;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
@@ -25,53 +25,16 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
-use tracing::info;
+
 use tracing::{error, trace};
 
 use ztunnel::identity::mock::MockCaClient;
 use ztunnel::identity::CertificateProvider;
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
-use ztunnel::test_helpers::components::WorkloadManager;
-use ztunnel::test_helpers::helpers::initialize_telemetry;
-use ztunnel::test_helpers::netns::{Namespace, Resolver};
-use ztunnel::test_helpers::tcp::HboneTestServer;
+
 use ztunnel::test_helpers::*;
 use ztunnel::{config, identity};
-
-macro_rules! function {
-    () => {{
-        fn f() {}
-        fn type_name_of<T>(_: T) -> &'static str {
-            std::any::type_name::<T>()
-        }
-        let name = type_name_of(f);
-        &name[..name.len() - 3]
-    }};
-}
-
-/// setup_netns_test prepares a test using network namespaces. This checks we have root,
-/// and automatically setups up a namespace based on the test name (to avoid conflicts).
-macro_rules! setup_netns_test {
-    () => {{
-        if unsafe { libc::getuid() } != 0 {
-            if std::env::var("CI").is_ok() {
-                panic!("CI tests should run as root to have full coverage");
-            }
-            eprintln!("This test requires root; skipping");
-            return Ok(());
-        }
-        initialize_telemetry();
-        let f = function!()
-            .strip_prefix(module_path!())
-            .unwrap()
-            .strip_prefix("::")
-            .unwrap()
-            .strip_suffix("::{{closure}}")
-            .unwrap();
-        WorkloadManager::new(f)?
-    }};
-}
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
@@ -245,32 +208,34 @@ async fn run_request_test(target: &str, node: &str) {
     .await;
 }
 
-#[track_caller]
-async fn run_waypoint_test(target: &str, node: &str) {
-    // Test a round trip outbound call (via socks5)
-    // Verifies the request goes through a waypoint
-    // Note: the waypoint here is a test waypoint which echos back to us; it does not do a full next-hop proxy.
-    // As such, we only run the waypoint, and not any test app
-    let waypoint = HboneTestServer::new(tcp::Mode::ReadWrite).await;
-    let cfg = config::Config {
-        local_node: (!node.is_empty()).then(|| node.to_string()),
-        ..test_config_with_waypoint(waypoint.address().ip())
-    };
-    tokio::spawn(waypoint.run());
-    testapp::with_app(cfg, |app| async move {
-        let dst = SocketAddr::from_str(target).unwrap();
-        let mut stream = app.socks5_connect(dst).await;
-        hbone_read_write_stream(&mut stream).await;
-    })
-    .await;
+#[tokio::test]
+async fn test_hbone_request() {
+    run_request_test(TEST_WORKLOAD_HBONE, "").await;
 }
 
 #[tokio::test]
-async fn test_waypoint() {
-    // Port doesn't matter, we will only go to the fake waypoint.
-    run_waypoint_test(&format!("{TEST_WORKLOAD_WAYPOINT}:1234"), "").await;
-    // Also test when client and server are on the same node; we still need to go through the waypoint.
-    run_waypoint_test(&format!("{TEST_WORKLOAD_WAYPOINT}:1234"), "local").await;
+async fn test_tcp_request() {
+    run_request_test(TEST_WORKLOAD_TCP, "").await;
+}
+
+#[tokio::test]
+async fn test_vip_request() {
+    run_request_test(&format!("{TEST_VIP}:80"), "").await;
+}
+
+#[tokio::test]
+async fn test_hbone_request_local() {
+    run_request_test(TEST_WORKLOAD_HBONE, "local").await;
+}
+
+#[tokio::test]
+async fn test_tcp_request_local() {
+    run_request_test(TEST_WORKLOAD_TCP, "local").await;
+}
+
+#[tokio::test]
+async fn test_vip_request_local() {
+    run_request_test(&format!("{TEST_VIP}:80"), "local").await;
 }
 
 // TODO: this test doesn't work since sending direct inbound requests still requires redirection support to terminate the TLS
@@ -467,15 +432,6 @@ async fn read_write_stream(stream: &mut TcpStream) -> usize {
     BODY.len()
 }
 
-async fn hbone_read_write_stream(stream: &mut TcpStream) {
-    const BODY: &[u8] = b"hello world";
-    const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
-    stream.write_all(BODY).await.unwrap();
-    let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
-    stream.read_exact(&mut buf).await.unwrap();
-    assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
-}
-
 /// admin_shutdown triggers a shutdown - from the admin server
 async fn admin_shutdown(addr: SocketAddr) {
     let req = Request::builder()
@@ -487,93 +443,4 @@ async fn admin_shutdown(addr: SocketAddr) {
     let client = Client::new();
     let resp = client.request(req).await.expect("admin shutdown request");
     assert_eq!(resp.status(), hyper::StatusCode::OK);
-}
-
-const TEST_VIP: &str = "10.10.0.1";
-
-#[tokio::test]
-async fn test_vip_request() -> anyhow::Result<()> {
-    let mut manager = setup_netns_test!();
-    let server1 = manager.workload_builder("server1").vip(TEST_VIP, 80, SERVER_PORT).register()?;
-    let server2 = manager.workload_builder("server2").hbone().vip(TEST_VIP, 80, SERVER_PORT).register()?;
-    let client = manager.workload_builder("client").on_local_node().register()?;
-    manager.deploy_ztunnel()?;
-
-    run_tcp_server(server1)?;
-    run_tcp_server(server2)?;
-    run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
-    Ok(())
-}
-
-
-#[tokio::test]
-async fn test_tcp_request() -> anyhow::Result<()> {
-    let mut manager = setup_netns_test!();
-    let server = manager.workload_builder("server").register()?;
-    client_server_test(manager, server)
-}
-
-#[tokio::test]
-async fn test_tcp_local_request() -> anyhow::Result<()> {
-    let mut manager = setup_netns_test!();
-    let server = manager.workload_builder("server").on_local_node().register()?;
-    client_server_test(manager, server)
-}
-
-#[tokio::test]
-async fn test_hbone_request() -> anyhow::Result<()> {
-    let mut manager = setup_netns_test!();
-    let server = manager.workload_builder("server").hbone().register()?;
-    client_server_test(manager, server)
-}
-
-#[tokio::test]
-async fn test_hbone_local_request() -> anyhow::Result<()> {
-    let mut manager = setup_netns_test!();
-    let server = manager.workload_builder("server").hbone().on_local_node().register()?;
-    client_server_test(manager, server)
-}
-
-const SERVER_PORT: u16 = 8080;
-
-/// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
-fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
-    let target = target.to_string();
-    client
-        .run(move || async move {
-            // We accept a ip:port, ip, or name (which is resolved).
-            let srv = target.parse::<SocketAddr>()
-                .unwrap_or_else(|_| {
-                    let ip = target.parse::<IpAddr>().unwrap_or_else(|_| resolver.resolve(&target).unwrap());
-                    SocketAddr::new(ip, SERVER_PORT)
-                });
-            info!("Running client to {srv}");
-            let mut stream = TcpStream::connect(srv).await.unwrap();
-            read_write_stream(&mut stream).await;
-            Ok(())
-        })?
-        .join()
-        .unwrap()
-}
-
-/// run_tcp_server deploys a simple echo server in the provided namespace
-fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
-    server.run_ready(|ready| async move {
-        let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, SERVER_PORT).await;
-        info!("Running echo server");
-        ready.set_ready();
-        echo.run().await;
-        Ok(())
-    })?;
-    Ok(())
-}
-
-/// client_server_test runs a simple test sending a single request from the client and asserting it is received.
-fn client_server_test(mut manager: WorkloadManager, server: Namespace, ) -> anyhow::Result<()> {
-    let client = manager.workload_builder("client").on_local_node().register()?;
-    manager.deploy_ztunnel()?;
-
-    run_tcp_server(server)?;
-    run_tcp_client(client, manager.resolver(), "server")?;
-    Ok(())
 }

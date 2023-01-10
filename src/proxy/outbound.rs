@@ -20,7 +20,7 @@ use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, info_span, trace_span, warn, Instrument, trace};
+use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
 use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Recorder};
@@ -338,7 +338,12 @@ impl OutboundConnection {
             && self.pi.cfg.local_node == Some(us.workload.node.clone())
             && us.workload.protocol == Protocol::HBONE
         {
-            trace!(workload_node=us.workload.node, local_node=self.pi.cfg.local_node, "select {:?}", RequestType::DirectLocal);
+            trace!(
+                workload_node = us.workload.node,
+                local_node = self.pi.cfg.local_node,
+                "select {:?}",
+                RequestType::DirectLocal
+            );
             return Ok(Request {
                 protocol: Protocol::HBONE,
                 source: source_workload,
