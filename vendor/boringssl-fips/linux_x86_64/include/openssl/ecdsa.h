@@ -106,6 +106,12 @@ OPENSSL_EXPORT ECDSA_SIG *ECDSA_SIG_new(void);
 // ECDSA_SIG_free frees |sig| its member |BIGNUM|s.
 OPENSSL_EXPORT void ECDSA_SIG_free(ECDSA_SIG *sig);
 
+// ECDSA_SIG_get0_r returns the r component of |sig|.
+OPENSSL_EXPORT const BIGNUM *ECDSA_SIG_get0_r(const ECDSA_SIG *sig);
+
+// ECDSA_SIG_get0_s returns the s component of |sig|.
+OPENSSL_EXPORT const BIGNUM *ECDSA_SIG_get0_s(const ECDSA_SIG *sig);
+
 // ECDSA_SIG_get0 sets |*out_r| and |*out_s|, if non-NULL, to the two
 // components of |sig|.
 OPENSSL_EXPORT void ECDSA_SIG_get0(const ECDSA_SIG *sig, const BIGNUM **out_r,
@@ -154,6 +160,25 @@ OPENSSL_EXPORT int ECDSA_SIG_to_bytes(uint8_t **out_bytes, size_t *out_len,
 // structure for a group whose order is represented in |order_len| bytes, or
 // zero on overflow.
 OPENSSL_EXPORT size_t ECDSA_SIG_max_len(size_t order_len);
+
+
+// Testing-only functions.
+
+// ECDSA_sign_with_nonce_and_leak_private_key_for_testing behaves like
+// |ECDSA_do_sign| but uses |nonce| for the ECDSA nonce 'k', instead of a random
+// value. |nonce| is interpreted as a big-endian integer. It must be reduced
+// modulo the group order and padded with zeros up to |BN_num_bytes(order)|
+// bytes.
+//
+// WARNING: This function is only exported for testing purposes, when using test
+// vectors or fuzzing strategies. It must not be used outside tests and may leak
+// any private keys it is used with.
+OPENSSL_EXPORT ECDSA_SIG *
+ECDSA_sign_with_nonce_and_leak_private_key_for_testing(const uint8_t *digest,
+                                                       size_t digest_len,
+                                                       const EC_KEY *eckey,
+                                                       const uint8_t *nonce,
+                                                       size_t nonce_len);
 
 
 // Deprecated functions.

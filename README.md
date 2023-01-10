@@ -25,12 +25,12 @@ The Ztunnel build enables the `fips` feature by default, which in turn enables t
 on [BoringSSL](https://github.com/cloudflare/boring).
 
 FIPS has
-[strict requirements](https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp3678.pdf)
+[strict requirements](https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp4407.pdf)
 to ensure that compliance is granted only to the exact binary tested.
-FIPS compliance was [granted](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/3678)
-to an old version of BoringSSL that was tested with `Clang 7.0.1`.
+FIPS compliance was [granted](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/4407)
+to an old version of BoringSSL that was tested with `Clang 12.0.0`.
 
-Installing `Clang 7.0.1` on modern environments is at best difficult. For `linux` `x86_64`, we work around
+Installing `Clang 12.0.0` on modern environments is at best difficult. For `linux` `x86_64`, we work around
 this problem by shipping the pre-built binaries under `vendor/boringssl-fips/linux_x86_64`. We then tell the BoringSSL libraries
 to use this path by setting the `BORING_BSSL_PATH` environment variable in `.cargo/config.toml`.
 

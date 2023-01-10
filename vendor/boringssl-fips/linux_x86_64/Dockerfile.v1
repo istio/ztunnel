@@ -18,24 +18,23 @@ RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/nul
 RUN apt-add-repository 'deb https://apt.kitware.com/ubuntu/ bionic main' && apt-get update
 RUN apt install -y cmake
 
-#install go
+#install go v1.16.5
 ENV GOROOT_BOOTSTRAP=/usr./make.bash
-RUN wget https://go.dev/dl/go1.12.7.linux-amd64.tar.gz
-RUN tar -xzvf go1.12.7.linux-amd64.tar.gz
+RUN wget https://go.dev/dl/go1.16.5.linux-amd64.tar.gz
+RUN tar -xzvf go1.16.5.linux-amd64.tar.gz
 ENV PATH=/go/bin/:$PATH
 ENV GOROOT=/go/
 
-#install clang_7.0.1
+#install clang v12.0.0
 RUN apt-get remove clang
-RUN wget https://releases.llvm.org/7.0.1/clang%2bllvm-7.0.1-x86_64-linux-gnu-ubuntu-18.04.tar.xz
-RUN tar -xvf clang+llvm-7.0.1-x86_64-linux-gnu-ubuntu-18.04.tar.xz
-RUN mv clang+llvm-7.0.1-x86_64-linux-gnu-ubuntu-18.04 clang_7.0.1
-RUN mv clang_7.0.1 /usr/local/
-RUN ln -s /usr/local/clang_7.0.1/bin/clang /usr/local/clang_7.0.1/bin/clang++-7
-ENV LD_LIBRARY_PATH=/usr/local/clang_7.0.1/lib:
-ENV PATH=/usr/local/clang_7.0.1/bin:/go/bin/:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN wget https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.0/clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+RUN tar -xvf clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+RUN mv clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04 /usr/local/clang_12.0.0
+RUN ln -s clang /usr/local/clang_12.0.0/bin/clang++-12
+ENV LD_LIBRARY_PATH=/usr/local/clang_12.0.0/lib
+ENV PATH=/usr/local/clang_12.0.0/bin:$PATH
 
 #build boringssl
-RUN git clone https://github.com/cloudflare/boring.git
+RUN git clone https://github.com/PiotrSikora/boring.git -b boringcrypto_4407
 ENV PATH=/root/.cargo/bin/:$PATH
 RUN cd boring/boring-sys/ && cargo build --release --features fips
