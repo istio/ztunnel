@@ -83,11 +83,13 @@ impl Inbound {
                 dst,
             };
             let workloads = self.workloads.clone();
+            let extensions = self.cfg.extensions.clone();
             debug!(%conn, "accepted connection");
             let enable_original_source = self.cfg.enable_original_source;
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
                     Self::serve_connect(
+                        extensions.clone(),
                         workloads.clone(),
                         conn.clone(),
                         enable_original_source.unwrap_or_default(),
@@ -134,12 +136,19 @@ impl Inbound {
 
     /// handle_inbound serves an inbound connection with a target address `addr`.
     pub(super) async fn handle_inbound(
+        ext: &crate::extensions::ExtensionManager,
         request_type: InboundConnect,
         orig_src: Option<IpAddr>,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = super::freebind_connect(orig_src, addr).await;
+        let stream = ext
+            .connect(
+                orig_src,
+                addr,
+                crate::extensions::UpstreamDestination::UpstreamServer,
+            )
+            .await;
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -147,19 +156,19 @@ impl Inbound {
             }
             Ok(stream) => {
                 let mut stream = stream;
-                stream.set_nodelay(true)?;
+                stream.as_ref().set_nodelay(true)?;
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
                         match request_type {
                             InboundConnect::DirectPath(mut incoming) => {
-                                if let Err(e) = relay(&mut incoming, &mut stream, true).await {
+                                if let Err(e) = relay(&mut incoming, stream.as_mut(), true).await {
                                     error!(dur=?start.elapsed(), "internal server copy: {}", e);
                                 }
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
-                                    if let Err(e) = super::copy_hbone(&mut upgraded, &mut stream)
+                                    if let Err(e) = super::copy_hbone(&mut upgraded, stream.as_mut())
                                         .instrument(trace_span!("hbone server"))
                                         .await
                                     {
@@ -199,6 +208,7 @@ impl Inbound {
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
+        ext: crate::extensions::ExtensionManager,
         workloads: WorkloadInformation,
         conn: rbac::Connection,
         enable_original_source: bool,
@@ -266,7 +276,7 @@ impl Inbound {
                 } else {
                     orig_src
                 };
-                let status_code = match Self::handle_inbound(Hbone(req), orig_src, addr)
+                let status_code = match Self::handle_inbound(&ext, Hbone(req), orig_src, addr)
                     .in_current_span()
                     .await
                 {

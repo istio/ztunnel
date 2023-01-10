@@ -15,6 +15,7 @@
 pub mod admin;
 pub mod app;
 pub mod config;
+pub mod extensions;
 pub mod identity;
 pub mod metrics;
 pub mod proxy;
@@ -31,3 +32,47 @@ pub mod xds;
 
 pub mod hyper_util;
 pub mod test_helpers;
+
+#[cfg(feature = "gperftools")]
+extern crate gperftools;
+
+use extensions::Extension;
+use tracing::info;
+
+// #[global_allocator]
+// static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// #[global_allocator]
+// static GLOBAL: tcmalloc::TCMalloc = tcmalloc::TCMalloc;
+
+pub fn entry(extension: Option<Box<dyn Extension + Sync + Send>>) -> anyhow::Result<()> {
+    telemetry::setup_logging();
+    let config: config::Config = config::parse_config(extension)?;
+
+    // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
+    match std::env::args().nth(1).as_deref() {
+        None | Some("proxy") => (),
+        Some("version") => return version(),
+        Some(unknown) => {
+            eprintln!("unknown command: {unknown}");
+            std::process::exit(1)
+        }
+    };
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move { proxy(config).await })
+}
+
+fn version() -> anyhow::Result<()> {
+    println!("{}", version::BuildInfo::new());
+    Ok(())
+}
+
+async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
+    info!("version: {}", version::BuildInfo::new());
+    info!("running with config: {}", serde_yaml::to_string(&cfg)?);
+    app::build(cfg).await?.wait_termination().await
+}

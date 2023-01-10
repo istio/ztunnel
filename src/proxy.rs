@@ -124,6 +124,9 @@ pub enum Error {
     #[error("tls handshake failed: {0:?}")]
     TlsHandshake(#[from] tokio_boring::HandshakeError<TcpStream>),
 
+    #[error("tls handshake failed: {0:?}")]
+    TlsHandshakeWrapped(#[from] tokio_boring::HandshakeError<crate::extensions::WrappedStream>),
+
     #[error("http handshake failed: {0}")]
     HttpHandshake(#[source] hyper::Error),
 

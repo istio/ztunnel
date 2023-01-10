@@ -23,8 +23,8 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use tokio::time;
 
+use crate::extensions::Extension;
 use crate::identity;
-
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
@@ -65,7 +65,7 @@ impl ConfigSource {
     }
 }
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
@@ -118,6 +118,8 @@ pub struct Config {
     // buffered copy in downstream/upstream relay.
     // Can be removed when we support metrics for zero copy as well.
     pub zero_copy_enabled: bool,
+
+    pub extensions: crate::extensions::ExtensionManager,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -158,9 +160,9 @@ fn parse_args() -> String {
     cli_args[1..].join(" ")
 }
 
-pub fn parse_config() -> Result<Config, Error> {
+pub fn parse_config(extension: Option<Box<dyn Extension + Sync + Send>>) -> Result<Config, Error> {
     let pc = parse_proxy_config()?;
-    construct_config(pc)
+    construct_config(pc, extension)
 }
 
 fn parse_proxy_config() -> Result<ProxyConfig, Error> {
@@ -170,7 +172,7 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
     construct_proxy_config(mesh_config_path, pc_env).map_err(Error::ProxyConfig)
 }
 
-pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
+pub fn construct_config(pc: ProxyConfig, extension: Option<Box<dyn Extension + Sync + Send>>) -> Result<Config, Error> {
     let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {
@@ -245,6 +247,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
         zero_copy_enabled: true,
+        extensions: crate::extensions::ExtensionManager::new(extension),
     })
 }
 
@@ -342,13 +345,13 @@ pub mod tests {
 
     #[test]
     fn config_from_proxyconfig() {
-        let default_config = construct_config(ProxyConfig::default())
+        let default_config = construct_config(ProxyConfig::default(), None)
             .expect("could not build Config without ProxyConfig");
 
         // mesh config only
         let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
         let pc = construct_proxy_config(mesh_config_path, None).unwrap();
-        let cfg = construct_config(pc).unwrap();
+        let cfg = construct_config(pc, None).unwrap();
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15099);
         // TODO remove prefix
@@ -366,7 +369,7 @@ pub mod tests {
         }"#,
         );
         let pc = construct_proxy_config("", pc_env).unwrap();
-        let cfg = construct_config(pc).unwrap();
+        let cfg = construct_config(pc, None).unwrap();
         assert_eq!(
             cfg.readiness_addr.port(),
             default_config.readiness_addr.port()
@@ -380,7 +383,7 @@ pub mod tests {
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
-        let cfg = construct_config(pc).unwrap();
+        let cfg = construct_config(pc, None).unwrap();
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
         assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");

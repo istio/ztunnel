@@ -21,7 +21,7 @@ use drain::Watch;
 
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
 use crate::metrics::traffic::Reporter;
@@ -35,20 +35,25 @@ use crate::{rbac, socket};
 pub struct Outbound {
     pi: ProxyInputs,
     drain: Watch,
-    listener: TcpListener,
+    listener: crate::extensions::WrappedTcpListener,
 }
 
 impl Outbound {
-    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
-        let listener: TcpListener = TcpListener::bind(pi.cfg.outbound_addr)
+    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
+        let listener = pi
+            .cfg
+            .extensions
+            .bind(
+                pi.cfg.outbound_addr,
+                crate::extensions::ListenerType::Outbound,
+            )
             .await
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
-        let transparent = super::maybe_set_transparent(&pi, &listener)?;
-        // Override with our explicitly configured setting
-        pi.cfg.enable_original_source = Some(transparent);
+
+        let transparent = socket::set_transparent(listener.as_ref()).is_ok();
 
         info!(
-            address=%listener.local_addr().unwrap(),
+            address=%listener.as_ref().local_addr().unwrap(),
             component="outbound",
             transparent,
             "listener established",
@@ -61,7 +66,7 @@ impl Outbound {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().unwrap()
+        self.listener.as_ref().local_addr().unwrap()
     }
 
     pub(super) async fn run(self) {
@@ -177,6 +182,7 @@ impl OutboundConnection {
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
             return Inbound::handle_inbound(
+                &self.pi.cfg.extensions,
                 InboundConnect::DirectPath(stream),
                 origin_src,
                 req.destination,
@@ -225,8 +231,17 @@ impl OutboundConnection {
                     .connector(req.destination_workload.map(|w| w.identity()).as_ref())?
                     .configure()
                     .expect("configure");
-                let tcp_stream = super::freebind_connect(local, req.gateway).await?;
-                tcp_stream.set_nodelay(true)?;
+                let tcp_stream = self
+                    .pi
+                    .cfg
+                    .extensions
+                    .connect(
+                        local,
+                        req.gateway,
+                        crate::extensions::UpstreamDestination::Ztunnel,
+                    )
+                    .await?;
+                tcp_stream.as_ref().set_nodelay(true)?;
                 let tls_stream = connect_tls(connector, tcp_stream).await?;
                 let (mut request_sender, connection) = builder
                     .handshake(tls_stream)
@@ -269,9 +284,25 @@ impl OutboundConnection {
                 } else {
                     None
                 };
-                let mut outbound = super::freebind_connect(local, req.gateway).await?;
+
+                let mut outbound = self
+                    .pi
+                    .cfg
+                    .extensions
+                    .connect(
+                        local,
+                        req.gateway,
+                        crate::extensions::UpstreamDestination::UpstreamServer,
+                    )
+                    .await?;
                 // Proxying data between downstrean and upstream
-                match relay(&mut stream, &mut outbound, self.pi.cfg.zero_copy_enabled).await {
+                match relay(
+                    &mut stream,
+                    outbound.as_mut(),
+                    self.pi.cfg.zero_copy_enabled,
+                )
+                .await
+                {
                     // Connection closed with count of bytes transferred between streams
                     Ok(Some((sent, recv))) => {
                         self.pi.metrics.record_count(&sent_bytes, sent);
@@ -418,10 +449,13 @@ enum RequestType {
     Passthrough,
 }
 
-pub async fn connect_tls(
+pub async fn connect_tls<S>(
     mut connector: ConnectConfiguration,
-    stream: TcpStream,
-) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
+    stream: S,
+) -> Result<tokio_boring::SslStream<S>, tokio_boring::HandshakeError<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     connector.set_verify_hostname(false);
     connector.set_use_server_name_indication(false);
     tokio_boring::connect(connector, "", stream).await
@@ -450,7 +484,7 @@ mod tests {
     ) {
         let cfg = Config {
             local_node: Some("local-node".to_string()),
-            ..crate::config::parse_config().unwrap()
+            ..crate::config::parse_config(None).unwrap()
         };
         let source = XdsWorkload {
             name: "source-workload".to_string(),
@@ -667,5 +701,126 @@ mod tests {
         destination: &'a str,
         gateway: &'a str,
         request_type: RequestType,
+    }
+
+    #[tokio::test]
+    async fn extension_on_for_listen_socket() {
+        use std::sync::atomic::Ordering;
+        let ext: crate::extensions::mock::MockExtension = Default::default();
+        let state = ext.state.clone();
+        let cfg = Config {
+            outbound_addr: "127.0.0.1:0".parse().unwrap(),
+            extensions: crate::extensions::ExtensionManager::new(Some(Box::new(ext))),
+            ..crate::config::parse_config(None).unwrap()
+        };
+        let (s, drain) = drain::channel();
+        let workloads: WorkloadInformation = WorkloadInformation {
+            info: Default::default(),
+            demand: None,
+        };
+        let o = Outbound::new(
+            ProxyInputs {
+                cert_manager: Box::new(identity::mock::MockCaClient::new(Duration::from_secs(10))),
+                workloads: workloads,
+                hbone_port: 15008,
+                cfg,
+                metrics: Arc::new(Default::default()),
+            },
+            drain,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.on_listen.load(Ordering::SeqCst), 1);
+
+        let addr = o.address();
+
+        tokio::spawn(async move {
+            o.run().await;
+        });
+
+        // connect to the outbound
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::net::TcpStream::connect(addr).await.unwrap();
+        })
+        .await
+        .unwrap();
+        // should happen pretty fast.
+        for _ in 0..100 {
+            if state.on_accept.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(state.on_accept.load(Ordering::SeqCst), 1);
+        s.drain().await;
+    }
+
+    #[tokio::test]
+    async fn extension_on_for_outbound() {
+        use std::sync::atomic::Ordering;
+        let ext: crate::extensions::mock::MockExtension = Default::default();
+        let state = ext.state.clone();
+        let cfg = Config {
+            local_node: Some("local-node".to_string()),
+            extensions: crate::extensions::ExtensionManager::new(Some(Box::new(ext))),
+            ..crate::config::parse_config(None).unwrap()
+        };
+        let source = XdsWorkload {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            address: Bytes::copy_from_slice(&[127, 0, 0, 1]),
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let xds = XdsWorkload {
+            address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+            ..Default::default()
+        };
+        let wl = workload::WorkloadStore::test_store(vec![source, xds]).unwrap();
+
+        let wi = WorkloadInformation {
+            info: Arc::new(Mutex::new(wl)),
+            demand: None,
+        };
+        let mut outbound = OutboundConnection {
+            pi: ProxyInputs {
+                cert_manager: Box::new(identity::mock::MockCaClient::new(Duration::from_secs(10))),
+                workloads: wi,
+                hbone_port: 15008,
+                cfg,
+                metrics: Arc::new(Default::default()),
+            },
+            id: TraceParent::new(),
+        };
+
+        // we need a pretend TcpStream for proxy_to. ideally this should be a mock..
+        // for it to be a mock, Outbound::proxy_to would need to accept generic stream.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            std::mem::drop(s);
+        });
+        let s = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::net::TcpStream::connect(addr).await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // this will error, but we don't care.
+        let _ = outbound
+            .proxy_to(
+                s,
+                "127.0.0.1".parse().unwrap(),
+                "127.0.0.1:1234".parse().unwrap(),
+            )
+            .await;
+
+        assert_eq!(state.on_pre_connect.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.on_pre_connect_args.lock().unwrap()[0],
+            crate::extensions::UpstreamDestination::UpstreamServer
+        );
     }
 }

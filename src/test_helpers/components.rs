@@ -73,7 +73,7 @@ impl WorkloadManager {
             fake_ca: true,
             local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
             local_node: Some(node.to_string()),
-            ..config::parse_config().unwrap()
+            ..config::parse_config(None).unwrap()
         };
         let waypoints = self.waypoints.iter().map(|i| i.to_string()).join(" ");
         let (tx, rx) = std::sync::mpsc::sync_channel(0);

@@ -12,8 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ztunnel::extensions::{Extension, ListenerType};
+
+struct ExampleExtension;
+
+impl ExampleExtension {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Extension for ExampleExtension {
+    fn on_listen(&self, l: &tokio::net::TcpListener, _: ListenerType) {
+        print!("ExampleExtension: Listening on {}", l.local_addr().unwrap());
+    }
+}
 
 fn main() -> anyhow::Result<()> {
-    ztunnel::entry(None)
- }
- 
+    ztunnel::entry(Some(Box::new(ExampleExtension::new())))
+}
