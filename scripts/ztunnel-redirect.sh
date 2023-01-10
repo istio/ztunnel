@@ -1,7 +1,11 @@
 #!/bin/bash
+
+# This script sets up redirection in the ztunnel network namespace for namespaced tests (tests/README.md)
 set -ex
 
 INSTANCE_IP="${1:?INSTANCE_IP}"
+shift
+
 
 # START https://github.com/solo-io/istio-sidecarless/blob/master/redirect-worker.sh#L198-L205
 PROXY_OUTBOUND_MARK=0x401/0xfff
@@ -109,7 +113,12 @@ $IPTABLES -t mangle -A PREROUTING -p tcp -i eth0 ! --dst $INSTANCE_IP -j MARK --
 # Huge hack. Currently, we only support single "node" test setup. This means we cannot test
 # Cross-ztunnel requests. Instead, loop these back to ourselves.
 # TODO: setup multiple ztunnels and actually communicate between them; then this can be removed.
-$IPTABLES -t nat -A OUTPUT -p tcp --dport 15008 -j REDIRECT --to-port $POD_INBOUND
+# We send HBONE to waypoints, so let those through...
+ipset create waypoint-pods-ips hash:ip
+for waypoint in $@; do
+  ipset add waypoint-pods-ips "${waypoint}"
+done
+$IPTABLES -t nat -A OUTPUT -p tcp --dport 15008 -m set '!' --match-set waypoint-pods-ips dst -j REDIRECT --to-port $POD_INBOUND
 
 # With normal linux routing we need to disable the rp_filter
 # as we get packets from a tunnel that doesn't have default routes.

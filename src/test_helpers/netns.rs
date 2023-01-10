@@ -1,12 +1,3 @@
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::future::Future;
-use std::net::IpAddr;
-use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::{sync, thread};
-
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +11,16 @@ use std::{sync, thread};
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use futures::FutureExt;
+
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
+use std::net::IpAddr;
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::{sync, thread};
+
 use netns_rs::NetNs;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::{debug, warn, Instrument};
@@ -52,7 +52,6 @@ impl Resolver {
 pub struct Namespace {
     id: u8,
     name: String,
-    namespace_name: String,
     netns: NetNs,
 }
 
@@ -107,7 +106,7 @@ impl Namespace {
         });
         debug!(namespace = name, "awaiting ready");
         // Await readiness
-        if let Err(_) = rx.recv() {
+        if rx.recv().is_err() {
             debug!(namespace = name, "failed ready");
             j.join().unwrap()?;
             anyhow::bail!("readiness dropped; used ready.set_ready() instead");
@@ -177,12 +176,12 @@ impl NamespaceManager {
         self.resolver().resolve(name)
     }
 
-    pub(super) fn run_in_root_namespace(&self, f: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
-        self.root.run(|_| {
-            f()
-        })?
+    pub(super) fn run_in_root_namespace(
+        &self,
+        f: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.root.run(|_| f())?
     }
-
 
     pub fn child(&self, name: &str) -> anyhow::Result<Namespace> {
         let mut namespaces = self.namespaces.lock().unwrap();
@@ -198,7 +197,6 @@ impl NamespaceManager {
             id,
             netns,
             name: name.to_string(),
-            namespace_name: net.clone(),
         };
         let ip = ns.ip();
         helpers::run_command(&format!(

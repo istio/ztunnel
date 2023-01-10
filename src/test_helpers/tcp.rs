@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use std::convert::Infallible;
-use std::net::IpAddr;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use std::{cmp, io};
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Response, Server};
-use rand::Rng;
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rand::Rng;
 use tokio::net::{TcpListener, TcpStream};
@@ -90,7 +90,7 @@ static BUFFER_SIZE: usize = 2 * 1024 * 1024;
 
 impl TestServer {
     pub async fn new(mode: Mode, port: u16) -> TestServer {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
         let listener = TcpListener::bind(addr).await.unwrap();
         TestServer { listener, mode }
     }
@@ -151,19 +151,9 @@ pub struct HboneTestServer {
 
 impl HboneTestServer {
     pub async fn new(mode: Mode) -> Self {
-        // Waypoints are assumed to always run on 15008, but we need to have a unique ip:port
-        // Linux doesn't offer a way to pick a random free ip, so we iterate until we find an open one
-        let mut rng = rand::thread_rng();
-        for _ in 0..1000 {
-            // lo has 127.0.0.1/8, so we will generate 2 u8's. That is enough to give us 65k
-            let attempt = SocketAddr::new(IpAddr::from([127, 137, rng.gen(), rng.gen()]), 15008);
-            let Ok(listener) = TcpListener::bind(attempt).await else {
-                // Try again...
-                continue
-            };
-            return Self { listener, mode };
-        }
-        panic!("failed to find a free IP after 1000 attempts");
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
+        let listener = TcpListener::bind(addr).await.unwrap();
+        Self { listener, mode }
     }
 
     pub fn address(&self) -> SocketAddr {
