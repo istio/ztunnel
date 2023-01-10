@@ -72,6 +72,7 @@ impl Namespace {
         format!("veth{}", self.id)
     }
 
+    // A small helper around run_ready that marks as "ready" immediately.
     pub fn run<F, Fut>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -83,6 +84,11 @@ impl Namespace {
         })
     }
 
+    /// run_ready runs an (async) closure. As input, a Ready is passed. This must be marked set_ready()
+    /// before the closure executes. run_ready() will return once set_ready() is called and run in the background.
+    /// Because network namespaces are bound to a thread, this function spins up a new thread for the closure and
+    /// spawns a single-threaded tokio runtime.
+    /// To await the closure, be sure to call join().
     pub fn run_ready<F, Fut>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
     where
         F: FnOnce(Ready) -> Fut + Send + 'static,
@@ -133,6 +139,7 @@ fn id_to_ip(i: u8) -> IpAddr {
     IpAddr::from([10, 0, i, 1])
 }
 
+// Clear out the namespace on Drop. This gives best effort assurance our test cleans up properly
 impl Drop for NamespaceManager {
     fn drop(&mut self) {
         // Drop the root namespace
@@ -183,6 +190,9 @@ impl NamespaceManager {
         self.root.run(|_| f())?
     }
 
+    /// child constructs a new network namespace "inside" the root namespace.
+    /// Each namespace gets a unique IP address, and is configured to be able to route to all other namespaces
+    /// through the root network namespace.
     pub fn child(&self, name: &str) -> anyhow::Result<Namespace> {
         let mut namespaces = self.namespaces.lock().unwrap();
         // Namespaces are never removed, so its safe (for now) to use the size
@@ -199,6 +209,8 @@ impl NamespaceManager {
             name: name.to_string(),
         };
         let ip = ns.ip();
+        // Give the namespace a veth and configure routing
+        // Largely inspired by https://github.com/containernetworking/plugins/blob/main/plugins/main/ptp/ptp.go
         helpers::run_command(&format!(
             "
 ip -n {prefix} link add {veth} type veth peer name eth0 netns {net}
