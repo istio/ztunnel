@@ -1525,7 +1525,7 @@ dependencies = [
  "findshlibs",
  "libc",
  "log",
- "nix 0.24.2",
+ "nix 0.24.3",
  "once_cell",
  "parking_lot",
  "protobuf",
@@ -1825,7 +1825,7 @@ dependencies = [
  "log",
  "netlink-packet-route",
  "netlink-proto",
- "nix 0.24.2",
+ "nix 0.24.3",
  "thiserror",
  "tokio",
 ]

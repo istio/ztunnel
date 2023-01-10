@@ -44,6 +44,16 @@ use ztunnel::test_helpers::*;
 use ztunnel::workload::{LocalConfig, LocalWorkload, Workload};
 use ztunnel::{config, identity};
 
+
+macro_rules! require_root {
+    () => {
+        if unsafe { libc::getuid() } != 0 {
+            eprintln!("This test requires root; skipping");
+            return Ok(())
+        }
+    };
+}
+
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
     helpers::initialize_telemetry();
@@ -398,7 +408,7 @@ async fn test_tcp_connections_metrics() {
 
 #[tokio::test]
 async fn test_tcp_bytes_metrics() {
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     let mut cfg = test_config();
@@ -585,6 +595,7 @@ impl WorkloadManager {
 // TODO: all threads must terminate... somehow.
 #[tokio::test]
 async fn test_new() -> anyhow::Result<()> {
+    require_root!();
     initialize_telemetry();
     let mut manager = WorkloadManager::new("test_new")?;
     tcp_server(&mut manager, "server")?;
