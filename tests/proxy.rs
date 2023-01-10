@@ -16,12 +16,8 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Add;
-
 use std::str::FromStr;
-
 use std::time::{Duration, SystemTime};
-
-use bytes::BufMut;
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -32,29 +28,49 @@ use tokio::time::timeout;
 use tracing::info;
 use tracing::{error, trace};
 
-use ztunnel::config::ConfigSource;
 use ztunnel::identity::mock::MockCaClient;
 use ztunnel::identity::CertificateProvider;
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::components::WorkloadManager;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
-use ztunnel::test_helpers::netns::Namespace;
+use ztunnel::test_helpers::netns::{Namespace, Resolver};
 use ztunnel::test_helpers::tcp::HboneTestServer;
 use ztunnel::test_helpers::*;
-use ztunnel::workload::{LocalConfig, LocalWorkload, Workload};
 use ztunnel::{config, identity};
 
+macro_rules! function {
+    () => {{
+        fn f() {}
+        fn type_name_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
+        }
+        let name = type_name_of(f);
+        &name[..name.len() - 3]
+    }};
+}
 
-macro_rules! require_root {
-    () => {
+/// setup_netns_test prepares a test using network namespaces. This checks we have root,
+/// and automatically setups up a namespace based on the test name (to avoid conflicts).
+macro_rules! setup_netns_test {
+    () => {{
         if unsafe { libc::getuid() } != 0 {
             if std::env::var("CI").is_ok() {
                 panic!("CI tests should run as root to have full coverage");
             }
             eprintln!("This test requires root; skipping");
-            return Ok(())
+            return Ok(());
         }
-    };
+        initialize_telemetry();
+        let f = function!()
+            .strip_prefix(module_path!())
+            .unwrap()
+            .strip_prefix("::")
+            .unwrap()
+            .strip_suffix("::{{closure}}")
+            .unwrap();
+        WorkloadManager::new(f)?
+    }};
 }
 
 #[tokio::test]
@@ -247,36 +263,6 @@ async fn run_waypoint_test(target: &str, node: &str) {
         hbone_read_write_stream(&mut stream).await;
     })
     .await;
-}
-
-#[tokio::test]
-async fn test_hbone_request() {
-    run_request_test(TEST_WORKLOAD_HBONE, "").await;
-}
-
-#[tokio::test]
-async fn test_tcp_request() {
-    run_request_test(TEST_WORKLOAD_TCP, "").await;
-}
-
-#[tokio::test]
-async fn test_vip_request() {
-    run_request_test(&format!("{TEST_VIP}:80"), "").await;
-}
-
-#[tokio::test]
-async fn test_hbone_request_local() {
-    run_request_test(TEST_WORKLOAD_HBONE, "local").await;
-}
-
-#[tokio::test]
-async fn test_tcp_request_local() {
-    run_request_test(TEST_WORKLOAD_TCP, "local").await;
-}
-
-#[tokio::test]
-async fn test_vip_request_local() {
-    run_request_test(&format!("{TEST_VIP}:80"), "local").await;
 }
 
 #[tokio::test]
@@ -503,129 +489,91 @@ async fn admin_shutdown(addr: SocketAddr) {
     assert_eq!(resp.status(), hyper::StatusCode::OK);
 }
 
-pub struct TestWorkloadBuilder<'a> {
-    w: LocalWorkload,
-    manager: &'a mut WorkloadManager,
-}
+const TEST_VIP: &str = "10.10.0.1";
 
-impl<'a> TestWorkloadBuilder<'a> {
-    pub fn new(name: &str, manager: &'a mut WorkloadManager) -> TestWorkloadBuilder<'a> {
-        TestWorkloadBuilder {
-            w: LocalWorkload {
-                workload: Workload {
-                    name: name.to_string(),
-                    ..test_default_workload()
-                },
-                vips: Default::default(),
-            },
-            manager,
-        }
-    }
-
-    pub fn register(mut self) -> anyhow::Result<Namespace> {
-        let network_namespace = self.manager.namespaces.child(&self.w.workload.name)?;
-        self.w.workload.workload_ip = network_namespace.ip();
-        self.manager.workloads.push(self.w);
-        Ok(network_namespace)
-    }
-}
-
-pub struct WorkloadManager {
-    namespaces: netns::NamespaceManager,
-    name: String,
-    /// workloads that we have constructed
-    workloads: Vec<LocalWorkload>,
-}
-
-impl WorkloadManager {
-    pub fn new(name: &str) -> anyhow::Result<Self> {
-        Ok(Self {
-            namespaces: netns::NamespaceManager::new(name)?,
-            name: name.to_string(),
-            workloads: vec![],
-        })
-    }
-
-    pub fn ztunnel(&mut self) -> anyhow::Result<()> {
-        let ns = TestWorkloadBuilder::new("ztunnel", self).register()?;
-        let ip = self.namespaces.resolve("ztunnel").unwrap();
-        let lc = LocalConfig {
-            workloads: self.workloads.clone(),
-            policies: vec![],
-        };
-        let mut b = bytes::BytesMut::new().writer();
-        serde_yaml::to_writer(&mut b, &lc)?;
-
-        let cfg = ztunnel::config::Config {
-            xds_address: None,
-            fake_ca: true,
-            local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
-            local_node: Some("local".to_string()),
-            ..config::parse_config().unwrap()
-        };
-        ns.run_ready(move |ready| async move {
-            helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
-            let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
-            let app = ztunnel::app::build_with_cert(cfg, cert_manager.clone())
-                .await
-                .unwrap();
-
-            let ta = TestApp {
-                admin_address: app.admin_address,
-                proxy_addresses: app.proxy_addresses,
-                readiness_address: app.readiness_address,
-                cert_manager,
-            };
-            ta.ready().await;
-            info!("ready");
-            ready.set_ready();
-
-            app.wait_termination().await
-        })?;
-        // We should be in the fake namespace, not root namespace
-        helpers::run_command(&format!("scripts/node-redirect.sh {ip}"))?;
-        Ok(())
-    }
-
-    pub fn workload_builder(&mut self, name: &str) -> TestWorkloadBuilder {
-        TestWorkloadBuilder::new(name, self)
-    }
-
-    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
-        self.namespaces.resolve(name)
-    }
-}
-// TODO: all threads must terminate... somehow.
 #[tokio::test]
-async fn test_new() -> anyhow::Result<()> {
-    require_root!();
-    initialize_telemetry();
-    let mut manager = WorkloadManager::new("test_new")?;
-    tcp_server(&mut manager, "server")?;
-    let client = manager.workload_builder("client").register()?;
-    manager.ztunnel()?;
-    client
-        .run(|| async move {
-            let srv = SocketAddr::new(manager.resolve("server").unwrap(), 8080);
-            info!("Running client to {srv}");
-            let mut stream = TcpStream::connect(srv).await.unwrap();
-            read_write_stream(&mut stream).await;
-            // tokio::time::sleep(Duration::from_secs(1000)).await;
-            Ok(())
-        })?
-        .join()
-        .unwrap()?;
+async fn test_vip_request() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let server1 = manager.workload_builder("server1").vip(TEST_VIP, 80, SERVER_PORT).register()?;
+    let server2 = manager.workload_builder("server2").hbone().vip(TEST_VIP, 80, SERVER_PORT).register()?;
+    let client = manager.workload_builder("client").on_local_node().register()?;
+    manager.deploy_ztunnel()?;
+
+    run_tcp_server(server1)?;
+    run_tcp_server(server2)?;
+    run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
     Ok(())
 }
 
-fn tcp_server(manager: &mut WorkloadManager, name: &str) -> anyhow::Result<()> {
-    let server = manager.workload_builder(name).register()?;
+
+#[tokio::test]
+async fn test_tcp_request() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let server = manager.workload_builder("server").register()?;
+    client_server_test(manager, server)
+}
+
+#[tokio::test]
+async fn test_tcp_local_request() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let server = manager.workload_builder("server").on_local_node().register()?;
+    client_server_test(manager, server)
+}
+
+#[tokio::test]
+async fn test_hbone_request() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let server = manager.workload_builder("server").hbone().register()?;
+    client_server_test(manager, server)
+}
+
+#[tokio::test]
+async fn test_hbone_local_request() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let server = manager.workload_builder("server").hbone().on_local_node().register()?;
+    client_server_test(manager, server)
+}
+
+const SERVER_PORT: u16 = 8080;
+
+/// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
+fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
+    let target = target.to_string();
+    client
+        .run(move || async move {
+            // We accept a ip:port, ip, or name (which is resolved).
+            let srv = target.parse::<SocketAddr>()
+                .unwrap_or_else(|_| {
+                    let ip = target.parse::<IpAddr>().unwrap_or_else(|_| resolver.resolve(&target).unwrap());
+                    SocketAddr::new(ip, SERVER_PORT)
+                });
+            info!("Running client to {srv}");
+            let mut stream = TcpStream::connect(srv).await.unwrap();
+            read_write_stream(&mut stream).await;
+            Ok(())
+        })?
+        .join()
+        .unwrap()
+}
+
+/// run_tcp_server deploys a simple echo server in the provided namespace
+fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
     server.run_ready(|ready| async move {
-        let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 8080).await;
+        let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, SERVER_PORT).await;
         info!("Running echo server");
         ready.set_ready();
         echo.run().await;
         Ok(())
     })?;
+    Ok(())
+}
+
+/// client_server_test runs a simple test sending a single request from the client and asserting it is received.
+fn client_server_test(mut manager: WorkloadManager, server: Namespace, ) -> anyhow::Result<()> {
+    let client = manager.workload_builder("client").on_local_node().register()?;
+    manager.deploy_ztunnel()?;
+
+    run_tcp_server(server)?;
+    run_tcp_client(client, manager.resolver(), "server")?;
     Ok(())
 }

@@ -53,11 +53,6 @@ OUTBOUND_ROUTE_TABLE=101
 # needed for original src.
 PROXY_ROUTE_TABLE=102
 
-# START https://github.com/solo-io/istio-sidecarless/blob/master/redirect-worker.sh#L185-L196
-set +e # Only for delete, we don't care if this fails
-ip link del p$INBOUND_TUN
-ip link del p$OUTBOUND_TUN
-set -e
 HOST_IP=$(ip route | grep default | awk '{print $3}')
 
 ip link add name p$INBOUND_TUN type geneve id 1000 remote $HOST_IP
@@ -71,19 +66,6 @@ ip link set p$OUTBOUND_TUN up
 
 echo 0 > /proc/sys/net/ipv4/conf/p$INBOUND_TUN/rp_filter
 echo 0 > /proc/sys/net/ipv4/conf/p$OUTBOUND_TUN/rp_filter
-# END https://github.com/solo-io/istio-sidecarless/blob/master/redirect-worker.sh#L185-L196
-
-# START https://github.com/solo-io/istio-sidecarless/blob/master/redirect-worker.sh#L206-L238
-set +e # Only for delete, we don't care if this fails
-ip rule del priority 20000
-ip rule del priority 20001
-ip rule del priority 20002
-ip rule del priority 20003
-
-ip route flush table 100
-ip route flush table 101
-ip route flush table 102
-set -e
 
 ip rule add priority 20000 fwmark $MARK lookup 100
 ip rule add priority 20001 fwmark $PROXY_OUTBOUND_MARK lookup 101
@@ -118,28 +100,17 @@ set -e
 $IPTABLES -t mangle -F PREROUTING
 $IPTABLES -t nat -F OUTPUT
 
-$IPTABLES-save | grep -v LOG | $IPTABLES-restore
-$IPTABLES -t mangle -I PREROUTING -j LOG --log-prefix "mangle pre zt "
-$IPTABLES -t mangle -I POSTROUTING -j LOG --log-prefix "mangle post zt "
-$IPTABLES -t mangle -I INPUT -j LOG --log-prefix "mangle inp zt "
-$IPTABLES -t mangle -I OUTPUT -j LOG --log-prefix "mangle out zt "
-$IPTABLES -t mangle -I FORWARD -j LOG --log-prefix "mangle fw zt "
-$IPTABLES -t nat -I POSTROUTING -j LOG --log-prefix "nat post zt "
-$IPTABLES -t nat -I INPUT -j LOG --log-prefix "nat inp zt "
-$IPTABLES -t nat -I OUTPUT -j LOG --log-prefix "nat out zt "
-$IPTABLES -t nat -I PREROUTING -j LOG --log-prefix "nat pre zt "
-$IPTABLES -t raw -I PREROUTING -j LOG --log-prefix "raw pre zt "
-$IPTABLES -t raw -I OUTPUT -j LOG --log-prefix "raw out zt "
-$IPTABLES -t filter -I FORWARD -j LOG --log-prefix "filt fw zt "
-$IPTABLES -t filter -I OUTPUT -j LOG --log-prefix "filt out zt "
-$IPTABLES -t filter -I INPUT -j LOG --log-prefix "filt inp zt "
-
 $IPTABLES -t mangle -A PREROUTING -p tcp -i p$INBOUND_TUN -m tcp --dport=$POD_INBOUND -j TPROXY --tproxy-mark $MARK --on-port $POD_INBOUND --on-ip 127.0.0.1
 $IPTABLES -t mangle -A PREROUTING -p tcp -i p$OUTBOUND_TUN -j TPROXY --tproxy-mark $MARK --on-port $POD_OUTBOUND --on-ip 127.0.0.1
 $IPTABLES -t mangle -A PREROUTING -p tcp -i p$INBOUND_TUN -j TPROXY --tproxy-mark $MARK --on-port $POD_INBOUND_PLAINTEXT --on-ip 127.0.0.1
 
 $IPTABLES -t mangle -A PREROUTING -p tcp -i eth0 ! --dst $INSTANCE_IP -j MARK --set-mark $ORG_SRC_RET_MARK
-# END https://github.com/solo-io/istio-sidecarless/blob/master/redirect-worker.sh#L206-L238
+
+# Huge hack. Currently, we only support single "node" test setup. This means we cannot test
+# Cross-ztunnel requests. Instead, loop these back to ourselves.
+# TODO: setup multiple ztunnels and actually communicate between them; then this can be removed.
+$IPTABLES -t nat -A OUTPUT -p tcp --dport 15008 -j REDIRECT --to-port $POD_INBOUND
+
 # With normal linux routing we need to disable the rp_filter
 # as we get packets from a tunnel that doesn't have default routes.
 echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
