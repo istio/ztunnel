@@ -160,7 +160,7 @@ async fn test_waypoint_bypass() -> anyhow::Result<()> {
         .on_local_node()
         .register()?;
     let client = manager.workload_builder("client").register()?;
-    let mut app = manager.deploy_ztunnel()?;
+    let app = manager.deploy_ztunnel()?;
 
     let srv = resolve_target(manager.resolver(), "server");
     client
@@ -211,7 +211,7 @@ async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
     let _ = manager.workload_builder("server").register()?;
     let client = manager.workload_builder("client").register()?;
-    let mut app = manager.deploy_ztunnel()?;
+    let app = manager.deploy_ztunnel()?;
 
     let srv = resolve_target(manager.resolver(), "server");
     client
