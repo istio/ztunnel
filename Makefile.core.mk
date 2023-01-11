@@ -1,7 +1,7 @@
 include common/Makefile.common.mk
 
 test:
-	RUST_LOG=debug cargo test --benches --tests --bins
+	RUST_LOG=debug cargo test --benches --tests --bins  -- --test-threads=1 --nocapture
 
 test-root: export CARGO_TARGET_$(shell rustc -vV | sed -n 's|host: ||p' | tr [:lower:] [:upper:]| tr - _)_RUNNER = sudo -E
 test-root:
