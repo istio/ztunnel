@@ -171,6 +171,6 @@ pub async fn relay(
     _: bool,
 ) -> Result<Option<(u64, u64)>, Error> {
     tokio::io::copy_bidirectional(downstream, upstream)
-            .await
-            .map(Some)
+        .await
+        .map(Some)
 }
