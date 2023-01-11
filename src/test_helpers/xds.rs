@@ -94,7 +94,7 @@ impl AdsServer {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
 
-        let xds_client = xds::Config::new(cfg.clone())
+        let xds_client = xds::Config::new(cfg)
             .with_workload_handler(xds_workloads)
             .watch(xds::WORKLOAD_TYPE.into())
             .build(metrics, ready.register_task("ads client"));
