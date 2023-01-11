@@ -216,7 +216,6 @@ impl Inbound {
         enable_original_source: bool,
         req: Request<Body>,
     ) -> Result<Response<Body>, hyper::Error> {
-        warn!("serve");
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
