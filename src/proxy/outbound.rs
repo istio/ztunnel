@@ -447,9 +447,7 @@ mod tests {
             demand: None,
         };
         let outbound = OutboundConnection {
-            cert_manager: Box::new(identity::mock::MockCaClient::new(
-                Duration::from_secs(10),
-            )),
+            cert_manager: Box::new(identity::mock::MockCaClient::new(Duration::from_secs(10))),
             workloads: wi,
             hbone_port: 15008,
             cfg,

@@ -33,8 +33,7 @@ pub async fn build_with_cert(
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
     let metrics = Arc::new(Metrics::from(&mut registry));
-    let certificate_manager: Box<dyn CertificateProvider> =
-        Box::new(cert_manager);
+    let certificate_manager: Box<dyn CertificateProvider> = Box::new(cert_manager);
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete

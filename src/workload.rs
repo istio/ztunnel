@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::convert::{Into};
+use std::convert::Into;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ use tracing::{debug, error, info, instrument, trace};
 use xds::istio::workload::Rbac as XdsRbac;
 
 use std::default::Default;
-use tokio::sync::{watch};
+use tokio::sync::watch;
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
@@ -267,7 +267,11 @@ impl WorkloadManager {
                 let workload_identity = rx.borrow().clone();
                 match cert_manager.fetch_certificate(&workload_identity).await {
                     Ok(_) => debug!("prefetched cert for {:?}", workload_identity.to_string()),
-                    Err(e) => error!("unable to prefetch cert for {:?}, skipping, {:?}", workload_identity.to_string(), e)
+                    Err(e) => error!(
+                        "unable to prefetch cert for {:?}, skipping, {:?}",
+                        workload_identity.to_string(),
+                        e
+                    ),
                 }
             }
         });

@@ -21,7 +21,7 @@ use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot};
+use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 use crate::config::Config;
@@ -297,10 +297,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
             %identity,
             "fetching cert"
         );
-        let cert = self
-            .cert_manager
-            .fetch_certificate(&identity)
-            .await?;
+        let cert = self.cert_manager.fetch_certificate(&identity).await?;
         let acc = cert.mtls_acceptor()?;
         Ok(acc)
     }
