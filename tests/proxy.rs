@@ -273,7 +273,7 @@ async fn test_inbound_waypoint_bypass() {
     let cfg = config::Config {
         ..test_config_with_waypoint(TEST_WORKLOAD_WAYPOINT.parse().unwrap())
     };
-    testapp::with_app(cfg, |mut app| async move {
+    testapp::with_app(cfg, |app| async move {
         let mut builder = hyper::client::conn::Builder::new();
         let builder = builder.http2_only(true);
 
