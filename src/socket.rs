@@ -15,10 +15,13 @@
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+#[cfg(all(target_os = "linux"))]
 use realm_io;
+#[cfg(all(target_os = "linux"))]
 use socket2::SockRef;
 use tokio::io;
 use tokio::net::TcpListener;
+#[cfg(all(target_os = "linux"))]
 use tracing::warn;
 
 #[cfg(target_os = "linux")]
@@ -138,15 +141,16 @@ mod linux {
     }
 }
 
+#[cfg(all(target_os = "linux"))]
 const EINVAL: i32 = 22;
 pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
-    zero_copy_enabled: bool,
+    _zero_copy_enabled: bool,
 ) -> Result<Option<(u64, u64)>, Error> {
     #[cfg(all(target_os = "linux"))]
     {
-        if zero_copy_enabled {
+        if _zero_copy_enabled {
             match realm_io::bidi_zero_copy(downstream, upstream).await {
                 Ok(()) => Ok(None),
                 Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
