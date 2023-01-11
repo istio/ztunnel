@@ -16,42 +16,27 @@ use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
-use crate::config::Config;
-use crate::identity::CertificateProvider;
-use crate::metrics::Metrics;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{util, Error, TraceParent};
+use crate::proxy::{util, Error, ProxyInputs, TraceParent};
 use crate::socket;
-use crate::workload::WorkloadInformation;
 
-pub struct Socks5 {
-    cfg: Config,
-    cert_manager: Box<dyn CertificateProvider>,
-    workloads: WorkloadInformation,
-    hbone_port: u16,
+pub(super) struct Socks5 {
+    pi: ProxyInputs,
     listener: TcpListener,
     drain: Watch,
-    pub metrics: Arc<Metrics>,
 }
 
 impl Socks5 {
-    pub async fn new(
-        cfg: Config,
-        cert_manager: Box<dyn CertificateProvider>,
-        hbone_port: u16,
-        workloads: WorkloadInformation,
-        metrics: Arc<Metrics>,
-        drain: Watch,
-    ) -> Result<Socks5, Error> {
-        let listener: TcpListener = TcpListener::bind(cfg.socks5_addr)
+    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Socks5, Error> {
+        let listener: TcpListener = TcpListener::bind(pi.cfg.socks5_addr)
             .await
-            .map_err(|e| Error::Bind(cfg.socks5_addr, e))?;
+            .map_err(|e| Error::Bind(pi.cfg.socks5_addr, e))?;
 
         info!(
             address=%listener.local_addr().unwrap(),
@@ -60,13 +45,9 @@ impl Socks5 {
         );
 
         Ok(Socks5 {
-            cfg,
-            cert_manager,
-            workloads,
-            hbone_port,
+            pi,
             listener,
             drain,
-            metrics,
         })
     }
 
@@ -83,11 +64,7 @@ impl Socks5 {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
                         let oc = OutboundConnection {
-                            cert_manager: self.cert_manager.clone(),
-                            workloads: self.workloads.clone(),
-                            cfg: self.cfg.clone(),
-                            hbone_port: self.hbone_port,
-                            metrics: self.metrics.clone(),
+                            pi: self.pi.clone(),
                             id: TraceParent::new(),
                         };
                         tokio::spawn(async move {
@@ -115,7 +92,7 @@ impl Socks5 {
     }
 }
 
-// hande will process a SOCKS5 connection. This supports a minimnal subset of the protocol,
+// hande will process a SOCKS5 connection. This supports a minimal subset of the protocol,
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6

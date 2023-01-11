@@ -46,6 +46,15 @@ pub struct Proxy {
     socks5: Socks5,
 }
 
+#[derive(Clone)]
+pub(super) struct ProxyInputs {
+    cfg: config::Config,
+    cert_manager: Box<dyn CertificateProvider>,
+    hbone_port: u16,
+    workloads: WorkloadInformation,
+    metrics: Arc<Metrics>,
+}
+
 impl Proxy {
     pub async fn new(
         cfg: config::Config,
@@ -54,33 +63,20 @@ impl Proxy {
         metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Proxy, Error> {
-        // We setup all the listeners first so we can capture any errors that should block startup
-        let inbound_passthrough = InboundPassthrough::new(cfg.clone()).await?;
-        let inbound = Inbound::new(
-            cfg.clone(),
-            workloads.clone(),
-            cert_manager.clone(),
-            drain.clone(),
-        )
-        .await?;
-        let outbound = Outbound::new(
-            cfg.clone(),
-            cert_manager.clone(),
-            workloads.clone(),
-            inbound.address().port(),
-            metrics.clone(),
-            drain.clone(),
-        )
-        .await?;
-        let socks5 = Socks5::new(
-            cfg.clone(),
-            cert_manager.clone(),
-            inbound.address().port(),
-            workloads.clone(),
+        let mut pi = ProxyInputs {
+            cfg,
+            workloads,
+            cert_manager,
             metrics,
-            drain,
-        )
-        .await?;
+            hbone_port: 0,
+        };
+        // We setup all the listeners first so we can capture any errors that should block startup
+        let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
+        pi.hbone_port = inbound.address().port();
+
+        let inbound_passthrough = InboundPassthrough::new(pi.clone()).await?;
+        let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
+        let socks5 = Socks5::new(pi.clone(), drain).await?;
         Ok(Proxy {
             inbound,
             inbound_passthrough,
@@ -147,6 +143,9 @@ pub enum Error {
 
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
+
+    #[error("unknown destination: {0}")]
+    UnknownDestination(IpAddr),
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.

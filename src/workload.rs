@@ -410,8 +410,10 @@ impl WorkloadInformation {
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
-                debug!("deny policy match");
+                debug!(policy = pol.to_key(), "deny policy match");
                 return false;
+            } else {
+                trace!(policy = pol.to_key(), "deny policy does not match");
             }
         }
         // "If there are no ALLOW policies for the workload, allow the request."
@@ -422,8 +424,10 @@ impl WorkloadInformation {
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
-                debug!("allow policy match");
+                debug!(policy = pol.to_key(), "allow policy match");
                 return true;
+            } else {
+                trace!(policy = pol.to_key(), "allow policy does not match");
             }
         }
         // "Deny the request."
@@ -673,6 +677,7 @@ pub enum WorkloadError {
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
+    use crate::test_helpers;
     use bytes::Bytes;
 
     use crate::xds::istio::workload::Port as XdsPort;
@@ -760,23 +765,6 @@ mod tests {
 
     #[test]
     fn workload_information() {
-        let default = Workload {
-            workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            waypoint_addresses: Vec::new(),
-            gateway_address: None,
-            protocol: Default::default(),
-            name: "".to_string(),
-            namespace: "".to_string(),
-            service_account: "default".to_string(),
-            workload_name: "".to_string(),
-            workload_type: "deployment".to_string(),
-            canonical_name: "".to_string(),
-            canonical_revision: "".to_string(),
-            node: "".to_string(),
-
-            authorization_policies: Default::default(),
-            native_hbone: false,
-        };
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
@@ -797,7 +785,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default.clone()
+                ..test_helpers::test_default_workload()
             })
         );
 
@@ -807,7 +795,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default.clone()
+                ..test_helpers::test_default_workload()
             })
         );
 
@@ -817,7 +805,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default
+                ..test_helpers::test_default_workload()
             })
         );
 

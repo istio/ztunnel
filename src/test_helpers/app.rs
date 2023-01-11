@@ -24,16 +24,19 @@ use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
+use crate::identity::mock::MockCaClient;
+use crate::identity::SecretManager;
 use crate::test_helpers::TEST_WORKLOAD_SOURCE;
 use crate::*;
 
 use super::helpers::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct TestApp {
     pub admin_address: SocketAddr,
     pub readiness_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
+    pub cert_manager: SecretManager<MockCaClient>,
 }
 
 pub async fn with_app<F, Fut, FO>(cfg: config::Config, f: F)
@@ -42,14 +45,17 @@ where
     Fut: Future<Output = FO>,
 {
     initialize_telemetry();
-    let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
-    let app = app::build_with_cert(cfg, cert_manager).await.unwrap();
+    let cert_manager = MockCaClient::new(Duration::from_secs(10));
+    let app = app::build_with_cert(cfg, cert_manager.clone())
+        .await
+        .unwrap();
     let shutdown = app.shutdown.trigger().clone();
 
     let ta = TestApp {
         admin_address: app.admin_address,
         proxy_addresses: app.proxy_addresses,
         readiness_address: app.readiness_address,
+        cert_manager,
     };
     let run_and_shutdown = async {
         ta.ready().await;

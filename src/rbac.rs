@@ -90,6 +90,10 @@ impl Authorization {
                 Identity::Spiffe { namespace, .. } => namespace.clone(),
             })
             .unwrap_or_default();
+        if self.groups.is_empty() {
+            trace!(matches = false, "empty groups");
+            return false;
+        }
         for rule in self.groups.iter() {
             // If ANY rule matches, it is a match...
             let mut rule_match = true;
@@ -138,6 +142,11 @@ impl Authorization {
                     group_match &= m;
                 }
 
+                if group.is_empty() {
+                    trace!(matches = true, "empty group");
+                } else {
+                    trace!(matches = group_match, "group");
+                }
                 rule_match &= group_match;
             }
             if rule_match {
