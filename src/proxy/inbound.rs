@@ -195,7 +195,6 @@ impl Inbound {
         conn: rbac::Connection,
         req: Request<Body>,
     ) -> Result<Response<Body>, hyper::Error> {
-        warn!("serve");
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
