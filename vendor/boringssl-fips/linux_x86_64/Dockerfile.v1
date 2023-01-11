@@ -39,6 +39,10 @@ RUN if [ "`go version | awk '{print $3}'`" != "go1.16.5" ]; then echo "Go versio
 RUN if [ "`ninja --version`" != "1.10.2" ]; then echo "Ninja version doesn't match."; exit 1; fi
 RUN if [ "`cmake --version | head -1 | awk '{print $3}'`" != "3.20.1" ]; then echo "CMake version doesn't match."; exit 1; fi
 
+# Force -fPIC to allow linking Rust libraries against BoringCrypto.
+ENV CFLAGS="-fPIC"
+ENV CXXFLAGS="-fPIC"
+
 # Build BoringCrypto.
 RUN wget https://commondatastorage.googleapis.com/chromium-boringssl-fips/boringssl-853ca1ea1168dff08011e5d42d94609cc0ca2e27.tar.xz
 RUN echo "a4d069ccef6f3c7bc0c68de82b91414f05cb817494cd1ab483dcf3368883c7c2 boringssl-853ca1ea1168dff08011e5d42d94609cc0ca2e27.tar.xz" | sha256sum --check
