@@ -18,7 +18,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bytes::{BufMut, Bytes};
 
-use crate::config;
+use crate::config::{self, RootCert};
 use crate::config::ConfigSource;
 use crate::workload::Protocol::{HBONE, TCP};
 use crate::workload::{LocalConfig, LocalWorkload, Workload};
@@ -29,6 +29,7 @@ pub mod components;
 pub mod helpers;
 pub mod netns;
 pub mod tcp;
+pub mod xds;
 
 pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {
     config::Config {
@@ -38,10 +39,20 @@ pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {
         ..test_config()
     }
 }
-pub fn test_config_with_port(port: u16) -> config::Config {
+
+pub fn test_config_with_port_xds_addr_and_root_cert(port: u16, xds_addr: Option<String>, xds_root_cert: Option<RootCert>) -> config::Config {
     config::Config {
-        xds_address: None,
+        xds_address: xds_addr,
         fake_ca: true,
+        // TODO: full FindRootCAForXDS logic like in Istio
+        xds_root_cert: match xds_root_cert {
+            Some(cert) => {
+                cert
+            }
+            None => {
+                RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap())
+            }
+        },
         local_xds_config: Some(ConfigSource::Static(local_xds_config(port, None).unwrap())),
         // Switch all addressed to localhost (so we don't make a bunch of ports expose on public internet when someone runs a test),
         // and port 0 (to avoid port conflicts)
@@ -55,6 +66,10 @@ pub fn test_config_with_port(port: u16) -> config::Config {
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         ..config::parse_config().unwrap()
     }
+}
+
+pub fn test_config_with_port(port: u16) -> config::Config {
+    test_config_with_port_xds_addr_and_root_cert(port, None, None)
 }
 
 pub fn test_config() -> config::Config {

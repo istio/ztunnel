@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
 
-use prost::DecodeError;
 use prost_types::value::Kind;
 use prost_types::{Struct, Value};
+use prost::{DecodeError, EncodeError};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -599,7 +599,7 @@ impl<T: prost::Message> XdsUpdate<T> {
     }
 }
 
-fn decode_proto<T: prost::Message + Default>(
+pub fn decode_proto<T: prost::Message + Default>(
     resource: ProtoResource,
 ) -> Result<XdsResource<T>, AdsError> {
     let name = resource.name;
@@ -618,4 +618,98 @@ pub enum AdsError {
     Decode(#[from] DecodeError),
     #[error("XDS payload without resource")]
     MissingResource(),
+    #[error("encode: {0}")]
+    Encode(#[from] EncodeError),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{test_helpers::{helpers, xds::{AdsServer}}, xds::{istio::workload::WorkloadType, WORKLOAD_TYPE}};
+    use prost::Message;
+    use prost_types::Any;
+    use tokio::time::sleep;
+    use super::*;
+    use std::{net::{IpAddr, Ipv4Addr}, time::SystemTime};
+
+    const POLL_RATE: Duration = Duration::from_millis(2);
+    const TEST_TIMEOUT: Duration = Duration::from_millis(100);
+
+    async fn verify_workload(ip: IpAddr,
+                             expected_workload: Option<Workload>,
+                             source: &crate::workload::WorkloadInformation) 
+    {
+        let start_time = SystemTime::now();
+        let mut matched = false;
+        while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
+            sleep(POLL_RATE).await;
+            let wl = source.fetch_workload(&ip).await;
+            matched = expected_workload.is_none() && wl.is_none() || (wl.is_some() && expected_workload.is_some() && wl.unwrap() == expected_workload.clone().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_abort_remove() {
+        helpers::initialize_telemetry();
+
+        // TODO: Load this from a file?
+        let ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
+        let mut resources = vec![];
+        let workloads = vec![Workload {  name: "1.1.1.1".to_string(),
+                                                        namespace: "default".to_string(),
+                                                        network: "".to_string(),
+                                                        address: ip.octets().to_vec().into(),
+                                                        protocol: 0,
+                                                        trust_domain: "local".to_string(),
+                                                        service_account: "default".to_string(),
+                                                        node: "default".to_string(),
+                                                        workload_type: WorkloadType::Deployment.into(),
+                                                        workload_name: "".to_string(),
+                                                        native_hbone: true,
+                                                        ..Default::default()
+                                                    }
+                                            ];
+        for wl in workloads.clone() {
+            resources.push(ProtoResource { name: wl.name.clone(),
+                                                     aliases: vec![],
+                                                     version: "0.0.1".to_string(),
+                                                     resource: Some(Any {type_url: WORKLOAD_TYPE.to_string(), value: wl.encode_to_vec()}),
+                                                     ttl: None,
+                                                     cache_control: None,
+                                        });
+        }
+
+        let initial_response = Ok(DeltaDiscoveryResponse { resources: resources,
+                                                                                nonce: "".to_string(),
+                                                                                system_version_info: "1.0.0".to_string(),
+                                                                                type_url: WORKLOAD_TYPE.to_string(),
+                                                                                removed_resources: vec![],
+                                                                            });
+
+        let abort_response = Err(tonic::Status::aborted("Aborting for test."));
+
+        let removed_resource_response: Result<DeltaDiscoveryResponse, tonic::Status> = Ok(DeltaDiscoveryResponse {
+            resources: vec![],
+            nonce: "".to_string(),
+            system_version_info: "1.0.0".to_string(),
+            type_url: WORKLOAD_TYPE.to_string(),
+            removed_resources: vec!["127.0.0.1".into()],
+        });
+
+        // Setup fake xds server
+        let (tx, client, workload_store) = AdsServer::spawn().await;
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                info!("workload manager: {}", e);
+            }
+        });
+
+        tx.send(initial_response).expect("failed to send server response");
+        verify_workload(std::net::IpAddr::V4(ip), Some(workloads[0].clone()), &workload_store).await;
+        tx.send(abort_response).expect("failed to send server response");
+        sleep(Duration::from_millis(50)).await;
+        verify_workload(std::net::IpAddr::V4(ip), Some(workloads[0].clone()), &workload_store).await;
+        tx.send(removed_resource_response).expect("failed to send server response");
+        verify_workload(std::net::IpAddr::V4(ip), None, &workload_store).await;
+    }
 }
