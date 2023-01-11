@@ -225,6 +225,7 @@ ip -n {net} route add default via 10.0.0.1
 ip -n {net} route add 10.0.0.1 dev eth0 scope link src {ip}
 ip -n {net} route del 10.0.0.0/16 # remove auto-kernel route
 ip -n {net} route add 10.0.0.0/16 via 10.0.0.1 src {ip}
+ip netns exec {prefix} sysctl -w net.ipv4.conf.all.rp_filter=0
 ip netns exec {prefix} sysctl -w net.ipv4.conf.{veth}.rp_filter=0
 "
         ))?;
