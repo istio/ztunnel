@@ -85,7 +85,12 @@ impl Inbound {
             let enable_original_source = self.cfg.enable_original_source;
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    Self::serve_connect(workloads.clone(), conn.clone(), enable_original_source, req)
+                    Self::serve_connect(
+                        workloads.clone(),
+                        conn.clone(),
+                        enable_original_source,
+                        req,
+                    )
                 }))
             }
         });
@@ -241,13 +246,14 @@ impl Inbound {
                         .unwrap());
                 }
                 let org_src = if enable_original_source {
-                    Some(conn.src_ip.clone())
+                    Some(conn.src_ip)
                 } else {
                     None
                 };
 
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
-                    info!(%conn, "unknown destination");
+
+                                       info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
                         .body(Body::empty())
@@ -268,12 +274,12 @@ impl Inbound {
                     }
                 }
                 let status_code = match Self::handle_inbound(Hbone(req), org_src, addr)
-                    .instrument(tracing::span::Span::current())
-                    .await
-                {
-                    Ok(_) => StatusCode::OK,
-                    Err(_) => StatusCode::SERVICE_UNAVAILABLE,
-                };
+                        .instrument(tracing::span::Span::current())
+                        .await
+                    {
+                        Ok(_) => StatusCode::OK,
+                        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+                    };
 
                 Ok(Response::builder()
                     .status(status_code)
