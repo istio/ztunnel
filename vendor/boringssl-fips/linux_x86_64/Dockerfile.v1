@@ -6,35 +6,46 @@
 FROM ubuntu:18.04
 
 RUN apt-get update
-RUN apt-get install -y curl build-essential software-properties-common gccgo-5 tar wget git xz-utils
+RUN apt-get install -y curl build-essential software-properties-common tar wget xz-utils unzip
 
-#install latest rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
-ENV PATH=/root/.cargo/bin/:$PATH
-RUN rustup default stable
+# Install CMake v3.20.1.
+RUN wget https://github.com/Kitware/CMake/releases/download/v3.20.1/cmake-3.20.1-linux-x86_64.tar.gz
+RUN tar -xvf cmake-3.20.1-linux-x86_64.tar.gz
+ENV PATH=$PWD/cmake-3.20.1-linux-x86_64/bin:$PATH
 
-#install cmake
-RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | apt-key add -
-RUN apt-add-repository 'deb https://apt.kitware.com/ubuntu/ bionic main' && apt-get update
-RUN apt install -y cmake
-
-#install go v1.16.5
-ENV GOROOT_BOOTSTRAP=/usr./make.bash
+# Install Go v1.16.5.
 RUN wget https://go.dev/dl/go1.16.5.linux-amd64.tar.gz
-RUN tar -xzvf go1.16.5.linux-amd64.tar.gz
-ENV PATH=/go/bin/:$PATH
-ENV GOROOT=/go/
+RUN tar -xvf go1.16.5.linux-amd64.tar.gz
+ENV PATH=$PWD/go/bin:$PATH
+ENV GOROOT=$PWD/go
 
-#install clang v12.0.0
-RUN apt-get remove clang
+# Install Clang v12.0.0.
 RUN wget https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.0/clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04.tar.xz
 RUN tar -xvf clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04.tar.xz
-RUN mv clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04 /usr/local/clang_12.0.0
-RUN ln -s clang /usr/local/clang_12.0.0/bin/clang++-12
-ENV LD_LIBRARY_PATH=/usr/local/clang_12.0.0/lib
-ENV PATH=/usr/local/clang_12.0.0/bin:$PATH
+RUN ln -s clang clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04/bin/clang++-12
+ENV PATH=$PWD/clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04/bin:$PATH
+ENV LD_LIBRARY_PATH=$PWD/clang+llvm-12.0.0-x86_64-linux-gnu-ubuntu-16.04/lib:$LD_LIBRARY_PATH
 
-#build boringssl
-RUN git clone https://github.com/PiotrSikora/boring.git -b boringcrypto_4407
-ENV PATH=/root/.cargo/bin/:$PATH
-RUN cd boring/boring-sys/ && cargo build --release --features fips
+# Install Ninja v1.10.2.
+RUN wget https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-linux.zip
+RUN mkdir ninja
+RUN unzip -o ninja-linux.zip -d ninja
+ENV PATH=$PWD/ninja:$PATH
+
+# Verify required versions of the tools in $PATH.
+# https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp4407.pdf
+RUN if [ "`clang --version | head -1 | awk '{print $3}'`" != "12.0.0" ]; then echo "Clang version doesn't match."; exit 1; fi
+RUN if [ "`go version | awk '{print $3}'`" != "go1.16.5" ]; then echo "Go version doesn't match."; exit 1; fi
+RUN if [ "`ninja --version`" != "1.10.2" ]; then echo "Ninja version doesn't match."; exit 1; fi
+RUN if [ "`cmake --version | head -1 | awk '{print $3}'`" != "3.20.1" ]; then echo "CMake version doesn't match."; exit 1; fi
+
+# Build BoringCrypto.
+RUN wget https://commondatastorage.googleapis.com/chromium-boringssl-fips/boringssl-853ca1ea1168dff08011e5d42d94609cc0ca2e27.tar.xz
+RUN echo "a4d069ccef6f3c7bc0c68de82b91414f05cb817494cd1ab483dcf3368883c7c2 boringssl-853ca1ea1168dff08011e5d42d94609cc0ca2e27.tar.xz" | sha256sum --check
+RUN tar xf boringssl-853ca1ea1168dff08011e5d42d94609cc0ca2e27.tar.xz
+RUN printf "set(CMAKE_C_COMPILER \"clang\")\nset(CMAKE_CXX_COMPILER \"clang++\")\n" > ${HOME}/toolchain
+RUN cd boringssl \
+    && mkdir build && cd build && cmake -GNinja -DCMAKE_TOOLCHAIN_FILE=${HOME}/toolchain -DFIPS=1 -DCMAKE_BUILD_TYPE=Release .. \
+    && ninja \
+    && ./crypto/crypto_test \
+    && if [ "`./tool/bssl isfips`" = "1" ]; then echo "FIPS check succeeded."; else echo "FIPS check failed."; exit 1; fi
