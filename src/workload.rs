@@ -26,7 +26,7 @@ use tracing::{debug, error, info, instrument, trace};
 use xds::istio::workload::Rbac as XdsRbac;
 
 use std::default::Default;
-use tokio::sync::watch;
+use tokio::sync::mpsc;
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
@@ -261,10 +261,10 @@ impl WorkloadManager {
         awaiting_ready: readiness::BlockReady,
         cert_manager: Box<dyn CertificateProvider>,
     ) -> anyhow::Result<WorkloadManager> {
-        let (tx, mut rx) = watch::channel(Identity::default());
+        let (tx, mut rx) = mpsc::channel::<Identity>(100);
+        // todo ratelimit prefetching to a reasonable limit
         tokio::spawn(async move {
-            while rx.changed().await.is_ok() {
-                let workload_identity = rx.borrow().clone();
+            while let Some(workload_identity) = rx.recv().await {
                 match cert_manager.fetch_certificate(&workload_identity).await {
                     Ok(_) => debug!("prefetched cert for {:?}", workload_identity.to_string()),
                     Err(e) => error!(
@@ -523,7 +523,7 @@ pub struct WorkloadStore {
     policies_by_namespace: HashMap<String, HashSet<String>>,
 
     #[serde(skip_serializing, default)]
-    cert_tx: Option<watch::Sender<Identity>>,
+    cert_tx: Option<mpsc::Sender<Identity>>,
 }
 
 impl WorkloadStore {
@@ -555,9 +555,8 @@ impl WorkloadStore {
                     .insert((service_sock_addr, port.target_port as u16));
             }
         }
-
         if let Some(tx) = self.cert_tx.as_mut() {
-            if tx.send(widentity).is_err() {
+            if tx.blocking_send(widentity).is_err() {
                 info!("prefetch receiver dropped.")
             }
         }
