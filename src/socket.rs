@@ -15,17 +15,12 @@
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-#[cfg(all(target_os = "linux"))]
-use realm_io;
-#[cfg(all(target_os = "linux"))]
-use socket2::SockRef;
 use tokio::io;
 use tokio::net::TcpListener;
-#[cfg(all(target_os = "linux"))]
-use tracing::warn;
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
+    use socket2::SockRef;
     SockRef::from(l).set_ip_transparent(true)
 }
 
@@ -53,6 +48,9 @@ pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
 
 #[cfg(target_os = "linux")]
 fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
+    use socket2::SockRef;
+    use tracing::warn;
+
     let sock = SockRef::from(stream);
     // Dual-stack IPv4/IPv6 sockets require us to check both options.
     match linux::original_dst(&sock) {
@@ -142,35 +140,37 @@ mod linux {
 }
 
 #[cfg(all(target_os = "linux"))]
-const EINVAL: i32 = 22;
 pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
-    _zero_copy_enabled: bool,
+    zero_copy_enabled: bool,
 ) -> Result<Option<(u64, u64)>, Error> {
-    #[cfg(all(target_os = "linux"))]
-    {
-        if _zero_copy_enabled {
-            match realm_io::bidi_zero_copy(downstream, upstream).await {
-                Ok(()) => Ok(None),
-                Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
-                    tokio::io::copy_bidirectional(downstream, upstream)
-                        .await
-                        .map(Some)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            tokio::io::copy_bidirectional(downstream, upstream)
-                .await
-                .map(Some)
-        }
-    }
+    const EINVAL: i32 = 22;
 
-    #[cfg(not(target_os = "linux"))]
-    {
+    if zero_copy_enabled {
+        match realm_io::bidi_zero_copy(downstream, upstream).await {
+            Ok(()) => Ok(None),
+            Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
+                tokio::io::copy_bidirectional(downstream, upstream)
+                    .await
+                    .map(Some)
+            }
+            Err(e) => Err(e),
+        }
+    } else {
         tokio::io::copy_bidirectional(downstream, upstream)
             .await
             .map(Some)
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn relay(
+    downstream: &mut tokio::net::TcpStream,
+    upstream: &mut tokio::net::TcpStream,
+    _: bool,
+) -> Result<Option<(u64, u64)>, Error> {
+    tokio::io::copy_bidirectional(downstream, upstream)
+            .await
+            .map(Some)
 }
