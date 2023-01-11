@@ -102,16 +102,16 @@ pub struct Workload {
 impl PartialEq<xds::istio::workload::Workload> for Workload {
     fn eq(&self, other: &xds::istio::workload::Workload) -> bool {
         let address = byte_to_ip(&other.address).unwrap();
-        self.workload_type == other.workload_type().as_str_name().to_lowercase() &&
-        self.workload_ip == address &&
-        self.name == other.name &&
-        self.namespace == other.namespace &&
-        self.service_account == other.service_account &&
-        self.node == other.node &&
-        self.workload_name == other.workload_name &&
-        self.canonical_name == other.canonical_name &&
-        self.canonical_revision == other.canonical_revision &&
-        self.native_hbone == other.native_hbone
+        self.workload_type == other.workload_type().as_str_name().to_lowercase()
+            && self.workload_ip == address
+            && self.name == other.name
+            && self.namespace == other.namespace
+            && self.service_account == other.service_account
+            && self.node == other.node
+            && self.workload_name == other.workload_name
+            && self.canonical_name == other.canonical_name
+            && self.canonical_revision == other.canonical_revision
+            && self.native_hbone == other.native_hbone
     }
 }
 
