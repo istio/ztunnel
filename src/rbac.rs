@@ -27,9 +27,9 @@ use xds::istio::security::StringMatch as XdsStringMatch;
 use crate::identity::Identity;
 use crate::workload::WorkloadError;
 use crate::workload::WorkloadError::EnumParse;
+use crate::{workload, xds};
 use xds::istio::security::string_match::MatchType;
 use xds::istio::security::Match;
-use crate::{workload, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -254,9 +254,7 @@ impl TryFrom<Option<xds::istio::security::Scope>> for RbacScope {
 
     fn try_from(value: Option<xds::istio::security::Scope>) -> Result<Self, Self::Error> {
         match value {
-            Some(xds::istio::security::Scope::WorkloadSelector) => {
-                Ok(RbacScope::WorkloadSelector)
-            }
+            Some(xds::istio::security::Scope::WorkloadSelector) => Ok(RbacScope::WorkloadSelector),
             Some(xds::istio::security::Scope::Namespace) => Ok(RbacScope::Namespace),
             Some(xds::istio::security::Scope::Global) => Ok(RbacScope::Global),
             None => Err(EnumParse("unknown type".into())),
@@ -273,9 +271,7 @@ pub enum RbacAction {
 impl TryFrom<Option<xds::istio::security::Action>> for RbacAction {
     type Error = WorkloadError;
 
-    fn try_from(
-        value: Option<xds::istio::security::Action>,
-    ) -> Result<Self, Self::Error> {
+    fn try_from(value: Option<xds::istio::security::Action>) -> Result<Self, Self::Error> {
         match value {
             Some(xds::istio::security::Action::Allow) => Ok(RbacAction::Allow),
             Some(xds::istio::security::Action::Deny) => Ok(RbacAction::Deny),
@@ -308,9 +304,7 @@ impl TryFrom<&XdsRbac> for Authorization {
             name: resource.name,
             namespace: resource.namespace,
             scope: RbacScope::try_from(xds::istio::security::Scope::from_i32(resource.scope))?,
-            action: RbacAction::try_from(xds::istio::security::Action::from_i32(
-                resource.action,
-            ))?,
+            action: RbacAction::try_from(xds::istio::security::Action::from_i32(resource.action))?,
             groups,
         })
     }

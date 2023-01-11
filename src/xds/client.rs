@@ -30,8 +30,8 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use crate::config::RootCert;
 use crate::metrics::xds::*;
 use crate::metrics::{Metrics, Recorder};
-use crate::xds::istio::workload::{Workload};
-use crate::xds::istio::security::{Authorization};
+use crate::xds::istio::security::Authorization;
+use crate::xds::istio::workload::Workload;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
@@ -443,9 +443,10 @@ impl AdsClient {
             xds::WORKLOAD_TYPE => {
                 self.decode_and_handle::<Workload, _>(|a| &a.config.workload_handler, response)
             }
-            xds::AUTHORIZATION_TYPE => {
-                self.decode_and_handle::<Authorization, _>(|a| &a.config.authorization_handler, response)
-            }
+            xds::AUTHORIZATION_TYPE => self.decode_and_handle::<Authorization, _>(
+                |a| &a.config.authorization_handler,
+                response,
+            ),
             _ => {
                 error!("unknown type");
                 Ok(())
