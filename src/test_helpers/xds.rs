@@ -17,27 +17,29 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::config::RootCert;
+use crate::readiness::Ready;
+use crate::workload::{WorkloadInformation, WorkloadStore};
 use async_trait::async_trait;
 use futures::{future, Stream};
 use hyper::service::make_service_fn;
 use log::info;
 use prometheus_client::registry::Registry;
-use tokio::sync::{watch, mpsc};
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::client::GrpcService;
-use tonic::{Streaming, Status, Response};
+use tonic::{Response, Status, Streaming};
 use tracing::warn;
-use crate::config::RootCert;
-use crate::readiness::Ready;
-use crate::workload::{WorkloadStore, WorkloadInformation};
 
 use crate::metrics::Metrics;
-use crate::xds::{AdsClient, self};
-use crate::xds::service::discovery::v3::aggregated_discovery_service_server::{AggregatedDiscoveryServiceServer, AggregatedDiscoveryService};
-use crate::xds::service::discovery::v3::{DiscoveryResponse, DeltaDiscoveryResponse, DiscoveryRequest, DeltaDiscoveryRequest};
-use crate::{
-    tls,
+use crate::tls;
+use crate::xds::service::discovery::v3::aggregated_discovery_service_server::{
+    AggregatedDiscoveryService, AggregatedDiscoveryServiceServer,
 };
+use crate::xds::service::discovery::v3::{
+    DeltaDiscoveryRequest, DeltaDiscoveryResponse, DiscoveryRequest, DiscoveryResponse,
+};
+use crate::xds::{self, AdsClient};
 
 use super::test_config_with_port_xds_addr_and_root_cert;
 
@@ -49,7 +51,7 @@ impl AdsServer {
     pub async fn spawn() -> (
         watch::Sender<Result<DeltaDiscoveryResponse, tonic::Status>>,
         AdsClient,
-        WorkloadInformation
+        WorkloadInformation,
     ) {
         let (tx, rx) = watch::channel(Err(tonic::Status::unavailable("No response set yet.")));
 
@@ -83,45 +85,45 @@ impl AdsServer {
         let ready = Ready::new();
         let mut registry = Registry::default();
         let metrics = Arc::new(Metrics::from(&mut registry));
-        let cfg = test_config_with_port_xds_addr_and_root_cert(80, Some(listener_addr_string), Some(root_cert));
+        let cfg = test_config_with_port_xds_addr_and_root_cert(
+            80,
+            Some(listener_addr_string),
+            Some(root_cert),
+        );
 
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
 
         let xds_client = xds::Config::new(cfg.clone())
-                                        .with_workload_handler(xds_workloads)
-                                        .watch(xds::WORKLOAD_TYPE.into())
-                                        .build(metrics, ready.register_task("ads client"));
+            .with_workload_handler(xds_workloads)
+            .watch(xds::WORKLOAD_TYPE.into())
+            .build(metrics, ready.register_task("ads client"));
 
-        let wi = WorkloadInformation {info: workloads, demand: None};
+        let wi = WorkloadInformation {
+            info: workloads,
+            demand: None,
+        };
         (tx, xds_client, wi)
     }
 }
 
-
 #[async_trait]
 impl AggregatedDiscoveryService for AdsServer {
-    type StreamAggregatedResourcesStream = Pin<Box<dyn Stream<Item = Result<DiscoveryResponse, Status>> + Send>>;
+    type StreamAggregatedResourcesStream =
+        Pin<Box<dyn Stream<Item = Result<DiscoveryResponse, Status>> + Send>>;
     async fn stream_aggregated_resources(
         &self,
         _request: tonic::Request<Streaming<DiscoveryRequest>>,
-    ) -> Result<
-        tonic::Response<Self::StreamAggregatedResourcesStream>,
-        tonic::Status,
-    > {
+    ) -> Result<tonic::Response<Self::StreamAggregatedResourcesStream>, tonic::Status> {
         unimplemented!("We only use Delta in zTunnel");
     }
 
-
-    type DeltaAggregatedResourcesStream = Pin<Box<dyn Stream<Item = Result<DeltaDiscoveryResponse, Status>> + Send>>;
+    type DeltaAggregatedResourcesStream =
+        Pin<Box<dyn Stream<Item = Result<DeltaDiscoveryResponse, Status>> + Send>>;
     async fn delta_aggregated_resources(
         &self,
         request: tonic::Request<tonic::Streaming<DeltaDiscoveryRequest>>,
-    ) -> Result<
-        tonic::Response<Self::DeltaAggregatedResourcesStream>,
-        tonic::Status,
-    > {
-
+    ) -> Result<tonic::Response<Self::DeltaAggregatedResourcesStream>, tonic::Status> {
         let mut in_stream = request.into_inner();
         let (tx, rx) = mpsc::channel(128);
         let mut stream_rx = self.rx.clone();
@@ -140,7 +142,6 @@ impl AggregatedDiscoveryService for AdsServer {
                                 break;
                             }
                         };
-
                     }
                     None => {
                         warn!("ads_server: stream failed");
