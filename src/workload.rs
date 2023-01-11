@@ -23,7 +23,7 @@ use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, instrument, trace};
 
-use xds::istio::workload::Rbac as XdsRbac;
+use xds::istio::security::Authorization as XdsAuthorization;
 
 use xds::istio::workload::Workload as XdsWorkload;
 
@@ -32,7 +32,7 @@ use crate::identity::Identity;
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::EnumParse;
 
-use crate::rbac::{Rbac, RbacScope};
+use crate::rbac::{Authorization, RbacScope};
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
 
@@ -232,14 +232,14 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
     }
 }
 
-impl xds::Handler<XdsRbac> for Arc<Mutex<WorkloadStore>> {
-    fn handle(&self, updates: Vec<XdsUpdate<XdsRbac>>) -> Result<(), Vec<RejectedConfig>> {
+impl xds::Handler<XdsAuthorization> for Arc<Mutex<WorkloadStore>> {
+    fn handle(&self, updates: Vec<XdsUpdate<XdsAuthorization>>) -> Result<(), Vec<RejectedConfig>> {
         let mut wli = self.lock().unwrap();
-        let handle = |res: XdsUpdate<XdsRbac>| {
+        let handle = |res: XdsUpdate<XdsAuthorization>| {
             match res {
                 XdsUpdate::Update(w) => {
                     info!("handling RBAC update {}", w.name);
-                    wli.insert_xds_rbac(w.resource)?;
+                    wli.insert_xds_authorization(w.resource)?;
                 }
                 XdsUpdate::Remove(name) => {
                     info!("handling RBAC delete {}", name);
@@ -265,9 +265,9 @@ impl WorkloadManager {
             Some(
                 xds::Config::new(config.clone())
                     .with_workload_handler(xds_workloads)
-                    .with_rbac_handler(xds_rbac)
+                    .with_authorization_handler(xds_rbac)
                     .watch(xds::WORKLOAD_TYPE.into())
-                    .watch(xds::RBAC_TYPE.into())
+                    .watch(xds::AUTHORIZATION_TYPE.into())
                     .build(metrics, awaiting_ready.subtask("ads client")),
             )
         } else {
@@ -321,7 +321,7 @@ pub struct LocalWorkload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalConfig {
     pub workloads: Vec<LocalWorkload>,
-    pub policies: Vec<Rbac>,
+    pub policies: Vec<Authorization>,
 }
 
 impl LocalClient {
@@ -350,7 +350,7 @@ impl LocalClient {
             }
         }
         for rbac in r.policies {
-            wli.insert_rbac(rbac);
+            wli.insert_authorization(rbac);
         }
         info!(%workloads, %policies, "local config initialized");
         Ok(())
@@ -498,7 +498,7 @@ pub struct WorkloadStore {
     vips: HashMap<SocketAddr, HashSet<(IpAddr, u16)>>,
 
     /// policies maintains a mapping of ns/name to policy.
-    policies: HashMap<String, rbac::Rbac>,
+    policies: HashMap<String, rbac::Authorization>,
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     policies_by_namespace: HashMap<String, HashSet<String>>,
 }
@@ -534,14 +534,14 @@ impl WorkloadStore {
         Ok(())
     }
 
-    fn insert_xds_rbac(&mut self, r: XdsRbac) -> anyhow::Result<()> {
-        let rbac = rbac::Rbac::try_from(&r)?;
+    fn insert_xds_authorization(&mut self, r: XdsAuthorization) -> anyhow::Result<()> {
+        let rbac = rbac::Authorization::try_from(&r)?;
         trace!("insert policy {}", serde_json::to_string(&rbac)?);
-        self.insert_rbac(rbac);
+        self.insert_authorization(rbac);
         Ok(())
     }
 
-    fn insert_rbac(&mut self, rbac: Rbac) {
+    fn insert_authorization(&mut self, rbac: Authorization) {
         let key = rbac.to_key();
         match rbac.scope {
             RbacScope::Global => {

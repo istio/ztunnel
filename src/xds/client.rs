@@ -30,7 +30,8 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use crate::config::RootCert;
 use crate::metrics::xds::*;
 use crate::metrics::{Metrics, Recorder};
-use crate::xds::istio::workload::{Rbac, Workload};
+use crate::xds::istio::security::Authorization;
+use crate::xds::istio::workload::Workload;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
@@ -110,7 +111,7 @@ pub struct Config {
     proxy_metadata: HashMap<String, String>,
 
     workload_handler: Box<dyn Handler<Workload>>,
-    rbac_handler: Box<dyn Handler<Rbac>>,
+    authorization_handler: Box<dyn Handler<Authorization>>,
     initial_watches: Vec<String>,
     on_demand: bool,
 }
@@ -122,7 +123,7 @@ impl Config {
             root_cert: config.xds_root_cert.clone(),
             auth: config.auth,
             workload_handler: Box::new(NopHandler {}),
-            rbac_handler: Box::new(NopHandler {}),
+            authorization_handler: Box::new(NopHandler {}),
             initial_watches: Vec::new(),
             on_demand: config.xds_on_demand,
             proxy_metadata: config.proxy_metadata,
@@ -134,8 +135,8 @@ impl Config {
         self
     }
 
-    pub fn with_rbac_handler(mut self, f: impl Handler<Rbac>) -> Config {
-        self.rbac_handler = Box::new(f);
+    pub fn with_authorization_handler(mut self, f: impl Handler<Authorization>) -> Config {
+        self.authorization_handler = Box::new(f);
         self
     }
 
@@ -442,9 +443,10 @@ impl AdsClient {
             xds::WORKLOAD_TYPE => {
                 self.decode_and_handle::<Workload, _>(|a| &a.config.workload_handler, response)
             }
-            xds::RBAC_TYPE => {
-                self.decode_and_handle::<Rbac, _>(|a| &a.config.rbac_handler, response)
-            }
+            xds::AUTHORIZATION_TYPE => self.decode_and_handle::<Authorization, _>(
+                |a| &a.config.authorization_handler,
+                response,
+            ),
             _ => {
                 error!("unknown type");
                 Ok(())
