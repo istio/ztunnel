@@ -52,6 +52,7 @@ fn version() -> anyhow::Result<()> {
 }
 
 async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
+    info!("version: {}", version::BuildInfo::new());
     info!("running with config: {cfg:#?}");
     app::build(cfg).await?.wait_termination().await
 }
