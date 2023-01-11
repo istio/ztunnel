@@ -20,7 +20,6 @@ use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -33,7 +32,7 @@ use crate::workload::WorkloadInformation;
 
 pub struct Socks5 {
     cfg: Config,
-    cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
+    cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
     hbone_port: u16,
     listener: TcpListener,
@@ -44,7 +43,7 @@ pub struct Socks5 {
 impl Socks5 {
     pub async fn new(
         cfg: Config,
-        cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
+        cert_manager: Box<dyn CertificateProvider>,
         hbone_port: u16,
         workloads: WorkloadInformation,
         metrics: Arc<Metrics>,

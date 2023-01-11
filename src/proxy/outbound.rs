@@ -20,7 +20,6 @@ use boring::ssl::ConnectConfiguration;
 use drain::Watch;
 use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::Config;
@@ -35,7 +34,7 @@ use crate::{rbac, socket};
 
 pub struct Outbound {
     cfg: Config,
-    cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
+    cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
     listener: TcpListener,
     drain: Watch,
@@ -46,7 +45,7 @@ pub struct Outbound {
 impl Outbound {
     pub async fn new(
         cfg: Config,
-        cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
+        cert_manager: Box<dyn CertificateProvider>,
         workloads: WorkloadInformation,
         hbone_port: u16,
         metrics: Arc<Metrics>,
@@ -131,7 +130,7 @@ impl Outbound {
 }
 
 pub struct OutboundConnection {
-    pub cert_manager: Arc<Mutex<Box<dyn CertificateProvider>>>,
+    pub cert_manager: Box<dyn CertificateProvider>,
     pub workloads: WorkloadInformation,
     // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
     pub cfg: Config,
@@ -226,7 +225,7 @@ impl OutboundConnection {
                     .unwrap();
 
                 let id = &req.source.identity();
-                let cert = self.cert_manager.lock().await.fetch_certificate(id).await?;
+                let cert = self.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
                     .connector(&req.destination_workload.map(|w| w.identity()))?
                     .configure()
@@ -448,9 +447,9 @@ mod tests {
             demand: None,
         };
         let outbound = OutboundConnection {
-            cert_manager: Arc::new(Mutex::new(Box::new(identity::mock::MockCaClient::new(
+            cert_manager: Box::new(identity::mock::MockCaClient::new(
                 Duration::from_secs(10),
-            )))),
+            )),
             workloads: wi,
             hbone_port: 15008,
             cfg,
