@@ -14,7 +14,7 @@
 
 use std::fmt::Debug;
 use std::future::Future;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{SocketAddr};
 use std::ops::Add;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
