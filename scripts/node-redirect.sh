@@ -21,7 +21,7 @@ ip link add name istioout type geneve id 1001 remote "${ZTUNNEL_IP}"
 ip addr add 192.168.127.1/30 dev istioout
 ip link set istioout up
 
-cat <<EOF | iptables-restore
+cat <<EOF | iptables-restore -w
 *mangle
 :PREROUTING ACCEPT
 :INPUT ACCEPT

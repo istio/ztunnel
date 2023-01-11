@@ -101,14 +101,14 @@ if [ "${mode}" = "nft" ]; then
 fi
 set -e
 
-$IPTABLES -t mangle -F PREROUTING
-$IPTABLES -t nat -F OUTPUT
+$IPTABLES -w -t mangle -F PREROUTING
+$IPTABLES -w -t nat -F OUTPUT
 
-$IPTABLES -t mangle -A PREROUTING -p tcp -i p$INBOUND_TUN -m tcp --dport=$POD_INBOUND -j TPROXY --tproxy-mark $MARK --on-port $POD_INBOUND --on-ip 127.0.0.1
-$IPTABLES -t mangle -A PREROUTING -p tcp -i p$OUTBOUND_TUN -j TPROXY --tproxy-mark $MARK --on-port $POD_OUTBOUND --on-ip 127.0.0.1
-$IPTABLES -t mangle -A PREROUTING -p tcp -i p$INBOUND_TUN -j TPROXY --tproxy-mark $MARK --on-port $POD_INBOUND_PLAINTEXT --on-ip 127.0.0.1
+$IPTABLES -w -t mangle -A PREROUTING -p tcp -i p$INBOUND_TUN -m tcp --dport=$POD_INBOUND -j TPROXY --tproxy-mark $MARK --on-port $POD_INBOUND --on-ip 127.0.0.1
+$IPTABLES -w -t mangle -A PREROUTING -p tcp -i p$OUTBOUND_TUN -j TPROXY --tproxy-mark $MARK --on-port $POD_OUTBOUND --on-ip 127.0.0.1
+$IPTABLES -w -t mangle -A PREROUTING -p tcp -i p$INBOUND_TUN -j TPROXY --tproxy-mark $MARK --on-port $POD_INBOUND_PLAINTEXT --on-ip 127.0.0.1
 
-$IPTABLES -t mangle -A PREROUTING -p tcp -i eth0 ! --dst $INSTANCE_IP -j MARK --set-mark $ORG_SRC_RET_MARK
+$IPTABLES -w -t mangle -A PREROUTING -p tcp -i eth0 ! --dst $INSTANCE_IP -j MARK --set-mark $ORG_SRC_RET_MARK
 
 # Huge hack. Currently, we only support single "node" test setup. This means we cannot test
 # Cross-ztunnel requests. Instead, loop these back to ourselves.
@@ -118,7 +118,7 @@ ipset create waypoint-pods-ips hash:ip
 for waypoint in $@; do
   ipset add waypoint-pods-ips "${waypoint}"
 done
-$IPTABLES -t nat -A OUTPUT -p tcp --dport 15008 -m set '!' --match-set waypoint-pods-ips dst -j REDIRECT --to-port $POD_INBOUND
+$IPTABLES -w -t nat -A OUTPUT -p tcp --dport 15008 -m set '!' --match-set waypoint-pods-ips dst -j REDIRECT --to-port $POD_INBOUND
 
 # With normal linux routing we need to disable the rp_filter
 # as we get packets from a tunnel that doesn't have default routes.
