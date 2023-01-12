@@ -25,10 +25,12 @@ use tracing::{debug, error, info, instrument, trace};
 
 use xds::istio::security::Authorization as XdsAuthorization;
 
+use std::default::Default;
+use tokio::sync::mpsc;
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
-use crate::identity::Identity;
+use crate::identity::{CertificateProvider, Identity};
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::EnumParse;
 
@@ -257,8 +259,26 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
+        cert_manager: Box<dyn CertificateProvider>,
     ) -> anyhow::Result<WorkloadManager> {
-        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let (tx, mut rx) = mpsc::channel::<Identity>(256);
+        // todo ratelimit prefetching to a reasonable limit
+        tokio::spawn(async move {
+            while let Some(workload_identity) = rx.recv().await {
+                match cert_manager.fetch_certificate(&workload_identity).await {
+                    Ok(_) => debug!("prefetched cert for {:?}", workload_identity.to_string()),
+                    Err(e) => error!(
+                        "unable to prefetch cert for {:?}, skipping, {:?}",
+                        workload_identity.to_string(),
+                        e
+                    ),
+                }
+            }
+        });
+        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
+            cert_tx: Some(tx),
+            ..Default::default()
+        }));
         let xds_workloads = workloads.clone();
         let xds_rbac = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
@@ -505,6 +525,9 @@ pub struct WorkloadStore {
     policies: HashMap<String, rbac::Authorization>,
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     policies_by_namespace: HashMap<String, HashSet<String>>,
+
+    #[serde(skip_serializing, default)]
+    cert_tx: Option<mpsc::Sender<Identity>>,
 }
 
 impl WorkloadStore {
@@ -520,6 +543,7 @@ impl WorkloadStore {
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
         let wip = workload.workload_ip;
+        let widentity = workload.identity();
         self.insert_workload(workload);
         for (vip, pl) in &w.virtual_ips {
             let ip = vip.parse::<IpAddr>()?;
@@ -533,6 +557,11 @@ impl WorkloadStore {
                     .entry(wip)
                     .or_default()
                     .insert((service_sock_addr, port.target_port as u16));
+            }
+        }
+        if let Some(tx) = self.cert_tx.as_mut() {
+            if let Err(e) = tx.try_send(widentity) {
+                info!("couldn't prefetch: {:?}", e)
             }
         }
         Ok(())
@@ -675,6 +704,7 @@ pub enum WorkloadError {
 
 #[cfg(test)]
 mod tests {
+    use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use crate::test_helpers;
