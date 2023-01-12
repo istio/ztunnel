@@ -30,7 +30,7 @@ manager
 For more information, see the docs under `WorkloadManager`.
 
 Running these tests requires root. To run tests under sudo, `make test-root` can be used.
-When not running as root, the tests are skipped. 
+When not running as root, the tests are skipped.
 Warning: rust doesn't allow reporting a test was skipped, so it just appears to pass; in CI we enforce it always runs as root to avoid missing tests.
 
 If namespaces get in a broken state, they can be cleaned up with:
