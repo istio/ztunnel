@@ -18,6 +18,8 @@ use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
+
+use hyper::header::FORWARDED;
 use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
@@ -198,27 +200,19 @@ impl OutboundConnection {
                     .http2_max_frame_size(self.pi.cfg.frame_size)
                     .http2_initial_connection_window_size(self.pi.cfg.connection_window_size);
 
+                let mut f = http_types::proxies::Forwarded::new();
+                f.add_for(remote_addr.to_string());
+
                 let request = hyper::Request::builder()
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
-                    .header(TRACEPARENT_HEADER, self.id.header());
-                let request = if self.pi.cfg.enable_original_source
-                    && req.request_type != RequestType::Direct
-                {
-                    request.header(hyper::header::FORWARDED, format!("for={}", remote_addr))
-                } else {
-                    request
-                };
-                let request = request.body(hyper::Body::empty()).unwrap();
-                let local = if self.pi.cfg.enable_original_source
-                    && req.request_type == RequestType::Direct
-                {
-                    Some(remote_addr)
-                } else {
-                    None
-                };
+                    .header(FORWARDED, f.value().unwrap())
+                    .header(TRACEPARENT_HEADER, self.id.header())
+                    .body(hyper::Body::empty())
+                    .unwrap();
+                let local = self.pi.cfg.enable_original_source.then_some(remote_addr);
                 let id = &req.source.identity();
                 let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                 let connector = cert

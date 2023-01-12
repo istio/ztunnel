@@ -26,7 +26,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac;
 use crate::socket::{relay, to_canonical};
@@ -232,7 +232,7 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
-                let orig_src = enable_original_source.then(|| conn.src_ip);
+                let orig_src = enable_original_source.then_some(conn.src_ip);
 
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
                     info!(%conn, "unknown destination");
@@ -241,15 +241,14 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 };
-                let from_waypoint = if !upstream.waypoint_addresses.is_empty() {
-                    conn.src_identity
-                        .as_ref()
-                        .map(|i| i == &upstream.identity())
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-                if !from_waypoint {
+                // TODO: This only identifies the service account; we need a more reliable way
+                // to identify specifically the waypoint proxy.
+                let from_waypoint = conn
+                    .src_identity
+                    .as_ref()
+                    .map(|i| i == &upstream.identity())
+                    .unwrap_or(false);
+                if !upstream.waypoint_addresses.is_empty() && !from_waypoint {
                     info!(%conn, "bypassed waypoint");
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)

@@ -12,27 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt, io};
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::{fmt, io};
 
 use boring::error::ErrorStack;
 use drain::Watch;
-use hyper::{Body, header, Request};
+use hyper::{header, Body, Request};
 use rand::Rng;
 use tokio::net::{TcpSocket, TcpStream};
 use tracing::{error, trace, warn};
 
 use inbound::Inbound;
 
-use crate::{config, identity, socket, tls};
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
+use crate::{config, identity, socket, tls};
 
 mod inbound;
 mod inbound_passthrough;
@@ -244,7 +244,6 @@ impl TryFrom<&str> for TraceParent {
 }
 
 fn parse_socket_or_ip(i: &str) -> Option<IpAddr> {
-
     // Remove square brackets around IPv6 address.
     let i = i
         .strip_prefix('[')
@@ -256,18 +255,16 @@ fn parse_socket_or_ip(i: &str) -> Option<IpAddr> {
         .or_else(|| i.parse::<IpAddr>().ok())
 }
 
-
 pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
     req.headers()
         .get(header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
-        .and_then(|rh| {
-            http_types::proxies::Forwarded::parse(rh)
-                .ok()
-        })
+        .and_then(|rh| http_types::proxies::Forwarded::parse(rh).ok())
         .and_then(|ph| {
             println!("got {:?}", ph.forwarded_for().last());
-            ph.forwarded_for().last().and_then(|f| parse_socket_or_ip(*f))
+            ph.forwarded_for()
+                .last()
+                .and_then(|f| parse_socket_or_ip(f))
         })
 }
 
