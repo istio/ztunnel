@@ -8,7 +8,7 @@ ZTUNNEL_IP="${1:?ztunnel IP}"
 ZTUNNEL_INTERFACE="${2:?ztunnel interface}"
 shift; shift;
 ipset create ztunnel-pods-ips hash:ip
-for ip in $@; do
+for ip in "$@"; do
   ipset add ztunnel-pods-ips "${ip}"
 done
 
