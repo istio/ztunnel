@@ -261,7 +261,7 @@ impl WorkloadManager {
         awaiting_ready: readiness::BlockReady,
         cert_manager: Box<dyn CertificateProvider>,
     ) -> anyhow::Result<WorkloadManager> {
-        let (tx, mut rx) = mpsc::channel::<Identity>(100);
+        let (tx, mut rx) = mpsc::channel::<Identity>(256);
         // todo ratelimit prefetching to a reasonable limit
         tokio::spawn(async move {
             while let Some(workload_identity) = rx.recv().await {
@@ -556,8 +556,8 @@ impl WorkloadStore {
             }
         }
         if let Some(tx) = self.cert_tx.as_mut() {
-            if tx.blocking_send(widentity).is_err() {
-                info!("prefetch receiver dropped.")
+            if let Err(e) = tx.try_send(widentity) {
+                info!("couldn't prefetch: {:?}", e)
             }
         }
         Ok(())
