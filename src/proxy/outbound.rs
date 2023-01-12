@@ -159,7 +159,7 @@ impl OutboundConnection {
             // We *could* apply this to all traffic, rather than just for destinations that are "captured"
             // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
             info!("proxying to {} using node local fast path", req.destination);
-            let origin_src = if self.cfg.enable_original_source {
+            let origin_src = if self.pi.cfg.enable_original_source {
                 super::get_original_src_from_stream(&stream)
             } else {
                 None
@@ -204,19 +204,21 @@ impl OutboundConnection {
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
                     .header(TRACEPARENT_HEADER, self.id.header());
-                let request =
-                    if self.cfg.enable_original_source && req.request_type != RequestType::Direct {
-                        request.header(hyper::header::FORWARDED, format!("for={}", remote_addr))
-                    } else {
-                        request
-                    };
+                let request = if self.pi.cfg.enable_original_source
+                    && req.request_type != RequestType::Direct
+                {
+                    request.header(hyper::header::FORWARDED, format!("for={}", remote_addr))
+                } else {
+                    request
+                };
                 let request = request.body(hyper::Body::empty()).unwrap();
-                let local =
-                    if self.cfg.enable_original_source && req.request_type == RequestType::Direct {
-                        Some(remote_addr)
-                    } else {
-                        None
-                    };
+                let local = if self.pi.cfg.enable_original_source
+                    && req.request_type == RequestType::Direct
+                {
+                    Some(remote_addr)
+                } else {
+                    None
+                };
                 let id = &req.source.identity();
                 let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
@@ -255,7 +257,7 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
                 // Create a TCP connection to upstream
-                let local = if self.cfg.enable_original_source {
+                let local = if self.pi.cfg.enable_original_source {
                     super::get_original_src_from_stream(&stream)
                 } else {
                     None

@@ -274,12 +274,12 @@ impl Inbound {
                     }
                 }
                 let status_code = match Self::handle_inbound(Hbone(req), org_src, addr)
-                        .instrument(tracing::span::Span::current())
-                        .await
-                    {
-                        Ok(_) => StatusCode::OK,
-                        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
-                    };
+                    .instrument(tracing::span::Span::current())
+                    .await
+                {
+                    Ok(_) => StatusCode::OK,
+                    Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+                };
 
                 Ok(Response::builder()
                     .status(status_code)
