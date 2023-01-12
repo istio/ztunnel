@@ -133,24 +133,11 @@ impl Inbound {
     /// handle_inbound serves an inbound connection with a target address `addr`.
     pub(super) async fn handle_inbound(
         request_type: InboundConnect,
-        origin_src: Option<IpAddr>,
+        orig_src: Option<IpAddr>,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = {
-            match &request_type {
-                DirectPath(_) => super::freebind_connect(origin_src, addr).await,
-                Hbone(req) => {
-                    let origin_src = if origin_src.is_some() {
-                        // overwrite the original source if encoded in fwded from waypoint
-                        super::get_original_src_from_fwded(req).map_or(origin_src, Some)
-                    } else {
-                        origin_src
-                    };
-                    super::freebind_connect(origin_src, addr).await
-                }
-            }
-        };
+        let stream = super::freebind_connect(orig_src, addr).await;
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -245,35 +232,40 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
-                let org_src = if enable_original_source {
-                    Some(conn.src_ip)
-                } else {
-                    None
-                };
+                let orig_src = enable_original_source.then(|| conn.src_ip);
 
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
-
-                                       info!(%conn, "unknown destination");
+                    info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
                         .body(Body::empty())
                         .unwrap());
                 };
-                if !upstream.waypoint_addresses.is_empty() {
-                    let from_waypoint = conn
-                        .src_identity
+                let from_waypoint = if !upstream.waypoint_addresses.is_empty() {
+                    conn.src_identity
                         .as_ref()
                         .map(|i| i == &upstream.identity())
-                        .unwrap_or(false);
-                    if !from_waypoint {
-                        info!(%conn, "bypassed waypoint");
-                        return Ok(Response::builder()
-                            .status(StatusCode::UNAUTHORIZED)
-                            .body(Body::empty())
-                            .unwrap());
-                    }
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if !from_waypoint {
+                    info!(%conn, "bypassed waypoint");
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Body::empty())
+                        .unwrap());
                 }
-                let status_code = match Self::handle_inbound(Hbone(req), org_src, addr)
+                let orig_src = if orig_src.is_some() && from_waypoint {
+                    // If the request is from our waypoint, trust the Forwarded header.
+                    // For other request types, we can only trust the source from the connection.
+                    // Since our own waypoint is in the same trust domain though, we can use Forwarded,
+                    // which drops the requirement of spoofing IPs from waypoints
+                    super::get_original_src_from_fwded(&req).or(orig_src)
+                } else {
+                    orig_src
+                };
+                let status_code = match Self::handle_inbound(Hbone(req), orig_src, addr)
                     .instrument(tracing::span::Span::current())
                     .await
                 {
