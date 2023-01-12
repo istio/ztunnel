@@ -44,12 +44,13 @@ pub(super) struct Inbound {
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
+    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_addr)
             .await
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
-        let transparent = crate::socket::set_transparent(&listener).is_ok();
-
+        let transparent = super::maybe_set_transparent(&pi, &listener)?;
+        // Override with our explicitly configured setting
+        pi.cfg.enable_original_source = Some(transparent);
         info!(
             address=%listener.local_addr().unwrap(),
             component="inbound",
@@ -88,7 +89,7 @@ impl Inbound {
                     Self::serve_connect(
                         workloads.clone(),
                         conn.clone(),
-                        enable_original_source,
+                        enable_original_source.unwrap_or_default(),
                         req,
                     )
                 }))

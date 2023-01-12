@@ -21,7 +21,7 @@ use boring::error::ErrorStack;
 use drain::Watch;
 use hyper::{header, Body, Request};
 use rand::Rng;
-use tokio::net::{TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tracing::{error, trace, warn};
 
 use inbound::Inbound;
@@ -115,7 +115,7 @@ pub struct Addresses {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("failed to bind to address: {0}")]
+    #[error("failed to bind to address {0}: {1}")]
     Bind(SocketAddr, io::Error),
 
     #[error("io error: {0}")]
@@ -241,6 +241,27 @@ impl TryFrom<&str> for TraceParent {
             flags: u8::from_str_radix(segs[3], 16)?,
         })
     }
+}
+
+pub(super) fn maybe_set_transparent(
+    pi: &ProxyInputs,
+    listener: &TcpListener,
+) -> Result<bool, Error> {
+    Ok(match pi.cfg.enable_original_source {
+        Some(true) => {
+            // Explicitly enabled. Return error if we cannot set it.
+            socket::set_transparent(listener)?;
+            true
+        }
+        Some(false) => {
+            // Explicitly disabled, don't even attempt to set it.
+            false
+        }
+        None => {
+            // Best effort
+            socket::set_transparent(listener).is_ok()
+        }
+    })
 }
 
 fn parse_socket_or_ip(i: &str) -> Option<IpAddr> {
