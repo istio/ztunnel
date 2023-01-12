@@ -19,9 +19,9 @@ use std::{fmt, io};
 
 use boring::error::ErrorStack;
 use drain::Watch;
+use hyper::{header, Body, Request};
 use rand::Rng;
-use tokio::net::{TcpSocket, TcpStream};
-
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tracing::{error, trace, warn};
 
 use inbound::Inbound;
@@ -33,7 +33,6 @@ use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
 use crate::{config, identity, socket, tls};
-use hyper::{header, Body, Request};
 
 mod inbound;
 mod inbound_passthrough;
@@ -116,7 +115,7 @@ pub struct Addresses {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("failed to bind to address: {0}")]
+    #[error("failed to bind to address {0}: {1}")]
     Bind(SocketAddr, io::Error),
 
     #[error("io error: {0}")]
@@ -248,35 +247,49 @@ impl TryFrom<&str> for TraceParent {
     }
 }
 
+pub(super) fn maybe_set_transparent(
+    pi: &ProxyInputs,
+    listener: &TcpListener,
+) -> Result<bool, Error> {
+    Ok(match pi.cfg.enable_original_source {
+        Some(true) => {
+            // Explicitly enabled. Return error if we cannot set it.
+            socket::set_transparent(listener)?;
+            true
+        }
+        Some(false) => {
+            // Explicitly disabled, don't even attempt to set it.
+            false
+        }
+        None => {
+            // Best effort
+            socket::set_transparent(listener).is_ok()
+        }
+    })
+}
+
+fn parse_socket_or_ip(i: &str) -> Option<IpAddr> {
+    // Remove square brackets around IPv6 address.
+    let i = i
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(i);
+    i.parse::<SocketAddr>()
+        .ok()
+        .map(|i| i.ip())
+        .or_else(|| i.parse::<IpAddr>().ok())
+}
+
 pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
-    let deli: &[_] = &[' ', '"'];
-    let first = req.headers().get(header::FORWARDED)?;
-    // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
-    // https://www.rfc-editor.org/rfc/rfc7239#section-4
-    let first = first
-        .to_str()
-        .unwrap_or("")
-        .split(',')
-        .next()?
-        .trim()
-        .split(';')
-        .find(|x| x.trim().to_lowercase().starts_with("for="))?
-        .split('=')
-        .nth(1)?
-        .trim_matches(deli);
-    if first.starts_with('[') {
-        let deli: &[_] = &[' ', '[', ']'];
-        first
-            .trim_matches(deli)
-            .split("]:")
-            .next()?
-            .parse::<IpAddr>()
-            .ok()
-    } else {
-        first
-            .parse::<IpAddr>()
-            .map_or_else(|_| first.split(':').next()?.parse::<IpAddr>().ok(), Some)
-    }
+    req.headers()
+        .get(header::FORWARDED)
+        .and_then(|rh| rh.to_str().ok())
+        .and_then(|rh| http_types::proxies::Forwarded::parse(rh).ok())
+        .and_then(|ph| {
+            ph.forwarded_for()
+                .last()
+                .and_then(|f| parse_socket_or_ip(f))
+        })
 }
 
 pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
@@ -309,5 +322,35 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
             };
             Ok(socket.connect(addr).await?)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hyper::http::request;
+    use test_case::test_case;
+
+    use super::*;
+
+    #[test_case(r#""#, None; "empty")]
+    #[test_case(r#"proto=https"#, None; "no for")]
+    #[test_case(r#"abc"#, None; "malformed")]
+    #[test_case(r#"for=192.0.2.43"#, Some("192.0.2.43"); "ipv4")]
+    #[test_case(r#"for="192.0.2.43""#, Some("192.0.2.43"); "quoted ipv4")]
+    #[test_case(r#"for="192.0.2.43:80""#, Some("192.0.2.43"); "ipv4 port")]
+    #[test_case(r#"for=192.0.2.43:80"#, None; "unquoted ipv4 port")]
+    #[test_case(r#"for="[2001:db8:cafe::17]""#, Some("2001:db8:cafe::17"); "ipv6")]
+    #[test_case(r#"for=[2001:db8:cafe::17]"#, None; "unquoted ipv6")]
+    #[test_case(r#"for="[2001:db8:cafe::17]:80""#, Some("2001:db8:cafe::17"); "ipv6 port")]
+    #[test_case(r#"for=192.0.2.43;proto=https"#, Some("192.0.2.43"); "sections")]
+    #[test_case(r#"for=192.0.2.43, for="[2001:db8:cafe::17]";proto=https"#, Some("2001:db8:cafe::17"); "multiple")]
+    #[test_case(r#"for=192.0.2.43, for="[2001:db8:cafe::17]", for=unknown;proto=https"#, None; "multiple unmatched")]
+    fn string_match(header: &str, expect: Option<&str>) {
+        let headers = request::Builder::new()
+            .header(header::FORWARDED, header)
+            .body(Body::empty())
+            .unwrap();
+        let expect = expect.map(|i| i.parse::<IpAddr>().unwrap());
+        assert_eq!(get_original_src_from_fwded(&headers), expect)
     }
 }
