@@ -82,6 +82,7 @@ impl Inbound {
                 dst,
             };
             let workloads = self.workloads.clone();
+            debug!(%conn, "accepted connection");
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
                     Self::serve_connect(workloads.clone(), conn.clone(), req)

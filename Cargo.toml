@@ -65,6 +65,7 @@ prometheus-parse = "0.2.3"
 url = "2.2"
 itertools = "0.10.5"
 ipnet = { version = "2.7.0", features = ["serde"] }
+netns-rs = "0.1.0"
 
 [build-dependencies]
 tonic-build = { version = "0.8", default-features=false, features = ["prost"] }
@@ -87,5 +88,7 @@ incremental = true
 [dev-dependencies]
 criterion = { version = "0.4.0", features = ["async_tokio", "html_reports"] }
 matches = "0.1.9"
+netns-rs = "0.1.0"
+rtnetlink = "0.11.0"
 test-case = "2.2.2"
 #debug = true

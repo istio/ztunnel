@@ -25,15 +25,16 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
-use tracing::{error, trace};
+
+use tracing::trace;
 
 use ztunnel::identity::mock::MockCaClient;
-use ztunnel::identity::CertificateProvider;
+
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
-use ztunnel::test_helpers::tcp::HboneTestServer;
+
+use ztunnel::config;
 use ztunnel::test_helpers::*;
-use ztunnel::{config, identity};
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
@@ -100,7 +101,7 @@ async fn test_shutdown_drain() {
         readiness_address: app.readiness_address,
         cert_manager,
     };
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     let shutdown = app.shutdown.trigger().clone();
@@ -147,7 +148,7 @@ async fn test_shutdown_forced_drain() {
         readiness_address: app.readiness_address,
         cert_manager,
     };
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     let shutdown = app.shutdown.trigger().clone();
@@ -191,7 +192,7 @@ async fn test_quit_lifecycle() {
 #[track_caller]
 async fn run_request_test(target: &str, node: &str) {
     // Test a round trip outbound call (via socks5)
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     let cfg = config::Config {
         local_node: (!node.is_empty()).then(|| node.to_string()),
@@ -203,26 +204,6 @@ async fn run_request_test(target: &str, node: &str) {
             .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
         let mut stream = app.socks5_connect(dst).await;
         read_write_stream(&mut stream).await;
-    })
-    .await;
-}
-
-#[track_caller]
-async fn run_waypoint_test(target: &str, node: &str) {
-    // Test a round trip outbound call (via socks5)
-    // Verifies the request goes through a waypoint
-    // Note: the waypoint here is a test waypoint which echos back to us; it does not do a full next-hop proxy.
-    // As such, we only run the waypoint, and not any test app
-    let waypoint = HboneTestServer::new(tcp::Mode::ReadWrite).await;
-    let cfg = config::Config {
-        local_node: (!node.is_empty()).then(|| node.to_string()),
-        ..test_config_with_waypoint(waypoint.address().ip())
-    };
-    tokio::spawn(waypoint.run());
-    testapp::with_app(cfg, |app| async move {
-        let dst = SocketAddr::from_str(target).unwrap();
-        let mut stream = app.socks5_connect(dst).await;
-        hbone_read_write_stream(&mut stream).await;
     })
     .await;
 }
@@ -258,62 +239,6 @@ async fn test_vip_request_local() {
 }
 
 #[tokio::test]
-async fn test_waypoint() {
-    // Port doesn't matter, we will only go to the fake waypoint.
-    run_waypoint_test(&format!("{TEST_WORKLOAD_WAYPOINT}:1234"), "").await;
-    // Also test when client and server are on the same node; we still need to go through the waypoint.
-    run_waypoint_test(&format!("{TEST_WORKLOAD_WAYPOINT}:1234"), "local").await;
-}
-
-// TODO: this test doesn't work since sending direct inbound requests still requires redirection support to terminate the TLS
-// Find a way to simulate this and re-enable
-#[tokio::test]
-#[ignore]
-async fn test_inbound_waypoint_bypass() {
-    let cfg = config::Config {
-        ..test_config_with_waypoint(TEST_WORKLOAD_WAYPOINT.parse().unwrap())
-    };
-    testapp::with_app(cfg, |app| async move {
-        let mut builder = hyper::client::conn::Builder::new();
-        let builder = builder.http2_only(true);
-
-        let request = hyper::Request::builder()
-            .uri(format!("https://{TEST_WORKLOAD_WAYPOINT}:12345"))
-            .method(Method::CONNECT)
-            .version(hyper::Version::HTTP_2)
-            .body(Body::empty())
-            .unwrap();
-
-        let id = &identity::Identity::default();
-        let cert = app.cert_manager.fetch_certificate(id).await.unwrap();
-        let mut connector = cert
-            .connector(None)
-            .unwrap()
-            .configure()
-            .expect("configure");
-        connector.set_verify_hostname(false);
-        connector.set_use_server_name_indication(false);
-        let tcp_stream = TcpStream::connect(app.proxy_addresses.inbound)
-            .await
-            .unwrap();
-        let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
-            .await
-            .unwrap();
-        let (mut request_sender, connection) = builder.handshake(tls_stream).await.unwrap();
-        // spawn a task to poll the connection and drive the HTTP state
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                error!("Error in HBONE connection handshake: {:?}", e);
-            }
-        });
-
-        let response = request_sender.send_request(request).await.unwrap();
-        assert_eq!(response.status(), hyper::StatusCode::UNAUTHORIZED);
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn test_stats_exist() {
     testapp::with_app(test_config(), |app| async move {
         let metrics = app.metrics().await;
@@ -336,7 +261,7 @@ async fn test_stats_exist() {
 #[tokio::test]
 async fn test_tcp_connections_metrics() {
     // Test a round trip outbound call (via socks5)
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
@@ -389,7 +314,7 @@ async fn test_tcp_connections_metrics() {
 
 #[tokio::test]
 async fn test_tcp_bytes_metrics() {
-    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite).await;
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     let mut cfg = test_config();
@@ -457,15 +382,6 @@ async fn read_write_stream(stream: &mut TcpStream) -> usize {
     stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(BODY, buf);
     BODY.len()
-}
-
-async fn hbone_read_write_stream(stream: &mut TcpStream) {
-    const BODY: &[u8] = b"hello world";
-    const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
-    stream.write_all(BODY).await.unwrap();
-    let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
-    stream.read_exact(&mut buf).await.unwrap();
-    assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
 }
 
 /// admin_shutdown triggers a shutdown - from the admin server
