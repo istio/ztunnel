@@ -111,7 +111,12 @@ impl InboundPassthrough {
             return Ok(());
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
-        let mut outbound = TcpStream::connect(orig).await?;
+        let orig_src = if pi.cfg.enable_original_source {
+            super::get_original_src_from_stream(&inbound)
+        } else {
+            None
+        };
+        let mut outbound = super::freebind_connect(orig_src, orig).await?;
         relay(&mut inbound, &mut outbound, true).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())

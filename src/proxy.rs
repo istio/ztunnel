@@ -20,8 +20,9 @@ use std::{fmt, io};
 use boring::error::ErrorStack;
 use drain::Watch;
 use rand::Rng;
-use tokio::net::TcpStream;
-use tracing::{error, trace};
+use tokio::net::{TcpSocket, TcpStream};
+
+use tracing::{error, trace, warn};
 
 use inbound::Inbound;
 
@@ -31,7 +32,8 @@ use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::workload::WorkloadInformation;
-use crate::{config, identity, tls};
+use crate::{config, identity, socket, tls};
+use hyper::{header, Body, Request};
 
 mod inbound;
 mod inbound_passthrough;
@@ -239,5 +241,69 @@ impl TryFrom<&str> for TraceParent {
             parent_id: u64::from_str_radix(segs[2], 16)?,
             flags: u8::from_str_radix(segs[3], 16)?,
         })
+    }
+}
+
+pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
+    let deli: &[_] = &[' ', '"'];
+    let first = req.headers().get(header::FORWARDED)?;
+    // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
+    // https://www.rfc-editor.org/rfc/rfc7239#section-4
+    let first = first
+        .to_str()
+        .unwrap_or("")
+        .split(',')
+        .next()?
+        .trim()
+        .split(';')
+        .find(|x| x.trim().to_lowercase().starts_with("for="))?
+        .split('=')
+        .nth(1)?
+        .trim_matches(deli);
+    if first.starts_with('[') {
+        let deli: &[_] = &[' ', '[', ']'];
+        first
+            .trim_matches(deli)
+            .split("]:")
+            .next()?
+            .parse::<IpAddr>()
+            .ok()
+    } else {
+        first
+            .parse::<IpAddr>()
+            .map_or_else(|_| first.split(':').next()?.parse::<IpAddr>().ok(), Some)
+    }
+}
+
+pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
+    stream
+        .peer_addr()
+        .map_or(None, |sa| Some(socket::to_canonical(sa).ip()))
+}
+
+pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
+    match local {
+        None => Ok(TcpStream::connect(addr).await?),
+        // TODO: Need figure out how to handle case of loadbalancing to itself.
+        //       We use ztunnel addr instead, otherwise app side will be confused.
+        Some(src) if src == socket::to_canonical(addr).ip() => Ok(TcpStream::connect(addr).await?),
+        Some(src) => {
+            let socket = if src.is_ipv4() {
+                TcpSocket::new_v4()?
+            } else {
+                TcpSocket::new_v6()?
+            };
+
+            let local_addr = SocketAddr::new(src, 0);
+            match socket::set_freebind_and_transparent(&socket) {
+                Err(err) => warn!("failed to set freebind: {:?}", err),
+                _ => {
+                    if let Err(err) = socket.bind(local_addr) {
+                        warn!("failed to bind local addr: {:?}", err)
+                    }
+                }
+            };
+            Ok(socket.connect(addr).await?)
+        }
     }
 }

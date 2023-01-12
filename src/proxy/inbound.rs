@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use drain::Watch;
@@ -26,7 +26,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
-use crate::proxy::inbound::InboundConnect::Hbone;
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac;
 use crate::socket::{relay, to_canonical};
@@ -82,9 +82,15 @@ impl Inbound {
                 dst,
             };
             let workloads = self.workloads.clone();
+            let enable_original_source = self.cfg.enable_original_source;
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    Self::serve_connect(workloads.clone(), conn.clone(), req)
+                    Self::serve_connect(
+                        workloads.clone(),
+                        conn.clone(),
+                        enable_original_source,
+                        req,
+                    )
                 }))
             }
         });
@@ -127,10 +133,24 @@ impl Inbound {
     /// handle_inbound serves an inbound connection with a target address `addr`.
     pub(super) async fn handle_inbound(
         request_type: InboundConnect,
+        origin_src: Option<IpAddr>,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = TcpStream::connect(addr).await;
+        let stream = {
+            match &request_type {
+                DirectPath(_) => super::freebind_connect(origin_src, addr).await,
+                Hbone(req) => {
+                    let origin_src = if origin_src.is_some() {
+                        // overwrite the original source if encoded in fwded from waypoint
+                        super::get_original_src_from_fwded(req).map_or(origin_src, Some)
+                    } else {
+                        origin_src
+                    };
+                    super::freebind_connect(origin_src, addr).await
+                }
+            }
+        };
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -192,6 +212,7 @@ impl Inbound {
     async fn serve_connect(
         workloads: WorkloadInformation,
         conn: rbac::Connection,
+        enable_original_source: bool,
         req: Request<Body>,
     ) -> Result<Response<Body>, hyper::Error> {
         match req.method() {
@@ -224,9 +245,15 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
+                let org_src = if enable_original_source {
+                    Some(conn.src_ip)
+                } else {
+                    None
+                };
 
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
-                    info!(%conn, "unknown destination");
+
+                                       info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
                         .body(Body::empty())
@@ -246,7 +273,7 @@ impl Inbound {
                             .unwrap());
                     }
                 }
-                let status_code = match Self::handle_inbound(Hbone(req), addr)
+                let status_code = match Self::handle_inbound(Hbone(req), org_src, addr)
                     .instrument(tracing::span::Span::current())
                     .await
                 {
