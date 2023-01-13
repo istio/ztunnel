@@ -20,11 +20,10 @@ use tokio::net::TcpListener;
 use tokio::net::TcpSocket;
 
 #[cfg(target_os = "linux")]
-use {    
-    std::io::ErrorKind,
-
+use {
     realm_io,
-    socket2::{Domain, SockRef},    
+    socket2::{Domain, SockRef},
+    std::io::ErrorKind,
     tracing::warn,
 };
 
