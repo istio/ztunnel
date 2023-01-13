@@ -563,7 +563,7 @@ impl WorkloadStore {
                     .insert((service_sock_addr, port.target_port as u16));
             }
         }
-        if Some(w.node) == self.local_node.clone() {
+        if Some(&w.node) == self.local_node.as_ref() {
             if let Some(tx) = self.cert_tx.as_mut() {
                 if let Err(e) = tx.try_send(widentity) {
                     info!("couldn't prefetch: {:?}", e)
