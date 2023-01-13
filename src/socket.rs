@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use realm_io;
-use socket2::{Domain, SockRef};
 use tokio::io;
 use tokio::net::TcpListener;
 use tokio::net::TcpSocket;
-use tracing::warn;
+
+#[cfg(target_os = "linux")]
+use {
+    realm_io,
+    socket2::{Domain, SockRef},
+    std::io::ErrorKind,
+    tracing::warn,
+};
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
@@ -181,35 +186,38 @@ mod linux {
     }
 }
 
-const EINVAL: i32 = 22;
+#[cfg(all(target_os = "linux"))]
 pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
     zero_copy_enabled: bool,
 ) -> Result<Option<(u64, u64)>, Error> {
-    #[cfg(all(target_os = "linux"))]
-    {
-        if zero_copy_enabled {
-            match realm_io::bidi_zero_copy(downstream, upstream).await {
-                Ok(()) => Ok(None),
-                Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
-                    tokio::io::copy_bidirectional(downstream, upstream)
-                        .await
-                        .map(Some)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            tokio::io::copy_bidirectional(downstream, upstream)
-                .await
-                .map(Some)
-        }
-    }
+    const EINVAL: i32 = 22;
 
-    #[cfg(not(target_os = "linux"))]
-    {
+    if zero_copy_enabled {
+        match realm_io::bidi_zero_copy(downstream, upstream).await {
+            Ok(()) => Ok(None),
+            Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
+                tokio::io::copy_bidirectional(downstream, upstream)
+                    .await
+                    .map(Some)
+            }
+            Err(e) => Err(e),
+        }
+    } else {
         tokio::io::copy_bidirectional(downstream, upstream)
             .await
             .map(Some)
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn relay(
+    downstream: &mut tokio::net::TcpStream,
+    upstream: &mut tokio::net::TcpStream,
+    _: bool,
+) -> Result<Option<(u64, u64)>, Error> {
+    tokio::io::copy_bidirectional(downstream, upstream)
+        .await
+        .map(Some)
 }
