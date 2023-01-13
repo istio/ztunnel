@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -22,38 +22,25 @@ use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
-use crate::config::Config;
-use crate::identity::CertificateProvider;
 use crate::metrics::traffic::Reporter;
-use crate::metrics::{traffic, Metrics, Recorder};
+use crate::metrics::{traffic, Recorder};
 use crate::proxy::inbound::{Inbound, InboundConnect};
-use crate::proxy::{util, Error, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::socket::relay;
-use crate::workload::{Protocol, Workload, WorkloadInformation};
+use crate::workload::{Protocol, Workload};
 use crate::{rbac, socket};
 
 pub struct Outbound {
-    cfg: Config,
-    cert_manager: Box<dyn CertificateProvider>,
-    workloads: WorkloadInformation,
-    listener: TcpListener,
+    pi: ProxyInputs,
     drain: Watch,
-    metrics: Arc<Metrics>,
-    hbone_port: u16,
+    listener: TcpListener,
 }
 
 impl Outbound {
-    pub async fn new(
-        cfg: Config,
-        cert_manager: Box<dyn CertificateProvider>,
-        workloads: WorkloadInformation,
-        hbone_port: u16,
-        metrics: Arc<Metrics>,
-        drain: Watch,
-    ) -> Result<Outbound, Error> {
-        let listener: TcpListener = TcpListener::bind(cfg.outbound_addr)
+    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
+        let listener: TcpListener = TcpListener::bind(pi.cfg.outbound_addr)
             .await
-            .map_err(|e| Error::Bind(cfg.outbound_addr, e))?;
+            .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
 
         let transparent = socket::set_transparent(&listener).is_ok();
 
@@ -64,12 +51,8 @@ impl Outbound {
             "listener established",
         );
         Ok(Outbound {
-            cfg,
-            cert_manager,
-            workloads,
+            pi,
             listener,
-            hbone_port,
-            metrics,
             drain,
         })
     }
@@ -86,13 +69,8 @@ impl Outbound {
                 let start_outbound_instant = Instant::now();
                 match socket {
                     Ok((stream, _remote)) => {
-                        let cfg = self.cfg.clone();
                         let mut oc = OutboundConnection {
-                            cert_manager: self.cert_manager.clone(),
-                            workloads: self.workloads.clone(),
-                            cfg,
-                            hbone_port: self.hbone_port,
-                            metrics: self.metrics.clone(),
+                            pi: self.pi.clone(),
                             id: TraceParent::new(),
                         };
                         let span = info_span!("outbound", id=%oc.id);
@@ -129,14 +107,9 @@ impl Outbound {
     }
 }
 
-pub struct OutboundConnection {
-    pub cert_manager: Box<dyn CertificateProvider>,
-    pub workloads: WorkloadInformation,
-    // TODO: Config may be excessively large, maybe we store a scoped OutboundConfig intended for cloning.
-    pub cfg: Config,
-    pub hbone_port: u16,
-    pub metrics: Arc<Metrics>,
-    pub id: TraceParent,
+pub(super) struct OutboundConnection {
+    pub(super) pi: ProxyInputs,
+    pub(super) id: TraceParent,
 }
 
 impl OutboundConnection {
@@ -177,6 +150,7 @@ impl OutboundConnection {
 
         // _connection_close will record once dropped
         let _connection_close = self
+            .pi
             .metrics
             .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
         if req.request_type == RequestType::DirectLocal && can_fastpath {
@@ -185,18 +159,27 @@ impl OutboundConnection {
             // We *could* apply this to all traffic, rather than just for destinations that are "captured"
             // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
             info!("proxying to {} using node local fast path", req.destination);
+            let origin_src = if self.pi.cfg.enable_original_source {
+                super::get_original_src_from_stream(&stream)
+            } else {
+                None
+            };
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
                 src_ip: remote_addr,
                 dst: req.destination,
             };
-            if !self.workloads.assert_rbac(&conn).await {
+            if !self.pi.workloads.assert_rbac(&conn).await {
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
-            return Inbound::handle_inbound(InboundConnect::DirectPath(stream), req.destination)
-                .await
-                .map_err(Error::Io);
+            return Inbound::handle_inbound(
+                InboundConnect::DirectPath(stream),
+                origin_src,
+                req.destination,
+            )
+            .await
+            .map_err(Error::Io);
         }
         match req.protocol {
             Protocol::HBONE => {
@@ -211,26 +194,38 @@ impl OutboundConnection {
                 let mut builder = hyper::client::conn::Builder::new();
                 let builder = builder
                     .http2_only(true)
-                    .http2_initial_stream_window_size(self.cfg.window_size)
-                    .http2_max_frame_size(self.cfg.frame_size)
-                    .http2_initial_connection_window_size(self.cfg.connection_window_size);
+                    .http2_initial_stream_window_size(self.pi.cfg.window_size)
+                    .http2_max_frame_size(self.pi.cfg.frame_size)
+                    .http2_initial_connection_window_size(self.pi.cfg.connection_window_size);
 
                 let request = hyper::Request::builder()
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
-                    .header(TRACEPARENT_HEADER, self.id.header())
-                    .body(hyper::Body::empty())
-                    .unwrap();
-
+                    .header(TRACEPARENT_HEADER, self.id.header());
+                let request = if self.pi.cfg.enable_original_source
+                    && req.request_type != RequestType::Direct
+                {
+                    request.header(hyper::header::FORWARDED, format!("for={}", remote_addr))
+                } else {
+                    request
+                };
+                let request = request.body(hyper::Body::empty()).unwrap();
+                let local = if self.pi.cfg.enable_original_source
+                    && req.request_type == RequestType::Direct
+                {
+                    Some(remote_addr)
+                } else {
+                    None
+                };
                 let id = &req.source.identity();
-                let cert = self.cert_manager.fetch_certificate(id).await?;
+                let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
-                    .connector(&req.destination_workload.map(|w| w.identity()))?
+                    .connector(req.destination_workload.map(|w| w.identity()).as_ref())?
                     .configure()
                     .expect("configure");
-                let tcp_stream = TcpStream::connect(req.gateway).await?;
+                let tcp_stream = super::freebind_connect(local, req.gateway).await?;
                 tcp_stream.set_nodelay(true)?;
                 let tls_stream = connect_tls(connector, tcp_stream).await?;
                 let (mut request_sender, connection) = builder
@@ -262,13 +257,18 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
                 // Create a TCP connection to upstream
-                let mut outbound = TcpStream::connect(req.gateway).await?;
+                let local = if self.pi.cfg.enable_original_source {
+                    super::get_original_src_from_stream(&stream)
+                } else {
+                    None
+                };
+                let mut outbound = super::freebind_connect(local, req.gateway).await?;
                 // Proxying data between downstrean and upstream
-                match relay(&mut stream, &mut outbound, self.cfg.zero_copy_enabled).await {
+                match relay(&mut stream, &mut outbound, self.pi.cfg.zero_copy_enabled).await {
                     // Connection closed with count of bytes transferred between streams
                     Ok(Some((sent, recv))) => {
-                        self.metrics.record_count(&sent_bytes, sent);
-                        self.metrics.record_count(&received_bytes, recv);
+                        self.pi.metrics.record_count(&sent_bytes, sent);
+                        self.pi.metrics.record_count(&received_bytes, recv);
                         Ok(())
                     }
                     Ok(None) => Ok(()),
@@ -283,13 +283,17 @@ impl OutboundConnection {
         downstream: IpAddr,
         target: SocketAddr,
     ) -> Result<Request, Error> {
-        let source_workload = match self.workloads.fetch_workload(&downstream).await {
+        let source_workload = match self.pi.workloads.fetch_workload(&downstream).await {
             Some(wl) => wl,
             None => return Err(Error::UnknownSource(downstream)),
         };
 
         // TODO: we want a single lock for source and upstream probably...?
-        let us = self.workloads.find_upstream(target, self.hbone_port).await;
+        let us = self
+            .pi
+            .workloads
+            .find_upstream(target, self.pi.hbone_port)
+            .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
             return Ok(Request {
@@ -324,7 +328,7 @@ impl OutboundConnection {
         }
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
-            && self.cfg.local_node == Some(us.workload.node.clone())
+            && self.pi.cfg.local_node == Some(us.workload.node.clone())
             && us.workload.protocol == Protocol::HBONE
         {
             return Ok(Request {
@@ -401,7 +405,7 @@ enum RequestType {
     Passthrough,
 }
 
-async fn connect_tls(
+pub async fn connect_tls(
     mut connector: ConnectConfiguration,
     stream: TcpStream,
 ) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
@@ -417,6 +421,8 @@ mod tests {
 
     use bytes::Bytes;
 
+    use crate::config::Config;
+    use crate::workload::WorkloadInformation;
     use crate::xds::istio::workload::Protocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, workload};
@@ -447,11 +453,13 @@ mod tests {
             demand: None,
         };
         let outbound = OutboundConnection {
-            cert_manager: Box::new(identity::mock::MockCaClient::new(Duration::from_secs(10))),
-            workloads: wi,
-            hbone_port: 15008,
-            cfg,
-            metrics: Arc::new(Default::default()),
+            pi: ProxyInputs {
+                cert_manager: Box::new(identity::mock::MockCaClient::new(Duration::from_secs(10))),
+                workloads: wi,
+                hbone_port: 15008,
+                cfg,
+                metrics: Arc::new(Default::default()),
+            },
             id: TraceParent::new(),
         };
 

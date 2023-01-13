@@ -17,11 +17,37 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use tokio::io;
 use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
+
+#[cfg(target_os = "linux")]
+use {    
+    std::io::ErrorKind,
+
+    realm_io,
+    socket2::{Domain, SockRef},    
+    tracing::warn,
+};
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
-    use socket2::SockRef;
     SockRef::from(l).set_ip_transparent(true)
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
+    let socket = SockRef::from(socket);
+    match socket.domain()? {
+        Domain::IPV4 => {
+            socket.set_ip_transparent(true)?;
+            socket.set_freebind(true)?;
+        }
+        Domain::IPV6 => {
+            linux::set_ipv6_transparent(&socket)?;
+            socket.set_freebind_ipv6(true)?
+        }
+        _ => return Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
+    };
+    Ok(())
 }
 
 pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
@@ -48,9 +74,6 @@ pub fn orig_dst_addr_or_default(stream: &tokio::net::TcpStream) -> SocketAddr {
 
 #[cfg(target_os = "linux")]
 fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
-    use socket2::SockRef;
-    use tracing::warn;
-
     let sock = SockRef::from(stream);
     // Dual-stack IPv4/IPv6 sockets require us to check both options.
     match linux::original_dst(&sock) {
@@ -88,6 +111,14 @@ pub fn set_transparent(_: &TcpListener) -> io::Result<()> {
     ))
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn set_freebind(sock: &TcpSocket) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "IP_FREEBIND not supported on this operating system",
+    ))
+}
+
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod linux {
@@ -95,6 +126,23 @@ mod linux {
 
     use socket2::{SockAddr, SockRef};
     use tokio::io;
+
+    pub fn set_ipv6_transparent(sock: &SockRef) -> io::Result<()> {
+        unsafe {
+            let optval: libc::c_int = 1;
+            let ret = libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TRANSPARENT,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
 
     // Replace with socket2's version once there is a release that contains
     // https://github.com/rust-lang/socket2/pull/360

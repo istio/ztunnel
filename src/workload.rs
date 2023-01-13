@@ -23,16 +23,18 @@ use rand::prelude::IteratorRandom;
 use thiserror::Error;
 use tracing::{debug, error, info, instrument, trace};
 
-use xds::istio::workload::Rbac as XdsRbac;
+use xds::istio::security::Authorization as XdsAuthorization;
 
+use std::default::Default;
+use tokio::sync::mpsc;
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
-use crate::identity::Identity;
+use crate::identity::{CertificateProvider, Identity};
 use crate::metrics::Metrics;
 use crate::workload::WorkloadError::EnumParse;
 
-use crate::rbac::{Rbac, RbacScope};
+use crate::rbac::{Authorization, RbacScope};
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
 
@@ -232,14 +234,14 @@ impl xds::Handler<XdsWorkload> for Arc<Mutex<WorkloadStore>> {
     }
 }
 
-impl xds::Handler<XdsRbac> for Arc<Mutex<WorkloadStore>> {
-    fn handle(&self, updates: Vec<XdsUpdate<XdsRbac>>) -> Result<(), Vec<RejectedConfig>> {
+impl xds::Handler<XdsAuthorization> for Arc<Mutex<WorkloadStore>> {
+    fn handle(&self, updates: Vec<XdsUpdate<XdsAuthorization>>) -> Result<(), Vec<RejectedConfig>> {
         let mut wli = self.lock().unwrap();
-        let handle = |res: XdsUpdate<XdsRbac>| {
+        let handle = |res: XdsUpdate<XdsAuthorization>| {
             match res {
                 XdsUpdate::Update(w) => {
                     info!("handling RBAC update {}", w.name);
-                    wli.insert_xds_rbac(w.resource)?;
+                    wli.insert_xds_authorization(w.resource)?;
                 }
                 XdsUpdate::Remove(name) => {
                     info!("handling RBAC delete {}", name);
@@ -257,17 +259,36 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
+        cert_manager: Box<dyn CertificateProvider>,
     ) -> anyhow::Result<WorkloadManager> {
-        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
+        let (tx, mut rx) = mpsc::channel::<Identity>(256);
+        // todo ratelimit prefetching to a reasonable limit
+        tokio::spawn(async move {
+            while let Some(workload_identity) = rx.recv().await {
+                match cert_manager.fetch_certificate(&workload_identity).await {
+                    Ok(_) => debug!("prefetched cert for {:?}", workload_identity.to_string()),
+                    Err(e) => error!(
+                        "unable to prefetch cert for {:?}, skipping, {:?}",
+                        workload_identity.to_string(),
+                        e
+                    ),
+                }
+            }
+        });
+        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
+            cert_tx: Some(tx),
+            local_node: config.clone().local_node,
+            ..Default::default()
+        }));
         let xds_workloads = workloads.clone();
         let xds_rbac = workloads.clone();
         let xds_client = if config.xds_address.is_some() {
             Some(
                 xds::Config::new(config.clone())
                     .with_workload_handler(xds_workloads)
-                    .with_rbac_handler(xds_rbac)
+                    .with_authorization_handler(xds_rbac)
                     .watch(xds::WORKLOAD_TYPE.into())
-                    .watch(xds::RBAC_TYPE.into())
+                    .watch(xds::AUTHORIZATION_TYPE.into())
                     .build(metrics, awaiting_ready.subtask("ads client")),
             )
         } else {
@@ -321,7 +342,7 @@ pub struct LocalWorkload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalConfig {
     pub workloads: Vec<LocalWorkload>,
-    pub policies: Vec<Rbac>,
+    pub policies: Vec<Authorization>,
 }
 
 impl LocalClient {
@@ -350,7 +371,7 @@ impl LocalClient {
             }
         }
         for rbac in r.policies {
-            wli.insert_rbac(rbac);
+            wli.insert_authorization(rbac);
         }
         info!(%workloads, %policies, "local config initialized");
         Ok(())
@@ -410,8 +431,10 @@ impl WorkloadInformation {
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
-                debug!("deny policy match");
+                debug!(policy = pol.to_key(), "deny policy match");
                 return false;
+            } else {
+                trace!(policy = pol.to_key(), "deny policy does not match");
             }
         }
         // "If there are no ALLOW policies for the workload, allow the request."
@@ -422,8 +445,10 @@ impl WorkloadInformation {
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
-                debug!("allow policy match");
+                debug!(policy = pol.to_key(), "allow policy match");
                 return true;
+            } else {
+                trace!(policy = pol.to_key(), "allow policy does not match");
             }
         }
         // "Deny the request."
@@ -498,9 +523,15 @@ pub struct WorkloadStore {
     vips: HashMap<SocketAddr, HashSet<(IpAddr, u16)>>,
 
     /// policies maintains a mapping of ns/name to policy.
-    policies: HashMap<String, rbac::Rbac>,
+    policies: HashMap<String, rbac::Authorization>,
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     policies_by_namespace: HashMap<String, HashSet<String>>,
+
+    #[serde(skip_serializing, default)]
+    cert_tx: Option<mpsc::Sender<Identity>>,
+
+    // needed to determine whether or not to prefetch certs
+    local_node: Option<String>,
 }
 
 impl WorkloadStore {
@@ -516,6 +547,7 @@ impl WorkloadStore {
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
         let wip = workload.workload_ip;
+        let widentity = workload.identity();
         self.insert_workload(workload);
         for (vip, pl) in &w.virtual_ips {
             let ip = vip.parse::<IpAddr>()?;
@@ -531,17 +563,24 @@ impl WorkloadStore {
                     .insert((service_sock_addr, port.target_port as u16));
             }
         }
+        if Some(&w.node) == self.local_node.as_ref() {
+            if let Some(tx) = self.cert_tx.as_mut() {
+                if let Err(e) = tx.try_send(widentity) {
+                    info!("couldn't prefetch: {:?}", e)
+                }
+            }
+        }
         Ok(())
     }
 
-    fn insert_xds_rbac(&mut self, r: XdsRbac) -> anyhow::Result<()> {
-        let rbac = rbac::Rbac::try_from(&r)?;
+    fn insert_xds_authorization(&mut self, r: XdsAuthorization) -> anyhow::Result<()> {
+        let rbac = rbac::Authorization::try_from(&r)?;
         trace!("insert policy {}", serde_json::to_string(&rbac)?);
-        self.insert_rbac(rbac);
+        self.insert_authorization(rbac);
         Ok(())
     }
 
-    fn insert_rbac(&mut self, rbac: Rbac) {
+    fn insert_authorization(&mut self, rbac: Authorization) {
         let key = rbac.to_key();
         match rbac.scope {
             RbacScope::Global => {
@@ -671,8 +710,10 @@ pub enum WorkloadError {
 
 #[cfg(test)]
 mod tests {
+    use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
+    use crate::test_helpers;
     use bytes::Bytes;
 
     use crate::xds::istio::workload::Port as XdsPort;
@@ -760,23 +801,6 @@ mod tests {
 
     #[test]
     fn workload_information() {
-        let default = Workload {
-            workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            waypoint_addresses: Vec::new(),
-            gateway_address: None,
-            protocol: Default::default(),
-            name: "".to_string(),
-            namespace: "".to_string(),
-            service_account: "default".to_string(),
-            workload_name: "".to_string(),
-            workload_type: "deployment".to_string(),
-            canonical_name: "".to_string(),
-            canonical_revision: "".to_string(),
-            node: "".to_string(),
-
-            authorization_policies: Default::default(),
-            native_hbone: false,
-        };
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
@@ -797,7 +821,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default.clone()
+                ..test_helpers::test_default_workload()
             })
         );
 
@@ -807,7 +831,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default.clone()
+                ..test_helpers::test_default_workload()
             })
         );
 
@@ -817,7 +841,7 @@ mod tests {
             Some(&Workload {
                 workload_ip: ip1,
                 name: "some name".to_string(),
-                ..default
+                ..test_helpers::test_default_workload()
             })
         );
 

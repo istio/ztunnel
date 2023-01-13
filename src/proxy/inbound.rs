@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use drain::Watch;
@@ -26,8 +26,8 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
-use crate::proxy::inbound::InboundConnect::Hbone;
-use crate::proxy::{TraceParent, TRACEPARENT_HEADER};
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac;
 use crate::socket::{relay, to_canonical};
 use crate::tls::TlsError;
@@ -35,7 +35,7 @@ use crate::workload::WorkloadInformation;
 
 use super::Error;
 
-pub struct Inbound {
+pub(super) struct Inbound {
     cfg: Config,
     listener: TcpListener,
     cert_manager: Box<dyn CertificateProvider>,
@@ -44,15 +44,10 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    pub async fn new(
-        cfg: Config,
-        workloads: WorkloadInformation,
-        cert_manager: Box<dyn CertificateProvider>,
-        drain: Watch,
-    ) -> Result<Inbound, Error> {
-        let listener: TcpListener = TcpListener::bind(cfg.inbound_addr)
+    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
+        let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_addr)
             .await
-            .map_err(|e| Error::Bind(cfg.inbound_addr, e))?;
+            .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
         let transparent = crate::socket::set_transparent(&listener).is_ok();
 
         info!(
@@ -62,10 +57,10 @@ impl Inbound {
             "listener established",
         );
         Ok(Inbound {
-            cfg,
-            workloads,
+            cfg: pi.cfg,
+            workloads: pi.workloads,
             listener,
-            cert_manager,
+            cert_manager: pi.cert_manager,
             drain,
         })
     }
@@ -87,9 +82,15 @@ impl Inbound {
                 dst,
             };
             let workloads = self.workloads.clone();
+            let enable_original_source = self.cfg.enable_original_source;
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    Self::serve_connect(workloads.clone(), conn.clone(), req)
+                    Self::serve_connect(
+                        workloads.clone(),
+                        conn.clone(),
+                        enable_original_source,
+                        req,
+                    )
                 }))
             }
         });
@@ -132,10 +133,24 @@ impl Inbound {
     /// handle_inbound serves an inbound connection with a target address `addr`.
     pub(super) async fn handle_inbound(
         request_type: InboundConnect,
+        origin_src: Option<IpAddr>,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = TcpStream::connect(addr).await;
+        let stream = {
+            match &request_type {
+                DirectPath(_) => super::freebind_connect(origin_src, addr).await,
+                Hbone(req) => {
+                    let origin_src = if origin_src.is_some() {
+                        // overwrite the original source if encoded in fwded from waypoint
+                        super::get_original_src_from_fwded(req).map_or(origin_src, Some)
+                    } else {
+                        origin_src
+                    };
+                    super::freebind_connect(origin_src, addr).await
+                }
+            }
+        };
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -197,6 +212,7 @@ impl Inbound {
     async fn serve_connect(
         workloads: WorkloadInformation,
         conn: rbac::Connection,
+        enable_original_source: bool,
         req: Request<Body>,
     ) -> Result<Response<Body>, hyper::Error> {
         match req.method() {
@@ -229,7 +245,35 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
-                let status_code = match Self::handle_inbound(InboundConnect::Hbone(req), addr)
+                let org_src = if enable_original_source {
+                    Some(conn.src_ip)
+                } else {
+                    None
+                };
+
+                let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
+
+                                       info!(%conn, "unknown destination");
+                    return Ok(Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::empty())
+                        .unwrap());
+                };
+                if !upstream.waypoint_addresses.is_empty() {
+                    let from_waypoint = conn
+                        .src_identity
+                        .as_ref()
+                        .map(|i| i == &upstream.identity())
+                        .unwrap_or(false);
+                    if !from_waypoint {
+                        info!(%conn, "bypassed waypoint");
+                        return Ok(Response::builder()
+                            .status(StatusCode::UNAUTHORIZED)
+                            .body(Body::empty())
+                            .unwrap());
+                    }
+                }
+                let status_code = match Self::handle_inbound(Hbone(req), org_src, addr)
                     .instrument(tracing::span::Span::current())
                     .await
                 {

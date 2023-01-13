@@ -250,7 +250,7 @@ impl Certs {
         Ok(conn.build())
     }
 
-    pub fn connector(&self, dest_id: &Option<Identity>) -> Result<ssl::SslConnector, Error> {
+    pub fn connector(&self, dest_id: Option<&Identity>) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
 
