@@ -29,7 +29,7 @@ pub mod mock {
     pub use super::manager::mock::new_secret_manager;
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
     #[error("failed to create CSR: {0}")]
     Signing(#[from] tls::Error),

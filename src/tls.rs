@@ -14,11 +14,13 @@
 
 pub mod boring;
 
+use std::sync::Arc;
+
 pub use crate::tls::boring::*;
 use ::boring::error::ErrorStack;
 use hyper::http::uri::InvalidUri;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
     #[error("invalid operation: {0:?}")]
     SslError(#[from] ErrorStack),
@@ -27,5 +29,11 @@ pub enum Error {
     InvalidRootCert(ErrorStack),
 
     #[error("invalid uri: {0}")]
-    InvalidUri(#[from] InvalidUri),
+    InvalidUri(#[from] Arc<InvalidUri>),
+}
+
+impl From<InvalidUri> for Error {
+    fn from(err: InvalidUri) -> Self {
+        Error::InvalidUri(Arc::new(err))
+    }
 }
