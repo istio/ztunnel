@@ -257,7 +257,7 @@ mod tests {
             };
             sm.fetch_certificate(&id)
                 .await
-                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+                .expect("Didn't get a cert as expected.");
         }
     }
 
@@ -274,7 +274,7 @@ mod tests {
             }
             sm.fetch_certificate(&id)
                 .await
-                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+                .expect("Didn't get a cert as expected.");
             sleep(Duration::from_micros(500)).await;
         }
     }
@@ -290,12 +290,12 @@ mod tests {
         let mut current_cert = sm
             .fetch_certificate(&id)
             .await
-            .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+            .expect("Didn't get a cert as expected.");
         loop {
             let new_cert = sm
                 .fetch_certificate(&id)
                 .await
-                .unwrap_or_else(|_| panic!("Didn't get a cert as expected."));
+                .expect("Didn't get a cert as expected.");
 
             if current_cert != new_cert {
                 total_updates += 1;
