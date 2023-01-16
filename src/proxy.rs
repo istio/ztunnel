@@ -156,16 +156,19 @@ const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
 pub async fn copy_hbone(
     upgraded: &mut hyper::upgrade::Upgraded,
     stream: &mut TcpStream,
-) -> Result<(), std::io::Error> {
+) -> Result<(u64, u64), std::io::Error> {
     use tokio::io::AsyncWriteExt;
     let (mut ri, mut wi) = tokio::io::split(upgraded);
     let (mut ro, mut wo) = stream.split();
+
+    let (mut sent, mut received): (u64, u64) = (0, 0);
 
     let client_to_server = async {
         let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
         let mut wo = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wo);
         let res = tokio::io::copy(&mut ri, &mut wo).await;
         trace!(?res, "hbone -> tcp");
+        received = res?;
         wo.shutdown().await
     };
 
@@ -174,10 +177,11 @@ pub async fn copy_hbone(
         let mut wi = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wi);
         let res = tokio::io::copy(&mut ro, &mut wi).await;
         trace!(?res, "tcp -> hbone");
+        sent = res?;
         wi.shutdown().await
     };
 
-    tokio::try_join!(client_to_server, server_to_client).map(|_| ())
+    tokio::try_join!(client_to_server, server_to_client).map(|_| (sent, received))
 }
 
 /// Represents a traceparent, as defined by https://www.w3.org/TR/trace-context/
