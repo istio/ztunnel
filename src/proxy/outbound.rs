@@ -248,14 +248,15 @@ impl OutboundConnection {
                 let mut upgraded = hyper::upgrade::on(response).await?;
                 match super::copy_hbone(&mut upgraded, &mut stream)
                     .instrument(trace_span!("hbone client"))
-                    .await {
-                        Ok((sent, recv)) => {
-                            self.pi.metrics.record_count(&sent_bytes, sent);
-                            self.pi.metrics.record_count(&received_bytes, recv);
-                            Ok(())
-                        }
-                        Err(e) => Err(Error::Io(e)), 
+                    .await
+                {
+                    Ok((sent, recv)) => {
+                        self.pi.metrics.record_count(&sent_bytes, sent);
+                        self.pi.metrics.record_count(&received_bytes, recv);
+                        Ok(())
                     }
+                    Err(e) => Err(Error::Io(e)),
+                }
             }
             Protocol::TCP => {
                 info!(
