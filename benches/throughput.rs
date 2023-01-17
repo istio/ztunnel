@@ -32,6 +32,9 @@ use ztunnel::metrics::Metrics;
 use ztunnel::metrics::Recorder;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
+use ztunnel::test_helpers::TEST_WORKLOAD_HBONE;
+use ztunnel::test_helpers::TEST_WORKLOAD_SOURCE;
+use ztunnel::test_helpers::TEST_WORKLOAD_TCP;
 use ztunnel::test_helpers::{helpers, tcp};
 
 use ztunnel::{app, identity, test_helpers};
@@ -74,15 +77,21 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
         };
         ta.ready().await;
         let echo = tcp::TestServer::new(mode).await;
-        let echo_addr = helpers::with_ip(echo.address(), "127.0.0.1".parse().unwrap());
+        let echo_addr = helpers::with_ip(echo.address(), TEST_WORKLOAD_SOURCE.parse().unwrap());
         let t = tokio::spawn(async move {
             let _ = tokio::join!(app.wait_termination(), echo.run());
         });
         let mut hbone = ta
-            .socks5_connect(helpers::with_ip(echo_addr, "127.0.0.1".parse().unwrap()))
+            .socks5_connect(helpers::with_ip(
+                echo_addr,
+                TEST_WORKLOAD_HBONE.parse().unwrap(),
+            ))
             .await;
         let mut tcp = ta
-            .socks5_connect(helpers::with_ip(echo_addr, "127.0.0.2".parse().unwrap()))
+            .socks5_connect(helpers::with_ip(
+                echo_addr,
+                TEST_WORKLOAD_TCP.parse().unwrap(),
+            ))
             .await;
         let mut direct = TcpStream::connect(echo_addr).await.unwrap();
         direct.set_nodelay(true).unwrap();
@@ -177,8 +186,11 @@ pub fn connections(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let e = env.lock().await;
             let mut s =
-                e.ta.socks5_connect(helpers::with_ip(e.echo_addr, "127.0.0.2".parse().unwrap()))
-                    .await;
+                e.ta.socks5_connect(helpers::with_ip(
+                    e.echo_addr,
+                    TEST_WORKLOAD_TCP.parse().unwrap(),
+                ))
+                .await;
             tcp::run_client(&mut s, 1, Mode::ReadWrite).await
         })
     });
@@ -188,8 +200,11 @@ pub fn connections(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let e = env.lock().await;
             let mut s =
-                e.ta.socks5_connect(helpers::with_ip(e.echo_addr, "127.0.0.1".parse().unwrap()))
-                    .await;
+                e.ta.socks5_connect(helpers::with_ip(
+                    e.echo_addr,
+                    TEST_WORKLOAD_HBONE.parse().unwrap(),
+                ))
+                .await;
             tcp::run_client(&mut s, 1, Mode::ReadWrite).await
         })
     });
