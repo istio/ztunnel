@@ -246,10 +246,17 @@ impl OutboundConnection {
                     return Err(Error::HttpStatus(code));
                 }
                 let mut upgraded = hyper::upgrade::on(response).await?;
-                super::copy_hbone(&mut upgraded, &mut stream)
+                match super::copy_hbone(&mut upgraded, &mut stream)
                     .instrument(trace_span!("hbone client"))
-                    .await?;
-                Ok(())
+                    .await
+                {
+                    Ok((sent, recv)) => {
+                        self.pi.metrics.record_count(&sent_bytes, sent);
+                        self.pi.metrics.record_count(&received_bytes, recv);
+                        Ok(())
+                    }
+                    Err(e) => Err(Error::Io(e)),
+                }
             }
             Protocol::TCP => {
                 info!(
