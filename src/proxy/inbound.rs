@@ -175,7 +175,7 @@ impl Inbound {
                             },
                         }
                     })
-                    .instrument(tracing::span::Span::current()),
+                    .in_current_span(),
                 );
                 // Send back our 200. We do this regardless of if our spawned task copies the data;
                 // we need to respond with headers immediately once connection is established for the
@@ -267,7 +267,7 @@ impl Inbound {
                     orig_src
                 };
                 let status_code = match Self::handle_inbound(Hbone(req), orig_src, addr)
-                    .instrument(tracing::span::Span::current())
+                    .in_current_span()
                     .await
                 {
                     Ok(_) => StatusCode::OK,

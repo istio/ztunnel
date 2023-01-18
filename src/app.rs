@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Context;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use anyhow::Context;
 use prometheus_client::registry::Registry;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
@@ -76,15 +76,20 @@ pub async fn build_with_cert(
 
     // spawn admin task and xds client task
     admin.spawn(drain_rx_admin);
-    tokio::spawn(async move {
-        if let Err(e) = workload_manager.run().await {
-            error!("workload manager: {}", e);
+    tokio::spawn(
+        async move {
+            if let Err(e) = workload_manager.run().await {
+                error!("workload manager: {}", e);
+            }
         }
-    });
+        .in_current_span(),
+    );
 
     let proxy_addresses = proxy.addresses();
     let readiness_drain_rx = drain_rx.clone();
+    let span = tracing::span::Span::current();
     thread::spawn(move || {
+        let _span = span.enter();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(config.num_worker_threads)
             .thread_name_fn(|| {
@@ -95,10 +100,13 @@ pub async fn build_with_cert(
             .enable_all()
             .build()
             .unwrap();
-        runtime.block_on(async move {
-            readiness_server.spawn(readiness_drain_rx);
-            proxy.run().await;
-        });
+        runtime.block_on(
+            async move {
+                readiness_server.spawn(readiness_drain_rx);
+                proxy.run().in_current_span().await;
+            }
+            .in_current_span(),
+        );
     });
 
     Ok(Bound {

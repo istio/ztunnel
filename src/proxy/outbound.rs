@@ -96,7 +96,7 @@ impl Outbound {
                     }
                 }
             }
-        };
+        }.in_current_span();
 
         // Stop accepting once we drain.
         // Note: we are *not* waiting for all connections to be closed. In the future, we may consider

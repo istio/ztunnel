@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use hyper::{Body, Method};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tracing::{error, info};
 
 use ztunnel::identity;
@@ -64,26 +66,31 @@ const TEST_VIP: &str = "10.10.0.1";
 
 const SERVER_PORT: u16 = 8080;
 
+const DEFAULT_NODE: &str = "node";
+const REMOTE_NODE: &str = "remote-node";
+
 #[tokio::test]
 async fn test_vip_request() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let server1 = manager
-        .workload_builder("server1")
-        .vip(TEST_VIP, 80, SERVER_PORT)
-        .register()?;
-    let server2 = manager
-        .workload_builder("server2")
-        .hbone()
-        .vip(TEST_VIP, 80, SERVER_PORT)
-        .register()?;
+    run_tcp_server(
+        manager
+            .workload_builder("server1", REMOTE_NODE)
+            .vip(TEST_VIP, 80, SERVER_PORT)
+            .register()?,
+    )?;
+    run_tcp_server(
+        manager
+            .workload_builder("server2", REMOTE_NODE)
+            .hbone()
+            .vip(TEST_VIP, 80, SERVER_PORT)
+            .register()?,
+    )?;
     let client = manager
-        .workload_builder("client")
-        .on_local_node()
+        .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel()?;
+    manager.deploy_ztunnel(REMOTE_NODE)?;
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
 
-    run_tcp_server(server1)?;
-    run_tcp_server(server2)?;
     run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
     Ok(())
 }
@@ -91,76 +98,106 @@ async fn test_vip_request() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_tcp_request() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let server = manager.workload_builder("server").register()?;
-    client_server_test(manager, server)
+    run_tcp_server(manager.workload_builder("server", REMOTE_NODE).register()?)?;
+    manager.deploy_ztunnel(REMOTE_NODE)?;
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
+        .register()?;
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    run_tcp_client(client, manager.resolver(), "server")?;
+    Ok(())
 }
 
 #[tokio::test]
 async fn test_tcp_local_request() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let server = manager
-        .workload_builder("server")
-        .on_local_node()
+    run_tcp_server(
+        manager
+            .workload_builder("server", DEFAULT_NODE)
+            .register()?,
+    )?;
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    client_server_test(manager, server)
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    run_tcp_client(client, manager.resolver(), "server")?;
+    Ok(())
 }
 
 #[tokio::test]
 async fn test_hbone_request() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let server = manager.workload_builder("server").hbone().register()?;
-    client_server_test(manager, server)
+    run_tcp_server(
+        manager
+            .workload_builder("server", REMOTE_NODE)
+            .hbone()
+            .register()?,
+    )?;
+    manager.deploy_ztunnel(REMOTE_NODE)?;
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
+        .register()?;
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    run_tcp_client(client, manager.resolver(), "server")?;
+    Ok(())
 }
 
 #[tokio::test]
 async fn test_hbone_local_request() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let server = manager
-        .workload_builder("server")
-        .hbone()
-        .on_local_node()
+    run_tcp_server(
+        manager
+            .workload_builder("server", DEFAULT_NODE)
+            .hbone()
+            .register()?,
+    )?;
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    client_server_test(manager, server)
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    run_tcp_client(client, manager.resolver(), "server")?;
+    Ok(())
 }
 
 #[tokio::test]
 async fn test_waypoint() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let waypoint = manager.register_waypoint("waypoint")?;
+    let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
     let ip = waypoint.ip();
     run_hbone_server(waypoint)?;
-    let _ = manager
-        .workload_builder("server")
+    manager
+        .workload_builder("server", DEFAULT_NODE)
         .hbone()
         .waypoint(ip)
-        .on_local_node()
         .register()?;
     let client = manager
-        .workload_builder("client")
-        .on_local_node()
+        .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel()?;
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore]
-// This is currently broken since our redirection hacks are not sophisticated enough to bypass the outbound
-// but not inbound
 async fn test_waypoint_bypass() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let waypoint = manager.register_waypoint("waypoint")?;
+    let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
     let ip = waypoint.ip();
     run_hbone_server(waypoint)?;
     let _ = manager
-        .workload_builder("server")
+        .workload_builder("server", DEFAULT_NODE)
         .waypoint(ip)
-        .on_local_node()
         .register()?;
-    let client = manager.workload_builder("client").register()?;
-    let app = manager.deploy_ztunnel()?;
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
+        .uncaptured()
+        .register()?;
+    let app = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     let srv = resolve_target(manager.resolver(), "server");
     client
@@ -209,9 +246,13 @@ async fn test_waypoint_bypass() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
-    let _ = manager.workload_builder("server").register()?;
-    let client = manager.workload_builder("client").register()?;
-    let app = manager.deploy_ztunnel()?;
+    let _ = manager
+        .workload_builder("server", DEFAULT_NODE)
+        .register()?;
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
+        .register()?;
+    let app = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     let srv = resolve_target(manager.resolver(), "server");
     client
@@ -275,8 +316,13 @@ fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow
     client
         .run(move || async move {
             info!("Running client to {srv}");
-            let mut stream = TcpStream::connect(srv).await.unwrap();
-            read_write_stream(&mut stream).await;
+            let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
+                .await
+                .unwrap()
+                .unwrap();
+            timeout(Duration::from_secs(5), read_write_stream(&mut stream))
+                .await
+                .unwrap();
             Ok(())
         })?
         .join()
@@ -325,18 +371,6 @@ fn run_hbone_server(server: Namespace) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// client_server_test runs a simple test sending a single request from the client and asserting it is received.
-fn client_server_test(mut manager: WorkloadManager, server: Namespace) -> anyhow::Result<()> {
-    let client = manager
-        .workload_builder("client")
-        .on_local_node()
-        .register()?;
-    manager.deploy_ztunnel()?;
-
-    run_tcp_server(server)?;
-    run_tcp_client(client, manager.resolver(), "server")?;
-    Ok(())
-}
 // TODO: dedupe
 async fn read_write_stream(stream: &mut TcpStream) -> usize {
     const BODY: &[u8] = b"hello world";

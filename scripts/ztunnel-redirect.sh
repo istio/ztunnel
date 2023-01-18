@@ -84,16 +84,6 @@ $IPTABLES -w -t mangle -A PREROUTING -p tcp -i p$INBOUND_TUN -j TPROXY --tproxy-
 
 $IPTABLES -w -t mangle -A PREROUTING -p tcp -i eth0 ! --dst $INSTANCE_IP -j MARK --set-mark $ORG_SRC_RET_MARK
 
-# Huge hack. Currently, we only support single "node" test setup. This means we cannot test
-# Cross-ztunnel requests. Instead, loop these back to ourselves.
-# TODO: setup multiple ztunnels and actually communicate between them; then this can be removed.
-# We send HBONE to waypoints, so let those through...
-ipset create waypoint-pods-ips hash:ip
-for waypoint in "$@"; do
-  ipset add waypoint-pods-ips "${waypoint}"
-done
-$IPTABLES -w -t nat -A OUTPUT -p tcp --dport 15008 -m set '!' --match-set waypoint-pods-ips dst -j REDIRECT --to-port $POD_INBOUND
-
 # With normal linux routing we need to disable the rp_filter
 # as we get packets from a tunnel that doesn't have default routes.
 echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter

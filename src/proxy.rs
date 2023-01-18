@@ -22,7 +22,7 @@ use drain::Watch;
 use hyper::{header, Body, Request};
 use rand::Rng;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tracing::{error, trace, warn};
+use tracing::{error, trace, warn, Instrument};
 
 use inbound::Inbound;
 
@@ -88,10 +88,10 @@ impl Proxy {
 
     pub async fn run(self) {
         let tasks = vec![
-            tokio::spawn(self.inbound_passthrough.run()),
-            tokio::spawn(self.inbound.run()),
-            tokio::spawn(self.outbound.run()),
-            tokio::spawn(self.socks5.run()),
+            tokio::spawn(self.inbound_passthrough.run().in_current_span()),
+            tokio::spawn(self.inbound.run().in_current_span()),
+            tokio::spawn(self.outbound.run().in_current_span()),
+            tokio::spawn(self.socks5.run().in_current_span()),
         ];
 
         futures::future::join_all(tasks).await;

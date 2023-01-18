@@ -34,7 +34,8 @@ pub struct WorkloadManager {
     namespaces: netns::NamespaceManager,
     /// workloads that we have constructed
     workloads: Vec<LocalWorkload>,
-    captured_workloads: Vec<IpAddr>,
+    /// Node to IPs on the node that are captured
+    captured_workloads: HashMap<String, Vec<IpAddr>>,
     waypoints: Vec<IpAddr>,
 }
 
@@ -44,7 +45,7 @@ impl WorkloadManager {
         Ok(Self {
             namespaces: netns::NamespaceManager::new(name)?,
             workloads: vec![],
-            captured_workloads: vec![],
+            captured_workloads: Default::default(),
             waypoints: vec![],
         })
     }
@@ -53,11 +54,13 @@ impl WorkloadManager {
     ///
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
-    pub fn deploy_ztunnel(&mut self) -> anyhow::Result<TestApp> {
-        let ns = TestWorkloadBuilder::new("ztunnel", self).register()?;
+    pub fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
+        let ns = TestWorkloadBuilder::new(&format!("ztunnel-{node}"), self)
+            .on_node(node)
+            .uncaptured()
+            .register()?;
         let ip = ns.ip();
         let veth = ns.interface();
-        let _count = self.namespaces.count();
         let lc = LocalConfig {
             workloads: self.workloads.clone(),
             policies: vec![],
@@ -65,11 +68,11 @@ impl WorkloadManager {
         let mut b = bytes::BytesMut::new().writer();
         serde_yaml::to_writer(&mut b, &lc)?;
 
-        let cfg = crate::config::Config {
+        let cfg = config::Config {
             xds_address: None,
             fake_ca: true,
             local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
-            local_node: Some("local".to_string()),
+            local_node: Some(node.to_string()),
             ..config::parse_config().unwrap()
         };
         let waypoints = self.waypoints.iter().map(|i| i.to_string()).join(" ");
@@ -100,24 +103,29 @@ impl WorkloadManager {
         // Setup the node...
         let captured = self
             .captured_workloads
+            .get(node)
+            .unwrap()
             .iter()
             .map(|i| i.to_string())
             .join(" ");
-        self.namespaces.run_in_root_namespace(|| {
+        self.namespaces.run_in_node(node, || {
             helpers::run_command(&format!("scripts/node-redirect.sh {ip} {veth} {captured}"))
         })?;
         Ok(rx.recv()?)
     }
 
     /// workload_builder allows creating a new workload. It will run in its own network namespace.
-    pub fn workload_builder(&mut self, name: &str) -> TestWorkloadBuilder {
-        TestWorkloadBuilder::new(name, self)
+    pub fn workload_builder(&mut self, name: &str, node: &str) -> TestWorkloadBuilder {
+        TestWorkloadBuilder::new(name, self).on_node(node)
     }
 
     /// register_waypoint builds a new waypoint. This must be used for waypoints, rather than workload_builder,
     /// or the redirection will not work properly
-    pub fn register_waypoint(&mut self, name: &str) -> anyhow::Result<Namespace> {
-        let ns = TestWorkloadBuilder::new(name, self).hbone().register()?;
+    pub fn register_waypoint(&mut self, name: &str, node: &str) -> anyhow::Result<Namespace> {
+        let ns = TestWorkloadBuilder::new(name, self)
+            .hbone()
+            .on_node(node)
+            .register()?;
         self.waypoints.push(ns.ip());
         Ok(ns)
     }
@@ -178,9 +186,9 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    /// Configure the workload to run on the "same node" as the ztunnel
-    pub fn on_local_node(mut self) -> Self {
-        self.w.workload.node = "local".to_string();
+    /// Configure the workload to run a given node
+    pub fn on_node(mut self, node: &str) -> Self {
+        self.w.workload.node = node.to_string();
         self
     }
 
@@ -192,7 +200,11 @@ impl<'a> TestWorkloadBuilder<'a> {
 
     /// Finish building the workload.
     pub fn register(mut self) -> anyhow::Result<Namespace> {
-        let network_namespace = self.manager.namespaces.child(&self.w.workload.name)?;
+        let node = self.w.workload.node.clone();
+        let network_namespace = self
+            .manager
+            .namespaces
+            .child(&self.w.workload.node, &self.w.workload.name)?;
         self.w.workload.workload_ip = network_namespace.ip();
         info!(
             "registered {}/{} at {}",
@@ -200,7 +212,11 @@ impl<'a> TestWorkloadBuilder<'a> {
         );
         self.manager.workloads.push(self.w);
         if self.captured {
-            self.manager.captured_workloads.push(network_namespace.ip());
+            self.manager
+                .captured_workloads
+                .entry(node)
+                .or_default()
+                .push(network_namespace.ip());
         }
         Ok(network_namespace)
     }
