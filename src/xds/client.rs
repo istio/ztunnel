@@ -36,6 +36,7 @@ use crate::xds::service::discovery::v3::aggregated_discovery_service_client::Agg
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
 use crate::{identity, readiness, tls, xds};
+use textnonce::TextNonce;
 
 use super::Error;
 
@@ -599,7 +600,7 @@ impl<T: prost::Message> XdsUpdate<T> {
     }
 }
 
-pub fn decode_proto<T: prost::Message + Default>(
+fn decode_proto<T: prost::Message + Default>(
     resource: ProtoResource,
 ) -> Result<XdsResource<T>, AdsError> {
     let name = resource.name;
@@ -626,7 +627,11 @@ pub enum AdsError {
 mod tests {
     use super::*;
     use crate::{
-        test_helpers::{helpers, xds::AdsServer},
+        test_helpers::{
+            helpers::{self},
+            xds::AdsServer,
+        },
+        workload,
         xds::{istio::workload::WorkloadType, WORKLOAD_TYPE},
     };
     use prost::Message;
@@ -636,24 +641,32 @@ mod tests {
         time::SystemTime,
     };
     use tokio::time::sleep;
+    use workload::Workload;
+    use xds::istio::workload::Workload as XdsWorkload;
 
     const POLL_RATE: Duration = Duration::from_millis(2);
     const TEST_TIMEOUT: Duration = Duration::from_millis(100);
 
     async fn verify_workload(
         ip: IpAddr,
-        expected_workload: Option<Workload>,
+        expected_workload: Option<XdsWorkload>,
         source: &crate::workload::WorkloadInformation,
     ) {
         let start_time = SystemTime::now();
+        let converted: Option<Workload> = match expected_workload {
+            None => None,
+            Some(ref expected_workload) => {
+                Some(Workload::try_from(&expected_workload.clone()).unwrap())
+            }
+        };
         let mut matched = false;
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
             sleep(POLL_RATE).await;
             let wl = source.fetch_workload(&ip).await;
-            matched = expected_workload.is_none() && wl.is_none()
+            matched = converted.is_none() && wl.is_none()
                 || (wl.is_some()
-                    && expected_workload.is_some()
-                    && wl.unwrap() == expected_workload.clone().unwrap());
+                    && converted.is_some()
+                    && wl.unwrap() == converted.clone().unwrap());
         }
     }
 
@@ -664,7 +677,7 @@ mod tests {
         // TODO: Load this from a file?
         let ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
         let mut resources = vec![];
-        let workloads = vec![Workload {
+        let workloads = vec![XdsWorkload {
             name: "1.1.1.1".to_string(),
             namespace: "default".to_string(),
             network: "".to_string(),
@@ -694,7 +707,7 @@ mod tests {
 
         let initial_response = Ok(DeltaDiscoveryResponse {
             resources: resources,
-            nonce: "".to_string(),
+            nonce: TextNonce::new().to_string(),
             system_version_info: "1.0.0".to_string(),
             type_url: WORKLOAD_TYPE.to_string(),
             removed_resources: vec![],
@@ -705,7 +718,7 @@ mod tests {
         let removed_resource_response: Result<DeltaDiscoveryResponse, tonic::Status> =
             Ok(DeltaDiscoveryResponse {
                 resources: vec![],
-                nonce: "".to_string(),
+                nonce: TextNonce::new().to_string(),
                 system_version_info: "1.0.0".to_string(),
                 type_url: WORKLOAD_TYPE.to_string(),
                 removed_resources: vec!["127.0.0.1".into()],

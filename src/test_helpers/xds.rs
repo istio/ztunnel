@@ -93,16 +93,20 @@ impl AdsServer {
 
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
         let xds_workloads = workloads.clone();
+        let xds_rbac = workloads.clone();
 
         let xds_client = xds::Config::new(cfg)
             .with_workload_handler(xds_workloads)
+            .with_authorization_handler(xds_rbac)
             .watch(xds::WORKLOAD_TYPE.into())
+            .watch(xds::AUTHORIZATION_TYPE.into())
             .build(metrics, ready.register_task("ads client"));
 
         let wi = WorkloadInformation {
             info: workloads,
             demand: None,
         };
+
         (tx, xds_client, wi)
     }
 }
@@ -135,7 +139,13 @@ impl AggregatedDiscoveryService for AdsServer {
                             Ok(_) => {
                                 let response = stream_rx.borrow().clone();
                                 info!("sending response...");
-                                tx.send(response).await.expect("working rx");
+                                match tx.send(response).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!("ads_server: send failed - {:?} ", e);
+                                        break;
+                                    }
+                                }
                             }
                             Err(_) => {
                                 warn!("ads_server: config update failed");
@@ -149,7 +159,7 @@ impl AggregatedDiscoveryService for AdsServer {
                     }
                 }
             }
-            info!("\tstream ended");
+            info!("stream ended");
         });
 
         let output_stream = ReceiverStream::new(rx);
