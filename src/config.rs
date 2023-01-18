@@ -175,17 +175,18 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else {
         "https://localhost:15012".to_string()
     };
-
-    let xds_address = parse(XDS_ADDRESS)?
-        .or(pc.discovery_address)
-        .or_else(|| Some(default_istiod_address.clone()));
+    let xds_address = empty_to_none(
+        parse(XDS_ADDRESS)?
+            .or(pc.discovery_address)
+            .or_else(|| Some(default_istiod_address.clone())),
+    );
 
     let fake_ca = parse_default(FAKE_CA, false)?;
-    let ca_address = if fake_ca {
+    let ca_address = empty_to_none(if fake_ca {
         None
     } else {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
-    };
+    });
 
     Ok(Config {
         window_size: 4 * 1024 * 1024,
@@ -247,15 +248,15 @@ pub struct MeshConfig {
     pub default_config: Option<ProxyConfig>,
 }
 
-#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[derive(serde::Deserialize, Default, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyConfig {
     pub discovery_address: Option<String>,
     pub proxy_admin_port: Option<u16>,
     pub status_port: Option<u16>,
-    pub concurrency: ::core::option::Option<u16>,
-    pub termination_drain_duration: Option<time::Duration>,
-    pub proxy_metadata: std::collections::HashMap<String, String>,
+    pub concurrency: Option<u16>,
+    pub termination_drain_duration: Option<Duration>,
+    pub proxy_metadata: HashMap<String, String>,
 }
 
 impl ProxyConfig {
@@ -318,6 +319,15 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
     // https://github.com/istio/istio/blob/bdd47796d696ea5db604b623c51567d13ff7c11b/pkg/config/mesh/mesh.go#L244
 
     Ok(pc)
+}
+
+pub fn empty_to_none<A: AsRef<str>>(inp: Option<A>) -> Option<A> {
+    if let Some(inner) = &inp {
+        if inner.as_ref().is_empty() {
+            return None;
+        }
+    }
+    inp
 }
 
 #[cfg(test)]
