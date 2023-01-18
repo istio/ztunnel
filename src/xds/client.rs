@@ -36,7 +36,6 @@ use crate::xds::service::discovery::v3::aggregated_discovery_service_client::Agg
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
 use crate::{identity, readiness, tls, xds};
-use textnonce::TextNonce;
 
 use super::Error;
 
@@ -640,6 +639,7 @@ mod tests {
         net::{IpAddr, Ipv4Addr},
         time::SystemTime,
     };
+    use textnonce::TextNonce;
     use tokio::time::sleep;
     use workload::Workload;
     use xds::istio::workload::Workload as XdsWorkload;
