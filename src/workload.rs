@@ -350,13 +350,17 @@ impl LocalClient {
     async fn run(self) -> Result<(), anyhow::Error> {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = self.cfg.read_to_string().await?;
+        trace!("local config: {data}");
         let r: LocalConfig = serde_yaml::from_str(&data)?;
         let mut wli = self.workloads.lock().unwrap();
         let workloads = r.workloads.len();
         let policies = r.policies.len();
         for wl in r.workloads {
             let wip = wl.workload.workload_ip;
-            debug!("inserting local workloads {wip}");
+            debug!(
+                "inserting local workloads {wip} ({}/{})",
+                &wl.workload.namespace, &wl.workload.name
+            );
             wli.insert_workload(wl.workload);
             for (vip, ports) in wl.vips {
                 let ip = vip.parse::<IpAddr>()?;

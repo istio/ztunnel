@@ -76,7 +76,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
             cert_manager,
         };
         ta.ready().await;
-        let echo = tcp::TestServer::new(mode).await;
+        let echo = tcp::TestServer::new(mode, 0).await;
         let echo_addr = helpers::with_ip(echo.address(), TEST_WORKLOAD_SOURCE.parse().unwrap());
         let t = tokio::spawn(async move {
             let _ = tokio::join!(app.wait_termination(), echo.run());
