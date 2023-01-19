@@ -25,6 +25,12 @@ lint: lint-scripts lint-yaml lint-markdown lint-licenses lint-copyright
 check:
 	cargo check
 
+cve-check:
+	cargo deny check advisories
+
+license-check:
+	cargo deny check licenses
+
 fix: fix-copyright-banner
 	cargo clippy --fix --allow-staged --allow-dirty
 	cargo fmt
