@@ -31,11 +31,13 @@ pub(super) struct InboundPassthrough {
 }
 
 impl InboundPassthrough {
-    pub(super) async fn new(pi: ProxyInputs) -> Result<InboundPassthrough, Error> {
+    pub(super) async fn new(mut pi: ProxyInputs) -> Result<InboundPassthrough, Error> {
         let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_plaintext_addr)
             .await
             .map_err(|e| Error::Bind(pi.cfg.inbound_plaintext_addr, e))?;
-        let transparent = socket::set_transparent(&listener).is_ok();
+        let transparent = super::maybe_set_transparent(&pi, &listener)?;
+        // Override with our explicitly configured setting
+        pi.cfg.enable_original_source = Some(transparent);
 
         info!(
             address=%listener.local_addr().unwrap(),
@@ -111,7 +113,7 @@ impl InboundPassthrough {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }
-        let orig_src = if pi.cfg.enable_original_source {
+        let orig_src = if pi.cfg.enable_original_source.unwrap_or_default() {
             super::get_original_src_from_stream(&inbound)
         } else {
             None

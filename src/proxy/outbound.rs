@@ -18,6 +18,8 @@ use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
+
+use hyper::header::FORWARDED;
 use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
@@ -37,12 +39,13 @@ pub struct Outbound {
 }
 
 impl Outbound {
-    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
+    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
         let listener: TcpListener = TcpListener::bind(pi.cfg.outbound_addr)
             .await
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
-
-        let transparent = socket::set_transparent(&listener).is_ok();
+        let transparent = super::maybe_set_transparent(&pi, &listener)?;
+        // Override with our explicitly configured setting
+        pi.cfg.enable_original_source = Some(transparent);
 
         info!(
             address=%listener.local_addr().unwrap(),
@@ -93,7 +96,7 @@ impl Outbound {
                     }
                 }
             }
-        };
+        }.in_current_span();
 
         // Stop accepting once we drain.
         // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
@@ -159,7 +162,7 @@ impl OutboundConnection {
             // We *could* apply this to all traffic, rather than just for destinations that are "captured"
             // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
             info!("proxying to {} using node local fast path", req.destination);
-            let origin_src = if self.pi.cfg.enable_original_source {
+            let origin_src = if self.pi.cfg.enable_original_source.unwrap_or_default() {
                 super::get_original_src_from_stream(&stream)
             } else {
                 None
@@ -198,27 +201,24 @@ impl OutboundConnection {
                     .http2_max_frame_size(self.pi.cfg.frame_size)
                     .http2_initial_connection_window_size(self.pi.cfg.connection_window_size);
 
+                let mut f = http_types::proxies::Forwarded::new();
+                f.add_for(remote_addr.to_string());
+
                 let request = hyper::Request::builder()
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .header(BAGGAGE_HEADER, baggage(&req))
-                    .header(TRACEPARENT_HEADER, self.id.header());
-                let request = if self.pi.cfg.enable_original_source
-                    && req.request_type != RequestType::Direct
-                {
-                    request.header(hyper::header::FORWARDED, format!("for={}", remote_addr))
-                } else {
-                    request
-                };
-                let request = request.body(hyper::Body::empty()).unwrap();
-                let local = if self.pi.cfg.enable_original_source
-                    && req.request_type == RequestType::Direct
-                {
-                    Some(remote_addr)
-                } else {
-                    None
-                };
+                    .header(FORWARDED, f.value().unwrap())
+                    .header(TRACEPARENT_HEADER, self.id.header())
+                    .body(hyper::Body::empty())
+                    .unwrap();
+                let local = self
+                    .pi
+                    .cfg
+                    .enable_original_source
+                    .unwrap_or_default()
+                    .then_some(remote_addr);
                 let id = &req.source.identity();
                 let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
@@ -264,7 +264,7 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
                 // Create a TCP connection to upstream
-                let local = if self.pi.cfg.enable_original_source {
+                let local = if self.pi.cfg.enable_original_source.unwrap_or_default() {
                     super::get_original_src_from_stream(&stream)
                 } else {
                     None

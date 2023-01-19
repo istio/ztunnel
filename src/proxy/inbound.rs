@@ -26,7 +26,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac;
 use crate::socket::{relay, to_canonical};
@@ -44,12 +44,13 @@ pub(super) struct Inbound {
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
+    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
         let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_addr)
             .await
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
-        let transparent = crate::socket::set_transparent(&listener).is_ok();
-
+        let transparent = super::maybe_set_transparent(&pi, &listener)?;
+        // Override with our explicitly configured setting
+        pi.cfg.enable_original_source = Some(transparent);
         info!(
             address=%listener.local_addr().unwrap(),
             component="inbound",
@@ -89,7 +90,7 @@ impl Inbound {
                     Self::serve_connect(
                         workloads.clone(),
                         conn.clone(),
-                        enable_original_source,
+                        enable_original_source.unwrap_or_default(),
                         req,
                     )
                 }))
@@ -134,24 +135,11 @@ impl Inbound {
     /// handle_inbound serves an inbound connection with a target address `addr`.
     pub(super) async fn handle_inbound(
         request_type: InboundConnect,
-        origin_src: Option<IpAddr>,
+        orig_src: Option<IpAddr>,
         addr: SocketAddr,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = {
-            match &request_type {
-                DirectPath(_) => super::freebind_connect(origin_src, addr).await,
-                Hbone(req) => {
-                    let origin_src = if origin_src.is_some() {
-                        // overwrite the original source if encoded in fwded from waypoint
-                        super::get_original_src_from_fwded(req).map_or(origin_src, Some)
-                    } else {
-                        origin_src
-                    };
-                    super::freebind_connect(origin_src, addr).await
-                }
-            }
-        };
+        let stream = super::freebind_connect(orig_src, addr).await;
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -187,7 +175,7 @@ impl Inbound {
                             },
                         }
                     })
-                    .instrument(tracing::span::Span::current()),
+                    .in_current_span(),
                 );
                 // Send back our 200. We do this regardless of if our spawned task copies the data;
                 // we need to respond with headers immediately once connection is established for the
@@ -246,36 +234,40 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
-                let org_src = if enable_original_source {
-                    Some(conn.src_ip)
-                } else {
-                    None
-                };
+                let orig_src = enable_original_source.then_some(conn.src_ip);
 
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
-
-                                       info!(%conn, "unknown destination");
+                    info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
                         .body(Body::empty())
                         .unwrap());
                 };
-                if !upstream.waypoint_addresses.is_empty() {
-                    let from_waypoint = conn
-                        .src_identity
-                        .as_ref()
-                        .map(|i| i == &upstream.identity())
-                        .unwrap_or(false);
-                    if !from_waypoint {
-                        info!(%conn, "bypassed waypoint");
-                        return Ok(Response::builder()
-                            .status(StatusCode::UNAUTHORIZED)
-                            .body(Body::empty())
-                            .unwrap());
-                    }
+                // TODO: This only identifies the service account; we need a more reliable way
+                // to identify specifically the waypoint proxy.
+                let from_waypoint = conn
+                    .src_identity
+                    .as_ref()
+                    .map(|i| i == &upstream.identity())
+                    .unwrap_or(false);
+                if !upstream.waypoint_addresses.is_empty() && !from_waypoint {
+                    info!(%conn, "bypassed waypoint");
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Body::empty())
+                        .unwrap());
                 }
-                let status_code = match Self::handle_inbound(Hbone(req), org_src, addr)
-                    .instrument(tracing::span::Span::current())
+                let orig_src = if orig_src.is_some() && from_waypoint {
+                    // If the request is from our waypoint, trust the Forwarded header.
+                    // For other request types, we can only trust the source from the connection.
+                    // Since our own waypoint is in the same trust domain though, we can use Forwarded,
+                    // which drops the requirement of spoofing IPs from waypoints
+                    super::get_original_src_from_fwded(&req).or(orig_src)
+                } else {
+                    orig_src
+                };
+                let status_code = match Self::handle_inbound(Hbone(req), orig_src, addr)
+                    .in_current_span()
                     .await
                 {
                     Ok(_) => StatusCode::OK,

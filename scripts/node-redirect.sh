@@ -3,7 +3,7 @@
 # This script sets up redirection in the host network namespace for namespaced tests (tests/README.md)
 set -ex
 
-HOST_IP="10.0.0.1"
+HOST_IP="$(ip -j addr | jq '.[] | select(.ifname == "eth0").addr_info[0].local' -r)"
 ZTUNNEL_IP="${1:?ztunnel IP}"
 ZTUNNEL_INTERFACE="${2:?ztunnel interface}"
 shift; shift;
@@ -78,6 +78,10 @@ ip route add table 101 0.0.0.0/0 via 192.168.127.2 dev istioout
 ip route add table 102 "${ZTUNNEL_IP}" dev "${ZTUNNEL_INTERFACE}" scope link
 ip route add table 102 0.0.0.0/0 via "${ZTUNNEL_IP}" dev "${ZTUNNEL_INTERFACE}" onlink
 ip route add table 100 "${ZTUNNEL_IP}" dev "${ZTUNNEL_INTERFACE}" scope link
+for ip in "$@"; do
+  ip route add table 100 "${ip}/32" via 192.168.126.2 dev istioin src "$HOST_IP"
+done
+
 ip rule add priority 100 fwmark 0x200/0x200 goto 32766
 ip rule add priority 101 fwmark 0x100/0x100 lookup 101
 ip rule add priority 102 fwmark 0x040/0x040 lookup 102
