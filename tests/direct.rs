@@ -95,12 +95,7 @@ async fn test_shutdown_drain() {
     let app = ztunnel::app::build_with_cert(test_config(), cert_manager.clone())
         .await
         .unwrap();
-    let ta = TestApp {
-        admin_address: app.admin_address,
-        proxy_addresses: app.proxy_addresses,
-        readiness_address: app.readiness_address,
-        cert_manager,
-    };
+    let ta = TestApp::from((&app, cert_manager));
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
@@ -142,12 +137,7 @@ async fn test_shutdown_forced_drain() {
     let app = ztunnel::app::build_with_cert(cfg, cert_manager.clone())
         .await
         .unwrap();
-    let ta = TestApp {
-        admin_address: app.admin_address,
-        proxy_addresses: app.proxy_addresses,
-        readiness_address: app.readiness_address,
-        cert_manager,
-    };
+    let ta = TestApp::from((&app, cert_manager));
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
@@ -241,7 +231,7 @@ async fn test_vip_request_local() {
 #[tokio::test]
 async fn test_stats_exist() {
     testapp::with_app(test_config(), |app| async move {
-        let metrics = app.metrics().await;
+        let metrics = app.metrics().await.unwrap();
         for metric in &[
             ("istio_build"),
             ("istio_connection_terminations"),
@@ -270,7 +260,7 @@ async fn test_tcp_connections_metrics() {
         read_write_stream(&mut stream).await;
 
         // We should have 1 open connection but 0 closed connections
-        let metrics = app.metrics().await;
+        let metrics = app.metrics().await.unwrap();
         assert_eq!(
             metrics.query_sum("istio_tcp_connections_opened_total", Default::default()),
             1,
@@ -293,6 +283,7 @@ async fn test_tcp_connections_metrics() {
             || async {
                 app.metrics()
                     .await
+                    .unwrap()
                     .query_sum("istio_tcp_connections_opened_total", Default::default())
             },
             1,
@@ -303,6 +294,7 @@ async fn test_tcp_connections_metrics() {
             || async {
                 app.metrics()
                     .await
+                    .unwrap()
                     .query_sum("istio_tcp_connections_closed_total", Default::default())
             },
             1,
@@ -331,6 +323,7 @@ async fn test_tcp_bytes_metrics() {
             || async {
                 app.metrics()
                     .await
+                    .unwrap()
                     .query_sum("istio_tcp_received_bytes_total", Default::default())
             },
             size,
@@ -341,6 +334,7 @@ async fn test_tcp_bytes_metrics() {
             || async {
                 app.metrics()
                     .await
+                    .unwrap()
                     .query_sum("istio_tcp_sent_bytes_total", Default::default())
             },
             size,

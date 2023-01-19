@@ -39,7 +39,8 @@ const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
-const DEFAULT_STATUS_PORT: u16 = 15021;
+const DEFAULT_READINESS_PORT: u16 = 15021;
+const DEFAULT_STATS_PORT: u16 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
@@ -72,6 +73,7 @@ pub struct Config {
 
     pub socks5_addr: SocketAddr,
     pub admin_addr: SocketAddr,
+    pub stats_addr: SocketAddr,
     pub readiness_addr: SocketAddr,
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
@@ -199,12 +201,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         // admin API should only be accessible over localhost
         admin_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
             pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
+        ),
+        stats_addr: SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            pc.status_port.unwrap_or(DEFAULT_STATS_PORT),
         ),
         readiness_addr: SocketAddr::new(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            pc.status_port.unwrap_or(DEFAULT_STATUS_PORT),
+            DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
 
         socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
@@ -342,7 +348,7 @@ pub mod tests {
         let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
         let pc = construct_proxy_config(mesh_config_path, None).unwrap();
         let cfg = construct_config(pc).unwrap();
-        assert_eq!(cfg.readiness_addr.port(), 15888);
+        assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15099);
         // TODO remove prefix
         assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
@@ -374,7 +380,7 @@ pub mod tests {
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
-        assert_eq!(cfg.readiness_addr.port(), 15888);
+        assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
         assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
         assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");

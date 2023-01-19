@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hyper::{Body, Response};
 use std::io;
 
 use hyper::server::conn::AddrIncoming;
@@ -43,4 +44,19 @@ pub fn tls_server<T: CertProvider + Clone + 'static>(
                 true
             }
         })
+}
+
+pub fn empty_response(code: hyper::StatusCode) -> Response<Body> {
+    Response::builder()
+        .status(code)
+        .body(Body::default())
+        .unwrap()
+}
+
+pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Body> {
+    Response::builder()
+        .status(code)
+        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .body(body.into())
+        .unwrap()
 }

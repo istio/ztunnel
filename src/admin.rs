@@ -15,8 +15,7 @@
 // Forked from https://github.com/olix0r/kubert/blob/main/kubert/src/admin.rs
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use drain::Watch;
 #[cfg(feature = "gperftools")]
@@ -26,8 +25,6 @@ use gperftools::profiler::PROFILER;
 use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
 use pprof::protos::Message;
-use prometheus_client::encoding::text::encode;
-use prometheus_client::registry::Registry;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
@@ -36,6 +33,7 @@ use tokio::sync::oneshot;
 use tracing::{error, info};
 
 use crate::config::Config;
+use crate::hyper_util::{empty_response, plaintext_response};
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
@@ -50,9 +48,8 @@ pub struct Builder {
 
 pub struct Server {
     addr: SocketAddr,
-    server: hyper::server::Builder<hyper::server::conn::AddrIncoming>,
+    server: hyper::server::Builder<AddrIncoming>,
     workload_info: WorkloadInformation,
-    registry: Arc<Mutex<Registry>>,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
 }
@@ -75,11 +72,7 @@ impl Builder {
         }
     }
 
-    pub fn bind(
-        self,
-        registry: Registry,
-        shutdown_trigger: signal::ShutdownTrigger,
-    ) -> hyper::Result<Server> {
+    pub fn bind(self, shutdown_trigger: signal::ShutdownTrigger) -> hyper::Result<Server> {
         let Self {
             addr,
             workload_info,
@@ -92,13 +85,11 @@ impl Builder {
             .http1_half_close(true)
             .http1_header_read_timeout(Duration::from_secs(2))
             .http1_max_buf_size(8 * 1024);
-        let registry = Arc::new(Mutex::new(registry));
 
         Ok(Server {
             addr,
             server,
             workload_info,
-            registry,
             config,
             shutdown_trigger,
         })
@@ -106,10 +97,6 @@ impl Builder {
 }
 
 impl Server {
-    pub fn registry(&self) -> Arc<Mutex<Registry>> {
-        Arc::clone(&self.registry)
-    }
-
     pub fn address(&self) -> SocketAddr {
         self.addr
     }
@@ -118,21 +105,18 @@ impl Server {
         let _dx = drain_rx.clone();
         let (tx, rx) = oneshot::channel();
         let workload_info = self.workload_info.clone();
-        let registry = self.registry();
         let config: Config = self.config;
         let shutdown_trigger = self.shutdown_trigger.clone();
         let server = self
             .server
             .serve(hyper::service::make_service_fn(move |_conn| {
                 let workload_info = workload_info.clone();
-                let registry = Arc::clone(&registry);
                 let shutdown_trigger = shutdown_trigger.clone();
                 let config: Config = config.clone();
                 async move {
                     let workload_info = workload_info.clone();
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
                         let workload_info = workload_info.clone();
-                        let registry = Arc::clone(&registry);
                         let shutdown_trigger = shutdown_trigger.clone();
                         let config: Config = config.clone();
 
@@ -159,9 +143,6 @@ impl Server {
                                 "/config_dump" => Ok::<_, hyper::Error>(
                                     handle_config_dump(config_dump, req).await,
                                 ),
-                                "/metrics" => {
-                                    Ok::<_, hyper::Error>(handle_metrics(registry, req).await)
-                                }
                                 "/logging" => Ok::<_, hyper::Error>(handle_logging(req).await),
                                 _ => Ok::<_, hyper::Error>(empty_response(
                                     hyper::StatusCode::NOT_FOUND,
@@ -268,21 +249,6 @@ async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Respon
         .unwrap()
 }
 
-async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Response<Body> {
-    let mut buf = String::new();
-    let reg = reg.lock().unwrap();
-    encode(&mut buf, &reg).unwrap();
-
-    Response::builder()
-        .status(hyper::StatusCode::OK)
-        .header(
-            hyper::header::CONTENT_TYPE,
-            "application/openmetrics-text;charset=utf-8;version=1.0.0",
-        )
-        .body(Body::from(buf))
-        .unwrap()
-}
-
 //mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
 //NOTE: multiple query parameters is not supported, for example
 //curl -X POST http://127.0.0.1:15000/logging?"tap=debug&router=debug"
@@ -332,21 +298,6 @@ fn list_loggers() -> Response<Body> {
             format!("failed to get the log level: {err}\n {HELP_STRING}"),
         ),
     }
-}
-
-fn empty_response(code: hyper::StatusCode) -> Response<Body> {
-    Response::builder()
-        .status(code)
-        .body(Body::default())
-        .unwrap()
-}
-
-fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Body> {
-    Response::builder()
-        .status(code)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
-        .body(body.into())
-        .unwrap()
 }
 
 fn change_log_level(reset: bool, level: &str) -> Response<Body> {

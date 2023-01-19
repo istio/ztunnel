@@ -53,6 +53,6 @@ fn version() -> anyhow::Result<()> {
 
 async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
     info!("version: {}", version::BuildInfo::new());
-    info!("running with config: {cfg:#?}");
+    info!("running with config: {}", serde_yaml::to_string(&cfg)?);
     app::build(cfg).await?.wait_termination().await
 }

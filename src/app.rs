@@ -25,7 +25,7 @@ use tracing::{error, info, warn, Instrument};
 
 use crate::identity::CertificateProvider;
 use crate::metrics::Metrics;
-use crate::{admin, config, identity, proxy, readiness, signal, workload};
+use crate::{admin, config, identity, proxy, readiness, signal, stats, workload};
 
 pub async fn build_with_cert(
     config: config::Config,
@@ -53,17 +53,19 @@ pub async fn build_with_cert(
     )
     .await?;
 
-    let shutdown_trigger = shutdown.trigger();
-    let admin = admin::Builder::new(config.clone(), workload_manager.workloads())
-        .bind(registry, shutdown_trigger)
+    let admin_server = admin::Builder::new(config.clone(), workload_manager.workloads())
+        .bind(shutdown.trigger())
         .context("admin server starts")?;
+    let stats_server = stats::Builder::new(config.clone())
+        .bind(registry, shutdown.trigger())
+        .context("stats server starts")?;
     let readiness_server = readiness::Builder::new(config.clone(), ready)
         .bind(shutdown.trigger())
         .context("error starting readiness server")?;
     let readiness_address = readiness_server.address();
-    let admin_address = admin.address();
+    let admin_address = admin_server.address();
+    let stats_address = stats_server.address();
 
-    let drain_rx_admin = drain_rx.clone();
     let proxy = proxy::Proxy::new(
         config.clone(),
         workload_manager.workloads(),
@@ -74,8 +76,9 @@ pub async fn build_with_cert(
     .await?;
     drop(proxy_task);
 
-    // spawn admin task and xds client task
-    admin.spawn(drain_rx_admin);
+    // spawn all tasks that should run in the main thread
+    admin_server.spawn(drain_rx.clone());
+    stats_server.spawn(drain_rx.clone());
     tokio::spawn(
         async move {
             if let Err(e) = workload_manager.run().await {
@@ -115,6 +118,7 @@ pub async fn build_with_cert(
         shutdown,
         readiness_address,
         admin_address,
+        stats_address,
         proxy_addresses,
     })
 }
@@ -133,6 +137,7 @@ pub struct Bound {
     pub admin_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
     pub readiness_address: SocketAddr,
+    pub stats_address: SocketAddr,
 
     pub shutdown: signal::Shutdown,
     config: config::Config,

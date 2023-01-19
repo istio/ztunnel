@@ -84,7 +84,9 @@ impl WorkloadManager {
             let app = crate::app::build_with_cert(cfg, cert_manager.clone()).await?;
 
             let ta = TestApp {
+                // Not actually accessible
                 admin_address: helpers::with_ip(app.admin_address, ip),
+                stats_address: helpers::with_ip(app.stats_address, ip),
                 proxy_addresses: proxy::Addresses {
                     outbound: helpers::with_ip(app.proxy_addresses.outbound, ip),
                     inbound: helpers::with_ip(app.proxy_addresses.inbound, ip),

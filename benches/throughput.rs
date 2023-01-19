@@ -69,12 +69,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
             .await
             .unwrap();
 
-        let ta = TestApp {
-            admin_address: app.admin_address,
-            proxy_addresses: app.proxy_addresses,
-            readiness_address: app.readiness_address,
-            cert_manager,
-        };
+        let ta = TestApp::from((&app, cert_manager));
         ta.ready().await;
         let echo = tcp::TestServer::new(mode, 0).await;
         let echo_addr = helpers::with_ip(echo.address(), TEST_WORKLOAD_SOURCE.parse().unwrap());
