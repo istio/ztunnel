@@ -53,15 +53,23 @@ pub async fn build_with_cert(
     )
     .await?;
 
-    let admin_server = admin::Builder::new(config.clone(), workload_manager.workloads())
-        .bind(shutdown.trigger())
-        .context("admin server starts")?;
-    let stats_server = stats::Builder::new(config.clone())
-        .bind(registry, shutdown.trigger())
-        .context("stats server starts")?;
-    let readiness_server = readiness::Builder::new(config.clone(), ready)
-        .bind(shutdown.trigger())
-        .context("error starting readiness server")?;
+    let admin_server = admin::Service::new(
+        config.clone(),
+        workload_manager.workloads(),
+        shutdown.trigger(),
+        drain_rx.clone(),
+    )
+    .context("admin server starts")?;
+    let stats_server = stats::Service::new(
+        config.clone(),
+        registry,
+        shutdown.trigger(),
+        drain_rx.clone(),
+    )
+    .context("stats server starts")?;
+    let readiness_server =
+        readiness::Service::new(config.clone(), ready, shutdown.trigger(), drain_rx.clone())
+            .context("readiness server starts")?;
     let readiness_address = readiness_server.address();
     let admin_address = admin_server.address();
     let stats_address = stats_server.address();
@@ -77,8 +85,8 @@ pub async fn build_with_cert(
     drop(proxy_task);
 
     // spawn all tasks that should run in the main thread
-    admin_server.spawn(drain_rx.clone());
-    stats_server.spawn(drain_rx.clone());
+    admin_server.spawn();
+    stats_server.spawn();
     tokio::spawn(
         async move {
             if let Err(e) = workload_manager.run().await {
@@ -89,7 +97,6 @@ pub async fn build_with_cert(
     );
 
     let proxy_addresses = proxy.addresses();
-    let readiness_drain_rx = drain_rx.clone();
     let span = tracing::span::Span::current();
     thread::spawn(move || {
         let _span = span.enter();
@@ -105,7 +112,7 @@ pub async fn build_with_cert(
             .unwrap();
         runtime.block_on(
             async move {
-                readiness_server.spawn(readiness_drain_rx);
+                readiness_server.spawn();
                 proxy.run().in_current_span().await;
             }
             .in_current_span(),

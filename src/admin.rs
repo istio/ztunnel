@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Forked from https://github.com/olix0r/kubert/blob/main/kubert/src/admin.rs
-
 use std::collections::HashMap;
 use std::{net::SocketAddr, time::Duration};
 
@@ -22,36 +20,29 @@ use drain::Watch;
 use gperftools::heap_profiler::HEAP_PROFILER;
 #[cfg(feature = "gperftools")]
 use gperftools::profiler::PROFILER;
-use hyper::server::conn::AddrIncoming;
 use hyper::{Body, Request, Response};
 use pprof::protos::Message;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
-use tokio::sync::oneshot;
-use tracing::{error, info};
+use tracing::error;
 
 use crate::config::Config;
-use crate::hyper_util::{empty_response, plaintext_response};
+use crate::hyper_util::{empty_response, plaintext_response, Server};
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
-use crate::{config, signal, telemetry};
+use crate::{signal, telemetry};
 
-/// Supports configuring an admin server
-pub struct Builder {
-    addr: SocketAddr,
-    workload_info: WorkloadInformation,
-    config: Config,
-}
-
-pub struct Server {
-    addr: SocketAddr,
-    server: hyper::server::Builder<AddrIncoming>,
+struct State {
     workload_info: WorkloadInformation,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
+}
+
+pub struct Service {
+    s: Server<State>,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
@@ -63,126 +54,54 @@ pub struct ConfigDump {
     config: Config,
 }
 
-impl Builder {
-    pub fn new(config: config::Config, workload_info: WorkloadInformation) -> Self {
-        Self {
-            addr: config.admin_addr,
-            workload_info,
-            config,
-        }
+impl Service {
+    pub fn new(
+        config: Config,
+        workload_info: WorkloadInformation,
+        shutdown_trigger: signal::ShutdownTrigger,
+        drain_rx: Watch,
+    ) -> hyper::Result<Self> {
+        Server::<State>::bind(
+            "admin",
+            config.admin_addr,
+            shutdown_trigger.clone(),
+            drain_rx,
+            State {
+                config,
+                workload_info,
+                shutdown_trigger,
+            },
+        )
+        .map(|s| Service { s })
     }
 
-    pub fn bind(self, shutdown_trigger: signal::ShutdownTrigger) -> hyper::Result<Server> {
-        let Self {
-            addr,
-            workload_info,
-            config,
-        } = self;
-
-        let bind = AddrIncoming::bind(&addr)?;
-        let addr = bind.local_addr();
-        let server = hyper::Server::builder(bind)
-            .http1_half_close(true)
-            .http1_header_read_timeout(Duration::from_secs(2))
-            .http1_max_buf_size(8 * 1024);
-
-        Ok(Server {
-            addr,
-            server,
-            workload_info,
-            config,
-            shutdown_trigger,
-        })
-    }
-}
-
-impl Server {
     pub fn address(&self) -> SocketAddr {
-        self.addr
+        self.s.address()
     }
 
-    pub fn spawn(self, drain_rx: Watch) {
-        let _dx = drain_rx.clone();
-        let (tx, rx) = oneshot::channel();
-        let workload_info = self.workload_info.clone();
-        let config: Config = self.config;
-        let shutdown_trigger = self.shutdown_trigger.clone();
-        let server = self
-            .server
-            .serve(hyper::service::make_service_fn(move |_conn| {
-                let workload_info = workload_info.clone();
-                let shutdown_trigger = shutdown_trigger.clone();
-                let config: Config = config.clone();
-                async move {
-                    let workload_info = workload_info.clone();
-                    Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
-                        let workload_info = workload_info.clone();
-                        let shutdown_trigger = shutdown_trigger.clone();
-                        let config: Config = config.clone();
-
-                        let config_dump: ConfigDump = ConfigDump {
-                            workload_info,
-                            static_config: Default::default(),
-                            version: BuildInfo::new(),
-                            config,
-                        };
-                        async move {
-                            match req.uri().path() {
-                                "/debug/pprof/profile" => {
-                                    Ok::<_, hyper::Error>(handle_pprof(req).await)
-                                }
-                                "/debug/gprof/profile" => {
-                                    Ok::<_, hyper::Error>(handle_gprof(req).await)
-                                }
-                                "/debug/gprof/heap" => {
-                                    Ok::<_, hyper::Error>(handle_gprof_heap(req).await)
-                                }
-                                "/quitquitquit" => Ok::<_, hyper::Error>(
-                                    handle_server_shutdown(shutdown_trigger, req).await,
-                                ),
-                                "/config_dump" => Ok::<_, hyper::Error>(
-                                    handle_config_dump(config_dump, req).await,
-                                ),
-                                "/logging" => Ok::<_, hyper::Error>(handle_logging(req).await),
-                                _ => Ok::<_, hyper::Error>(empty_response(
-                                    hyper::StatusCode::NOT_FOUND,
-                                )),
-                            }
-                        }
-                    }))
+    pub fn spawn(self) {
+        self.s.spawn(|state, req| async move {
+            match req.uri().path() {
+                "/debug/pprof/profile" => Ok(handle_pprof(req).await),
+                "/debug/gprof/profile" => Ok(handle_gprof(req).await),
+                "/debug/gprof/heap" => Ok(handle_gprof_heap(req).await),
+                "/quitquitquit" => {
+                    Ok(handle_server_shutdown(state.shutdown_trigger.clone(), req).await)
                 }
-            }))
-            .with_graceful_shutdown(async {
-                // Wait until the drain is signaled
-                let shutdown = drain_rx.signaled().await;
-                // Once `shutdown` is dropped, we are declaring the drain is complete. Hyper will start draining
-                // once with_graceful_shutdown function exists, so we need to exit the function but later
-                // drop `shutdown`.
-                if tx.send(shutdown).is_err() {
-                    error!("admin receiver dropped")
-                }
-                info!("starting drain of admin server");
-            });
-
-        info!(
-            address=%self.addr,
-            component="admin",
-            "listener established",
-        );
-        let shutdown_trigger = self.shutdown_trigger;
-        tokio::spawn(async move {
-            if let Err(err) = server.await {
-                error!("Serving admin start failed: {err}");
-                shutdown_trigger.shutdown_now().await;
-            } else {
-                // Now that the server has gracefully exited, drop `shutdown` to allow draining to proceed
-                match rx.await {
-                    Ok(shutdown) => drop(shutdown),
-                    Err(_) => info!("admin sender dropped"),
-                }
-                info!("admin server terminated");
+                "/config_dump" => Ok(handle_config_dump(
+                    ConfigDump {
+                        workload_info: state.workload_info.clone(),
+                        static_config: Default::default(),
+                        version: BuildInfo::new(),
+                        config: state.config.clone(),
+                    },
+                    req,
+                )
+                .await),
+                "/logging" => Ok(handle_logging(req).await),
+                _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
             }
-        });
+        })
     }
 }
 
