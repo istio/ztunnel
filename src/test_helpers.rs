@@ -13,14 +13,15 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::default::Default;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use bytes::{BufMut, Bytes};
 
 use crate::config;
 use crate::config::ConfigSource;
 use crate::workload::Protocol::{HBONE, TCP};
 use crate::workload::{LocalConfig, LocalWorkload, Workload};
-use bytes::{BufMut, Bytes};
-use std::default::Default;
 
 pub mod app;
 pub mod ca;
@@ -42,13 +43,16 @@ pub fn test_config_with_port(port: u16) -> config::Config {
         xds_address: None,
         fake_ca: true,
         local_xds_config: Some(ConfigSource::Static(local_xds_config(port, None).unwrap())),
-        socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        admin_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        zero_copy_enabled: true,
+        // Switch all addressed to localhost (so we don't make a bunch of ports expose on public internet when someone runs a test),
+        // and port 0 (to avoid port conflicts)
+        // inbound_addr cannot do localhost since we abuse that its listening on all of 127.0.0.0/8 range.
+        inbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        socks5_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        admin_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        readiness_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        stats_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         ..config::parse_config().unwrap()
     }
 }

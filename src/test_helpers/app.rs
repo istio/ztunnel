@@ -24,6 +24,7 @@ use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
+use crate::app::Bound;
 use crate::identity::mock::MockCaClient;
 use crate::identity::SecretManager;
 use crate::test_helpers::TEST_WORKLOAD_SOURCE;
@@ -34,9 +35,22 @@ use super::helpers::*;
 #[derive(Clone)]
 pub struct TestApp {
     pub admin_address: SocketAddr,
+    pub stats_address: SocketAddr,
     pub readiness_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
     pub cert_manager: SecretManager<MockCaClient>,
+}
+
+impl From<(&Bound, SecretManager<MockCaClient>)> for TestApp {
+    fn from((app, cert_manager): (&Bound, SecretManager<MockCaClient>)) -> Self {
+        Self {
+            admin_address: app.admin_address,
+            stats_address: app.stats_address,
+            proxy_addresses: app.proxy_addresses,
+            readiness_address: app.readiness_address,
+            cert_manager,
+        }
+    }
 }
 
 pub async fn with_app<F, Fut, FO>(cfg: config::Config, f: F)
@@ -51,12 +65,7 @@ where
         .unwrap();
     let shutdown = app.shutdown.trigger().clone();
 
-    let ta = TestApp {
-        admin_address: app.admin_address,
-        proxy_addresses: app.proxy_addresses,
-        readiness_address: app.readiness_address,
-        cert_manager,
-    };
+    let ta = TestApp::from((&app, cert_manager));
     let run_and_shutdown = async {
         ta.ready().await;
         f(ta).await;
@@ -81,6 +90,27 @@ impl TestApp {
         client.request(req).await
     }
 
+    pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "http://localhost:{}/metrics",
+                self.stats_address.port()
+            ))
+            .header("content-type", "application/json")
+            .body(Body::default())
+            .unwrap();
+        let client = Client::new();
+        let body = client.request(req).await?.into_body();
+        let body = body::to_bytes(body).await?;
+        let iter = std::str::from_utf8(&body)?
+            .lines()
+            .into_iter()
+            .map(|x| Ok::<_, io::Error>(x.to_string()));
+        let scrape = prometheus_parse::Scrape::parse(iter).unwrap();
+        Ok(ParsedMetrics { scrape })
+    }
+
     pub async fn readiness_request(&self) -> anyhow::Result<()> {
         let req = Request::builder()
             .method(Method::GET)
@@ -102,23 +132,6 @@ impl TestApp {
                 other
             )),
         }
-    }
-
-    pub async fn admin_request_string(&self, path: &str) -> String {
-        let body = self.admin_request(path).await.expect("request").into_body();
-        let body = body::to_bytes(body).await.expect("read read body");
-        let s = std::str::from_utf8(&body).expect("to string");
-        s.to_string()
-    }
-
-    pub async fn metrics(&self) -> ParsedMetrics {
-        let body = self.admin_request_string("metrics").await;
-        let iter = body
-            .lines()
-            .into_iter()
-            .map(|x| Ok::<_, io::Error>(x.to_string()));
-        let scrape = prometheus_parse::Scrape::parse(iter).unwrap();
-        ParsedMetrics { scrape }
     }
 
     pub async fn ready(&self) {
