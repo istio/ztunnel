@@ -1,3 +1,13 @@
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
+use std::net::IpAddr;
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::{sync, thread};
+
+use anyhow::anyhow;
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,20 +21,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::future::Future;
-use std::net::IpAddr;
-use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::{sync, thread};
-
-use anyhow::anyhow;
+use itertools::Itertools;
 use netns_rs::NetNs;
 use tokio::runtime::{Handle, RuntimeFlavor};
-use tracing::{debug, warn, Instrument};
+use tracing::{debug, error, warn, Instrument};
 
 use crate::test_helpers::helpers;
 
@@ -57,13 +57,15 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
-        self.state
-            .lock()
-            .unwrap()
-            .pods
-            .get(name)
-            .map(|i| id_to_ip(i.node_id, i.id))
+    pub fn resolve(&self, name: &str) -> anyhow::Result<IpAddr> {
+        let pods = &self.state.lock().unwrap().pods;
+        match pods.get(name).map(|i| id_to_ip(i.node_id, i.id)) {
+            Some(p) => Ok(p),
+            _ => Err(anyhow::anyhow!(
+                "failed to resolve {name}, have {:?}",
+                pods.keys().collect_vec()
+            )),
+        }
     }
 }
 
@@ -168,7 +170,11 @@ impl Drop for NamespaceManager {
     fn drop(&mut self) {
         // Drop the root namespace
         drop_namespace(&self.prefix);
-        let state = self.state.lock().unwrap();
+        let Ok(state) = self.state.lock() else {
+            // Panic in Drop is not good... so just skip
+            error!("lock poisoned!");
+            return
+        };
         for (name, ns) in state.pods.iter() {
             drop_namespace(&format!("{}~{}~{name}", self.prefix, &ns.node));
         }
@@ -209,7 +215,7 @@ ip -n {prefix} addr add 172.172.0.1/16 dev br0
         }
     }
 
-    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
+    pub fn resolve(&self, name: &str) -> anyhow::Result<IpAddr> {
         self.resolver().resolve(name)
     }
 

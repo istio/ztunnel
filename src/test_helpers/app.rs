@@ -153,7 +153,6 @@ impl TestApp {
             self.proxy_addresses.socks5,
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         );
-
         // Set source IP to TEST_WORKLOAD_SOURCE
         let socket = TcpSocket::new_v4().unwrap();
         socket
@@ -163,40 +162,42 @@ impl TestApp {
             )))
             .unwrap();
 
-        let mut stream = socket.connect(socks_addr).await.expect("must connect");
+        let stream = socket.connect(socks_addr).await.unwrap();
         stream.set_nodelay(true).unwrap();
-
-        let addr_type = if addr.ip().is_ipv4() { 0x01u8 } else { 0x04u8 };
-        stream
-            .write_all(&[
-                0x05u8, // socks5
-                0x1u8,  // 1 auth method
-                0x0u8,  // unauthenticated auth method
-            ])
-            .await
-            .unwrap();
-        let mut auth = [0u8; 2];
-        stream.read_exact(&mut auth).await.unwrap();
-
-        let mut cmd = vec![
-            0x05u8, // socks5
-            0x1u8,  // establish tcp stream
-            0x0u8,  // RSV
-            addr_type,
-        ];
-        match socket::to_canonical(addr).ip() {
-            IpAddr::V6(ip) => cmd.extend_from_slice(&ip.octets()),
-            IpAddr::V4(ip) => cmd.extend_from_slice(&ip.octets()),
-        };
-        cmd.extend_from_slice(&addr.port().to_be_bytes());
-        stream.write_all(&cmd).await.unwrap();
-
-        // We don't care about response but need to clear out the stream
-        let mut resp = [0u8; 10];
-        stream.read_exact(&mut resp).await.unwrap();
-
-        stream
+        socks5_connect(stream, addr).await.unwrap()
     }
+}
+
+pub async fn socks5_connect(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Result<TcpStream> {
+    let addr_type = if addr.ip().is_ipv4() { 0x01u8 } else { 0x04u8 };
+    stream
+        .write_all(&[
+            0x05u8, // socks5
+            0x1u8,  // 1 auth method
+            0x0u8,  // unauthenticated auth method
+        ])
+        .await?;
+    let mut auth = [0u8; 2];
+    stream.read_exact(&mut auth).await?;
+
+    let mut cmd = vec![
+        0x05u8, // socks5
+        0x1u8,  // establish tcp stream
+        0x0u8,  // RSV
+        addr_type,
+    ];
+    match socket::to_canonical(addr).ip() {
+        IpAddr::V6(ip) => cmd.extend_from_slice(&ip.octets()),
+        IpAddr::V4(ip) => cmd.extend_from_slice(&ip.octets()),
+    };
+    cmd.extend_from_slice(&addr.port().to_be_bytes());
+    stream.write_all(&cmd).await?;
+
+    // We don't care about response but need to clear out the stream
+    let mut resp = [0u8; 10];
+    stream.read_exact(&mut resp).await?;
+
+    Ok(stream)
 }
 
 pub struct ParsedMetrics {

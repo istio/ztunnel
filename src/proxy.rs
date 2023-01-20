@@ -149,6 +149,9 @@ pub enum Error {
 
     #[error("unknown destination: {0}")]
     UnknownDestination(IpAddr),
+
+    #[error("attempted recursive call to ourselves")]
+    SelfCall,
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.

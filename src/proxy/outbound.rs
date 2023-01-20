@@ -119,7 +119,7 @@ impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
         let peer = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
         let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
-        self.proxy_to(stream, peer.ip(), orig_dst_addr).await
+        self.proxy_to(stream, peer.ip(), orig_dst_addr, false).await
     }
 
     pub async fn proxy_to(
@@ -127,12 +127,21 @@ impl OutboundConnection {
         mut stream: TcpStream,
         remote_addr: IpAddr,
         orig_dst_addr: SocketAddr,
+        block_passthrough: bool,
     ) -> Result<(), Error> {
+        if Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip {
+            return Err(Error::SelfCall);
+        }
         let req = self.build_request(remote_addr, orig_dst_addr).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig_dst_addr, req.gateway, req.request_type, req.direction
         );
+        if block_passthrough && req.destination_workload.is_none() {
+            // This is mostly used by socks5. For typical outbound calls, we need to allow calls to arbitrary
+            // domains. But for socks5
+            return Err(Error::SelfCall);
+        }
         let can_fastpath = req.protocol == Protocol::HBONE
             && !req
                 .destination_workload
