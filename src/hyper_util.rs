@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use drain::Watch;
-use hyper::{Body, Request, Response};
 use hyper::server::conn::AddrIncoming;
+use hyper::{Body, Request, Response};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_stream::{Stream, StreamExt};
@@ -111,10 +111,11 @@ impl<S> Server<S> {
     }
 
     pub fn spawn<F, R>(self, f: F)
-        where
-            S: Send + Sync + 'static,
-            F: Fn(Arc<S>, Request<Body>) -> R + Send + Sync+ 'static,
-            R: Future<Output = Result<Response<Body>, hyper::Error>> + Send + Sync+ 'static{
+    where
+        S: Send + Sync + 'static,
+        F: Fn(Arc<S>, Request<Body>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<Response<Body>, hyper::Error>> + Send + Sync + 'static,
+    {
         let drain_rx = self.drain_rx;
         let name = self.name.clone();
         let (tx, rx) = oneshot::channel();
@@ -128,8 +129,8 @@ impl<S> Server<S> {
                 async {
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
                         let state = state.clone();
-                        let fut = f(state, req);
-                        fut
+
+                        f(state, req)
                     }))
                 }
             }))
