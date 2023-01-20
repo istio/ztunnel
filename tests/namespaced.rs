@@ -451,7 +451,7 @@ async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
                 (15001, Request),    // Outbound: should be blocked due to recursive call
                 (15006, Request),    // Inbound: should be blocked due to recursive call
                 (15008, Request),    // HBONE: expected TLS, reject
-                (15080, Request),    // Socks5: expected socks5, reject
+                (15080, Connection),    // Socks5: only localhost
                 (15000, Connection), // Admin: only localhost
                 (15020, Http),       // Stats: accept connection and returns a HTTP error
                 (15021, Http),       // Readiness: accept connection and returns a HTTP error
@@ -462,64 +462,6 @@ async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
                 let stream = timeout(Duration::from_secs(1), TcpStream::connect(tgt))
                     .await
                     .unwrap();
-                if failure == Connection {
-                    assert!(stream.is_err());
-                    continue;
-                }
-                let mut stream = stream.unwrap();
-
-                let res = timeout(Duration::from_secs(1), send_traffic(&mut stream))
-                    .await
-                    .unwrap();
-                if failure == Request {
-                    assert!(res.is_err());
-                    continue;
-                }
-                res.unwrap();
-            }
-            // Same thing, but over socks5
-            for (port, _failure) in tests {
-                // For socks5, the socks5 listener will accept everything... but make sure we don't get loops or HTTP response
-                let failure = Request;
-                info!("send to socks5 {port}, want {failure:?} error");
-                let socks_tgt = SocketAddr::from((manager.resolve("ztunnel-node").unwrap(), 15080));
-                let tgt = SocketAddr::from((manager.resolve("ztunnel-node").unwrap(), port));
-                let socks_stream = TcpStream::connect(socks_tgt).await.unwrap();
-                let stream = timeout(
-                    Duration::from_secs(1),
-                    app::socks5_connect(socks_stream, tgt),
-                )
-                .await
-                .unwrap();
-                if failure == Connection {
-                    assert!(stream.is_err());
-                    continue;
-                }
-                let mut stream = stream.unwrap();
-
-                let res = timeout(Duration::from_secs(1), send_traffic(&mut stream))
-                    .await
-                    .unwrap();
-                if failure == Request {
-                    assert!(res.is_err());
-                    continue;
-                }
-                res.unwrap();
-            }
-            // Same thing, but over socks5 and requesting localhost
-            for (port, _failure) in tests {
-                // For socks5, the socks5 listener will accept everything... but make sure we don't get loops or HTTP response
-                let failure = Request;
-                info!("send to socks5 over localhost {port}, want {failure:?} error");
-                let socks_tgt = SocketAddr::from((manager.resolve("ztunnel-node").unwrap(), 15080));
-                let tgt = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), port));
-                let socks_stream = TcpStream::connect(socks_tgt).await.unwrap();
-                let stream = timeout(
-                    Duration::from_secs(1),
-                    app::socks5_connect(socks_stream, tgt),
-                )
-                .await
-                .unwrap();
                 if failure == Connection {
                     assert!(stream.is_err());
                     continue;
