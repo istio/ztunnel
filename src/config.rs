@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -200,8 +200,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .unwrap_or(DEFAULT_DRAIN_DURATION),
 
         // admin API should only be accessible over localhost
+        // todo: bind to both v4 localhost and v6
         admin_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
             pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
         ),
         stats_addr: SocketAddr::new(
