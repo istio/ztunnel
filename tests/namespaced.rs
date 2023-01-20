@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use hyper::{Body, Method};
@@ -451,7 +451,7 @@ async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
                 (15001, Request),    // Outbound: should be blocked due to recursive call
                 (15006, Request),    // Inbound: should be blocked due to recursive call
                 (15008, Request),    // HBONE: expected TLS, reject
-                (15080, Connection),    // Socks5: only localhost
+                (15080, Connection), // Socks5: only localhost
                 (15000, Connection), // Admin: only localhost
                 (15020, Http),       // Stats: accept connection and returns a HTTP error
                 (15021, Http),       // Readiness: accept connection and returns a HTTP error
