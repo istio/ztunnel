@@ -184,6 +184,27 @@ async fn test_waypoint() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn test_waypoint_hairpin() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let waypoint = manager.register_waypoint("waypoint", REMOTE_NODE)?;
+    let ip = waypoint.ip();
+    run_hbone_server(waypoint)?;
+    manager
+        .workload_builder("server", DEFAULT_NODE)
+        .hbone()
+        .waypoint(ip)
+        .register()?;
+    let client = manager
+        .workload_builder("client", REMOTE_NODE)
+        .uncaptured()
+        .register()?;
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_waypoint_bypass() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
     let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
