@@ -103,14 +103,14 @@ impl ExtensionManager {
         addr: std::net::SocketAddr,
         dest: UpstreamDestination,
     ) -> std::io::Result<WrappedStream> {
-        let mut socket = if addr.is_ipv4() {
+        let socket = if addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
         } else {
             tokio::net::TcpSocket::new_v6()?
         };
 
         if let Some(ext) = self.extensions.as_ref() {
-            ext.on_pre_connect(&mut socket, dest);
+            ext.on_pre_connect(&socket, dest);
         }
 
         super::proxy::freebind_connect(local, addr)
@@ -138,7 +138,7 @@ impl WrappedTcpListener {
         let ret = self.inner.accept().await;
         if let Ok((s, _)) = &ret {
             if let Some(ext) = &self.ext {
-                ext.on_accept(&s, self.listener_type);
+                ext.on_accept(s, self.listener_type);
             }
         }
         ret
