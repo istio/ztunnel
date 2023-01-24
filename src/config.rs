@@ -172,7 +172,10 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
     construct_proxy_config(mesh_config_path, pc_env).map_err(Error::ProxyConfig)
 }
 
-pub fn construct_config(pc: ProxyConfig, extension: Option<Box<dyn Extension + Sync + Send>>) -> Result<Config, Error> {
+pub fn construct_config(
+    pc: ProxyConfig,
+    extension: Option<Box<dyn Extension + Sync + Send>>,
+) -> Result<Config, Error> {
     let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {

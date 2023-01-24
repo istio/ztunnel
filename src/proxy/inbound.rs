@@ -168,9 +168,10 @@ impl Inbound {
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
-                                    if let Err(e) = super::copy_hbone(&mut upgraded, stream.as_mut())
-                                        .instrument(trace_span!("hbone server"))
-                                        .await
+                                    if let Err(e) =
+                                        super::copy_hbone(&mut upgraded, stream.as_mut())
+                                            .instrument(trace_span!("hbone server"))
+                                            .await
                                     {
                                         error!(dur=?start.elapsed(), "hbone server copy: {}", e);
                                     } else {

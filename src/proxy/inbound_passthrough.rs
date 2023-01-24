@@ -160,11 +160,11 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
+    use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, workload};
+    use bytes::Bytes;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use crate::xds::istio::workload::Workload as XdsWorkload;
-    use bytes::Bytes;
 
     use crate::workload::WorkloadInformation;
 
