@@ -761,6 +761,7 @@ mod tests {
         let ext: crate::extensions::mock::MockExtension = Default::default();
         let state = ext.state.clone();
         let cfg = Config {
+            outbound_addr: "127.0.0.1:0".parse().unwrap(),
             local_node: Some("local-node".to_string()),
             extensions: crate::extensions::ExtensionManager::new(Some(Box::new(ext))),
             ..crate::config::parse_config(None).unwrap()

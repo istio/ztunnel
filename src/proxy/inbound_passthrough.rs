@@ -175,6 +175,7 @@ mod tests {
         let state = ext.state.clone();
         let cfg = Config {
             extensions: crate::extensions::ExtensionManager::new(Some(Box::new(ext))),
+            inbound_plaintext_addr: "127.0.0.1:0".parse().unwrap(),
             ..crate::config::parse_config(None).unwrap()
         };
         let source = XdsWorkload {
@@ -210,8 +211,8 @@ mod tests {
             tokio::net::TcpStream::connect(addr).await
         })
         .await
-        .unwrap()
-        .unwrap();
+        .expect("timeout waiting for pre connect")
+        .expect("failed to connect");
 
         // test that eventual (i.e. 1s) we get the metric incremented
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
