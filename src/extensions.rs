@@ -113,7 +113,7 @@ impl ExtensionManager {
             ext.on_pre_connect(&socket, dest);
         }
 
-        super::proxy::freebind_connect(local, addr)
+        super::proxy::freebind_connect(socket, local, addr)
             .await
             .map(|s| self.wrap_stream(s))
     }

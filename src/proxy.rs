@@ -301,19 +301,13 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
         .map_or(None, |sa| Some(socket::to_canonical(sa).ip()))
 }
 
-pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
+pub async fn freebind_connect(socket : TcpSocket, local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
     match local {
-        None => Ok(TcpStream::connect(addr).await?),
+        None => Ok(socket.connect(addr).await?),
         // TODO: Need figure out how to handle case of loadbalancing to itself.
         //       We use ztunnel addr instead, otherwise app side will be confused.
-        Some(src) if src == socket::to_canonical(addr).ip() => Ok(TcpStream::connect(addr).await?),
+        Some(src) if src == socket::to_canonical(addr).ip() => Ok(socket.connect(addr).await?),
         Some(src) => {
-            let socket = if src.is_ipv4() {
-                TcpSocket::new_v4()?
-            } else {
-                TcpSocket::new_v6()?
-            };
-
             let local_addr = SocketAddr::new(src, 0);
             match socket::set_freebind_and_transparent(&socket) {
                 Err(err) => warn!("failed to set freebind: {:?}", err),
