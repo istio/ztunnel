@@ -262,7 +262,11 @@ pub mod mock {
             self.state.on_accept.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn on_pre_connect(&self, _s: &TcpSocket, d: UpstreamDestination) {
+        fn on_pre_connect(&self, s: &TcpSocket, d: UpstreamDestination) {
+            let socket_ref = socket2::SockRef::from(s);
+            socket_ref
+                .set_keepalive(true)
+                .expect("failed to set keepalive");
             self.state.on_pre_connect.fetch_add(1, Ordering::SeqCst);
             self.state.on_pre_connect_args.lock().unwrap().push(d);
         }
@@ -306,6 +310,10 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(cloned_state.on_pre_connect.load(Ordering::SeqCst), 1);
+
+                let socket_ref = socket2::SockRef::from(conn.as_ref());
+                let keep_alive = socket_ref.keepalive().expect("failed to read keepalive");
+                assert_eq!(keep_alive, true);
                 // read/write some bytes to verify we wrapped correctly
                 let mut buf = [0u8; 3];
 
@@ -321,7 +329,7 @@ mod tests {
             .unwrap();
         });
 
-        // recieve connection
+        // receive connection
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             let (mut conn, _) = listener.accept().await.unwrap();
             assert_eq!(state.on_accept.load(Ordering::SeqCst), 1);
