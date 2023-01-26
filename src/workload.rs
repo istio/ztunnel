@@ -401,11 +401,6 @@ impl WorkloadInformation {
             return false;
         };
 
-        if wl.waypoint_addresses.contains(&conn.src_ip) && conn.src_identity == Some(wl.identity())
-        {
-            debug!("request from waypoint, skipping policy");
-            return true;
-        }
         let wli = self.info.lock().unwrap();
 
         // We can get policies from namespace, global, and workload...

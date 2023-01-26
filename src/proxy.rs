@@ -147,6 +147,9 @@ pub enum Error {
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
 
+    #[error("unknown waypoint {0} for {0}")]
+    UnknownWaypoint(IpAddr, IpAddr),
+
     #[error("unknown destination: {0}")]
     UnknownDestination(IpAddr),
 

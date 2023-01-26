@@ -29,9 +29,10 @@ use crate::identity::CertificateProvider;
 use crate::proxy::inbound::InboundConnect::Hbone;
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac;
+use crate::rbac::Connection;
 use crate::socket::{relay, to_canonical};
 use crate::tls::TlsError;
-use crate::workload::WorkloadInformation;
+use crate::workload::{Workload, WorkloadInformation};
 
 use super::Error;
 
@@ -227,13 +228,6 @@ impl Inbound {
                 }
                 // Orig has 15008, swap with the real port
                 let conn = rbac::Connection { dst: addr, ..conn };
-                if !workloads.assert_rbac(&conn).await {
-                    info!(%conn, "RBAC rejected");
-                    return Ok(Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::empty())
-                        .unwrap());
-                }
                 let orig_src = enable_original_source.then_some(conn.src_ip);
 
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
@@ -243,14 +237,19 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 };
-                // TODO: This only identifies the service account; we need a more reliable way
-                // to identify specifically the waypoint proxy.
-                let from_waypoint = conn
-                    .src_identity
-                    .as_ref()
-                    .map(|i| i == &upstream.identity())
-                    .unwrap_or(false);
-                if !upstream.waypoint_addresses.is_empty() && !from_waypoint {
+                let (has_waypoint, from_waypoint) =
+                    Self::check_waypoint(&workloads, &upstream, &conn).await;
+
+                if from_waypoint {
+                    debug!("request from waypoint, skipping policy");
+                } else if !workloads.assert_rbac(&conn).await {
+                    info!(%conn, "RBAC rejected");
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Body::empty())
+                        .unwrap());
+                }
+                if has_waypoint && !from_waypoint {
                     info!(%conn, "bypassed waypoint");
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
@@ -288,6 +287,20 @@ impl Inbound {
                     .unwrap())
             }
         }
+    }
+
+    async fn check_waypoint(
+        workloads: &WorkloadInformation,
+        upstream: &Workload,
+        conn: &Connection,
+    ) -> (bool, bool) {
+        let has_waypoint = !upstream.waypoint_addresses.is_empty();
+        for i in upstream.waypoint_addresses.iter() {
+            if workloads.fetch_workload(i).await.map(|w| w.identity()) == conn.src_identity {
+                return (has_waypoint, true);
+            }
+        }
+        (has_waypoint, false)
     }
 }
 

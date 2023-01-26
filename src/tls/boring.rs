@@ -360,10 +360,10 @@ pub fn extract_sans(cert: &x509::X509) -> Vec<Identity> {
 
 impl SanChecker for x509::X509 {
     fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
-        extract_sans(self)
-            .into_iter()
-            .find(|id| id == identity)
-            .ok_or(TlsError::SanError)
+        let sans = extract_sans(self);
+        sans.iter()
+            .find(|id| id == &identity)
+            .ok_or_else(|| TlsError::SanError(identity.clone(), sans.clone()))
             .map(|_| ())
     }
 }
@@ -434,8 +434,8 @@ pub enum TlsError {
     CertificateLookup(IpAddr),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
-    #[error("san verification error: remote did not present the expected SAN")]
-    SanError,
+    #[error("san verification error: remote did not present the expected SAN ({0}), got {1:?}")]
+    SanError(Identity, Vec<Identity>),
     #[error("failed getting ex data")]
     ExDataError,
     #[error("failed getting peer cert")]
