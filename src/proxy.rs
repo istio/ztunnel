@@ -15,6 +15,7 @@
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use std::{fmt, io};
 
 use boring::error::ErrorStack;
@@ -22,6 +23,7 @@ use drain::Watch;
 use hyper::{header, Body, Request};
 use rand::Rng;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::time::timeout;
 use tracing::{error, trace, warn, Instrument};
 
 use inbound::Inbound;
@@ -150,6 +152,9 @@ pub enum Error {
 
     #[error("unknown destination: {0}")]
     UnknownDestination(IpAddr),
+
+    #[error("attempted recursive call to ourselves")]
+    SelfCall,
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
@@ -301,34 +306,54 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
         .map_or(None, |sa| Some(socket::to_canonical(sa).ip()))
 }
 
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn freebind_connect(
     socket: TcpSocket,
     local: Option<IpAddr>,
     addr: SocketAddr,
 ) -> io::Result<TcpStream> {
-    match local {
-        None => Ok(socket.connect(addr).await?),
-        // TODO: Need figure out how to handle case of loadbalancing to itself.
-        //       We use ztunnel addr instead, otherwise app side will be confused.
-        Some(src) if src == socket::to_canonical(addr).ip() => Ok(socket.connect(addr).await?),
-        Some(src) => {
-            let local_addr = SocketAddr::new(src, 0);
-            match socket::set_freebind_and_transparent(&socket) {
-                Err(err) => warn!("failed to set freebind: {:?}", err),
-                _ => {
-                    if let Err(err) = socket.bind(local_addr) {
-                        warn!("failed to bind local addr: {:?}", err)
+    async fn connect(
+        socket: TcpSocket,
+        local: Option<IpAddr>,
+        addr: SocketAddr,
+    ) -> io::Result<TcpStream> {
+        match local {
+            None => {
+                trace!(dest=%addr, "no local address, connect directly");
+                Ok(socket.connect(addr).await?)
+            }
+            // TODO: Need figure out how to handle case of loadbalancing to itself.
+            //       We use ztunnel addr instead, otherwise app side will be confused.
+            Some(src) if src == socket::to_canonical(addr).ip() => {
+                trace!(%src, dest=%addr, "dest and source are the same, connect directly");
+                Ok(socket.connect(addr).await?)
+            }
+            Some(src) => {
+                let local_addr = SocketAddr::new(src, 0);
+                match socket::set_freebind_and_transparent(&socket) {
+                    Err(err) => warn!("failed to set freebind: {:?}", err),
+                    _ => {
+                        if let Err(err) = socket.bind(local_addr) {
+                            warn!("failed to bind local addr: {:?}", err)
+                        }
                     }
-                }
-            };
-            Ok(socket.connect(addr).await?)
+                };
+                trace!(%src, dest=%addr, "connect with source IP");
+                Ok(socket.connect(addr).await?)
+            }
         }
     }
+    // Wrap the entire connect function in a timeout
+    timeout(CONNECTION_TIMEOUT, connect(socket, local, addr))
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
 }
 
 #[cfg(test)]
 mod tests {
     use hyper::http::request;
+    use std::assert_eq;
     use test_case::test_case;
 
     use super::*;

@@ -15,7 +15,7 @@
 use std::net::SocketAddr;
 
 use tokio::net::TcpStream;
-use tracing::{error, info, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, ProxyInputs};
@@ -73,7 +73,7 @@ impl InboundPassthrough {
                         )
                         .await
                         {
-                            warn!("plaintext proxying failed: {}", e)
+                            warn!(source=%socket::to_canonical(remote), component="inbound plaintext", "proxying failed: {}", e)
                         }
                     });
                 }
@@ -93,6 +93,9 @@ impl InboundPassthrough {
         mut inbound: TcpStream,
     ) -> Result<(), Error> {
         let orig = orig_dst_addr_or_default(&inbound);
+        if Some(orig.ip()) == pi.cfg.local_ip {
+            return Err(Error::SelfCall);
+        }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let Some(upstream) = pi.workloads.fetch_workload(&orig.ip()).await else {
             return Err(Error::UnknownDestination(orig.ip()))
@@ -107,7 +110,10 @@ impl InboundPassthrough {
                 pi: pi.clone(),
                 id: TraceParent::new(),
             };
-            return oc.proxy_to(inbound, source.ip(), orig).await;
+            // Spoofing the source IP only works when the destination or the source are on our node.
+            // In this case, the source and the destination might both be remote, so we need to disable it.
+            oc.pi.cfg.enable_original_source = Some(false);
+            return oc.proxy_to(inbound, source.ip(), orig, false).await;
         }
 
         // We enforce RBAC only for non-hairpin cases. This is because we may not be able to properly
@@ -128,7 +134,7 @@ impl InboundPassthrough {
         } else {
             None
         };
-
+        trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
         let mut outbound = pi
             .cfg
             .extensions
@@ -138,7 +144,7 @@ impl InboundPassthrough {
                 crate::extensions::UpstreamDestination::UpstreamServer,
             )
             .await?;
-
+        trace!(%source, destination=%orig, component="inbound plaintext", "connected");
         relay(&mut inbound, outbound.as_mut(), true).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())

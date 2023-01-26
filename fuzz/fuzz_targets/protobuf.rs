@@ -16,10 +16,10 @@
 
 use libfuzzer_sys::fuzz_target;
 use ztunnel::xds::istio::workload::Workload as XdsWorkload;
-use ztunnel::xds::istio::workload::Rbac as XdsRbac;
+use ztunnel::xds::istio::security::Authorization as XdsAuthorization;
 use prost::Message;
 use ztunnel::workload::Workload;
-use ztunnel::rbac::Rbac;
+use ztunnel::rbac::Authorization;
 
 fuzz_target!(|data: &[u8]| {
     let _ = run_workload(data);
@@ -32,6 +32,6 @@ fn run_workload(data: &[u8]) -> anyhow::Result<()> {
 }
 
 fn run_rbac(data: &[u8]) -> anyhow::Result<()> {
-    Rbac::try_from(&XdsRbac::decode(data)?)?;
+    Authorization::try_from(&XdsAuthorization::decode(data)?)?;
     Ok(())
 }
