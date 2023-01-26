@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use tracing::info;
 use ztunnel::extensions::{Extension, ListenerType};
 
 struct ExampleExtension;
@@ -24,7 +25,7 @@ impl ExampleExtension {
 
 impl Extension for ExampleExtension {
     fn on_listen(&self, l: &tokio::net::TcpListener, _: ListenerType) {
-        print!("ExampleExtension: Listening on {}", l.local_addr().unwrap());
+        info!("ExampleExtension: Listening on {}", l.local_addr().unwrap());
     }
 }
 

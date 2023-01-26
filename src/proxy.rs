@@ -301,7 +301,11 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
         .map_or(None, |sa| Some(socket::to_canonical(sa).ip()))
 }
 
-pub async fn freebind_connect(socket : TcpSocket, local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
+pub async fn freebind_connect(
+    socket: TcpSocket,
+    local: Option<IpAddr>,
+    addr: SocketAddr,
+) -> io::Result<TcpStream> {
     match local {
         None => Ok(socket.connect(addr).await?),
         // TODO: Need figure out how to handle case of loadbalancing to itself.
