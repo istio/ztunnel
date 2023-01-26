@@ -23,6 +23,7 @@ use tracing::{error, info};
 
 use ztunnel::identity;
 use ztunnel::identity::CertificateProvider;
+
 use ztunnel::test_helpers::components::WorkloadManager;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::netns::{Namespace, Resolver};
@@ -409,4 +410,76 @@ async fn hbone_read_write_stream(stream: &mut TcpStream) {
     let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
     stream.read_exact(&mut buf).await.unwrap();
     assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
+}
+
+#[tokio::test]
+async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
+        .register()?;
+    manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    #[derive(PartialEq, Copy, Clone, Debug)]
+    enum Failure {
+        /// Cannot even connect
+        Connection,
+        /// Can connect, but cannot send bytes
+        Request,
+        /// Can connect, but get a HTTP error
+        Http,
+    }
+    use Failure::*;
+    async fn send_traffic(stream: &mut TcpStream) -> anyhow::Result<()> {
+        const BODY: &[u8] = b"hello world\r\n\r\n";
+        stream.write_all(BODY).await?;
+        let mut buf: [u8; BODY.len()] = [0; BODY.len()];
+        stream.read_exact(&mut buf).await?;
+        if &buf[..12] != b"HTTP/1.1 400" {
+            anyhow::bail!(
+                "expected http error, got {}",
+                std::str::from_utf8(&buf).unwrap()
+            );
+        }
+        Ok(())
+    }
+    // Test calling sensitive ports on ztunnel, to ensure we are robust against (usually malicious) calls
+    // directly to ztunnel.
+    client
+        .run(move || async move {
+            let tests = [
+                (15001, Request),    // Outbound: should be blocked due to recursive call
+                (15006, Request),    // Inbound: should be blocked due to recursive call
+                (15008, Request),    // HBONE: expected TLS, reject
+                (15080, Connection), // Socks5: only localhost
+                (15000, Connection), // Admin: only localhost
+                (15020, Http),       // Stats: accept connection and returns a HTTP error
+                (15021, Http),       // Readiness: accept connection and returns a HTTP error
+            ];
+            for (port, failure) in tests {
+                info!("send to {port}, want {failure:?} error");
+                let tgt = SocketAddr::from((manager.resolve("ztunnel-node").unwrap(), port));
+                let stream = timeout(Duration::from_secs(1), TcpStream::connect(tgt))
+                    .await
+                    .unwrap();
+                if failure == Connection {
+                    assert!(stream.is_err());
+                    continue;
+                }
+                let mut stream = stream.unwrap();
+
+                let res = timeout(Duration::from_secs(1), send_traffic(&mut stream))
+                    .await
+                    .unwrap();
+                if failure == Request {
+                    assert!(res.is_err());
+                    continue;
+                }
+                res.unwrap();
+            }
+            Ok(())
+        })?
+        .join()
+        .unwrap()?;
+    Ok(())
 }

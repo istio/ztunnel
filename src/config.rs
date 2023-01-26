@@ -27,6 +27,7 @@ use crate::identity;
 
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
+const INSTANCE_IP: &str = "INSTANCE_IP";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
@@ -81,6 +82,8 @@ pub struct Config {
 
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
+    /// The local_ip we are running at.
+    pub local_ip: Option<IpAddr>,
 
     /// CA address to use. If fake_ca is set, this will be None.
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
@@ -214,12 +217,13 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
 
-        socks5_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15080),
+        socks5_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
         local_node: parse(NODE_NAME)?,
+        local_ip: parse(INSTANCE_IP)?,
 
         xds_address,
         // TODO: full FindRootCAForXDS logic like in Istio

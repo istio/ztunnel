@@ -73,6 +73,7 @@ impl WorkloadManager {
             fake_ca: true,
             local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
             local_node: Some(node.to_string()),
+            local_ip: Some(ns.ip()),
             ..config::parse_config().unwrap()
         };
         let waypoints = self.waypoints.iter().map(|i| i.to_string()).join(" ");
@@ -106,7 +107,7 @@ impl WorkloadManager {
         let captured = self
             .captured_workloads
             .get(node)
-            .unwrap()
+            .unwrap_or(&vec![])
             .iter()
             .map(|i| i.to_string())
             .join(" ");
@@ -137,7 +138,7 @@ impl WorkloadManager {
     }
 
     /// resolve acts as a "DNS lookup", converting a workload name to an IP address.
-    pub fn resolve(&self, name: &str) -> Option<IpAddr> {
+    pub fn resolve(&self, name: &str) -> anyhow::Result<IpAddr> {
         self.namespaces.resolve(name)
     }
 }
