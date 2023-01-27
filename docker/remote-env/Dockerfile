@@ -27,7 +27,7 @@ FROM gcr.io/istio-testing/build-tools:master-65b95c3425a26e633081b2d0834cc0df6e8
 # - sudo, while not required, is recommended to be installed, since the
 #   workspace user (`gitpod`) is non-root and won't be able to install
 #   and use `sudo` to install any other tools in a live workspace.
-RUN apt-get update && apt-get install -yq \
+RUN apt-get update && apt-get install --no-install-recommends -yq \
     net-tools \
     iproute2 \
     iptables \
@@ -62,6 +62,8 @@ ARG REMOTE_USER_SHELL=/bin/bash
 ARG REMOTE_USER_LOGIN_SCRIPT=$REMOTE_USER_HOME/.bashrc
 ARG REMOTE_USER_ID=3333
 ARG REMOTE_USER_GROUPS=sudo
+# ignoring because the current shell doesn't support pipefail; likely want to have a better fix long term
+# hadolint ignore=DL4006
 RUN useradd -lm \
   -u $REMOTE_USER_ID \
   -G $REMOTE_USER_GROUPS \
