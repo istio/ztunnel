@@ -179,7 +179,6 @@ async fn test_quit_lifecycle() {
         .expect("app exits without error");
 }
 
-#[track_caller]
 async fn run_request_test(target: &str, node: &str) {
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
@@ -240,8 +239,7 @@ async fn test_stats_exist() {
         ] {
             assert!(
                 metrics.query(metric, Default::default()).is_some(),
-                "expected metric {}",
-                metric
+                "expected metric {metric}"
             );
         }
     })

@@ -105,7 +105,7 @@ pub async fn build_with_cert(
             .thread_name_fn(|| {
                 static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
                 let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-                format!("ztunnel-proxy-{}", id)
+                format!("ztunnel-proxy-{id}")
             })
             .enable_all()
             .build()

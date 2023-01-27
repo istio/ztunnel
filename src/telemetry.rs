@@ -71,7 +71,7 @@ pub fn set_level(reset: bool, level: &str) -> Result<(), Error> {
             if reset {
                 format!("{},{}", default_env_filter(), level)
             } else {
-                format!("{},{}", current, level)
+                format!("{current},{level}")
             }
         } else {
             level.to_string()

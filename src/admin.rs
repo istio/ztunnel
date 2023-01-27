@@ -201,7 +201,7 @@ async fn handle_logging(req: Request<Body>) -> Response<Body> {
         }
         _ => plaintext_response(
             hyper::StatusCode::METHOD_NOT_ALLOWED,
-            format!("Invalid HTTP method\n {}", HELP_STRING),
+            format!("Invalid HTTP method\n {HELP_STRING}"),
         ),
     }
 }
@@ -210,7 +210,7 @@ fn list_loggers() -> Response<Body> {
     match telemetry::get_current_loglevel() {
         Ok(loglevel) => plaintext_response(
             hyper::StatusCode::OK,
-            format!("current log level is {}\n", loglevel),
+            format!("current log level is {loglevel}\n"),
         ),
         Err(err) => plaintext_response(
             hyper::StatusCode::INTERNAL_SERVER_ERROR,

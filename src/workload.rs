@@ -124,7 +124,7 @@ impl fmt::Display for Workload {
             self.name,
             self.workload_ip,
             self.gateway_address
-                .map(|x| format!("{}", x))
+                .map(|x| format!("{x}"))
                 .unwrap_or_else(|| "None".into()),
             self.protocol
         )
@@ -147,7 +147,7 @@ impl fmt::Display for Upstream {
             self.port,
             self.workload
                 .gateway_address
-                .map(|x| format!("{}", x))
+                .map(|x| format!("{x}"))
                 .unwrap_or_else(|| "None".into()),
             self.workload.protocol
         )

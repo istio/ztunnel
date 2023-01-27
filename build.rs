@@ -62,14 +62,14 @@ fn main() -> Result<(), anyhow::Error> {
                 // Each line looks like `istio.io/pkg/version.buildGitRevision=abc`
                 if let Some((key, value)) = line.split_once('=') {
                     let key = key.split('.').last().unwrap();
-                    println!("cargo:rustc-env=ZTUNNEL_BUILD_{}={}", key, value);
+                    println!("cargo:rustc-env=ZTUNNEL_BUILD_{key}={value}");
                 } else {
-                    println!("cargo:warning=invalid build output {}", line);
+                    println!("cargo:warning=invalid build output {line}");
                 }
             }
         }
         Err(err) => {
-            println!("cargo:warning={}", err);
+            println!("cargo:warning={err}");
         }
     };
     println!(
