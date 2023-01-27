@@ -270,7 +270,7 @@ mod tests {
             let id = identity::Identity::Spiffe {
                 trust_domain: "cluster.local".to_string(),
                 namespace: "istio-system".to_string(),
-                service_account: format!("ztunnel{}", i),
+                service_account: format!("ztunnel{i}"),
             };
             sm.fetch_certificate(&id)
                 .await

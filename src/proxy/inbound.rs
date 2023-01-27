@@ -297,7 +297,7 @@ impl<'a, T: Display> Display for OptionDisplay<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.0 {
             None => write!(f, "None"),
-            Some(i) => write!(f, "{}", i),
+            Some(i) => write!(f, "{i}"),
         }
     }
 }

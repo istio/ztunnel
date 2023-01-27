@@ -297,7 +297,7 @@ ip -n {other_net} route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev eth0
         }
         let node_id = state.nodes.get(node).unwrap().id;
         let veth = format!("veth{id}");
-        let net = format!("{}~{node}~{name}", prefix);
+        let net = format!("{prefix}~{node}~{name}");
         let netns = NetNs::new(&net)?;
         let ns = Namespace {
             id,
