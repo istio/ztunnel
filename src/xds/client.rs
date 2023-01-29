@@ -39,15 +39,15 @@ use crate::{identity, readiness, tls, xds};
 
 use super::Error;
 
-const INSTANCE_IP:&str = "INSTANCE_IP";
-const INSTANCE_IPS:&str = "INSTANCE_IPS";
-const DEFAULT_IP:&str = "1.1.1.1";
-const POD_NAME:&str = "POD_NAME";
-const POD_NAMESPACE:&str = "POD_NAMESPACE";
-const NODE_NAME:&str = "NODE_NAME";
-const NAME:&str = "NAME";
-const NAMESPACE:&str = "NAMESPACE";
-const EMPTY_STR: &str ="";
+const INSTANCE_IP: &str = "INSTANCE_IP";
+const INSTANCE_IPS: &str = "INSTANCE_IPS";
+const DEFAULT_IP: &str = "1.1.1.1";
+const POD_NAME: &str = "POD_NAME";
+const POD_NAMESPACE: &str = "POD_NAMESPACE";
+const NODE_NAME: &str = "NODE_NAME";
+const NAME: &str = "NAME";
+const NAMESPACE: &str = "NAMESPACE";
+const EMPTY_STR: &str = "";
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub struct ResourceKey {
