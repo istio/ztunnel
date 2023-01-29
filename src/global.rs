@@ -12,6 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const ZTUNNEL : &str = "ztunnel";
-const TRUST_NAME_SPACE: &str ="istio-system";
-const EMPTY_STR: &str ="";
+pub const ZTUNNEL : String = "ztunnel".to_string();
+pub const TRUST_NAME_SPACE: String ="istio-system".to_string();
+pub const EMPTY_STR: &str ="";
