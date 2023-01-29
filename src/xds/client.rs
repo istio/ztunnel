@@ -328,7 +328,7 @@ impl AdsClient {
             .append(&mut Self::build_struct(self.config.proxy_metadata.clone()).fields);
 
         Node {
-            id: format!("ztunnel~{ip}~{pod_name}.{ns}.{ns}.svc.cluster.local"),
+            id: format!("ztunnel~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
             metadata: Some(metadata),
             ..Default::default()
         }
