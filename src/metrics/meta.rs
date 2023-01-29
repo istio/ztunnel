@@ -35,7 +35,7 @@ impl Metrics {
         let git_tag = version::BuildInfo::new().git_tag;
         build_gauge
             .get_or_create(&IstioBuildLabel {
-                component: "ztunnel".to_string(),
+                component: ZTUNNEL,
                 tag: git_tag,
             })
             .set(1);

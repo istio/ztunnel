@@ -91,8 +91,8 @@ impl Default for Identity {
     fn default() -> Self {
         Identity::Spiffe {
             trust_domain: "cluster.local".to_string(),
-            namespace: "istio-system".to_string(),
-            service_account: "ztunnel".to_string(),
+            namespace: TRUST_NAME_SPACE,
+            service_account: ZTUNNEL,
         }
     }
 }
