@@ -28,7 +28,6 @@ pub mod tls;
 pub mod version;
 pub mod workload;
 pub mod xds;
-pub mod global;
 
 pub mod hyper_util;
 pub mod test_helpers;

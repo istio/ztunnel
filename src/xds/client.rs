@@ -36,7 +36,6 @@ use crate::xds::service::discovery::v3::aggregated_discovery_service_client::Agg
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
 use crate::{identity, readiness, tls, xds};
-use crate::global;
 
 use super::Error;
 
@@ -47,6 +46,7 @@ const POD_NAMESPACE:&str = "POD_NAMESPACE";
 const NODE_NAME:&str = "NODE_NAME";
 const NAME:&str = "NAME";
 const NAMESPACE:&str = "NAMESPACE";
+const EMPTY_STR: &str ="";
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub struct ResourceKey {
@@ -315,7 +315,7 @@ impl AdsClient {
         let ns = std::env::var(POD_NAMESPACE);
         let ns = ns.as_deref().unwrap_or(global::EMPTY_STR);
         let node_name = std::env::var(NODE_NAME);
-        let node_name = node_name.as_deref().unwrap_or(global::EMPTY_STR);
+        let node_name = node_name.as_deref().unwrap_or(EMPTY_STR);
         let mut metadata = Self::build_struct([
             (POD_NAME, pod_name),
             (POD_NAMESPACE, ns),
@@ -327,7 +327,7 @@ impl AdsClient {
             .append(&mut Self::build_struct(self.config.proxy_metadata.clone()).fields);
 
         Node {
-            id: format!("ztunnel~{ip}~{pod_name}.{ns}.svc.cluster.local"),
+            id: format!("ztunnel~{ip}~{pod_name}.{ns}.{ns}.svc.cluster.local"),
             metadata: Some(metadata),
             ..Default::default()
         }

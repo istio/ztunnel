@@ -18,7 +18,6 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 use crate::version;
-use crate::global;
 
 pub(super) struct Metrics {}
 
@@ -36,7 +35,7 @@ impl Metrics {
         let git_tag = version::BuildInfo::new().git_tag;
         build_gauge
             .get_or_create(&IstioBuildLabel {
-                component: global::ZTUNNEL,
+                component: "ztunnel".to_string(),
                 tag: git_tag,
             })
             .set(1);
