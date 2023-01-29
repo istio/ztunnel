@@ -27,6 +27,7 @@ use tracing::{info, warn};
 
 use crate::identity::Error::Spiffe;
 use crate::tls;
+use crate::global;
 
 use super::Error;
 use super::{CaClient, CertificateProvider};

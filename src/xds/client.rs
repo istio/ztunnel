@@ -36,6 +36,7 @@ use crate::xds::service::discovery::v3::aggregated_discovery_service_client::Agg
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
 use crate::{identity, readiness, tls, xds};
+use crate::global;
 
 use super::Error;
 

@@ -18,6 +18,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 use crate::version;
+use crate::global;
 
 pub(super) struct Metrics {}
 
