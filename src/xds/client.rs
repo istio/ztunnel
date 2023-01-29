@@ -310,11 +310,11 @@ impl AdsClient {
         let ip = std::env::var(INSTANCE_IP);
         let ip = ip.as_deref().unwrap_or(DEFAULT_IP);
         let pod_name = std::env::var( POD_NAME);
-        let pod_name = pod_name.as_deref().unwrap_or(EMPTY_STR);
+        let pod_name = pod_name.as_deref().unwrap_or(global::EMPTY_STR);
         let ns = std::env::var(POD_NAMESPACE);
-        let ns = ns.as_deref().unwrap_or(EMPTY_STR);
+        let ns = ns.as_deref().unwrap_or(global::EMPTY_STR);
         let node_name = std::env::var(NODE_NAME);
-        let node_name = node_name.as_deref().unwrap_or(EMPTY_STR);
+        let node_name = node_name.as_deref().unwrap_or(global::EMPTY_STR);
         let mut metadata = Self::build_struct([
             (POD_NAME, pod_name),
             (POD_NAMESPACE, ns),

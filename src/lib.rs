@@ -31,3 +31,4 @@ pub mod xds;
 
 pub mod hyper_util;
 pub mod test_helpers;
+pub mod global;
