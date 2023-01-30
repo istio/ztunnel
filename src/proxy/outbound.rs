@@ -24,6 +24,7 @@ use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
+use crate::identity::Identity;
 use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Recorder};
 use crate::proxy::inbound::{Inbound, InboundConnect};
@@ -231,7 +232,7 @@ impl OutboundConnection {
                 let id = &req.source.identity();
                 let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                 let connector = cert
-                    .connector(req.destination_workload.map(|w| w.identity()).as_ref())?
+                    .connector(req.expected_identity.as_ref())?
                     .configure()
                     .expect("configure");
                 let tcp_stream = super::freebind_connect(local, req.gateway).await?;
@@ -317,6 +318,7 @@ impl OutboundConnection {
                 source: source_workload,
                 destination: target,
                 destination_workload: None,
+                expected_identity: None,
                 gateway: target,
                 direction: Direction::Outbound,
                 request_type: RequestType::Passthrough,
@@ -329,13 +331,19 @@ impl OutboundConnection {
             let waypoint_address = us.workload.choose_waypoint_address().unwrap();
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
+            let waypoint_workload = match self.pi.workloads.fetch_workload(&waypoint_address).await
+            {
+                Some(wl) => wl,
+                None => return Err(Error::UnknownWaypoint(waypoint_address, downstream)),
+            };
             return Ok(Request {
                 // Always use HBONE here
                 protocol: Protocol::HBONE,
                 source: source_workload,
                 // Use the original VIP, not translated
                 destination: target,
-                destination_workload: Some(us.workload), // TODO: should this be the waypoint workload?
+                destination_workload: Some(us.workload),
+                expected_identity: Some(waypoint_workload.identity()),
                 gateway: SocketAddr::from((waypoint_address, 15008)),
                 // Let the client remote know we are on the inbound path.
                 direction: Direction::Inbound,
@@ -358,6 +366,7 @@ impl OutboundConnection {
                 source: source_workload,
                 destination: SocketAddr::from((us.workload.workload_ip, us.port)),
                 destination_workload: Some(us.workload.clone()),
+                expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
                     us.workload
                         .gateway_address
@@ -377,6 +386,7 @@ impl OutboundConnection {
             source: source_workload,
             destination: SocketAddr::from((us.workload.workload_ip, us.port)),
             destination_workload: Some(us.workload.clone()),
+            expected_identity: Some(us.workload.identity()),
             gateway: us
                 .workload
                 .gateway_address
@@ -404,7 +414,12 @@ struct Request {
     direction: Direction,
     source: Workload,
     destination: SocketAddr,
+    // The intended destination workload. This is always the original intended target, even in the case
+    // of other proxies along the path.
     destination_workload: Option<Workload>,
+    // The identity we will assert for the next hop; this may not be the same as destination_workload
+    // in the case of proxies along the path.
+    expected_identity: Option<Identity>,
     gateway: SocketAddr,
     request_type: RequestType,
 }
@@ -468,7 +483,14 @@ mod tests {
             node: "local-node".to_string(),
             ..Default::default()
         };
-        let wl = workload::WorkloadStore::test_store(vec![source, xds]).unwrap();
+        let waypoint = XdsWorkload {
+            name: "waypoint-workload".to_string(),
+            namespace: "ns".to_string(),
+            address: Bytes::copy_from_slice(&[127, 0, 0, 10]),
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let wl = workload::WorkloadStore::test_store(vec![source, waypoint, xds]).unwrap();
 
         let wi = WorkloadInformation {
             info: Arc::new(Mutex::new(wl)),
