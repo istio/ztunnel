@@ -39,6 +39,16 @@ use crate::{identity, readiness, tls, xds};
 
 use super::Error;
 
+const INSTANCE_IP: &str = "INSTANCE_IP";
+const INSTANCE_IPS: &str = "INSTANCE_IPS";
+const DEFAULT_IP: &str = "1.1.1.1";
+const POD_NAME: &str = "POD_NAME";
+const POD_NAMESPACE: &str = "POD_NAMESPACE";
+const NODE_NAME: &str = "NODE_NAME";
+const NAME: &str = "NAME";
+const NAMESPACE: &str = "NAMESPACE";
+const EMPTY_STR: &str = "";
+
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub struct ResourceKey {
     pub name: String,
@@ -299,19 +309,19 @@ impl AdsClient {
     }
 
     fn node(&self) -> Node {
-        let ip = std::env::var("INSTANCE_IP");
-        let ip = ip.as_deref().unwrap_or("1.1.1.1");
-        let pod_name = std::env::var("POD_NAME");
-        let pod_name = pod_name.as_deref().unwrap_or("");
-        let ns = std::env::var("POD_NAMESPACE");
-        let ns = ns.as_deref().unwrap_or("");
-        let node = std::env::var("NODE_NAME");
-        let node = node.as_deref().unwrap_or("");
+        let ip = std::env::var(INSTANCE_IP);
+        let ip = ip.as_deref().unwrap_or(DEFAULT_IP);
+        let pod_name = std::env::var(POD_NAME);
+        let pod_name = pod_name.as_deref().unwrap_or(EMPTY_STR);
+        let ns = std::env::var(POD_NAMESPACE);
+        let ns = ns.as_deref().unwrap_or(EMPTY_STR);
+        let node_name = std::env::var(NODE_NAME);
+        let node_name = node_name.as_deref().unwrap_or(EMPTY_STR);
         let mut metadata = Self::build_struct([
-            ("NAME", pod_name),
-            ("NAMESPACE", ns),
-            ("INSTANCE_IPS", ip),
-            ("NODE_NAME", node),
+            (NAME, pod_name),
+            (NAMESPACE, ns),
+            (INSTANCE_IPS, ip),
+            (NODE_NAME, node_name),
         ]);
         metadata
             .fields
