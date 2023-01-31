@@ -317,7 +317,7 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
             }
             // TODO: Need figure out how to handle case of loadbalancing to itself.
             //       We use ztunnel addr instead, otherwise app side will be confused.
-            Some(src) if src == socket::to_canonical(addr).ip() => {
+            Some(src) if src == socket::to_canonical(addr).ip() || addr.ip().is_loopback() => {
                 trace!(%src, dest=%addr, "dest and source are the same, connect directly");
                 Ok(TcpStream::connect(addr).await?)
             }
