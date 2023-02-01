@@ -153,19 +153,12 @@ impl OutboundConnection {
             reporter: Reporter::source,
             source: req.source.clone(),
             destination: req.destination_workload.clone(),
-            // Client doesn't know if server verified, so we can't claim it was mTLS
-            connection_security_policy: traffic::SecurityPolicy::unknown,
+            connection_security_policy: if req.protocol == Protocol::HBONE { traffic::SecurityPolicy::mutual_tls } else { traffic::SecurityPolicy::unknown },
             destination_service: None,
+            destination_service_namespace: None,
+            destination_service_name: None,
         };
 
-        let received_bytes = traffic::ReceivedBytes::from(&connection_metrics);
-        let sent_bytes = traffic::SentBytes::from(&connection_metrics);
-
-        // _connection_close will record once dropped
-        let _connection_close = self
-            .pi
-            .metrics
-            .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
         if req.request_type == RequestType::DirectLocal && can_fastpath {
             // For same node, we just access it directly rather than making a full network connection.
             // Pass our `stream` over to the inbound handler, which will process as usual
@@ -190,10 +183,21 @@ impl OutboundConnection {
                 InboundConnect::DirectPath(stream),
                 origin_src,
                 req.destination,
+                self.pi.metrics.clone(),
+                connection_metrics,
             )
             .await
             .map_err(Error::Io);
         }
+
+        let received_bytes = traffic::ReceivedBytes::from(&connection_metrics);
+        let sent_bytes = traffic::SentBytes::from(&connection_metrics);
+
+        // _connection_close will record once dropped
+        let _connection_close = self
+            .pi
+            .metrics
+            .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
         match req.protocol {
             Protocol::HBONE => {
                 info!(

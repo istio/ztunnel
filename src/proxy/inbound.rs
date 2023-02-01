@@ -15,6 +15,7 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use drain::Watch;
@@ -26,7 +27,9 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use crate::config::Config;
 use crate::identity::CertificateProvider;
-use crate::proxy::inbound::InboundConnect::Hbone;
+use crate::metrics::traffic::{ConnectionOpen, Reporter};
+use crate::metrics::{traffic, Metrics, Recorder};
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac;
 use crate::rbac::Connection;
@@ -42,6 +45,7 @@ pub(super) struct Inbound {
     cert_manager: Box<dyn CertificateProvider>,
     workloads: WorkloadInformation,
     drain: Watch,
+    metrics: Arc<Metrics>,
 }
 
 impl Inbound {
@@ -63,6 +67,7 @@ impl Inbound {
             workloads: pi.workloads,
             listener,
             cert_manager: pi.cert_manager,
+            metrics: pi.metrics,
             drain,
         })
     }
@@ -86,6 +91,7 @@ impl Inbound {
             let workloads = self.workloads.clone();
             debug!(%conn, "accepted connection");
             let enable_original_source = self.cfg.enable_original_source;
+            let metrics = self.metrics.clone();
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
                     Self::serve_connect(
@@ -93,6 +99,7 @@ impl Inbound {
                         conn.clone(),
                         enable_original_source.unwrap_or_default(),
                         req,
+                        metrics.clone(),
                     )
                 }))
             }
@@ -138,6 +145,8 @@ impl Inbound {
         request_type: InboundConnect,
         orig_src: Option<IpAddr>,
         addr: SocketAddr,
+        metrics: Arc<Metrics>,
+        connection_metrics: ConnectionOpen,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr).await;
@@ -152,21 +161,41 @@ impl Inbound {
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
+                        let _connection_close = metrics
+                            .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+
+                        let received_bytes = traffic::ReceivedBytes::from(&connection_metrics);
+                        let sent_bytes = traffic::SentBytes::from(&connection_metrics);
                         match request_type {
-                            InboundConnect::DirectPath(mut incoming) => {
-                                if let Err(e) = relay(&mut incoming, &mut stream, true).await {
-                                    error!(dur=?start.elapsed(), "internal server copy: {}", e);
+                            DirectPath(mut incoming) => {
+                                match relay(&mut incoming, &mut stream, false).await {
+                                    // Connection closed with count of bytes transferred between streams
+                                    Ok(Some((sent, recv))) => {
+                                        error!("got bytes count {sent} {recv}");
+                                        metrics.record_count(&sent_bytes, sent);
+                                        metrics.record_count(&received_bytes, recv);
+                                    }
+                                    Ok(None) => {
+                                        error!("no bytes count");
+                                    }
+                                    Err(e) => {
+                                        error!(dur=?start.elapsed(), "internal server copy: {}", e)
+                                    }
                                 }
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
-                                    if let Err(e) = super::copy_hbone(&mut upgraded, &mut stream)
+                                    match super::copy_hbone(&mut upgraded, &mut stream)
                                         .instrument(trace_span!("hbone server"))
                                         .await
                                     {
-                                        error!(dur=?start.elapsed(), "hbone server copy: {}", e);
-                                    } else {
-                                        info!(dur=?start.elapsed(), "complete");
+                                        Ok((sent, recv)) => {
+                                            metrics.record_count(&sent_bytes, sent);
+                                            metrics.record_count(&received_bytes, recv);
+                                        }
+                                        Err(e) => {
+                                            error!(dur=?start.elapsed(), "hbone server copy: {}", e)
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -204,6 +233,7 @@ impl Inbound {
         conn: rbac::Connection,
         enable_original_source: bool,
         req: Request<Body>,
+        metrics: Arc<Metrics>,
     ) -> Result<Response<Body>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
@@ -265,7 +295,19 @@ impl Inbound {
                 } else {
                     orig_src
                 };
-                let status_code = match Self::handle_inbound(Hbone(req), orig_src, addr)
+
+                let connection_metrics = traffic::ConnectionOpen {
+                    reporter: Reporter::destination,
+                    source: upstream.clone(), // TODO: this is not the real source! we need to derive it from baggage
+                    destination: Some(upstream.clone()),
+                    connection_security_policy: traffic::SecurityPolicy::mutual_tls,
+                    destination_service: None,
+                    destination_service_namespace: None,
+                    destination_service_name: None,
+                };
+                let status_code = match Self::handle_inbound(Hbone(req), orig_src, addr,
+                                                             metrics,
+                                                             connection_metrics,)
                     .in_current_span()
                     .await
                 {

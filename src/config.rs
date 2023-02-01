@@ -248,7 +248,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
-        zero_copy_enabled: true,
+        zero_copy_enabled: false,
     })
 }
 

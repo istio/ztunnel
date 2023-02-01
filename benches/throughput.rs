@@ -217,6 +217,8 @@ pub fn metrics(c: &mut Criterion) {
                 source: test_helpers::test_default_workload(),
                 destination: None,
                 destination_service: None,
+                destination_service_name: None,
+                destination_service_namespace: None,
                 connection_security_policy: Default::default(),
             })
         })

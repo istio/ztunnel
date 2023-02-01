@@ -64,6 +64,7 @@ impl EncodeLabelValue for ResponseFlags {
 pub enum SecurityPolicy {
     #[default]
     unknown,
+    mutual_tls,
 }
 
 #[derive(Default, Hash, PartialEq, Eq, Clone, Debug)]
@@ -113,6 +114,8 @@ pub struct ConnectionOpen {
     pub source: Workload,
     pub destination: Option<Workload>,
     pub destination_service: Option<String>,
+    pub destination_service_namespace: Option<String>,
+    pub destination_service_name: Option<String>,
     pub connection_security_policy: SecurityPolicy,
 }
 
@@ -206,7 +209,10 @@ pub(super) struct CommonTrafficLabels {
     source_version: DefaultedUnknown<String>,
     source_cluster: DefaultedUnknown<String>,
 
+    // TODO: never set
     destination_service: DefaultedUnknown<String>,
+    destination_service_namespace: DefaultedUnknown<String>,
+    destination_service_name: DefaultedUnknown<String>,
 
     destination_workload: DefaultedUnknown<String>,
     destination_canonical_service: DefaultedUnknown<String>,
