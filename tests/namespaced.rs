@@ -136,13 +136,14 @@ async fn test_hbone_request() -> anyhow::Result<()> {
             .hbone()
             .register()?,
     )?;
-    manager.deploy_ztunnel(REMOTE_NODE)?;
+    let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
     manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_client(client, manager.resolver(), "server")?;
+    info!("{}", remote.metrics().await?.dump());
     Ok(())
 }
 

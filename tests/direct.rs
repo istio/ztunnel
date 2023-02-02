@@ -26,7 +26,7 @@ use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
 
-use tracing::trace;
+use tracing::{error, trace};
 
 use ztunnel::identity::mock::MockCaClient;
 

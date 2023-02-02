@@ -193,12 +193,13 @@ impl NamespaceManager {
                 "Namespaces require single threaded"
             );
         }
-        let _ns = NetNs::new(prefix)?;
+        let ns = NetNs::new(prefix)?;
         // Build Self early so we cleanup if later commands fail
         let res = Self {
             prefix: prefix.to_string(),
             state: Default::default(),
         };
+        ns.enter()?;
         helpers::run_command(&format!(
             "
 ip -n {prefix} link add name br0 type bridge
@@ -268,6 +269,7 @@ set -ex
 ip -n {prefix} link add {veth} type veth peer name eth0 netns {node_net}
 ip -n {prefix} link set dev {veth} up
 ip -n {prefix} link set dev {veth} master br0
+ip -n {prefix} route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev br0
 # Give our node an IP
 ip -n {node_net} link set dev eth0 up
 ip -n {node_net} addr add 172.172.0.{node_id}/16 dev eth0

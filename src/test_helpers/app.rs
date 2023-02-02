@@ -20,9 +20,11 @@ use std::ops::Deref;
 use std::time::Duration;
 
 use hyper::{body, Body, Client, Method, Request, Response};
+use itertools::Itertools;
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
+use tracing::error;
 
 use crate::app::Bound;
 use crate::identity::mock::MockCaClient;
@@ -94,8 +96,8 @@ impl TestApp {
         let req = Request::builder()
             .method(Method::GET)
             .uri(format!(
-                "http://localhost:{}/metrics",
-                self.stats_address.port()
+                "http://{}/metrics",
+                self.stats_address
             ))
             .header("content-type", "application/json")
             .body(Body::default())
@@ -200,6 +202,7 @@ pub async fn socks5_connect(mut stream: TcpStream, addr: SocketAddr) -> anyhow::
     Ok(stream)
 }
 
+#[derive(Debug)]
 pub struct ParsedMetrics {
     scrape: Scrape,
 }
@@ -246,7 +249,7 @@ impl ParsedMetrics {
         .unwrap_or(0)
     }
     pub fn dump(&self) -> String {
-        format!("{:?}", self.scrape.samples)
+       self.scrape.samples.iter().map(|s|format!("{s:?}")).join("\n")
     }
 }
 
