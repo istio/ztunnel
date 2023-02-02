@@ -21,6 +21,7 @@ use drain::Watch;
 
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
+
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
@@ -29,9 +30,8 @@ use crate::metrics::traffic::Reporter;
 use crate::metrics::{traffic, Recorder};
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::socket::relay;
 use crate::workload::{Protocol, Workload};
-use crate::{rbac, socket};
+use crate::{proxy, rbac, socket};
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -153,7 +153,11 @@ impl OutboundConnection {
             reporter: Reporter::source,
             source: req.source.clone(),
             destination: req.destination_workload.clone(),
-            connection_security_policy: if req.protocol == Protocol::HBONE { traffic::SecurityPolicy::mutual_tls } else { traffic::SecurityPolicy::unknown },
+            connection_security_policy: if req.protocol == Protocol::HBONE {
+                traffic::SecurityPolicy::mutual_tls
+            } else {
+                traffic::SecurityPolicy::unknown
+            },
             destination_service: None,
             destination_service_namespace: None,
             destination_service_name: None,
@@ -190,14 +194,13 @@ impl OutboundConnection {
             .map_err(Error::Io);
         }
 
-        let received_bytes = traffic::ReceivedBytes::from(&connection_metrics);
-        let sent_bytes = traffic::SentBytes::from(&connection_metrics);
+        let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
 
         // _connection_close will record once dropped
         let _connection_close = self
             .pi
             .metrics
-            .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
         match req.protocol {
             Protocol::HBONE => {
                 info!(
@@ -264,9 +267,8 @@ impl OutboundConnection {
                     .instrument(trace_span!("hbone client"))
                     .await
                 {
-                    Ok((sent, recv)) => {
-                        self.pi.metrics.record_count(&sent_bytes, sent);
-                        self.pi.metrics.record_count(&received_bytes, recv);
+                    Ok(transferred) => {
+                        self.pi.metrics.record(&transferred_bytes, transferred);
                         Ok(())
                     }
                     Err(e) => Err(Error::Io(e)),
@@ -285,16 +287,13 @@ impl OutboundConnection {
                 };
                 let mut outbound = super::freebind_connect(local, req.gateway).await?;
                 // Proxying data between downstrean and upstream
-                match relay(&mut stream, &mut outbound, self.pi.cfg.zero_copy_enabled).await {
-                    // Connection closed with count of bytes transferred between streams
-                    Ok(Some((sent, recv))) => {
-                        self.pi.metrics.record_count(&sent_bytes, sent);
-                        self.pi.metrics.record_count(&received_bytes, recv);
-                        Ok(())
-                    }
-                    Ok(None) => Ok(()),
-                    Err(e) => Err(Error::Io(e)),
-                }
+                proxy::relay(
+                    &mut stream,
+                    &mut outbound,
+                    &self.pi.metrics,
+                    transferred_bytes,
+                )
+                .await
             }
         }
     }

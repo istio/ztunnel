@@ -29,7 +29,7 @@ use tracing::{error, trace, warn, Instrument};
 use inbound::Inbound;
 
 use crate::identity::CertificateProvider;
-use crate::metrics::Metrics;
+use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
@@ -348,10 +348,26 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
 }
 
+pub async fn relay(
+    downstream: &mut tokio::net::TcpStream,
+    upstream: &mut tokio::net::TcpStream,
+    metrics: impl AsRef<Metrics>,
+    transferred_bytes: traffic::BytesTransferred<'_>,
+) -> Result<(), Error> {
+    match socket::relay(downstream, upstream).await {
+        Ok(transferred) => {
+            metrics.as_ref().record(&transferred_bytes, transferred);
+            Ok(())
+        }
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use hyper::http::request;
     use std::assert_eq;
+
+    use hyper::http::request;
     use test_case::test_case;
 
     use super::*;

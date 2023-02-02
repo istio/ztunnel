@@ -14,14 +14,15 @@
 
 use std::net::SocketAddr;
 
+use crate::metrics::traffic;
+use crate::metrics::traffic::Reporter;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, trace, warn};
 
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, ProxyInputs};
 use crate::proxy::{Error, TraceParent};
-use crate::socket;
-use crate::socket::relay;
+use crate::{proxy, socket};
 
 use crate::rbac;
 
@@ -127,7 +128,21 @@ impl InboundPassthrough {
         trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
         let mut outbound = super::freebind_connect(orig_src, orig).await?;
         trace!(%source, destination=%orig, component="inbound plaintext", "connected");
-        relay(&mut inbound, &mut outbound, true).await?;
+
+        let connection_metrics = traffic::ConnectionOpen {
+            reporter: Reporter::destination,
+            source: upstream.clone(), // TODO: this is not the real source! we need to derive it from baggage
+            destination: Some(upstream.clone()),
+            connection_security_policy: traffic::SecurityPolicy::unknown,
+            destination_service: None,
+            destination_service_namespace: None,
+            destination_service_name: None,
+        };
+        let _connection_close = pi
+            .metrics
+            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+        let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
+        proxy::relay(&mut inbound, &mut outbound, &pi.metrics, transferred_bytes).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }

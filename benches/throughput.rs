@@ -28,8 +28,8 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use ztunnel::metrics::traffic::ConnectionOpen;
-use ztunnel::metrics::Metrics;
-use ztunnel::metrics::Recorder;
+use ztunnel::metrics::{Metrics, RecorderIncrement};
+
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::TEST_WORKLOAD_HBONE;
@@ -212,7 +212,7 @@ pub fn metrics(c: &mut Criterion) {
     let mut c = c.benchmark_group("metrics");
     c.bench_function("write", |b| {
         b.iter(|| {
-            metrics.record(&ConnectionOpen {
+            metrics.increment(&ConnectionOpen {
                 reporter: Default::default(),
                 source: test_helpers::test_default_workload(),
                 destination: None,

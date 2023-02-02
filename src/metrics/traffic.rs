@@ -104,9 +104,7 @@ impl<T: EncodeLabelValue> EncodeLabelValue for DefaultedUnknown<T> {
 
 pub struct ConnectionClose<'a>(&'a ConnectionOpen);
 
-pub struct ReceivedBytes<'a>(&'a ConnectionOpen);
-
-pub struct SentBytes<'a>(&'a ConnectionOpen);
+pub struct BytesTransferred<'a>(&'a ConnectionOpen);
 
 #[derive(Clone)]
 pub struct ConnectionOpen {
@@ -125,15 +123,9 @@ impl<'a> From<&'a ConnectionOpen> for ConnectionClose<'a> {
     }
 }
 
-impl<'a> From<&'a ConnectionOpen> for ReceivedBytes<'a> {
+impl<'a> From<&'a ConnectionOpen> for BytesTransferred<'a> {
     fn from(c: &'a ConnectionOpen) -> Self {
-        ReceivedBytes(c)
-    }
-}
-
-impl<'a> From<&'a ConnectionOpen> for SentBytes<'a> {
-    fn from(c: &'a ConnectionOpen) -> Self {
-        SentBytes(c)
+        BytesTransferred(c)
     }
 }
 
@@ -170,14 +162,8 @@ impl CommonTrafficLabels {
     }
 }
 
-impl From<ReceivedBytes<'_>> for CommonTrafficLabels {
-    fn from(c: ReceivedBytes) -> Self {
-        c.0.into()
-    }
-}
-
-impl From<SentBytes<'_>> for CommonTrafficLabels {
-    fn from(c: SentBytes) -> Self {
+impl From<BytesTransferred<'_>> for CommonTrafficLabels {
+    fn from(c: BytesTransferred) -> Self {
         c.0.into()
     }
 }
@@ -265,8 +251,8 @@ impl Metrics {
     }
 }
 
-impl Recorder<ConnectionOpen> for super::Metrics {
-    fn record_count(&self, reason: &ConnectionOpen, count: u64) {
+impl Recorder<ConnectionOpen, u64> for super::Metrics {
+    fn record(&self, reason: &ConnectionOpen, count: u64) {
         self.traffic
             .connection_opens
             .get_or_create(&CommonTrafficLabels::from(reason))
@@ -274,8 +260,8 @@ impl Recorder<ConnectionOpen> for super::Metrics {
     }
 }
 
-impl Recorder<ConnectionClose<'_>> for super::Metrics {
-    fn record_count(&self, reason: &ConnectionClose, count: u64) {
+impl Recorder<ConnectionClose<'_>, u64> for super::Metrics {
+    fn record(&self, reason: &ConnectionClose, count: u64) {
         self.traffic
             .connection_close
             .get_or_create(&CommonTrafficLabels::from(reason.0))
@@ -283,20 +269,19 @@ impl Recorder<ConnectionClose<'_>> for super::Metrics {
     }
 }
 
-impl Recorder<ReceivedBytes<'_>> for super::Metrics {
-    fn record_count(&self, reason: &ReceivedBytes, count: u64) {
-        self.traffic
-            .received_bytes
-            .get_or_create(&CommonTrafficLabels::from(reason.0))
-            .inc_by(count);
-    }
-}
-
-impl Recorder<SentBytes<'_>> for super::Metrics {
-    fn record_count(&self, reason: &SentBytes, count: u64) {
-        self.traffic
-            .sent_bytes
-            .get_or_create(&CommonTrafficLabels::from(reason.0))
-            .inc_by(count);
+impl Recorder<BytesTransferred<'_>, (u64, u64)> for super::Metrics {
+    fn record(&self, event: &BytesTransferred<'_>, (sent, recv): (u64, u64)) {
+        if sent != 0 {
+            self.traffic
+                .sent_bytes
+                .get_or_create(&CommonTrafficLabels::from(event.0))
+                .inc_by(sent);
+        }
+        if recv != 0 {
+            self.traffic
+                .received_bytes
+                .get_or_create(&CommonTrafficLabels::from(event.0))
+                .inc_by(recv);
+        }
     }
 }

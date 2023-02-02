@@ -54,24 +54,24 @@ impl Default for Metrics {
 
 impl Metrics {
     #[must_use = "metric will be dropped (and thus recorded) immediately if not assign"]
-    /// record_defer is used to record a metric now and another metric later once the MetricGuard is dropped
+    /// increment_defer is used to increment a metric now and another metric later once the MetricGuard is dropped
     ///
     /// # Examples
     ///
     /// ```ignore
     /// let connection_open = ConnectionOpen {};
     /// // Record connection opened now
-    /// let connection_close = self.metrics.record_defer::<_, ConnectionClosed>(&connection_open);
+    /// let connection_close = self.metrics.increment_defer::<_, ConnectionClosed>(&connection_open);
     /// // Eventually, report connection closed
     /// drop(connection_close);
     /// ```
-    pub fn record_defer<'a, M1, M2>(&'a self, event: &'a M1) -> MetricGuard<'a, M2>
+    pub fn increment_defer<'a, M1, M2>(&'a self, event: &'a M1) -> MetricGuard<'a, M2>
     where
         M1: Clone + 'a,
         M2: From<&'a M1>,
-        Metrics: Recorder<M1> + Recorder<M2>,
+        Metrics: RecorderIncrement<M1> + RecorderIncrement<M2>,
     {
-        self.record(event);
+        self.increment(event);
         let m2: M2 = event.into();
         MetricGuard {
             metrics: self,
@@ -80,32 +80,40 @@ impl Metrics {
     }
 }
 
-pub struct MetricGuard<'a, M>
+pub struct MetricGuard<'a, E>
 where
-    Metrics: Recorder<M>,
+    Metrics: RecorderIncrement<E>,
 {
     metrics: &'a Metrics,
-    event: Option<M>,
+    event: Option<E>,
 }
 
-impl<M> Drop for MetricGuard<'_, M>
+impl<E> Drop for MetricGuard<'_, E>
 where
-    Metrics: Recorder<M>,
+    Metrics: RecorderIncrement<E>,
 {
     fn drop(&mut self) {
         if let Some(m) = mem::take(&mut self.event) {
-            self.metrics.record(&m)
+            self.metrics.increment(&m)
         }
     }
 }
 
-/// Recorder that can record events
-pub trait Recorder<E> {
-    /// Record the given event.
-    fn record(&self, event: &E) {
-        self.record_count(event, 1)
-    }
+pub trait Recorder<E, T> {
+    /// Record the given event
+    fn record(&self, event: &E, meta: T);
+}
 
+pub trait RecorderIncrement<E>: Recorder<E, u64> {
     /// Record the given event by incrementing the counter by count
-    fn record_count(&self, event: &E, count: u64);
+    fn increment(&self, event: &E);
+}
+
+impl<E, R> RecorderIncrement<E> for R
+where
+    R: Recorder<E, u64>,
+{
+    fn increment(&self, event: &E) {
+        self.record(event, 1);
+    }
 }

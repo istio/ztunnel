@@ -190,24 +190,15 @@ mod linux {
 pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
-    zero_copy_enabled: bool,
-) -> Result<Option<(u64, u64)>, Error> {
+) -> Result<(u64, u64), Error> {
     const EINVAL: i32 = 22;
 
-    if zero_copy_enabled {
-        match realm_io::bidi_zero_copy(downstream, upstream).await {
-            Ok(()) => Ok(None),
-            Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
-                tokio::io::copy_bidirectional(downstream, upstream)
-                    .await
-                    .map(Some)
-            }
-            Err(e) => Err(e),
+    match realm_io::bidi_zero_copy(downstream, upstream).await {
+        Ok(d) => Ok(d),
+        Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
+            tokio::io::copy_bidirectional(downstream, upstream).await
         }
-    } else {
-        tokio::io::copy_bidirectional(downstream, upstream)
-            .await
-            .map(Some)
+        Err(e) => Err(e),
     }
 }
 
@@ -217,7 +208,5 @@ pub async fn relay(
     upstream: &mut tokio::net::TcpStream,
     _: bool,
 ) -> Result<Option<(u64, u64)>, Error> {
-    tokio::io::copy_bidirectional(downstream, upstream)
-        .await
-        .map(Some)
+    tokio::io::copy_bidirectional(downstream, upstream).await
 }

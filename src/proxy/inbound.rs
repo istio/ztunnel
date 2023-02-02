@@ -21,6 +21,7 @@ use std::time::Instant;
 use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
+
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
@@ -31,11 +32,11 @@ use crate::metrics::traffic::{ConnectionOpen, Reporter};
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
-use crate::rbac;
 use crate::rbac::Connection;
-use crate::socket::{relay, to_canonical};
+use crate::socket::to_canonical;
 use crate::tls::TlsError;
 use crate::workload::{Workload, WorkloadInformation};
+use crate::{proxy, rbac};
 
 use super::Error;
 
@@ -162,25 +163,21 @@ impl Inbound {
                 tokio::task::spawn(
                     (async move {
                         let _connection_close = metrics
-                            .record_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+                            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
 
-                        let received_bytes = traffic::ReceivedBytes::from(&connection_metrics);
-                        let sent_bytes = traffic::SentBytes::from(&connection_metrics);
+                        let transferred_bytes =
+                            traffic::BytesTransferred::from(&connection_metrics);
                         match request_type {
                             DirectPath(mut incoming) => {
-                                match relay(&mut incoming, &mut stream, false).await {
-                                    // Connection closed with count of bytes transferred between streams
-                                    Ok(Some((sent, recv))) => {
-                                        error!("got bytes count {sent} {recv}");
-                                        metrics.record_count(&sent_bytes, sent);
-                                        metrics.record_count(&received_bytes, recv);
-                                    }
-                                    Ok(None) => {
-                                        error!("no bytes count");
-                                    }
-                                    Err(e) => {
-                                        error!(dur=?start.elapsed(), "internal server copy: {}", e)
-                                    }
+                                if let Err(e) = proxy::relay(
+                                    &mut incoming,
+                                    &mut stream,
+                                    &metrics,
+                                    transferred_bytes,
+                                )
+                                .await
+                                {
+                                    error!(dur=?start.elapsed(), "internal server copy: {}", e)
                                 }
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
@@ -189,9 +186,8 @@ impl Inbound {
                                         .instrument(trace_span!("hbone server"))
                                         .await
                                     {
-                                        Ok((sent, recv)) => {
-                                            metrics.record_count(&sent_bytes, sent);
-                                            metrics.record_count(&received_bytes, recv);
+                                        Ok(transferred) => {
+                                            metrics.record(&transferred_bytes, transferred);
                                         }
                                         Err(e) => {
                                             error!(dur=?start.elapsed(), "hbone server copy: {}", e)
@@ -305,11 +301,15 @@ impl Inbound {
                     destination_service_namespace: None,
                     destination_service_name: None,
                 };
-                let status_code = match Self::handle_inbound(Hbone(req), orig_src, addr,
-                                                             metrics,
-                                                             connection_metrics,)
-                    .in_current_span()
-                    .await
+                let status_code = match Self::handle_inbound(
+                    Hbone(req),
+                    orig_src,
+                    addr,
+                    metrics,
+                    connection_metrics,
+                )
+                .in_current_span()
+                .await
                 {
                     Ok(_) => StatusCode::OK,
                     Err(_) => StatusCode::SERVICE_UNAVAILABLE,

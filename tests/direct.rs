@@ -307,8 +307,7 @@ async fn test_tcp_bytes_metrics() {
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
-    let mut cfg = test_config();
-    cfg.zero_copy_enabled = false;
+    let cfg = test_config();
     testapp::with_app(cfg, |app| async move {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
         let mut stream = app.socks5_connect(dst).await;
