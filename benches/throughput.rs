@@ -215,7 +215,8 @@ pub fn metrics(c: &mut Criterion) {
         b.iter(|| {
             metrics.increment(&ConnectionOpen {
                 reporter: Default::default(),
-                source: test_helpers::test_default_workload(),
+                source: Some(test_helpers::test_default_workload()),
+                derived_source: None,
                 destination: None,
                 destination_service: None,
                 destination_service_name: None,

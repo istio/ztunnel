@@ -128,9 +128,14 @@ impl InboundPassthrough {
         let mut outbound = super::freebind_connect(orig_src, orig).await?;
         trace!(%source, destination=%orig, component="inbound plaintext", "connected");
 
+        // TODO: get the attributes from baggage and/or XDS
+        let ds = traffic::DerivedWorkload {
+            ..Default::default()
+        };
         let connection_metrics = traffic::ConnectionOpen {
             reporter: Reporter::destination,
-            source: upstream.clone(), // TODO: this is not the real source! we need to derive it from baggage
+            source: None,
+            derived_source: Some(ds),
             destination: Some(upstream.clone()),
             connection_security_policy: traffic::SecurityPolicy::unknown,
             destination_service: None,

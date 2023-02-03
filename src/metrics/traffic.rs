@@ -107,10 +107,20 @@ pub struct ConnectionClose<'a>(&'a ConnectionOpen);
 
 pub struct BytesTransferred<'a>(&'a ConnectionOpen);
 
+#[derive(Clone, Debug, Default)]
+pub struct DerivedWorkload {
+    pub workload_name: Option<String>,
+    pub app: Option<String>,
+    pub revision: Option<String>,
+    pub namespace: Option<String>,
+    pub identity: Option<Identity>,
+}
+
 #[derive(Clone)]
 pub struct ConnectionOpen {
     pub reporter: Reporter,
-    pub source: Workload,
+    pub source: Option<Workload>,
+    pub derived_source: Option<DerivedWorkload>,
     pub destination: Option<Workload>,
     pub destination_service: Option<String>,
     pub destination_service_namespace: Option<String>,
@@ -135,7 +145,10 @@ impl CommonTrafficLabels {
         Default::default()
     }
 
-    fn with_source(mut self, w: &Workload) -> Self {
+    fn with_source(mut self, w: Option<&Workload>) -> Self {
+        let Some(w) = w else {
+            return self
+        };
         self.source_workload = w.workload_name.clone().into();
         self.source_canonical_service = w.canonical_name.clone().into();
         self.source_canonical_revision = w.canonical_revision.clone().into();
@@ -143,6 +156,21 @@ impl CommonTrafficLabels {
         self.source_principal = w.identity().into();
         self.source_app = w.canonical_name.clone().into();
         self.source_version = w.canonical_revision.clone().into();
+        self.source_cluster = "Kubernetes".to_string().into(); // TODO
+        self
+    }
+
+    fn with_derived_source(mut self, w: Option<&DerivedWorkload>) -> Self {
+        let Some(w) = w else {
+            return self
+        };
+        self.source_workload = w.workload_name.clone().into();
+        self.source_canonical_service = w.app.clone().into();
+        self.source_canonical_revision = w.revision.clone().into();
+        self.source_workload_namespace = w.namespace.clone().into();
+        self.source_principal = w.identity.clone().into();
+        self.source_app = w.workload_name.clone().into();
+        self.source_version = w.revision.clone().into();
         self.source_cluster = "Kubernetes".to_string().into(); // TODO
         self
     }
@@ -177,7 +205,8 @@ impl From<&ConnectionOpen> for CommonTrafficLabels {
             response_flags: ResponseFlags::none,
             connection_security_policy: c.connection_security_policy,
             ..CommonTrafficLabels::new()
-                .with_source(&c.source)
+                .with_source(c.source.as_ref())
+                .with_derived_source(c.derived_source.as_ref())
                 .with_destination(c.destination.as_ref())
         }
     }

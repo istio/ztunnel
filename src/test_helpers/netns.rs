@@ -275,7 +275,6 @@ ip -n {node_net} link set dev eth0 up
 ip -n {node_net} addr add 172.172.0.{node_id}/16 dev eth0
 # Route everything to the network
 ip -n {node_net} route add default via 172.172.0.1
-# TODO: cross product routing for
 ip -n {node_net} route add 172.172.0.0/17 dev eth0 scope link src 172.172.0.{node_id}
 "
             ))?;

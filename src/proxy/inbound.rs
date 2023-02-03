@@ -291,9 +291,15 @@ impl Inbound {
                     orig_src
                 };
 
+                // TODO: get the attributes from baggage and/or XDS
+                let source = traffic::DerivedWorkload {
+                    identity: conn.src_identity,
+                    ..Default::default()
+                };
                 let connection_metrics = traffic::ConnectionOpen {
                     reporter: Reporter::destination,
-                    source: upstream.clone(), // TODO: this is not the real source! we need to derive it from baggage
+                    source: None,
+                    derived_source: Some(source),
                     destination: Some(upstream.clone()),
                     connection_security_policy: traffic::SecurityPolicy::mutual_tls,
                     destination_service: None,

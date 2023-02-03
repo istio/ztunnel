@@ -313,8 +313,6 @@ async fn test_waypoint_hairpin() -> anyhow::Result<()> {
         (BYTES_RECV, REQ_SIZE),
         (BYTES_SENT, HBONE_REQ_SIZE),
     ];
-    error!("verifying metrics");
-    println!("verifying metrics");
     verify_metrics(zt, &metrics, &source_labels()).await;
     Ok(())
 }

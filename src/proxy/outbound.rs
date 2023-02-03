@@ -148,7 +148,8 @@ impl OutboundConnection {
                 .unwrap_or(false);
         let connection_metrics = traffic::ConnectionOpen {
             reporter: Reporter::source,
-            source: req.source.clone(),
+            derived_source: None,
+            source: Some(req.source.clone()),
             destination: req.destination_workload.clone(),
             connection_security_policy: if req.protocol == Protocol::HBONE {
                 traffic::SecurityPolicy::mutual_tls
