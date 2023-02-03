@@ -31,6 +31,7 @@ use crate::{identity, tls};
 
 #[derive(Copy, Clone, Debug)]
 pub enum Mode {
+    ReadDoubleWrite,
     ReadWrite,
     Write,
     Read,
@@ -53,6 +54,11 @@ pub async fn run_client(
                 let written = w.write(&buf[..length]).await?;
                 transferred += written;
                 r.read_exact(&mut buf[..written]).await?;
+            }
+            Mode::ReadDoubleWrite => {
+                let written = w.write(&buf[..length]).await?;
+                transferred += written;
+                r.read_exact(&mut buf[..written * 2]).await?;
             }
             Mode::Write => {
                 transferred += w.write(&buf[..length]).await?;
@@ -121,11 +127,28 @@ where
             let mut r = tokio::io::BufReader::with_capacity(BUFFER_SIZE, r);
             tokio::io::copy_buf(&mut r, w).await.expect("tcp copy");
         }
+        Mode::ReadDoubleWrite => {
+            let mut buffer = vec![0; BUFFER_SIZE];
+            loop {
+                let read = r.read(&mut buffer).await.expect("tcp ready");
+                if read == 0 {
+                    break;
+                }
+                let wrote = w.write(&buffer[..read]).await.expect("tcp ready");
+                if wrote == 0 {
+                    break;
+                }
+                let wrote = w.write(&buffer[..read]).await.expect("tcp ready");
+                if wrote == 0 {
+                    break;
+                }
+            }
+        }
         Mode::Write => {
             let buffer = vec![0; BUFFER_SIZE];
             loop {
-                let read = w.write(&buffer).await.expect("tcp ready");
-                if read == 0 {
+                let wrote = w.write(&buffer).await.expect("tcp ready");
+                if wrote == 0 {
                     break;
                 }
             }

@@ -24,7 +24,6 @@ use itertools::Itertools;
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
-use tracing::error;
 
 use crate::app::Bound;
 use crate::identity::mock::MockCaClient;
@@ -95,10 +94,7 @@ impl TestApp {
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!(
-                "http://{}/metrics",
-                self.stats_address
-            ))
+            .uri(format!("http://{}/metrics", self.stats_address))
             .header("content-type", "application/json")
             .body(Body::default())
             .unwrap();
@@ -211,7 +207,7 @@ impl ParsedMetrics {
     pub fn query(
         &self,
         metric: &str,
-        labels: HashMap<String, String>,
+        labels: &HashMap<String, String>,
     ) -> Option<Vec<&prometheus_parse::Sample>> {
         if !self
             .scrape
@@ -225,12 +221,12 @@ impl ParsedMetrics {
                 .samples
                 .iter()
                 .filter(|s| s.metric == metric)
-                .filter(|s| superset_of(s.labels.deref(), &labels))
+                .filter(|s| superset_of(s.labels.deref(), labels))
                 .collect(),
         )
     }
 
-    pub fn query_sum(&self, metric: &str, labels: HashMap<String, String>) -> u64 {
+    pub fn query_sum(&self, metric: &str, labels: &HashMap<String, String>) -> u64 {
         let res = self.query(metric, labels);
         res.map(|streams| {
             streams
@@ -249,7 +245,11 @@ impl ParsedMetrics {
         .unwrap_or(0)
     }
     pub fn dump(&self) -> String {
-       self.scrape.samples.iter().map(|s|format!("{s:?}")).join("\n")
+        self.scrape
+            .samples
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .join("\n")
     }
 }
 

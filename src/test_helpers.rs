@@ -14,9 +14,14 @@
 
 use std::collections::HashMap;
 use std::default::Default;
+use std::fmt::Debug;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::Add;
+use std::time::{Duration, SystemTime};
 
 use bytes::{BufMut, Bytes};
+use tracing::trace;
 
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
@@ -164,4 +169,29 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
     let mut b = bytes::BytesMut::new().writer();
     serde_yaml::to_writer(&mut b, &lc)?;
     Ok(b.into_inner().freeze())
+}
+
+pub async fn assert_eventually<F, T, Fut>(dur: Duration, f: F, expected: T)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = T>,
+    T: Eq + Debug,
+{
+    let mut delay = Duration::from_millis(10);
+    let end = SystemTime::now().add(dur);
+    let mut last: T;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        last = f().await;
+        if last == expected {
+            return;
+        }
+        trace!("attempt {attempts} with delay {delay:?}");
+        if SystemTime::now().add(delay) > end {
+            panic!("assert_eventually failed after {attempts}: last response: {last:?}")
+        }
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+    }
 }

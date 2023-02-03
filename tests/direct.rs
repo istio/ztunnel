@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::ops::Add;
 use std::str::FromStr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use hyper::{Body, Client, Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,12 +23,11 @@ use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
 
-use tracing::{error, trace};
-
 use ztunnel::identity::mock::MockCaClient;
 
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::assert_eventually;
 
 use ztunnel::config;
 use ztunnel::test_helpers::*;
@@ -238,7 +234,7 @@ async fn test_stats_exist() {
             ("istio_tcp_connections_closed"),
         ] {
             assert!(
-                metrics.query(metric, Default::default()).is_some(),
+                metrics.query(metric, &Default::default()).is_some(),
                 "expected metric {metric}"
             );
         }
@@ -260,13 +256,13 @@ async fn test_tcp_connections_metrics() {
         // We should have 1 open connection but 0 closed connections
         let metrics = app.metrics().await.unwrap();
         assert_eq!(
-            metrics.query_sum("istio_tcp_connections_opened_total", Default::default()),
+            metrics.query_sum("istio_tcp_connections_opened_total", &Default::default()),
             1,
             "metrics: {}",
             metrics.dump()
         );
         assert_eq!(
-            metrics.query_sum("istio_tcp_connections_closed_total", Default::default()),
+            metrics.query_sum("istio_tcp_connections_closed_total", &Default::default()),
             0,
             "metrics: {}",
             metrics.dump()
@@ -282,7 +278,7 @@ async fn test_tcp_connections_metrics() {
                 app.metrics()
                     .await
                     .unwrap()
-                    .query_sum("istio_tcp_connections_opened_total", Default::default())
+                    .query_sum("istio_tcp_connections_opened_total", &Default::default())
             },
             1,
         )
@@ -293,7 +289,7 @@ async fn test_tcp_connections_metrics() {
                 app.metrics()
                     .await
                     .unwrap()
-                    .query_sum("istio_tcp_connections_closed_total", Default::default())
+                    .query_sum("istio_tcp_connections_closed_total", &Default::default())
             },
             1,
         )
@@ -321,7 +317,7 @@ async fn test_tcp_bytes_metrics() {
                 app.metrics()
                     .await
                     .unwrap()
-                    .query_sum("istio_tcp_received_bytes_total", Default::default())
+                    .query_sum("istio_tcp_received_bytes_total", &Default::default())
             },
             size,
         )
@@ -332,38 +328,13 @@ async fn test_tcp_bytes_metrics() {
                 app.metrics()
                     .await
                     .unwrap()
-                    .query_sum("istio_tcp_sent_bytes_total", Default::default())
+                    .query_sum("istio_tcp_sent_bytes_total", &Default::default())
             },
             size,
         )
         .await;
     })
     .await;
-}
-
-async fn assert_eventually<F, T, Fut>(dur: Duration, f: F, expected: T)
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = T>,
-    T: Eq + Debug,
-{
-    let mut delay = Duration::from_millis(10);
-    let end = SystemTime::now().add(dur);
-    let mut last: T;
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        last = f().await;
-        if last == expected {
-            return;
-        }
-        trace!("attempt {attempts} with delay {delay:?}");
-        if SystemTime::now().add(delay) > end {
-            panic!("assert_eventually failed after {attempts}: last response: {last:?}")
-        }
-        tokio::time::sleep(delay).await;
-        delay *= 2;
-    }
 }
 
 async fn read_write_stream(stream: &mut TcpStream) -> usize {

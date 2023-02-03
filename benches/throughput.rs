@@ -94,6 +94,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
 
         let client_mode = match mode {
             Mode::ReadWrite => Mode::ReadWrite,
+            Mode::ReadDoubleWrite => Mode::ReadDoubleWrite,
             Mode::Write => Mode::Read,
             Mode::Read => Mode::Write,
         };

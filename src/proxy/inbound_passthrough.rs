@@ -14,17 +14,16 @@
 
 use std::net::SocketAddr;
 
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{error, info, trace, warn, Instrument};
+
 use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, trace, warn};
-
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, ProxyInputs};
 use crate::proxy::{Error, TraceParent};
-use crate::{proxy, socket};
-
 use crate::rbac;
+use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
     listener: TcpListener,
@@ -66,7 +65,7 @@ impl InboundPassthrough {
                         {
                             warn!(source=%socket::to_canonical(remote), component="inbound plaintext", "proxying failed: {}", e)
                         }
-                    });
+                    }.in_current_span());
                 }
                 Err(e) => {
                     if util::is_runtime_shutdown(&e) {
@@ -142,7 +141,7 @@ impl InboundPassthrough {
             .metrics
             .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
         let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
-        proxy::relay(&mut inbound, &mut outbound, &pi.metrics, transferred_bytes).await?;
+        proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }

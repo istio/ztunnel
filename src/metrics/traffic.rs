@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use std::fmt::Write;
 
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
 use crate::identity::Identity;
+use crate::metrics::traffic::Reporter::source;
 use crate::metrics::Recorder;
 use crate::workload::Workload;
 
@@ -270,7 +271,13 @@ impl Recorder<ConnectionClose<'_>, u64> for super::Metrics {
 }
 
 impl Recorder<BytesTransferred<'_>, (u64, u64)> for super::Metrics {
-    fn record(&self, event: &BytesTransferred<'_>, (sent, recv): (u64, u64)) {
+    fn record(&self, event: &BytesTransferred<'_>, m: (u64, u64)) {
+        let (sent, recv) = if event.0.reporter == source {
+            // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
+            (m.1, m.0)
+        } else {
+            (m.0, m.1)
+        };
         if sent != 0 {
             self.traffic
                 .sent_bytes

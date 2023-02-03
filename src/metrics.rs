@@ -15,6 +15,7 @@
 use std::mem;
 
 use prometheus_client::registry::Registry;
+use tracing::error;
 
 mod meta;
 #[allow(non_camel_case_types)]
@@ -95,6 +96,8 @@ where
     fn drop(&mut self) {
         if let Some(m) = mem::take(&mut self.event) {
             self.metrics.increment(&m)
+        } else {
+            error!("defer record failed, event is gone");
         }
     }
 }

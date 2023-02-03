@@ -21,7 +21,6 @@ use std::time::Instant;
 use drain::Watch;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
@@ -29,7 +28,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::traffic::{ConnectionOpen, Reporter};
-use crate::metrics::{traffic, Metrics, Recorder};
+use crate::metrics::{traffic, Metrics};
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
@@ -182,16 +181,16 @@ impl Inbound {
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
-                                    match super::copy_hbone(&mut upgraded, &mut stream)
-                                        .instrument(trace_span!("hbone server"))
-                                        .await
+                                    if let Err(e) = super::copy_hbone(
+                                        &mut upgraded,
+                                        &mut stream,
+                                        &metrics,
+                                        transferred_bytes,
+                                    )
+                                    .instrument(trace_span!("hbone server"))
+                                    .await
                                     {
-                                        Ok(transferred) => {
-                                            metrics.record(&transferred_bytes, transferred);
-                                        }
-                                        Err(e) => {
-                                            error!(dur=?start.elapsed(), "hbone server copy: {}", e)
-                                        }
+                                        error!(dur=?start.elapsed(), "hbone server copy: {}", e);
                                     }
                                 }
                                 Err(e) => {

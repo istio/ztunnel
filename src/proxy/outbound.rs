@@ -13,21 +13,18 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
-
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
 use drain::Watch;
-
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
-
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
 use crate::identity::Identity;
+use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
-use crate::metrics::{traffic, Recorder};
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::workload::{Protocol, Workload};
@@ -263,16 +260,15 @@ impl OutboundConnection {
                     return Err(Error::HttpStatus(code));
                 }
                 let mut upgraded = hyper::upgrade::on(response).await?;
-                match super::copy_hbone(&mut upgraded, &mut stream)
-                    .instrument(trace_span!("hbone client"))
-                    .await
-                {
-                    Ok(transferred) => {
-                        self.pi.metrics.record(&transferred_bytes, transferred);
-                        Ok(())
-                    }
-                    Err(e) => Err(Error::Io(e)),
-                }
+                let res = super::copy_hbone(
+                    &mut upgraded,
+                    &mut stream,
+                    &self.pi.metrics,
+                    transferred_bytes,
+                )
+                .instrument(trace_span!("hbone client"))
+                .await;
+                res
             }
             Protocol::TCP => {
                 info!(
