@@ -1895,7 +1895,8 @@ dependencies = [
 [[package]]
 name = "realm_io"
 version = "0.4.0"
-source = "git+https://github.com/howardjohn/realm?branch=io/copy-bytes-sent#aa71b4ca2a15e22eb9592cad413216441c551203"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419b106090b985e393ac20b68845ca77d5a7fc9af6126ae97fbd8825bbdbaf69"
 dependencies = [
  "libc",
  "tokio",
