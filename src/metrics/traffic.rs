@@ -205,8 +205,9 @@ impl From<&ConnectionOpen> for CommonTrafficLabels {
             response_flags: ResponseFlags::none,
             connection_security_policy: c.connection_security_policy,
             ..CommonTrafficLabels::new()
-                .with_source(c.source.as_ref())
+                // Intentionally before with_source; source is more reliable
                 .with_derived_source(c.derived_source.as_ref())
+                .with_source(c.source.as_ref())
                 .with_destination(c.destination.as_ref())
         }
     }

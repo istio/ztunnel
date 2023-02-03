@@ -28,7 +28,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 use crate::config::Config;
 use crate::identity::CertificateProvider;
 use crate::metrics::traffic::{ConnectionOpen, Reporter};
-use crate::metrics::{traffic, Metrics};
+use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
@@ -147,6 +147,7 @@ impl Inbound {
         addr: SocketAddr,
         metrics: Arc<Metrics>,
         connection_metrics: ConnectionOpen,
+        extra_connection_metrics: Option<ConnectionOpen>,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr).await;
@@ -164,11 +165,15 @@ impl Inbound {
                         let _connection_close = metrics
                             .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
 
+                        let _extra_conn_close = extra_connection_metrics
+                            .as_ref()
+                            .map(|co| metrics.increment_defer::<_, traffic::ConnectionClose>(co));
+
                         let transferred_bytes =
                             traffic::BytesTransferred::from(&connection_metrics);
                         match request_type {
                             DirectPath(mut incoming) => {
-                                if let Err(e) = proxy::relay(
+                                match proxy::relay(
                                     &mut incoming,
                                     &mut stream,
                                     &metrics,
@@ -176,7 +181,17 @@ impl Inbound {
                                 )
                                 .await
                                 {
-                                    error!(dur=?start.elapsed(), "internal server copy: {}", e)
+                                    Ok(transferred) => {
+                                        if let Some(co) = extra_connection_metrics.as_ref() {
+                                            metrics.record(
+                                                &traffic::BytesTransferred::from(co),
+                                                transferred,
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(dur=?start.elapsed(), "internal server copy: {}", e)
+                                    }
                                 }
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
@@ -253,8 +268,6 @@ impl Inbound {
                 }
                 // Orig has 15008, swap with the real port
                 let conn = rbac::Connection { dst: addr, ..conn };
-                let orig_src = enable_original_source.then_some(conn.src_ip);
-
                 let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
@@ -281,25 +294,27 @@ impl Inbound {
                         .body(Body::empty())
                         .unwrap());
                 }
-                let orig_src = if orig_src.is_some() && from_waypoint {
+                let source_ip = if from_waypoint {
                     // If the request is from our waypoint, trust the Forwarded header.
                     // For other request types, we can only trust the source from the connection.
                     // Since our own waypoint is in the same trust domain though, we can use Forwarded,
                     // which drops the requirement of spoofing IPs from waypoints
-                    super::get_original_src_from_fwded(&req).or(orig_src)
+                    super::get_original_src_from_fwded(&req).unwrap_or(conn.src_ip)
                 } else {
-                    orig_src
+                    conn.src_ip
                 };
 
-                // TODO: get the attributes from baggage and/or XDS
-                let source = traffic::DerivedWorkload {
+                // Find source info. We can lookup by XDS or from connection attributes
+                let source = workloads.fetch_workload(&source_ip).await;
+                let derived_source = traffic::DerivedWorkload {
                     identity: conn.src_identity,
+                    // TODO: use baggage for the rest
                     ..Default::default()
                 };
                 let connection_metrics = traffic::ConnectionOpen {
                     reporter: Reporter::destination,
-                    source: None,
-                    derived_source: Some(source),
+                    source,
+                    derived_source: Some(derived_source),
                     destination: Some(upstream.clone()),
                     connection_security_policy: traffic::SecurityPolicy::mutual_tls,
                     destination_service: None,
@@ -308,10 +323,11 @@ impl Inbound {
                 };
                 let status_code = match Self::handle_inbound(
                     Hbone(req),
-                    orig_src,
+                    enable_original_source.then_some(source_ip),
                     addr,
                     metrics,
                     connection_metrics,
+                    None,
                 )
                 .in_current_span()
                 .await

@@ -119,23 +119,32 @@ impl InboundPassthrough {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }
-        let orig_src = if pi.cfg.enable_original_source.unwrap_or_default() {
-            super::get_original_src_from_stream(&inbound)
-        } else {
-            None
-        };
+        let source_ip = super::get_original_src_from_stream(&inbound);
+        let orig_src = pi
+            .cfg
+            .enable_original_source
+            .unwrap_or_default()
+            .then_some(source_ip)
+            .flatten();
         trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
         let mut outbound = super::freebind_connect(orig_src, orig).await?;
         trace!(%source, destination=%orig, component="inbound plaintext", "connected");
 
-        // TODO: get the attributes from baggage and/or XDS
-        let ds = traffic::DerivedWorkload {
+        // Find source info. We can lookup by XDS or from connection attributes
+        let source_workload = if let Some(source_ip) = source_ip {
+            pi.workloads.fetch_workload(&source_ip).await
+        } else {
+            None
+        };
+        let derived_source = traffic::DerivedWorkload {
+            identity: conn.src_identity,
+            // TODO: use baggage for the rest
             ..Default::default()
         };
         let connection_metrics = traffic::ConnectionOpen {
             reporter: Reporter::destination,
-            source: None,
-            derived_source: Some(ds),
+            source: source_workload,
+            derived_source: Some(derived_source),
             destination: Some(upstream.clone()),
             connection_security_policy: traffic::SecurityPolicy::unknown,
             destination_service: None,

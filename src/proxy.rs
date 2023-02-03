@@ -361,12 +361,12 @@ pub async fn relay(
     upstream: &mut tokio::net::TcpStream,
     metrics: impl AsRef<Metrics>,
     transferred_bytes: traffic::BytesTransferred<'_>,
-) -> Result<(), Error> {
+) -> Result<(u64, u64), Error> {
     match socket::relay(downstream, upstream).await {
         Ok(transferred) => {
             trace!(sent = transferred.0, recv = transferred.1, "relay complete");
             metrics.as_ref().record(&transferred_bytes, transferred);
-            Ok(())
+            Ok(transferred)
         }
         Err(e) => Err(Error::Io(e)),
     }

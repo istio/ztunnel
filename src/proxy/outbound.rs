@@ -181,12 +181,28 @@ impl OutboundConnection {
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
+            // same as above but inverted, this is the "inbound" metric
+            let inbound_connection_metrics = traffic::ConnectionOpen {
+                reporter: Reporter::destination,
+                derived_source: None,
+                destination: Some(req.source.clone()),
+                source: req.destination_workload.clone(),
+                connection_security_policy: if req.protocol == Protocol::HBONE {
+                    traffic::SecurityPolicy::mutual_tls
+                } else {
+                    traffic::SecurityPolicy::unknown
+                },
+                destination_service: None,
+                destination_service_namespace: None,
+                destination_service_name: None,
+            };
             return Inbound::handle_inbound(
                 InboundConnect::DirectPath(stream),
                 origin_src,
                 req.destination,
                 self.pi.metrics.clone(),
                 connection_metrics,
+                Some(inbound_connection_metrics),
             )
             .await
             .map_err(Error::Io);
@@ -291,6 +307,7 @@ impl OutboundConnection {
                     transferred_bytes,
                 )
                 .await
+                .map(|_| ())
             }
         }
     }
