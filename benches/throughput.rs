@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use ztunnel::metrics::traffic::ConnectionOpen;
-use ztunnel::metrics::{Metrics, RecorderIncrement};
+use ztunnel::metrics::{IncrementRecorder, Metrics};
 
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;

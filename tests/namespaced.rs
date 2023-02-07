@@ -201,7 +201,7 @@ async fn verify_metrics(
     assertions: &[(&str, u64)],
     labels: &HashMap<String, String>,
 ) {
-    // Wait form metrics to populate...
+    // Wait for metrics to populate...
     for _ in 0..10 {
         let m = ztunnel.metrics().await.unwrap();
         let mut found = true;

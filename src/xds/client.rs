@@ -29,7 +29,7 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::RootCert;
 use crate::metrics::xds::*;
-use crate::metrics::{Metrics, RecorderIncrement};
+use crate::metrics::{IncrementRecorder, Metrics};
 use crate::xds::istio::security::Authorization;
 use crate::xds::istio::workload::Workload;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;

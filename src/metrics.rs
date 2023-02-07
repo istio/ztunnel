@@ -70,7 +70,7 @@ impl Metrics {
     where
         M1: Clone + 'a,
         M2: From<&'a M1>,
-        Metrics: RecorderIncrement<M1> + RecorderIncrement<M2>,
+        Metrics: IncrementRecorder<M1> + IncrementRecorder<M2>,
     {
         self.increment(event);
         let m2: M2 = event.into();
@@ -83,7 +83,7 @@ impl Metrics {
 
 pub struct MetricGuard<'a, E>
 where
-    Metrics: RecorderIncrement<E>,
+    Metrics: IncrementRecorder<E>,
 {
     metrics: &'a Metrics,
     event: Option<E>,
@@ -91,7 +91,7 @@ where
 
 impl<E> Drop for MetricGuard<'_, E>
 where
-    Metrics: RecorderIncrement<E>,
+    Metrics: IncrementRecorder<E>,
 {
     fn drop(&mut self) {
         if let Some(m) = mem::take(&mut self.event) {
@@ -107,12 +107,12 @@ pub trait Recorder<E, T> {
     fn record(&self, event: &E, meta: T);
 }
 
-pub trait RecorderIncrement<E>: Recorder<E, u64> {
+pub trait IncrementRecorder<E>: Recorder<E, u64> {
     /// Record the given event by incrementing the counter by count
     fn increment(&self, event: &E);
 }
 
-impl<E, R> RecorderIncrement<E> for R
+impl<E, R> IncrementRecorder<E> for R
 where
     R: Recorder<E, u64>,
 {
