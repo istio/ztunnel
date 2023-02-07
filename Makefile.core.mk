@@ -11,9 +11,9 @@ build:
 	cargo build
 
 # Test that all important features build
-build-features:
-	cargo build --features console
-	(cd fuzz; cargo build)
+check-features:
+	cargo check --features console
+	(cd fuzz; cargo check)
 
 # target in common/Makefile.common.mk doesn't handle our third party vendored files; only check golang and rust codes
 lint-copyright:
@@ -21,7 +21,7 @@ lint-copyright:
 		${XARGS} common/scripts/lint_copyright_banner.sh
 
 lint: lint-scripts lint-yaml lint-markdown lint-licenses lint-copyright
-	cargo clippy
+	cargo clippy --benches --tests --bins
 
 check:
 	cargo check
@@ -47,4 +47,4 @@ gen: format
 gen-check: gen check-clean-repo
 
 presubmit: export RUSTFLAGS = -D warnings
-presubmit: build  build-features test lint gen-check
+presubmit: check-features test lint gen-check

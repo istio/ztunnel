@@ -653,12 +653,7 @@ mod tests {
         source: &crate::workload::WorkloadInformation,
     ) {
         let start_time = SystemTime::now();
-        let converted: Option<Workload> = match expected_workload {
-            None => None,
-            Some(ref expected_workload) => {
-                Some(Workload::try_from(&expected_workload.clone()).unwrap())
-            }
-        };
+        let converted: Option<Workload> = expected_workload.as_ref().map(|expected_workload| Workload::try_from(&expected_workload.clone()).unwrap());
         let mut matched = false;
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
             sleep(POLL_RATE).await;
@@ -706,7 +701,7 @@ mod tests {
         }
 
         let initial_response = Ok(DeltaDiscoveryResponse {
-            resources: resources,
+            resources,
             nonce: TextNonce::new().to_string(),
             system_version_info: "1.0.0".to_string(),
             type_url: WORKLOAD_TYPE.to_string(),
