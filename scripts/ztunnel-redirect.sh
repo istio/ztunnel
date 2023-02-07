@@ -7,13 +7,9 @@ INSTANCE_IP="${1:?INSTANCE_IP}"
 shift
 
 
-# START https://github.com/solo-io/istio-sidecarless/blob/master/redirect-worker.sh#L198-L205
-PROXY_OUTBOUND_MARK=0x401/0xfff
-PROXY_INBOUND_MARK=0x402/0xfff
 # tproxy mark, it's only used here.
 MARK=0x400/0xfff
 ORG_SRC_RET_MARK=0x4d3/0xfff
-# END https://github.com/solo-io/istio-sidecarless/blob/master/redirect-worker.sh#L198-L205
 
 # Below is from config.sh but used in redirect-worker.sh as well
 POD_OUTBOUND=15001
@@ -46,8 +42,6 @@ echo 0 > /proc/sys/net/ipv4/conf/p$INBOUND_TUN/rp_filter
 echo 0 > /proc/sys/net/ipv4/conf/p$OUTBOUND_TUN/rp_filter
 
 ip rule add priority 20000 fwmark $MARK lookup 100
-ip rule add priority 20001 fwmark $PROXY_OUTBOUND_MARK lookup 101
-ip rule add priority 20002 fwmark $PROXY_INBOUND_MARK lookup 102
 ip rule add priority 20003 fwmark $ORG_SRC_RET_MARK lookup 100
 ip route add local 0.0.0.0/0 dev lo table 100
 
