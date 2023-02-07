@@ -653,7 +653,9 @@ mod tests {
         source: &crate::workload::WorkloadInformation,
     ) {
         let start_time = SystemTime::now();
-        let converted: Option<Workload> = expected_workload.as_ref().map(|expected_workload| Workload::try_from(&expected_workload.clone()).unwrap());
+        let converted: Option<Workload> = expected_workload
+            .as_ref()
+            .map(|expected_workload| Workload::try_from(&expected_workload.clone()).unwrap());
         let mut matched = false;
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
             sleep(POLL_RATE).await;
