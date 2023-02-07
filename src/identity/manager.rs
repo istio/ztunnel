@@ -89,10 +89,13 @@ impl fmt::Display for Identity {
 
 impl Default for Identity {
     fn default() -> Self {
+        const TRUST_DOMAIN: &str = "cluster.local";
+        const SERVICE_ACCOUNT: &str = "ztunnel";
+        const NAMESPACE: &str = "istio-system";
         Identity::Spiffe {
-            trust_domain: "cluster.local".to_string(),
-            namespace: "istio-system".to_string(),
-            service_account: "ztunnel".to_string(),
+            trust_domain: TRUST_DOMAIN.to_string(),
+            namespace: NAMESPACE.to_string(),
+            service_account: SERVICE_ACCOUNT.to_string(),
         }
     }
 }
