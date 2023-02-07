@@ -162,7 +162,7 @@ impl Certs {
             .cert
             .not_after
             .duration_since(self.cert.not_before)
-            .unwrap()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
             / 2;
         // If now() is earlier than not_before, we need to refresh ASAP, so return 0.
         let elapsed = SystemTime::now()
