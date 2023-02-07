@@ -15,15 +15,15 @@
 use std::net::SocketAddr;
 
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, trace, warn, Instrument};
 
+use crate::metrics::traffic;
+use crate::metrics::traffic::Reporter;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, ProxyInputs};
 use crate::proxy::{Error, TraceParent};
-use crate::socket;
-use crate::socket::relay;
-
 use crate::rbac;
+use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
     listener: TcpListener,
@@ -65,7 +65,7 @@ impl InboundPassthrough {
                         {
                             warn!(source=%socket::to_canonical(remote), component="inbound plaintext", "proxying failed: {}", e)
                         }
-                    });
+                    }.in_current_span());
                 }
                 Err(e) => {
                     if util::is_runtime_shutdown(&e) {
@@ -119,15 +119,43 @@ impl InboundPassthrough {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }
-        let orig_src = if pi.cfg.enable_original_source.unwrap_or_default() {
-            super::get_original_src_from_stream(&inbound)
-        } else {
-            None
-        };
+        let source_ip = super::get_original_src_from_stream(&inbound);
+        let orig_src = pi
+            .cfg
+            .enable_original_source
+            .unwrap_or_default()
+            .then_some(source_ip)
+            .flatten();
         trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
         let mut outbound = super::freebind_connect(orig_src, orig).await?;
         trace!(%source, destination=%orig, component="inbound plaintext", "connected");
-        relay(&mut inbound, &mut outbound, true).await?;
+
+        // Find source info. We can lookup by XDS or from connection attributes
+        let source_workload = if let Some(source_ip) = source_ip {
+            pi.workloads.fetch_workload(&source_ip).await
+        } else {
+            None
+        };
+        let derived_source = traffic::DerivedWorkload {
+            identity: conn.src_identity,
+            // TODO: use baggage for the rest
+            ..Default::default()
+        };
+        let connection_metrics = traffic::ConnectionOpen {
+            reporter: Reporter::destination,
+            source: source_workload,
+            derived_source: Some(derived_source),
+            destination: Some(upstream.clone()),
+            connection_security_policy: traffic::SecurityPolicy::unknown,
+            destination_service: None,
+            destination_service_namespace: None,
+            destination_service_name: None,
+        };
+        let _connection_close = pi
+            .metrics
+            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+        let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
+        proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }

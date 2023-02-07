@@ -28,8 +28,8 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use ztunnel::metrics::traffic::ConnectionOpen;
-use ztunnel::metrics::Metrics;
-use ztunnel::metrics::Recorder;
+use ztunnel::metrics::{IncrementRecorder, Metrics};
+
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::TEST_WORKLOAD_HBONE;
@@ -94,6 +94,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
 
         let client_mode = match mode {
             Mode::ReadWrite => Mode::ReadWrite,
+            Mode::ReadDoubleWrite => Mode::ReadDoubleWrite,
             Mode::Write => Mode::Read,
             Mode::Read => Mode::Write,
         };
@@ -212,11 +213,14 @@ pub fn metrics(c: &mut Criterion) {
     let mut c = c.benchmark_group("metrics");
     c.bench_function("write", |b| {
         b.iter(|| {
-            metrics.record(&ConnectionOpen {
+            metrics.increment(&ConnectionOpen {
                 reporter: Default::default(),
-                source: test_helpers::test_default_workload(),
+                source: Some(test_helpers::test_default_workload()),
+                derived_source: None,
                 destination: None,
                 destination_service: None,
+                destination_service_name: None,
+                destination_service_namespace: None,
                 connection_security_policy: Default::default(),
             })
         })

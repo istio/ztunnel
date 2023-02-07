@@ -20,6 +20,7 @@ use std::ops::Deref;
 use std::time::Duration;
 
 use hyper::{body, Body, Client, Method, Request, Response};
+use itertools::Itertools;
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
@@ -93,10 +94,7 @@ impl TestApp {
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!(
-                "http://localhost:{}/metrics",
-                self.stats_address.port()
-            ))
+            .uri(format!("http://{}/metrics", self.stats_address))
             .header("content-type", "application/json")
             .body(Body::default())
             .unwrap();
@@ -200,6 +198,7 @@ pub async fn socks5_connect(mut stream: TcpStream, addr: SocketAddr) -> anyhow::
     Ok(stream)
 }
 
+#[derive(Debug)]
 pub struct ParsedMetrics {
     scrape: Scrape,
 }
@@ -208,7 +207,7 @@ impl ParsedMetrics {
     pub fn query(
         &self,
         metric: &str,
-        labels: HashMap<String, String>,
+        labels: &HashMap<String, String>,
     ) -> Option<Vec<&prometheus_parse::Sample>> {
         if !self
             .scrape
@@ -222,12 +221,12 @@ impl ParsedMetrics {
                 .samples
                 .iter()
                 .filter(|s| s.metric == metric)
-                .filter(|s| superset_of(s.labels.deref(), &labels))
+                .filter(|s| superset_of(s.labels.deref(), labels))
                 .collect(),
         )
     }
 
-    pub fn query_sum(&self, metric: &str, labels: HashMap<String, String>) -> u64 {
+    pub fn query_sum(&self, metric: &str, labels: &HashMap<String, String>) -> u64 {
         let res = self.query(metric, labels);
         res.map(|streams| {
             streams
@@ -246,7 +245,11 @@ impl ParsedMetrics {
         .unwrap_or(0)
     }
     pub fn dump(&self) -> String {
-        format!("{:?}", self.scrape.samples)
+        self.scrape
+            .samples
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .join("\n")
     }
 }
 

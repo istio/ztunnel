@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use std::fmt::Write;
 
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
 use crate::identity::Identity;
+use crate::metrics::traffic::Reporter::source;
 use crate::metrics::Recorder;
 use crate::workload::Workload;
 
@@ -64,6 +65,7 @@ impl EncodeLabelValue for ResponseFlags {
 pub enum SecurityPolicy {
     #[default]
     unknown,
+    mutual_tls,
 }
 
 #[derive(Default, Hash, PartialEq, Eq, Clone, Debug)]
@@ -103,16 +105,26 @@ impl<T: EncodeLabelValue> EncodeLabelValue for DefaultedUnknown<T> {
 
 pub struct ConnectionClose<'a>(&'a ConnectionOpen);
 
-pub struct ReceivedBytes<'a>(&'a ConnectionOpen);
+pub struct BytesTransferred<'a>(&'a ConnectionOpen);
 
-pub struct SentBytes<'a>(&'a ConnectionOpen);
+#[derive(Clone, Debug, Default)]
+pub struct DerivedWorkload {
+    pub workload_name: Option<String>,
+    pub app: Option<String>,
+    pub revision: Option<String>,
+    pub namespace: Option<String>,
+    pub identity: Option<Identity>,
+}
 
 #[derive(Clone)]
 pub struct ConnectionOpen {
     pub reporter: Reporter,
-    pub source: Workload,
+    pub source: Option<Workload>,
+    pub derived_source: Option<DerivedWorkload>,
     pub destination: Option<Workload>,
     pub destination_service: Option<String>,
+    pub destination_service_namespace: Option<String>,
+    pub destination_service_name: Option<String>,
     pub connection_security_policy: SecurityPolicy,
 }
 
@@ -122,15 +134,9 @@ impl<'a> From<&'a ConnectionOpen> for ConnectionClose<'a> {
     }
 }
 
-impl<'a> From<&'a ConnectionOpen> for ReceivedBytes<'a> {
+impl<'a> From<&'a ConnectionOpen> for BytesTransferred<'a> {
     fn from(c: &'a ConnectionOpen) -> Self {
-        ReceivedBytes(c)
-    }
-}
-
-impl<'a> From<&'a ConnectionOpen> for SentBytes<'a> {
-    fn from(c: &'a ConnectionOpen) -> Self {
-        SentBytes(c)
+        BytesTransferred(c)
     }
 }
 
@@ -139,7 +145,10 @@ impl CommonTrafficLabels {
         Default::default()
     }
 
-    fn with_source(mut self, w: &Workload) -> Self {
+    fn with_source(mut self, w: Option<&Workload>) -> Self {
+        let Some(w) = w else {
+            return self
+        };
         self.source_workload = w.workload_name.clone().into();
         self.source_canonical_service = w.canonical_name.clone().into();
         self.source_canonical_revision = w.canonical_revision.clone().into();
@@ -147,6 +156,21 @@ impl CommonTrafficLabels {
         self.source_principal = w.identity().into();
         self.source_app = w.canonical_name.clone().into();
         self.source_version = w.canonical_revision.clone().into();
+        self.source_cluster = "Kubernetes".to_string().into(); // TODO
+        self
+    }
+
+    fn with_derived_source(mut self, w: Option<&DerivedWorkload>) -> Self {
+        let Some(w) = w else {
+            return self
+        };
+        self.source_workload = w.workload_name.clone().into();
+        self.source_canonical_service = w.app.clone().into();
+        self.source_canonical_revision = w.revision.clone().into();
+        self.source_workload_namespace = w.namespace.clone().into();
+        self.source_principal = w.identity.clone().into();
+        self.source_app = w.workload_name.clone().into();
+        self.source_version = w.revision.clone().into();
         self.source_cluster = "Kubernetes".to_string().into(); // TODO
         self
     }
@@ -167,14 +191,8 @@ impl CommonTrafficLabels {
     }
 }
 
-impl From<ReceivedBytes<'_>> for CommonTrafficLabels {
-    fn from(c: ReceivedBytes) -> Self {
-        c.0.into()
-    }
-}
-
-impl From<SentBytes<'_>> for CommonTrafficLabels {
-    fn from(c: SentBytes) -> Self {
+impl From<BytesTransferred<'_>> for CommonTrafficLabels {
+    fn from(c: BytesTransferred) -> Self {
         c.0.into()
     }
 }
@@ -187,7 +205,9 @@ impl From<&ConnectionOpen> for CommonTrafficLabels {
             response_flags: ResponseFlags::none,
             connection_security_policy: c.connection_security_policy,
             ..CommonTrafficLabels::new()
-                .with_source(&c.source)
+                // Intentionally before with_source; source is more reliable
+                .with_derived_source(c.derived_source.as_ref())
+                .with_source(c.source.as_ref())
                 .with_destination(c.destination.as_ref())
         }
     }
@@ -206,7 +226,10 @@ pub(super) struct CommonTrafficLabels {
     source_version: DefaultedUnknown<String>,
     source_cluster: DefaultedUnknown<String>,
 
+    // TODO: never set
     destination_service: DefaultedUnknown<String>,
+    destination_service_namespace: DefaultedUnknown<String>,
+    destination_service_name: DefaultedUnknown<String>,
 
     destination_workload: DefaultedUnknown<String>,
     destination_canonical_service: DefaultedUnknown<String>,
@@ -259,8 +282,8 @@ impl Metrics {
     }
 }
 
-impl Recorder<ConnectionOpen> for super::Metrics {
-    fn record_count(&self, reason: &ConnectionOpen, count: u64) {
+impl Recorder<ConnectionOpen, u64> for super::Metrics {
+    fn record(&self, reason: &ConnectionOpen, count: u64) {
         self.traffic
             .connection_opens
             .get_or_create(&CommonTrafficLabels::from(reason))
@@ -268,8 +291,8 @@ impl Recorder<ConnectionOpen> for super::Metrics {
     }
 }
 
-impl Recorder<ConnectionClose<'_>> for super::Metrics {
-    fn record_count(&self, reason: &ConnectionClose, count: u64) {
+impl Recorder<ConnectionClose<'_>, u64> for super::Metrics {
+    fn record(&self, reason: &ConnectionClose, count: u64) {
         self.traffic
             .connection_close
             .get_or_create(&CommonTrafficLabels::from(reason.0))
@@ -277,20 +300,25 @@ impl Recorder<ConnectionClose<'_>> for super::Metrics {
     }
 }
 
-impl Recorder<ReceivedBytes<'_>> for super::Metrics {
-    fn record_count(&self, reason: &ReceivedBytes, count: u64) {
-        self.traffic
-            .received_bytes
-            .get_or_create(&CommonTrafficLabels::from(reason.0))
-            .inc_by(count);
-    }
-}
-
-impl Recorder<SentBytes<'_>> for super::Metrics {
-    fn record_count(&self, reason: &SentBytes, count: u64) {
-        self.traffic
-            .sent_bytes
-            .get_or_create(&CommonTrafficLabels::from(reason.0))
-            .inc_by(count);
+impl Recorder<BytesTransferred<'_>, (u64, u64)> for super::Metrics {
+    fn record(&self, event: &BytesTransferred<'_>, m: (u64, u64)) {
+        let (sent, recv) = if event.0.reporter == source {
+            // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
+            (m.1, m.0)
+        } else {
+            (m.0, m.1)
+        };
+        if sent != 0 {
+            self.traffic
+                .sent_bytes
+                .get_or_create(&CommonTrafficLabels::from(event.0))
+                .inc_by(sent);
+        }
+        if recv != 0 {
+            self.traffic
+                .received_bytes
+                .get_or_create(&CommonTrafficLabels::from(event.0))
+                .inc_by(recv);
+        }
     }
 }

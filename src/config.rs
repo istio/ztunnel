@@ -116,11 +116,6 @@ pub struct Config {
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
-
-    // For testing purposes the use of zero copy can be disabled to test with
-    // buffered copy in downstream/upstream relay.
-    // Can be removed when we support metrics for zero copy as well.
-    pub zero_copy_enabled: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -248,7 +243,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
-        zero_copy_enabled: true,
     })
 }
 

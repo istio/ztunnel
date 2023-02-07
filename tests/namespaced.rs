@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ use tracing::{error, info};
 
 use ztunnel::identity;
 use ztunnel::identity::CertificateProvider;
-
+use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::components::WorkloadManager;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::netns::{Namespace, Resolver};
@@ -89,10 +90,19 @@ async fn test_vip_request() -> anyhow::Result<()> {
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel(REMOTE_NODE)?;
-    manager.deploy_ztunnel(DEFAULT_NODE)?;
+    let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
+    let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
+
+    let metrics = [
+        (CONNECTIONS_OPENED, 1),
+        (CONNECTIONS_CLOSED, 1),
+        // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+        (BYTES_RECV, REQ_SIZE),
+        (BYTES_SENT, REQ_SIZE * 2),
+    ];
+    verify_local_remote_metrics(remote, local, &metrics).await;
     Ok(())
 }
 
@@ -100,13 +110,21 @@ async fn test_vip_request() -> anyhow::Result<()> {
 async fn test_tcp_request() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
     run_tcp_server(manager.workload_builder("server", REMOTE_NODE).register()?)?;
-    manager.deploy_ztunnel(REMOTE_NODE)?;
+    let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel(DEFAULT_NODE)?;
+    let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_client(client, manager.resolver(), "server")?;
+    let metrics = [
+        (CONNECTIONS_OPENED, 1),
+        (CONNECTIONS_CLOSED, 1),
+        // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+        (BYTES_RECV, REQ_SIZE),
+        (BYTES_SENT, REQ_SIZE * 2),
+    ];
+    verify_local_remote_metrics(remote, local, &metrics).await;
     Ok(())
 }
 
@@ -121,11 +139,27 @@ async fn test_tcp_local_request() -> anyhow::Result<()> {
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel(DEFAULT_NODE)?;
+    let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_client(client, manager.resolver(), "server")?;
+
+    let metrics = [
+        (CONNECTIONS_OPENED, 1),
+        (CONNECTIONS_CLOSED, 1),
+        // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+        (BYTES_RECV, REQ_SIZE),
+        (BYTES_SENT, REQ_SIZE * 2),
+    ];
+    verify_metrics(zt, &metrics, &source_labels()).await;
     Ok(())
 }
+
+const CONNECTIONS_OPENED: &str = "istio_tcp_connections_opened_total";
+const CONNECTIONS_CLOSED: &str = "istio_tcp_connections_closed_total";
+const BYTES_RECV: &str = "istio_tcp_received_bytes_total";
+const BYTES_SENT: &str = "istio_tcp_sent_bytes_total";
+const REQ_SIZE: u64 = b"hello world".len() as u64;
+const HBONE_REQ_SIZE: u64 = b"hello world".len() as u64 + b"waypoint\n".len() as u64;
 
 #[tokio::test]
 async fn test_hbone_request() -> anyhow::Result<()> {
@@ -136,14 +170,68 @@ async fn test_hbone_request() -> anyhow::Result<()> {
             .hbone()
             .register()?,
     )?;
-    manager.deploy_ztunnel(REMOTE_NODE)?;
+    let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel(DEFAULT_NODE)?;
+    let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_client(client, manager.resolver(), "server")?;
+
+    let metrics = [
+        (CONNECTIONS_OPENED, 1),
+        (CONNECTIONS_CLOSED, 1),
+        // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+        (BYTES_RECV, REQ_SIZE),
+        (BYTES_SENT, REQ_SIZE * 2),
+    ];
+    verify_local_remote_metrics(remote, local, &metrics).await;
     Ok(())
+}
+
+fn destination_labels() -> HashMap<String, String> {
+    HashMap::from([("reporter".to_string(), "destination".to_string())])
+}
+fn source_labels() -> HashMap<String, String> {
+    HashMap::from([("reporter".to_string(), "source".to_string())])
+}
+
+async fn verify_metrics(
+    ztunnel: TestApp,
+    assertions: &[(&str, u64)],
+    labels: &HashMap<String, String>,
+) {
+    // Wait for metrics to populate...
+    for _ in 0..10 {
+        let m = ztunnel.metrics().await.unwrap();
+        let mut found = true;
+        for (metric, _) in assertions {
+            if m.query_sum(metric, labels) == 0 {
+                found = false
+            }
+        }
+        if found {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let metrics = ztunnel.metrics().await.unwrap();
+    // Now run our assertions
+    for (metric, expected) in assertions {
+        assert_eq!(
+            metrics.query_sum(metric, labels),
+            *expected,
+            "{} with {:?} failed, dump: {}",
+            metric,
+            labels,
+            metrics.dump()
+        );
+    }
+}
+
+async fn verify_local_remote_metrics(remote: TestApp, local: TestApp, metrics: &[(&str, u64)]) {
+    verify_metrics(remote, metrics, &destination_labels()).await;
+    verify_metrics(local, metrics, &source_labels()).await;
 }
 
 #[tokio::test]
@@ -158,9 +246,17 @@ async fn test_hbone_local_request() -> anyhow::Result<()> {
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel(DEFAULT_NODE)?;
+    let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_client(client, manager.resolver(), "server")?;
+
+    let metrics = [
+        (CONNECTIONS_OPENED, 1),
+        (CONNECTIONS_CLOSED, 1),
+        (BYTES_RECV, REQ_SIZE),
+        (BYTES_SENT, REQ_SIZE * 2),
+    ];
+    verify_metrics(zt, &metrics, &source_labels()).await;
     Ok(())
 }
 
@@ -178,9 +274,17 @@ async fn test_waypoint() -> anyhow::Result<()> {
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
-    manager.deploy_ztunnel(DEFAULT_NODE)?;
+    let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
+
+    let metrics = [
+        (CONNECTIONS_OPENED, 1),
+        (CONNECTIONS_CLOSED, 1),
+        (BYTES_RECV, REQ_SIZE),
+        (BYTES_SENT, HBONE_REQ_SIZE),
+    ];
+    verify_metrics(zt, &metrics, &source_labels()).await;
     Ok(())
 }
 
@@ -199,9 +303,17 @@ async fn test_waypoint_hairpin() -> anyhow::Result<()> {
         .workload_builder("client", REMOTE_NODE)
         .uncaptured()
         .register()?;
-    manager.deploy_ztunnel(DEFAULT_NODE)?;
+    let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
     run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
+
+    let metrics = [
+        (CONNECTIONS_OPENED, 1),
+        (CONNECTIONS_CLOSED, 1),
+        (BYTES_RECV, REQ_SIZE),
+        (BYTES_SENT, HBONE_REQ_SIZE),
+    ];
+    verify_metrics(zt, &metrics, &source_labels()).await;
     Ok(())
 }
 
@@ -342,9 +454,12 @@ fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow
                 .await
                 .unwrap()
                 .unwrap();
-            timeout(Duration::from_secs(5), read_write_stream(&mut stream))
-                .await
-                .unwrap();
+            timeout(
+                Duration::from_secs(5),
+                double_read_write_stream(&mut stream),
+            )
+            .await
+            .unwrap();
             Ok(())
         })?
         .join()
@@ -372,7 +487,7 @@ fn run_tcp_to_hbone_client(
 /// run_tcp_server deploys a simple echo server in the provided namespace
 fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
     server.run_ready(|ready| async move {
-        let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, SERVER_PORT).await;
+        let echo = tcp::TestServer::new(tcp::Mode::ReadDoubleWrite, SERVER_PORT).await;
         info!("Running echo server");
         ready.set_ready();
         echo.run().await;
@@ -393,14 +508,13 @@ fn run_hbone_server(server: Namespace) -> anyhow::Result<()> {
     Ok(())
 }
 
-// TODO: dedupe
-async fn read_write_stream(stream: &mut TcpStream) -> usize {
+async fn double_read_write_stream(stream: &mut TcpStream) -> usize {
     const BODY: &[u8] = b"hello world";
     stream.write_all(BODY).await.unwrap();
-    let mut buf: [u8; BODY.len()] = [0; BODY.len()];
+    let mut buf = [0; BODY.len() * 2];
     stream.read_exact(&mut buf).await.unwrap();
-    assert_eq!(BODY, buf);
-    BODY.len()
+    assert_eq!(b"hello worldhello world", &buf);
+    BODY.len() * 2
 }
 
 async fn hbone_read_write_stream(stream: &mut TcpStream) {

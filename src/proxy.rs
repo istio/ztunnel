@@ -29,7 +29,7 @@ use tracing::{error, trace, warn, Instrument};
 use inbound::Inbound;
 
 use crate::identity::CertificateProvider;
-use crate::metrics::Metrics;
+use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
@@ -163,7 +163,9 @@ const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
 pub async fn copy_hbone(
     upgraded: &mut hyper::upgrade::Upgraded,
     stream: &mut TcpStream,
-) -> Result<(u64, u64), std::io::Error> {
+    metrics: impl AsRef<Metrics>,
+    transferred_bytes: traffic::BytesTransferred<'_>,
+) -> Result<(), Error> {
     use tokio::io::AsyncWriteExt;
     let (mut ri, mut wi) = tokio::io::split(upgraded);
     let (mut ro, mut wo) = stream.split();
@@ -188,7 +190,13 @@ pub async fn copy_hbone(
         wi.shutdown().await
     };
 
-    tokio::try_join!(client_to_server, server_to_client).map(|_| (sent, received))
+    tokio::try_join!(client_to_server, server_to_client)?;
+
+    trace!(sent, recv = received, "copy hbone complete");
+    metrics
+        .as_ref()
+        .record(&transferred_bytes, (sent, received));
+    Ok(())
 }
 
 /// Represents a traceparent, as defined by https://www.w3.org/TR/trace-context/
@@ -348,10 +356,27 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
 }
 
+pub async fn relay(
+    downstream: &mut tokio::net::TcpStream,
+    upstream: &mut tokio::net::TcpStream,
+    metrics: impl AsRef<Metrics>,
+    transferred_bytes: traffic::BytesTransferred<'_>,
+) -> Result<(u64, u64), Error> {
+    match socket::relay(downstream, upstream).await {
+        Ok(transferred) => {
+            trace!(sent = transferred.0, recv = transferred.1, "relay complete");
+            metrics.as_ref().record(&transferred_bytes, transferred);
+            Ok(transferred)
+        }
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use hyper::http::request;
     use std::assert_eq;
+
+    use hyper::http::request;
     use test_case::test_case;
 
     use super::*;
