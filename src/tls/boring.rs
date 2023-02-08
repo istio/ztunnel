@@ -45,6 +45,8 @@ use crate::config::RootCert;
 use crate::identity::{self, Identity};
 
 use super::Error;
+use kube::{client::ConfigExt, Client, Config};
+use tower::ServiceBuilder;
 
 pub fn asn1_time_to_system_time(time: &Asn1TimeRef) -> SystemTime {
     let unix_time = Asn1Time::from_unix(0).unwrap().diff(time).unwrap();
@@ -236,6 +238,37 @@ pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel
     let hyper = hyper::Client::builder().http2_only(true).build(https);
 
     Ok(TlsGrpcChannel { uri, client: hyper })
+}
+
+// creating K8s client with boring
+pub async fn create_k8s_client(root_cert: RootCert) -> Result<kube::Client, anyhow::Error> {
+    let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+    conn.set_verify(ssl::SslVerifyMode::PEER);
+    conn.set_alpn_protos(Alpn::H2.encode())?;
+    conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
+    conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+    match root_cert {
+        RootCert::File(f) => {
+            conn.set_ca_file(f).map_err(Error::InvalidRootCert)?;
+        }
+        RootCert::Static(b) => {
+            conn.cert_store_mut()
+                .add_cert(x509::X509::from_pem(&b).map_err(Error::InvalidRootCert)?)
+                .map_err(Error::InvalidRootCert)?;
+        }
+        RootCert::Default => {} // Already configured to use system root certs
+    }
+    let mut http = hyper::client::HttpConnector::new();
+    http.enforce_http(false);
+    let https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
+    let hyper_client = hyper::Client::builder().build::<_, hyper::Body>(https);
+    let config = Config::infer().await?;
+    let service = ServiceBuilder::new()
+        .layer(config.base_uri_layer())
+        .option_layer(config.auth_layer()?)
+        .service(hyper_client);
+    let client = Client::new(service, config.default_namespace);
+    Ok(client)
 }
 
 impl Certs {

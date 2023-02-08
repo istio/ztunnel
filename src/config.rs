@@ -34,6 +34,7 @@ const XDS_ADDRESS: &str = "XDS_ADDRESS";
 const CA_ADDRESS: &str = "CA_ADDRESS";
 const TERMINATION_GRACE_PERIOD: &str = "TERMINATION_GRACE_PERIOD";
 const FAKE_CA: &str = "FAKE_CA";
+const K8S_CUSTOM_SIGNER: &str = "K8S_CUSTOM_SIGNER";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
@@ -88,8 +89,12 @@ pub struct Config {
     /// CA address to use. If fake_ca is set, this will be None.
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
     pub ca_address: Option<String>,
+    // Custom Signer
+    pub k8s_custom_signer: Option<String>,
     /// Root cert for CA TLS verification.
     pub ca_root_cert: RootCert,
+    /// K8s CA cert
+    pub k8s_ca_crt: RootCert,
     /// XDS address to use. If unset, XDS will not be used.
     pub xds_address: Option<String>,
     /// Root cert for XDS TLS verification.
@@ -186,6 +191,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     });
+    let k8s_custom_signer = Some(parse_default(K8S_CUSTOM_SIGNER, "".to_owned())?);
 
     Ok(Config {
         window_size: 4 * 1024 * 1024,
@@ -224,8 +230,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         // TODO: full FindRootCAForXDS logic like in Istio
         xds_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         ca_address,
+        k8s_custom_signer,
         // TODO: full FindRootCAForCA logic like in Istio
         ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
+        k8s_ca_crt: RootCert::File(
+            "./var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+                .parse()
+                .unwrap(),
+        ),
         local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
         proxy_metadata: pc.proxy_metadata,

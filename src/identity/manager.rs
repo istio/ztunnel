@@ -26,6 +26,7 @@ use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::tls;
 
+use super::CustomSigner;
 use super::Error::{self, Spiffe};
 use super::{CaClient, CertificateProvider};
 
@@ -411,6 +412,20 @@ impl SecretManager<CaClient> {
     pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
         let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert.clone(), cfg.auth)?;
         Ok(Self::new_with_client(caclient))
+    }
+}
+
+impl SecretManager<CustomSigner> {
+    pub async fn origin(cfg: crate::config::Config) -> Result<Self, anyhow::Error> {
+        let k8s_client = tls::create_k8s_client(cfg.k8s_ca_crt).await;
+        match k8s_client {
+            Ok(client) => {
+                let custom_signer =
+                    CustomSigner::new(cfg.k8s_custom_signer.unwrap_or_default(), client)?;
+                Ok(Self::new_with_client(custom_signer))
+            }
+            Err(_) => Err(anyhow::Error::msg("K8s client creation failed")),
+        }
     }
 }
 
