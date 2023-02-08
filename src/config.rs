@@ -37,6 +37,9 @@ const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
+const ZTUNNEL_ADMIN_PORT: &str = "ZTUNNEL_ADMIN_PORT";
+const ZTUNNEL_READINESS_PORT: &str = "ZTUNNEL_READINESS_PORT";
+const ZTUNNEL_STATS_PORT: &str = "ZTUNNEL_STATS_PORT";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
@@ -187,6 +190,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     });
 
+    let admin_port = parse(ZTUNNEL_ADMIN_PORT)?
+        .or(pc.proxy_admin_port)
+        .unwrap_or(DEFAULT_ADMIN_PORT);
+    let stats_port = parse(ZTUNNEL_STATS_PORT)?
+        .or(pc.status_port)
+        .unwrap_or(DEFAULT_STATS_PORT);
+    let readiness_port = parse(ZTUNNEL_READINESS_PORT)?
+        // There is no config for this in ProxyConfig currently
+        .unwrap_or(DEFAULT_READINESS_PORT);
+
     Ok(Config {
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
@@ -199,18 +212,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         // admin API should only be accessible over localhost
         // todo: bind to both v4 localhost and v6
-        admin_addr: SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
-        ),
-        stats_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            pc.status_port.unwrap_or(DEFAULT_STATS_PORT),
-        ),
-        readiness_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
-        ),
+        admin_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), admin_port),
+        stats_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), stats_port),
+        readiness_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), readiness_port),
 
         socks5_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
