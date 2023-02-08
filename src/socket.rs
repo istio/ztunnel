@@ -103,18 +103,18 @@ fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn set_transparent(_: &TcpListener) -> io::Result<()> {
+pub fn set_freebind_and_transparent(_: &TcpSocket) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Other,
-        "IP_TRANSPARENT not supported on this operating system",
+        "IP_TRANSPARENT and IP_FREEBIND are not supported on this operating system",
     ))
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn set_freebind(sock: &TcpSocket) -> io::Result<()> {
+pub fn set_transparent(_: &TcpListener) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Other,
-        "IP_FREEBIND not supported on this operating system",
+        "IP_TRANSPARENT not supported on this operating system",
     ))
 }
 
@@ -206,7 +206,6 @@ pub async fn relay(
 pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
-    _: bool,
-) -> Result<Option<(u64, u64)>, Error> {
+) -> Result<(u64, u64), Error> {
     tokio::io::copy_bidirectional(downstream, upstream).await
 }
