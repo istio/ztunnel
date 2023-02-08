@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
+use std::default::Default;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -21,33 +22,27 @@ use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument, trace};
 
 use xds::istio::security::Authorization as XdsAuthorization;
-
-use std::default::Default;
-use tokio::sync::mpsc;
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
 use crate::identity::{CertificateProvider, Identity};
 use crate::metrics::Metrics;
-use crate::workload::WorkloadError::EnumParse;
-
 use crate::rbac::{Authorization, RbacScope};
+use crate::workload::WorkloadError::EnumParse;
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
+)]
 pub enum Protocol {
+    #[default]
     TCP,
     HBONE,
-}
-
-impl Default for Protocol {
-    fn default() -> Self {
-        Protocol::TCP
-    }
 }
 
 impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
@@ -57,6 +52,27 @@ impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
         match value {
             Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::HBONE),
             Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::TCP),
+            None => Err(EnumParse("unknown type".into())),
+        }
+    }
+}
+
+#[derive(
+    Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
+)]
+pub enum HealthStatus {
+    #[default]
+    Healthy,
+    Unhealthy,
+}
+
+impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
+    type Error = WorkloadError;
+
+    fn try_from(value: Option<xds::istio::workload::WorkloadStatus>) -> Result<Self, Self::Error> {
+        match value {
+            Some(xds::istio::workload::WorkloadStatus::Healthy) => Ok(HealthStatus::Healthy),
+            Some(xds::istio::workload::WorkloadStatus::Unhealthy) => Ok(HealthStatus::Unhealthy),
             None => Err(EnumParse("unknown type".into())),
         }
     }
@@ -97,6 +113,9 @@ pub struct Workload {
 
     #[serde(default)]
     pub authorization_policies: Vec<String>,
+
+    #[serde(default)]
+    pub status: HealthStatus,
 }
 
 impl Workload {
@@ -205,6 +224,10 @@ impl TryFrom<&XdsWorkload> for Workload {
             workload_type,
             canonical_name: resource.canonical_name,
             canonical_revision: resource.canonical_revision,
+
+            status: HealthStatus::try_from(xds::istio::workload::WorkloadStatus::from_i32(
+                resource.status,
+            ))?,
 
             native_hbone: resource.native_hbone,
             authorization_policies: resource.authorization_policies,
@@ -546,20 +569,28 @@ impl WorkloadStore {
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
         let wip = workload.workload_ip;
+        // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
+        // under a lock, so there is no race here.
+        self.remove(wip.to_string());
         let widentity = workload.identity();
+        let status = workload.status;
         self.insert_workload(workload);
-        for (vip, pl) in &w.virtual_ips {
-            let ip = vip.parse::<IpAddr>()?;
-            for port in &pl.ports {
-                let service_sock_addr = SocketAddr::from((ip, port.service_port as u16));
-                self.vips
-                    .entry(service_sock_addr)
-                    .or_default()
-                    .insert((wip, port.target_port as u16));
-                self.workload_to_vip
-                    .entry(wip)
-                    .or_default()
-                    .insert((service_sock_addr, port.target_port as u16));
+        // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
+        // include them in load balancing we do to Services.
+        if status == HealthStatus::Healthy {
+            for (vip, pl) in &w.virtual_ips {
+                let ip = vip.parse::<IpAddr>()?;
+                for port in &pl.ports {
+                    let service_sock_addr = SocketAddr::from((ip, port.service_port as u16));
+                    self.vips
+                        .entry(service_sock_addr)
+                        .or_default()
+                        .insert((wip, port.target_port as u16));
+                    self.workload_to_vip
+                        .entry(wip)
+                        .or_default()
+                        .insert((service_sock_addr, port.target_port as u16));
+                }
             }
         }
         if Some(&w.node) == self.local_node.as_ref() {
@@ -712,11 +743,13 @@ mod tests {
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    use crate::test_helpers;
     use bytes::Bytes;
 
+    use crate::test_helpers;
+    use crate::test_helpers::helpers::initialize_telemetry;
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;
+    use crate::xds::istio::workload::WorkloadStatus as XdsStatus;
 
     use super::*;
 
@@ -800,6 +833,7 @@ mod tests {
 
     #[test]
     fn workload_information() {
+        initialize_telemetry();
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
@@ -848,34 +882,28 @@ mod tests {
         assert_eq!(wi.find_workload(&ip1), None);
         assert_eq!(wi.workloads.len(), 0);
 
+        let vip = HashMap::from([(
+            "127.0.1.1".to_string(),
+            XdsPortList {
+                ports: vec![XdsPort {
+                    service_port: 80,
+                    target_port: 8080,
+                }],
+            },
+        )]);
+
         // Add two workloads into the VIP
         wi.insert_xds_workload(XdsWorkload {
-            address: xds_ip1,
+            address: xds_ip1.clone(),
             name: "some name".to_string(),
-            virtual_ips: HashMap::from([(
-                "127.0.1.1".to_string(),
-                XdsPortList {
-                    ports: vec![XdsPort {
-                        service_port: 80,
-                        target_port: 8080,
-                    }],
-                },
-            )]),
+            virtual_ips: vip.clone(),
             ..Default::default()
         })
         .unwrap();
         wi.insert_xds_workload(XdsWorkload {
-            address: xds_ip2,
+            address: xds_ip2.clone(),
             name: "some name2".to_string(),
-            virtual_ips: HashMap::from([(
-                "127.0.1.1".to_string(),
-                XdsPortList {
-                    ports: vec![XdsPort {
-                        service_port: 80,
-                        target_port: 8080,
-                    }],
-                },
-            )]),
+            virtual_ips: vip.clone(),
             ..Default::default()
         })
         .unwrap();
@@ -885,6 +913,44 @@ mod tests {
         assert_vips(&wi, vec!["some name"]);
         wi.remove("127.0.0.1".to_string());
         assert_vips(&wi, vec![]);
+
+        // Add 2 workload with VIP
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip1.clone(),
+            name: "some name".to_string(),
+            virtual_ips: vip.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip2.clone(),
+            name: "some name2".to_string(),
+            virtual_ips: vip.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_vips(&wi, vec!["some name", "some name2"]);
+        // now update it without the VIP
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip1,
+            name: "some name".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        // Should be remove
+        assert_vips(&wi, vec!["some name2"]);
+        // now update it without unhealthy
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip2,
+            name: "some name2".to_string(),
+            virtual_ips: vip,
+            status: XdsStatus::Unhealthy as i32,
+            ..Default::default()
+        })
+        .unwrap();
+        // Should be removed
+        assert_vips(&wi, vec![]);
+        assert_eq!(wi.vips.len(), 0);
     }
 
     #[track_caller]

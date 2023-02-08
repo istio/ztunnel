@@ -102,6 +102,7 @@ pub fn test_default_workload() -> Workload {
         canonical_name: "".to_string(),
         canonical_revision: "".to_string(),
         node: "".to_string(),
+        status: Default::default(),
 
         authorization_policies: Vec::new(),
         native_hbone: false,
