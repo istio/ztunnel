@@ -367,6 +367,9 @@ impl OutboundConnection {
                 request_type: RequestType::ToServerWaypoint,
             });
         }
+        if us.workload.gateway_address.is_none() {
+            return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
+        }
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node == Some(us.workload.node.clone())
@@ -387,7 +390,7 @@ impl OutboundConnection {
                 gateway: SocketAddr::from((
                     us.workload
                         .gateway_address
-                        .expect("todo: refactor gateway ip handling")
+                        .expect("gateway address confirmed")
                         .ip(),
                     15008,
                 )),
@@ -407,7 +410,7 @@ impl OutboundConnection {
             gateway: us
                 .workload
                 .gateway_address
-                .expect("todo: refactor gateway ip handling"),
+                .expect("gateway address confirmed"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
         })

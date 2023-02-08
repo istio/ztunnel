@@ -155,6 +155,9 @@ pub enum Error {
 
     #[error("attempted recursive call to ourselves")]
     SelfCall,
+
+    #[error("no gateway address: {0}")]
+    NoGatewayAddress(Box<crate::workload::Workload>),
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
