@@ -368,7 +368,7 @@ impl OutboundConnection {
             });
         }
         if us.workload.gateway_address.is_none() {
-            return Err(Error::NoGatewayAddress(us.workload.clone()));
+            return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
         }
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
