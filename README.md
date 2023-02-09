@@ -24,7 +24,7 @@ If a feature is not directly used to implement the node proxy component in ambie
 
 ### FIPS
 
-Ztunnel enables the `fips` feature by default, which in turn enables the `fips` feature
+Ztunnel builds currently enable the `fips` Cargo feature by default, which in turn enables the `fips` feature
 on [BoringSSL](https://github.com/cloudflare/boring).
 
 FIPS has
