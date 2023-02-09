@@ -19,8 +19,7 @@ Explicitly out of scope for ztunnel include:
 In general, ztunnel does not aim to be a generic extensible proxy; Envoy is better suited for that task.
 If a feature is not directly used to implement the node proxy component in ambient mesh, it is unlikely to be accepted.
 
-## Building 
-
+## Building
 
 ### FIPS
 
@@ -35,7 +34,7 @@ to an old version of BoringSSL that was tested with `Clang 12.0.0`.
 
 Given that FIPS support will always have special environmental build requirements, we currently we work around this by vendoring OS/arch specific FIPS-compliant binary builds of `boringssl` in [](vendor/boringssl-fips/)
 
-We vendor FIPS boringssl binaries for 
+We vendor FIPS boringssl binaries for
 - `linux/x86_64`
 - `linux/arm64`
 
@@ -43,12 +42,14 @@ To use these vendored libraries and build ztunnel for either of these OS/arch co
 [.cargo/config.toml](.cargo/config.toml) and change the values of BORING_BSSL_PATH and BORING_BSSL_INCLUDE_PATH under the `[env]` key to match the path to the vendored libraries for your platform, e.g:
 
 #### For linux/x86_64
+
 ``` toml
 BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
 BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/linux_x86_64/include/", force = true, relative = true }
 ```
 
 #### For linux/arm64
+
 ``` toml
 BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_arm64", force = true, relative = true }
 BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/linux_arm64/include/", force = true, relative = true }
@@ -64,14 +65,12 @@ This manual twiddling of environment vars is not ideal but given that the altern
 
 Note that the Dockerfiles used to build these vendored `boringssl` builds may be found in the respective vendor directories, and can serve as a reference for the build environment needed to generate FIPS-compliant ztunnel builds.
 
-
 ### Non-FIPS
 
 If you are building for a platform we don't include vendored FIPS `boringssl` binaries for, or you don't want or need FIPS compliance, note that currently non-FIPS builds are **not supported** by us. However you may build `ztunnel` with a FIPS-less `boringssl` by doing the following:
 
-
 1. Comment out the `BORING_BSSL_*` environment variables in `.cargo/config.toml` entirely.
-2. Run `cargo build --no-default-features`
+1. Run `cargo build --no-default-features`
 
 Some IDEs (such as the [Intellij-series](https://github.com/intellij-rust/intellij-rust/issues/9757)) do not support
 globally applying arguments to cargo. In this case, it is probably easier to remove `fips` as a default feature in
