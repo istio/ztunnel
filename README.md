@@ -33,8 +33,7 @@ to ensure that compliance is granted only to the exact binary tested.
 FIPS compliance was [granted](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/4407)
 to an old version of BoringSSL that was tested with `Clang 12.0.0`.
 
-
-Currently, we work around this by vendoring OS/arch specific FIPS-compliant binary builds of `boringssl` in [](vendor/boringssl-fips/)
+Given that FIPS support will always have special environmental build requirements, we currently we work around this by vendoring OS/arch specific FIPS-compliant binary builds of `boringssl` in [](vendor/boringssl-fips/)
 
 We vendor FIPS boringssl binaries for 
 - `linux/x86_64`
