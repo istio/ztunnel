@@ -35,6 +35,7 @@ to an old version of BoringSSL that was tested with `Clang 12.0.0`.
 Given that FIPS support will always have special environmental build requirements, we currently we work around this by vendoring OS/arch specific FIPS-compliant binary builds of `boringssl` in [](vendor/boringssl-fips/)
 
 We vendor FIPS boringssl binaries for
+
 - `linux/x86_64`
 - `linux/arm64`
 
