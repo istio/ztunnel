@@ -26,7 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
 use crate::app::Bound;
-use crate::identity::mock::MockCaClient;
+use crate::identity::mock::CaClient as MockCaClient;
 use crate::identity::SecretManager;
 use crate::test_helpers::TEST_WORKLOAD_SOURCE;
 use crate::*;
@@ -60,7 +60,7 @@ where
     Fut: Future<Output = FO>,
 {
     initialize_telemetry();
-    let cert_manager = MockCaClient::new(Duration::from_secs(10));
+    let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
     let app = app::build_with_cert(cfg, cert_manager.clone())
         .await
         .unwrap();

@@ -81,7 +81,7 @@ impl WorkloadManager {
         // Setup the ztunnel...
         ns.run_ready(move |ready| async move {
             helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip} {waypoints}"))?;
-            let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
+            let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(cfg, cert_manager.clone()).await?;
 
             let ta = TestApp {

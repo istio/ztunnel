@@ -12,16 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod caclient;
-
-pub use caclient::*;
-use std::str::Utf8Error;
-pub mod manager;
-pub use manager::*;
-pub mod auth;
-
 use crate::tls;
+use std::str::Utf8Error;
+
+mod caclient;
+pub use caclient::*;
+
+mod manager;
+pub use manager::*;
+
+mod auth;
 pub use auth::*;
+
+pub mod mock {
+    pub use super::caclient::mock::CaClient;
+    pub use super::manager::mock::new_secret_manager;
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
