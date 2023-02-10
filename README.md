@@ -46,14 +46,14 @@ To use these vendored libraries and build ztunnel for either of these OS/arch co
 
 ``` toml
 BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
-BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/linux_x86_64/include/", force = true, relative = true }
+BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
 ```
 
 #### For linux/arm64
 
 ``` toml
 BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_arm64", force = true, relative = true }
-BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/linux_arm64/include/", force = true, relative = true }
+BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
 ```
 
 Once that's done, you should be able to build:
@@ -70,7 +70,7 @@ Note that the Dockerfiles used to build these vendored `boringssl` builds may be
 
 If you are building for a platform we don't include vendored FIPS `boringssl` binaries for, or you don't want or need FIPS compliance, note that currently non-FIPS builds are **not supported** by us. However you may build `ztunnel` with a FIPS-less `boringssl` by doing the following:
 
-1. Comment out the `BORING_BSSL_*` environment variables in `.cargo/config.toml` entirely.
+1. Comment out all of the `BORING_BSSL_*` environment variables in `.cargo/config.toml` entirely.
 1. Run `cargo build --no-default-features`
 
 Some IDEs (such as the [Intellij-series](https://github.com/intellij-rust/intellij-rust/issues/9757)) do not support
