@@ -23,7 +23,7 @@ use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
 
-use ztunnel::identity::mock::MockCaClient;
+use ztunnel::identity::mock::new_secret_manager;
 
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
@@ -87,7 +87,7 @@ async fn test_conflicting_bind_error_admin() {
 async fn test_shutdown_drain() {
     helpers::initialize_telemetry();
 
-    let cert_manager = MockCaClient::new(Duration::from_secs(10));
+    let cert_manager = new_secret_manager(Duration::from_secs(10));
     let app = ztunnel::app::build_with_cert(test_config(), cert_manager.clone())
         .await
         .unwrap();
@@ -129,7 +129,7 @@ async fn test_shutdown_forced_drain() {
     let mut cfg = test_config();
     cfg.termination_grace_period = Duration::from_millis(10);
 
-    let cert_manager = MockCaClient::new(Duration::from_secs(10));
+    let cert_manager = new_secret_manager(Duration::from_secs(10));
     let app = ztunnel::app::build_with_cert(cfg, cert_manager.clone())
         .await
         .unwrap();

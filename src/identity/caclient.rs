@@ -98,6 +98,40 @@ impl CertificateProvider for CaClient {
     }
 }
 
+pub mod mock {
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+
+    use crate::identity::{CertificateProvider, Identity};
+    use crate::tls::{generate_test_certs, Certs};
+
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    pub struct CaClient {
+        pub cert_lifetime: Duration,
+    }
+
+    #[async_trait]
+    impl CertificateProvider for CaClient {
+        async fn fetch_certificate(&self, id: &Identity) -> Result<Certs, Error> {
+            let certs = generate_test_certs(
+                &id.clone().into(),
+                Duration::from_secs(0),
+                self.cert_lifetime,
+            );
+            return Ok(certs);
+        }
+    }
+
+    impl CaClient {
+        pub fn new(cert_lifetime: Duration) -> CaClient {
+            CaClient { cert_lifetime }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

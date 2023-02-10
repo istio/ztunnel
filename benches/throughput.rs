@@ -64,7 +64,7 @@ fn initialize_environment(mode: Mode) -> (Arc<Mutex<TestEnv>>, Runtime) {
         .unwrap();
     // Global setup: spin up an echo server and ztunnel instance
     let (env, _) = rt.block_on(async move {
-        let cert_manager = identity::mock::MockCaClient::new(Duration::from_secs(10));
+        let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
         let app = app::build_with_cert(test_helpers::test_config(), cert_manager.clone())
             .await
             .unwrap();
