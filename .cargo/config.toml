@@ -2,4 +2,4 @@
 target-dir = "out/rust"
 [env]
 BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
-BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/linux_x86_64/include/", force = true, relative = true }
+BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
