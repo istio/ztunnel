@@ -30,4 +30,5 @@ pub mod workload;
 pub mod xds;
 
 pub mod hyper_util;
+#[cfg(test)]
 pub mod test_helpers;
