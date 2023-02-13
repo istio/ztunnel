@@ -30,5 +30,6 @@ pub mod workload;
 pub mod xds;
 
 pub mod hyper_util;
-#[cfg(test)]
+
+#[cfg(target_os = "linux")]
 pub mod test_helpers;

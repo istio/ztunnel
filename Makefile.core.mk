@@ -13,7 +13,6 @@ build:
 # Test that all important features build
 check-features:
 	cargo check --features console
-	(cd tests; cargo check --profile test)
 	(cd fuzz; cargo check)
 
 # target in common/Makefile.common.mk doesn't handle our third party vendored files; only check golang and rust codes
