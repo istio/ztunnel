@@ -29,7 +29,8 @@ pub struct BuildInfo {
     git_revision: String,
     rust_version: String,
     build_status: String,
-    pub git_tag: String,
+    git_tag: String,
+    pub istio_version: String,
 }
 
 impl BuildInfo {
@@ -40,13 +41,14 @@ impl BuildInfo {
             rust_version: BUILD_RUST_VERSION.to_string(),
             build_status: BUILD_STATUS.to_string(),
             git_tag: BUILD_TAG.to_string(),
+            istio_version: env::var("ISTIO_VERSION").unwrap_or_else(|_| "unknown".to_string())
         }
     }
 }
 
 impl Display for BuildInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\"}}",
-        self.version, self.git_revision, self.rust_version, self.build_status, self.git_tag)
+        write!(f, "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
+        self.version, self.git_revision, self.rust_version, self.build_status, self.git_tag, self.istio_version)
     }
 }
