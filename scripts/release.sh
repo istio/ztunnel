@@ -19,8 +19,6 @@ set -ex
 WD=$(dirname "$0")
 WD=$(cd "$WD" || exit; pwd)
 
-cargo build --release
-
 case $(uname -m) in
     x86_64)
       export ARCH=amd64;;
@@ -31,6 +29,8 @@ case $(uname -m) in
       ;;
     *) echo "unsupported architecture"; exit 1 ;;
 esac
+
+cargo build --release
 
 SHA="$(git rev-parse --verify HEAD)"
 RELEASE_NAME="ztunnel-${SHA}-${ARCH}"
