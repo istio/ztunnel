@@ -22,8 +22,13 @@ WD=$(cd "$WD" || exit; pwd)
 cargo build --release
 
 case $(uname -m) in
-    x86_64) export ARCH=amd64;;
-    aarch64) export ARCH=arm64;;
+    x86_64)
+      export ARCH=amd64;;
+    aarch64)
+      export ARCH=arm64
+      # TODO(https://github.com/istio/ztunnel/issues/357) clean up this hack
+      sed -i 's/x86_64/arm64/g' .cargo/config.toml
+      ;;
     *) echo "unsupported architecture"; exit 1 ;;
 esac
 
