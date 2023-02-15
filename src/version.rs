@@ -41,7 +41,7 @@ impl BuildInfo {
             rust_version: BUILD_RUST_VERSION.to_string(),
             build_status: BUILD_STATUS.to_string(),
             git_tag: BUILD_TAG.to_string(),
-            istio_version: env::var("ISTIO_VERSION").unwrap_or_else(|_| "unknown".to_string())
+            istio_version: env::var("ISTIO_VERSION").unwrap_or_else(|_| "unknown".to_string()),
         }
     }
 }
