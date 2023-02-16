@@ -628,7 +628,7 @@ pub mod tests {
     #[test]
     #[cfg(not(feature = "fips"))]
     fn is_fips_disabled() {
-        assert_eq!(!boring::fips::enabled());
+        assert!(!boring::fips::enabled());
     }
 
     #[test]
