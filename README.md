@@ -66,6 +66,25 @@ This manual twiddling of environment vars is not ideal but given that the altern
 
 Note that the Dockerfiles used to build these vendored `boringssl` builds may be found in the respective vendor directories, and can serve as a reference for the build environment needed to generate FIPS-compliant ztunnel builds.
 
+#### On Mac OSX
+
+The ztunnel is not intended to be run on Mac OS. Some of the dependencies for
+testing ztunnel don't support macs at all. This means developing ztunnel from
+a Mac requires a VM or a container. The `make` targets in this project automatically
+use a container to build and test.
+
+This can be very slow. Changing your container runtime to use `virtiofs` speed things up by about 2x. This works with [Docker](https://www.docker.com/blog/speed-boost-achievement-unlocked-on-docker-desktop-4-6-for-mac/)
+and [lima](https://github.com/lima-vm/lima/blob/be92ce592c905f74623323db5e37c261feae0863/examples/default.yaml#L98).
+
+The slowdown is mostly due to having the `out/` directory in our bind mount. This can be removed by setting the following environment variable:
+
+``` bash
+export CONDITIONAL_HOST_MOUNTS="--mount type=volume,source=cargoout,destination=/home -e CARGO_TARGET_DIR=/home/cargoout"
+```
+
+Subsequent `make ...` commands will not write to the host's `out/` directory.
+This speeds up build times by over 10x.
+
 ### Non-FIPS
 
 If you are building for a platform we don't include vendored FIPS `boringssl` binaries for, or you don't want or need FIPS compliance, note that currently non-FIPS builds are **not supported** by us. However you may build `ztunnel` with a FIPS-less `boringssl` by doing the following:
