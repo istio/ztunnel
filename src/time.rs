@@ -28,21 +28,23 @@ impl Converter {
         }
     }
 
-    pub fn system_time_to_instant(&self, t: SystemTime) -> Instant {
+    pub fn system_time_to_instant(&self, t: SystemTime) -> Option<Instant> {
         match t.duration_since(self.sys_now) {
-            Ok(d) => self.now + d,
+            Ok(d) => Some(self.now + d),
             Err(_) => match self.sys_now.duration_since(t) {
-                Ok(d) => self.now - d,
+                Ok(d) => self.now.checked_sub(d),
                 Err(_) => panic!("time both before and after"),
             },
         }
     }
 
-    pub fn instant_to_system_time(&self, t: Instant) -> SystemTime {
+    pub fn instant_to_system_time(&self, t: Instant) -> Option<SystemTime> {
         if t > self.now {
-            self.sys_now + t.saturating_duration_since(self.now)
+            self.sys_now
+                .checked_add(t.saturating_duration_since(self.now))
         } else {
-            self.sys_now - self.now.saturating_duration_since(t)
+            self.sys_now
+                .checked_sub(self.now.saturating_duration_since(t))
         }
     }
 
@@ -58,6 +60,12 @@ impl Converter {
     }
 }
 
+impl Default for Converter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -67,8 +75,8 @@ mod tests {
         const DELAY: Duration = Duration::from_secs(1);
         let conv = super::Converter::new();
         let now = Instant::now();
-        let sys_now = conv.instant_to_system_time(now);
+        let sys_now = conv.instant_to_system_time(now).unwrap();
         let later = conv.system_time_to_instant(sys_now + DELAY);
-        assert_eq!(later, now + DELAY);
+        assert_eq!(later, Some(now + DELAY));
     }
 }

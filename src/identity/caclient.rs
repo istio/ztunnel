@@ -177,7 +177,8 @@ pub mod mock {
             let not_before = self
                 .cfg
                 .time_conv
-                .instant_to_system_time(Instant::now().into());
+                .instant_to_system_time(Instant::now().into())
+                .expect("SystemTime cannot represent current time. Was the process started in extreme future?");
             let not_after = not_before + self.cfg.cert_lifetime;
 
             let certs = generate_test_certs_at(&id.clone().into(), not_before, not_after);

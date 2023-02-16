@@ -230,7 +230,19 @@ impl<C: CertificateProvider> Worker<C> {
                             None => Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY,
                             Some(certs) => {
                                 let certs: tls::Certs = certs; // Type annotation.
-                                self.time_conv.system_time_to_instant(certs.refresh_at()).into()
+                                if let Some(t) = self.time_conv.system_time_to_instant(certs.refresh_at()) {
+                                    t.into()
+                                } else {
+                                    // Malformed certificate (not_after is way too much into the
+                                    // past or the future). Queue another refresh soon.
+                                    //
+                                    // TODO: This is a bit inconsistent since we still return the
+                                    // certificate to the caller successfully. Basically the
+                                    // behavior is silly, but simple and avoid panics in time math.
+                                    // We'll try to get rid of the SystemTime <-> Instant
+                                    // conversion here, so for now leaving the code as is.
+                                    Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY
+                                }
                             },
                         };
                         // TODO: Add some jitter.
@@ -245,7 +257,7 @@ impl<C: CertificateProvider> Worker<C> {
             };
         }
         // SecretManager dropped, drain remaining requests and terminate background processing.
-        while let Some(_) = workers.next().await {}
+        while workers.next().await.is_some() {}
     }
 
     async fn refresh(
