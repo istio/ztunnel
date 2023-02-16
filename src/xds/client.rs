@@ -171,7 +171,6 @@ impl Config {
         }
     }
 }
-pub fn is_expected_grpc_error() {}
 pub struct AdsClient {
     config: Config,
     /// Stores all known workload resources. Map from type_url to name
