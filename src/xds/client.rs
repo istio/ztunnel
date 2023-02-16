@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
 
-use hyper::http::status;
 use prost::{DecodeError, EncodeError};
 use prost_types::value::Kind;
 use prost_types::{Struct, Value};
