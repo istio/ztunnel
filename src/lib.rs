@@ -24,6 +24,7 @@ pub mod signal;
 pub mod socket;
 pub mod stats;
 pub mod telemetry;
+pub mod time;
 pub mod tls;
 pub mod version;
 pub mod workload;

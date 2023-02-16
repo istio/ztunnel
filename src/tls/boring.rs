@@ -52,6 +52,11 @@ pub fn asn1_time_to_system_time(time: &Asn1TimeRef) -> SystemTime {
         + Duration::from_secs(unix_time.days as u64 * 86400 + unix_time.secs as u64)
 }
 
+fn system_time_to_asn1_time(time: SystemTime) -> Option<Asn1Time> {
+    let ts = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Asn1Time::from_unix(ts.try_into().ok()?).ok()
+}
+
 pub fn cert_from(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Certs {
     let key = pkey::PKey::private_key_from_pem(key).unwrap();
     let cert = x509::X509::from_pem(cert).unwrap();
@@ -155,6 +160,13 @@ impl Certs {
     }
     pub fn is_expired(&self) -> bool {
         SystemTime::now() > self.cert.not_after
+    }
+
+    pub fn refresh_at(&self) -> SystemTime {
+        match self.cert.not_after.duration_since(self.cert.not_before) {
+            Ok(valid_for) => self.cert.not_before + valid_for / 2,
+            Err(_) => self.cert.not_after,
+        }
     }
 
     pub fn get_duration_until_refresh(&self) -> Duration {
@@ -496,31 +508,23 @@ impl From<IpAddr> for TestIdentity {
 //     }
 // }
 
-pub fn generate_test_certs(
+// TODO: Move to the mock submodule.
+
+// TODO: Move towards code that doesn't rely on SystemTime::now() for easier time control with
+// tokio. Ideally we'll be able to also get rid of the sub-second timestamps on certificates
+// (since right now they are there only for testing).
+pub fn generate_test_certs_at(
     id: &TestIdentity,
-    duration_until_valid: Duration,
-    duration_until_expiry: Duration,
+    not_before: SystemTime,
+    not_after: SystemTime,
 ) -> Certs {
     let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
     let (ca_cert, ca_key) = test_ca().unwrap();
     let mut builder = x509::X509::builder().unwrap();
-    let not_before_asn = Asn1Time::days_from_now(
-        (duration_until_valid.as_secs() / 60 / 24)
-            .try_into()
-            .unwrap(),
-    )
-    .unwrap();
-    let not_before_systime = SystemTime::now() + duration_until_valid;
-    let expire_time: i64 = (not_before_systime
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + duration_until_expiry.as_secs())
-    .try_into()
-    .unwrap();
+    let not_before_asn = system_time_to_asn1_time(not_before).unwrap();
     builder.set_not_before(&not_before_asn).unwrap();
     builder
-        .set_not_after(&Asn1Time::from_unix(expire_time).unwrap())
+        .set_not_after(&system_time_to_asn1_time(not_after).unwrap())
         .unwrap();
 
     builder.set_pubkey(&key).unwrap();
@@ -575,13 +579,22 @@ pub fn generate_test_certs(
 
     let mut cert = ZtunnelCert::new(builder.build());
     // For sub-second granularity
-    cert.not_before = not_before_systime;
-    cert.not_after = not_before_systime + duration_until_expiry;
+    cert.not_before = not_before;
+    cert.not_after = not_after;
     Certs {
         cert,
         key,
         chain: vec![ZtunnelCert::new(ca_cert)],
     }
+}
+
+pub fn generate_test_certs(
+    id: &TestIdentity,
+    duration_until_valid: Duration,
+    duration_until_expiry: Duration,
+) -> Certs {
+    let not_before = SystemTime::now() + duration_until_valid;
+    generate_test_certs_at(id, not_before, not_before + duration_until_expiry)
 }
 
 fn test_ca() -> Result<(x509::X509, PKey<Private>), Error> {

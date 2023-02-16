@@ -99,35 +99,92 @@ impl CertificateProvider for CaClient {
 }
 
 pub mod mock {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use tokio::sync::RwLock;
+    use tokio::time::Instant;
 
     use crate::identity::{CertificateProvider, Identity};
-    use crate::tls::{generate_test_certs, Certs};
+    use crate::tls::{generate_test_certs_at, Certs};
 
     use super::*;
 
-    #[derive(Clone, Debug)]
-    pub struct CaClient {
+    #[derive(Default)]
+    struct ClientState {
+        fetches: Vec<Identity>,
+    }
+
+    #[derive(Clone)]
+    pub struct ClientConfig {
         pub cert_lifetime: Duration,
+        pub time_conv: crate::time::Converter,
+        // If non-zero, causes fetch_certificate calls to sleep for the specified duration before
+        // returning. This is helpful to let tests that pause tokio time get more control over code
+        // execution.
+        pub fetch_latency: Duration,
+    }
+
+    impl Default for ClientConfig {
+        fn default() -> Self {
+            Self {
+                fetch_latency: Duration::ZERO,
+                cert_lifetime: Duration::from_secs(10),
+                time_conv: crate::time::Converter::new(),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct CaClient {
+        cfg: ClientConfig,
+        state: Arc<RwLock<ClientState>>,
+    }
+
+    impl CaClient {
+        pub fn new(cfg: ClientConfig) -> CaClient {
+            CaClient {
+                cfg,
+                state: Default::default(),
+            }
+        }
+
+        pub fn cert_lifetime(&self) -> Duration {
+            self.cfg.cert_lifetime
+        }
+
+        // Returns a list of fetch_certificate calls, in the order they happened. Calls are added
+        // just before the function returns (ie. after the potential sleep controlled by the
+        // fetch_latency config option).
+        pub async fn fetches(&self) -> Vec<Identity> {
+            self.state.read().await.fetches.clone()
+        }
+
+        pub async fn clear_fetches(&self) {
+            self.state.write().await.fetches.clear();
+        }
     }
 
     #[async_trait]
     impl CertificateProvider for CaClient {
         async fn fetch_certificate(&self, id: &Identity) -> Result<Certs, Error> {
-            let certs = generate_test_certs(
-                &id.clone().into(),
-                Duration::from_secs(0),
-                self.cert_lifetime,
-            );
-            return Ok(certs);
-        }
-    }
+            if self.cfg.fetch_latency != Duration::ZERO {
+                tokio::time::sleep(self.cfg.fetch_latency).await;
+            }
 
-    impl CaClient {
-        pub fn new(cert_lifetime: Duration) -> CaClient {
-            CaClient { cert_lifetime }
+            // Get SystemTime::now() via Instant::now() to allow mocking in tests.
+            let not_before = self
+                .cfg
+                .time_conv
+                .instant_to_system_time(Instant::now().into())
+                .expect("SystemTime cannot represent current time. Was the process started in extreme future?");
+            let not_after = not_before + self.cfg.cert_lifetime;
+
+            let certs = generate_test_certs_at(&id.clone().into(), not_before, not_after);
+
+            self.state.write().await.fetches.push(id.clone());
+            return Ok(certs);
         }
     }
 }
