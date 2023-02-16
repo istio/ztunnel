@@ -32,11 +32,12 @@ impl Metrics {
         let build_gauge: Family<IstioBuildLabel, Gauge> = Default::default();
         registry.register("build", "Istio component build info", build_gauge.clone());
 
-        let git_tag = version::BuildInfo::new().git_tag;
+        let tag = version::BuildInfo::new().istio_version;
+        // Note: tag refers to the "Istio version", not the ztunnels own tag (which is an implementation detail to Istio).
         build_gauge
             .get_or_create(&IstioBuildLabel {
                 component: "ztunnel".to_string(),
-                tag: git_tag,
+                tag,
             })
             .set(1);
 
