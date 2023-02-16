@@ -32,6 +32,7 @@ pub struct ConnectionTermination {
 pub enum ConnectionTerminationReason {
     ConnectionError,
     Error,
+    Reconnect,
     Complete,
 }
 

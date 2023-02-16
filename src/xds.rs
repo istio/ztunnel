@@ -14,11 +14,12 @@
 
 mod client;
 
+use std::convert::TryInto;
+
 pub use client::*;
 use tokio::sync::mpsc;
 mod types;
 use self::service::discovery::v3::DeltaDiscoveryRequest;
-use std::convert::TryInto;
 pub use types::*;
 
 #[derive(thiserror::Error, Debug)]

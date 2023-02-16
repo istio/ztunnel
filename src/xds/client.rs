@@ -25,7 +25,6 @@ use prost_types::{Struct, Value};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tonic::Code::DeadlineExceeded;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::RootCert;
@@ -271,15 +270,16 @@ impl AdsClient {
                 let status: tonic::Status = e.try_into().unwrap();
                 if status.code() == tonic::Code::Unknown
                     || status.code() == tonic::Code::Cancelled
-                    || status.code() == DeadlineExceeded
+                    || status.code() == tonic::Code::DeadlineExceeded
                     || (status.code() == tonic::Code::Unavailable
                         && status.message().contains("transport is closing"))
                 {
                     debug!("XDS client terminated: {}, retrying", err_detail);
-                    self.metrics.record(&ConnectionTerminationReason::Complete);
+                    self.metrics
+                        .increment(&ConnectionTerminationReason::Reconnect);
                 } else {
                     warn!("XDS client error: {}, retrying", err_detail);
-                    self.metrics.record(&ConnectionTerminationReason::Error);
+                    self.metrics.increment(&ConnectionTerminationReason::Error);
                 }
                 // For gRPC errors, we connect immediately
                 // Reset backoff
