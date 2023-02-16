@@ -607,8 +607,15 @@ pub mod tests {
     use super::generate_test_certs;
 
     #[test]
+    #[cfg(feature = "fips")]
     fn is_fips_enabled() {
         assert!(boring::fips::enabled());
+    }
+
+    #[test]
+    #[cfg(not(feature = "fips"))]
+    fn is_fips_disabled() {
+        assert_eq!(!boring::fips::enabled());
     }
 
     #[test]
@@ -640,11 +647,5 @@ pub mod tests {
         );
         assert!(!future_certs.is_expired());
         assert_eq!(future_certs.get_duration_until_refresh(), zero_dur);
-    }
-
-    #[test]
-    #[cfg(not(feature = "fips"))]
-    fn is_fips_disabled() {
-        assert_eq!(false, boring::fips::enabled());
     }
 }
