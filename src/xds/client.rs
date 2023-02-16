@@ -19,12 +19,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
 
+use hyper::http::status;
 use prost::{DecodeError, EncodeError};
 use prost_types::value::Kind;
 use prost_types::{Struct, Value};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tonic::Code::DeadlineExceeded;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::RootCert;
@@ -169,7 +171,7 @@ impl Config {
         }
     }
 }
-
+pub fn is_expected_grpc_error() {}
 pub struct AdsClient {
     config: Config,
     /// Stores all known workload resources. Map from type_url to name
@@ -265,6 +267,25 @@ impl AdsClient {
                     .increment(&ConnectionTerminationReason::ConnectionError);
                 tokio::time::sleep(backoff).await;
                 backoff
+            }
+            Err(e @ Error::GrpcStatus(_)) => {
+                let err_detail = e.to_string();
+                let status: tonic::Status = e.try_into().unwrap();
+                if status.code() == tonic::Code::Unknown
+                    || status.code() == tonic::Code::Cancelled
+                    || status.code() == DeadlineExceeded
+                    || (status.code() == tonic::Code::Unavailable
+                        && status.message().contains("transport is closing"))
+                {
+                    debug!("XDS client terminated: {}, retrying", err_detail);
+                    self.metrics.record(&ConnectionTerminationReason::Complete);
+                } else {
+                    warn!("XDS client error: {}, retrying", err_detail);
+                    self.metrics.record(&ConnectionTerminationReason::Error);
+                }
+                // For gRPC errors, we connect immediately
+                // Reset backoff
+                Duration::from_millis(10)
             }
             Err(e) => {
                 // For other errors, we connect immediately
