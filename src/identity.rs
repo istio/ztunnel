@@ -43,4 +43,6 @@ pub enum Error {
     EmptyResponse(Identity),
     #[error("invalid spiffe identity: {0}")]
     Spiffe(String),
+    #[error("the identity is no longer needed")]
+    Forgotten,
 }

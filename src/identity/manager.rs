@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write;
 use std::str::FromStr;
@@ -106,6 +106,7 @@ pub enum Priority {
     RealTime,
 }
 
+#[derive(Debug)]
 enum CertState {
     // Should happen only on the first request for an Identity.
     Initializing,
@@ -167,7 +168,7 @@ struct Worker<C: CertificateProvider> {
 impl<C: CertificateProvider> Worker<C> {
     fn new(
         client: C,
-        requests: mpsc::Receiver<(Identity, Priority)>,
+        requests: mpsc::Receiver<Request>,
         cfg: SecretManagerConfig,
     ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         if cfg.concurrency == 0 {
@@ -186,19 +187,29 @@ impl<C: CertificateProvider> Worker<C> {
         (worker, tokio::spawn(async move { w.run(requests).await }))
     }
 
+    async fn has_id(&self, id: &Identity) -> bool {
+        self.certs.lock().await.contains_key(id)
+    }
+
     // Manages certificate updates. Since all the work is done in a single task, the code is
     // lock-free. This is OK as the code is I/O bound so we don't need the extra parallelism.
-    async fn run(&self, mut requests: mpsc::Receiver<(Identity, Priority)>) {
+    async fn run(&self, mut requests: mpsc::Receiver<Request>) {
         use futures::stream::FuturesUnordered;
         use futures::StreamExt;
         use priority_queue::PriorityQueue;
 
+        #[derive(Eq, PartialEq)]
+        enum Fetch {
+            Processing,
+            Forgetting,
+        }
+
         // A set of futures refreshing the certificates. Each future completes with the identity for
         // which it was invoked and a resulting certificate or error.
-        let mut workers = FuturesUnordered::new();
-        // The set of identities for which there are pending requests. Elements of workers and
-        // processing correspond to each other.
-        let mut processing = HashSet::new();
+        let mut fetches = FuturesUnordered::new();
+        // The set of identities for which there are pending fetches. Elements of `fetches` and
+        // `processing` correspond to each other.
+        let mut processing: HashMap<Identity, Fetch> = HashMap::new();
         // Identities for which we will need to refresh certificates in the future, ordered by the
         // priority and time at which the refresh needs to happen.
         //
@@ -212,78 +223,120 @@ impl<C: CertificateProvider> Worker<C> {
         'main: loop {
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
             tokio::select! {
+                // Handle requests from SecretManager. Those are generally split between the
+                // client-side processing (operations on the `certs` map) and the worker-side
+                // processing (receiving the relevant request and taking action on it). The order
+                // of processing of requests here may not match with the order the `certs` map was
+                // processed by clients: it is possible for concurrent calls fetch_certificate
+                // (id) and forget_certificate(id) to result in id not being present in the `certs`
+                // map, but the Fetch and Forget requests arriving in the reverse order in the
+                // worker here.
+                //
+                // For that reason, we check the `certs` map (via the has_id call) before processing
+                // each request to decide if it's still relevant. After the check we are free to
+                // not worry about ordering and proceed with handling the request - a contradicting
+                // call made later by the client would result in another request being delivered to
+                // the worker.
                 res = requests.recv() => match res {
-                    Some((id, pri)) => {
-                        if !processing.contains(&id) {
-                            pending.push_increase(id, PendingPriority(pri, Instant::now()));
+                    Some(Request::Fetch(id, pri)) => {
+                        if !self.has_id(&id).await {
+                            // Nobody interested in the Identity anymore, do nothing.
+                            continue 'main;
+                        }
+                        match processing.get(&id) {
+                            None => {
+                                pending.push_increase(id, PendingPriority(pri, Instant::now()));
+                            },
+                            Some(Fetch::Forgetting) => {
+                                // Once the associated future completes, the result will be dropped
+                                // instead of communicated back to the `certs` map and queued for
+                                // refresh.
+                                processing.insert(id, Fetch::Processing);
+                            },
+                            Some(Fetch::Processing) => (),
                         }
                     },
-                    None => {
-                        break 'main
-                    },
-                },
-                Some(res) = workers.next() => match res {
-                    Err(_) => break 'main,
-                    Ok((id, certs)) => {
-                        processing.remove(&id);
-                        let refresh_at = match certs {
-                            None => Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY,
-                            Some(certs) => {
-                                let certs: tls::Certs = certs; // Type annotation.
-                                if let Some(t) = self.time_conv.system_time_to_instant(certs.refresh_at()) {
-                                    t.into()
-                                } else {
-                                    // Malformed certificate (not_after is way too much into the
-                                    // past or the future). Queue another refresh soon.
-                                    //
-                                    // TODO: This is a bit inconsistent since we still return the
-                                    // certificate to the caller successfully. Basically the
-                                    // behavior is silly, but simple and avoid panics in time math.
-                                    // We'll try to get rid of the SystemTime <-> Instant
-                                    // conversion here, so for now leaving the code as is.
-                                    Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY
-                                }
+                    Some(Request::Forget(id)) => {
+                        if self.has_id(&id).await {
+                            // After the forget was queued, there was another request to start
+                            // managing the Identity. Do nothing.
+                            continue 'main;
+                        }
+                        match processing.get(&id) {
+                            None => {
+                                pending.remove(&id);
                             },
-                        };
-                        // TODO: Add some jitter.
-                        pending.push_increase(id, PendingPriority(Priority::Background, refresh_at));
+                            Some(Fetch::Processing) => {
+                                processing.insert(id, Fetch::Forgetting);
+                            },
+                            Some(Fetch::Forgetting) => (),
+                        }
                     },
+                    None => break 'main,
                 },
-                true = maybe_sleep_until(next), if workers.len() < self.concurrency as usize => {
+                // Handle fetch results.
+                Some((id, res)) = fetches.next() => {
+                    match processing.remove(&id) {
+                        Some(Fetch::Processing) => (),
+                        Some(Fetch::Forgetting) => continue 'main,
+                        None => unreachable!("processing should represent all fetches"),
+                    }
+                    let (state, refresh_at) = match res {
+                        Err(err) => {
+                            let refresh_at = Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY;
+                            (CertState::Unavailable(err), refresh_at)
+                        },
+                        Ok(certs) => {
+                            let certs: tls::Certs = certs; // Type annotation.
+                            let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
+                            let refresh_at = if let Some(t) = refresh_at {
+                                t.into()
+                            } else {
+                                // Malformed certificate (not_after is way too much into the
+                                // past or the future). Queue another refresh soon.
+                                //
+                                // TODO: This is a bit inconsistent since we still return the
+                                // certificate to the caller successfully. Basically the
+                                // behavior is silly, but simple and avoid panics in time math.
+                                // We'll try to get rid of the SystemTime <-> Instant
+                                // conversion here, so for now leaving the code as is.
+                                Instant::now()
+                            };
+                            (CertState::Available(certs), refresh_at)
+                        },
+                    };
+                    if self.update_certs(&id, state).await {
+                        pending.push_increase(id, PendingPriority(Priority::Background, refresh_at));
+                    }
+                },
+                // Initiate the next fetch.
+                true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
                     let (id, _) = pending.pop().unwrap();
-                    processing.insert(id.to_owned());
-                    workers.push(self.refresh(id.to_owned()));
+                    processing.insert(id.to_owned(), Fetch::Processing);
+                    fetches.push(async move {
+                        let res = self.client.fetch_certificate(&id).await;
+                        (id, res)
+                    });
                 },
             };
         }
         // SecretManager dropped, drain remaining requests and terminate background processing.
-        while workers.next().await.is_some() {}
+        while fetches.next().await.is_some() {}
     }
 
-    async fn refresh(
-        &self,
-        id: Identity,
-    ) -> Result<(Identity, Option<tls::Certs>), watch::error::SendError<CertState>> {
-        let (state, res) = match self.client.fetch_certificate(&id).await {
-            Ok(certs) => (CertState::Available(certs.clone()), Some(certs)), // TODO: must we return 2 copies of certs as different types?
-            Err(err) => (CertState::Unavailable(err), None),
-        };
-        match self.update_certs(&id, state).await {
-            Err(e) => Err(e),
-            Ok(()) => Ok((id, res)),
+    // Returns whether the Identity is still managed.
+    async fn update_certs(&self, id: &Identity, certs: CertState) -> bool {
+        // Both errors (lack of entry in the `certs` map and a send error) are handled the same way
+        // (by returning false): either (a) there was no entry in the `certs` map due to a
+        // forget_certificate call some time ago or (b) a forget_certificate call was made and
+        // finished just after the lock was released (but before certs was sent)
+        match self.certs.lock().await.get(id) {
+            Some(state) => {
+                state.tx.send(certs).expect("state.rx cannot be gone");
+                true
+            }
+            None => false,
         }
-    }
-
-    // Fails if nobody is listening, ie. the SecretManager is no more. Should trigger background
-    // processing shutdown in such case.
-    async fn update_certs(
-        &self,
-        id: &Identity,
-        certs: CertState,
-    ) -> Result<(), watch::error::SendError<CertState>> {
-        let all_certs = self.certs.lock().await;
-        let state = all_certs.get(id).unwrap();
-        state.tx.send(certs)
     }
 }
 
@@ -299,6 +352,11 @@ async fn maybe_sleep_until(till: Option<Instant>) -> bool {
     }
 }
 
+enum Request {
+    Fetch(Identity, Priority),
+    Forget(Identity),
+}
+
 pub struct SecretManagerConfig {
     time_conv: crate::time::Converter,
     concurrency: u16,
@@ -312,7 +370,7 @@ pub struct SecretManager<C: CertificateProvider> {
     // Channel to which certificate requests are sent to. The Identity for which request is being
     // sent for must have a corresponding entry in the worker's certs map (which is where the
     // result can be read from).
-    requests: mpsc::Sender<(Identity, Priority)>,
+    requests: mpsc::Sender<Request>,
 }
 
 impl<T: CertificateProvider> SecretManager<T> {
@@ -339,6 +397,12 @@ impl<T: CertificateProvider> SecretManager<T> {
         )
     }
 
+    async fn post(&self, req: Request) {
+        if let Err(e) = self.requests.send(req).await {
+            unreachable!("SecretManager worker died: {e}");
+        }
+    }
+
     async fn start_fetch(
         &self,
         id: &Identity,
@@ -354,10 +418,8 @@ impl<T: CertificateProvider> SecretManager<T> {
                 certs.insert(id.to_owned(), CertChannel { rx: rx.clone(), tx });
                 drop(certs);
                 // Notify the background worker to start refreshing the certificate.
-                match self.requests.send((id.to_owned(), pri)).await {
-                    Err(e) => unreachable!("SecretManager worker died: {e}"),
-                    Ok(()) => Ok(rx),
-                }
+                self.post(Request::Fetch(id.to_owned(), pri)).await;
+                Ok(rx)
             }
         }
     }
@@ -366,12 +428,12 @@ impl<T: CertificateProvider> SecretManager<T> {
         tokio::select! {
             // Wait for the initial value if not ready yet.
             res = rx.changed() => match res {
-                Err(e) => unreachable!("the send end of the channel should still be reachable via self: {e}"),
                 Ok(()) => match *rx.borrow() {
                     CertState::Unavailable(ref err) => Err(err.to_owned()),
                     CertState::Available(ref certs) => Ok(certs.to_owned()),
                     CertState::Initializing => unreachable!("Only the initial state can be Initializing, but the state has changed"),
                 },
+                Err(_) => Err(Error::Forgotten),
             },
             // Ideally we'd detect it by rx.changed() failing above, but making sure that senders
             // are owned by the background worker (and so drop on panic/other error) complicates
@@ -389,6 +451,12 @@ impl<T: CertificateProvider> SecretManager<T> {
         // and wait. Any changes should go to one of those two methods, and if that proves
         // impossible - unit testing strategy may need to be rethinked.
         self.wait(self.start_fetch(id, pri).await?).await
+    }
+
+    pub async fn forget_certificate(&self, id: &Identity) {
+        if self.worker.certs.lock().await.remove(id).is_some() {
+            self.post(Request::Forget(id.clone())).await;
+        }
     }
 }
 
@@ -783,6 +851,21 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_unused_cleanup() {
         setup(1).tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_forget_pending() {
+        let secret_manager = setup(1);
+        let start = Instant::now();
+        let sm = secret_manager.clone();
+
+        let fetch = tokio::spawn(async move { sm.fetch_certificate(&identity("test")).await });
+        // Proceed the fetch till it blocks waiting for the worker.
+        tokio::time::sleep_until(start + NANOSEC).await;
+        secret_manager.forget_certificate(&identity("test")).await;
+
+        assert_matches!(fetch.await.unwrap(), Err(Error::Forgotten));
+        secret_manager.tear_down().await;
     }
 
     #[test]
