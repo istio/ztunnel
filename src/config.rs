@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::{env, fs};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use std::{env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -323,7 +323,12 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
 
     let istio_env_vars: Vec<(String, String)> = env::vars()
         .filter(|(key, _)| key.starts_with(ISTIO_META_PREFIX))
-        .map(|(key, val)| (key.trim_start_matches(ISTIO_META_PREFIX).to_lowercase(), val))
+        .map(|(key, val)| {
+            (
+                key.trim_start_matches(ISTIO_META_PREFIX).to_lowercase(),
+                val,
+            )
+        })
         .collect();
     for (key, val) in istio_env_vars {
         pc.proxy_metadata.insert(key, val);
