@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fs;
+use std::{env, fs};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -43,6 +43,8 @@ const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
+
+const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -319,6 +321,14 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
         .filter_map(|(k, v)| Some((k.strip_prefix("")?.to_string(), v)))
         .collect();
 
+    let istio_env_vars: Vec<(String, String)> = env::vars()
+        .filter(|(key, _)| key.starts_with(ISTIO_META_PREFIX))
+        .map(|(key, val)| (key.trim_start_matches(ISTIO_META_PREFIX).to_lowercase(), val))
+        .collect();
+    for (key, val) in istio_env_vars {
+        pc.proxy_metadata.insert(key, val);
+    }
+
     // TODO if certain fields like trustDomainAliases are added, make sure they merge like:
     // https://github.com/istio/istio/blob/bdd47796d696ea5db604b623c51567d13ff7c11b/pkg/config/mesh/mesh.go#L244
 
@@ -387,5 +397,35 @@ pub mod tests {
             cfg.proxy_metadata["ISTIO_META_FOOBAR"],
             "foobar-overwritten"
         );
+    }
+
+    #[test]
+    fn test_istio_env_map() {
+        // Set up some test environment variables
+        env::set_var("ISTIO_META_FOO", "bar");
+        env::set_var("ISTIO_META_HELLO", "world");
+        env::set_var("NOT_ISTIO_VAR", "not_istio_value");
+
+        // Get all environment variables that start with "ISTIO_META_"
+        let istio_env_vars: Vec<(String, String)> = env::vars()
+            .filter(|(key, _)| key.starts_with("ISTIO_META_"))
+            .map(|(key, val)| (key.trim_start_matches("ISTIO_META_").to_lowercase(), val))
+            .collect();
+
+        // Create a HashMap from the environment variables
+        let mut istio_env_map: HashMap<String, String> = HashMap::new();
+        for (key, val) in istio_env_vars {
+            istio_env_map.insert(key, val);
+        }
+
+        // Check that the HashMap contains the expected key-value pairs
+        assert_eq!(istio_env_map.get("foo"), Some(&"bar".to_string()));
+        assert_eq!(istio_env_map.get("hello"), Some(&"world".to_string()));
+        assert_eq!(istio_env_map.get("not_istio_var"), None);
+
+        // Unset the test environment variables
+        env::remove_var("ISTIO_META_FOO");
+        env::remove_var("ISTIO_META_HELLO");
+        env::remove_var("NOT_ISTIO_VAR");
     }
 }
