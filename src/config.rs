@@ -21,6 +21,7 @@ use std::{env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
+use serde_json::Value;
 use tokio::time;
 
 use crate::identity;
@@ -310,7 +311,7 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
 
     let mut pc = [mesh_config, proxy_config_env]
         .into_iter()
-        .flatten() 
+        .flatten()
         .fold(ProxyConfig::default(), |pc, v| pc.merge(v));
 
     // only include ISTIO_META_ prefixed fields in this map
@@ -326,13 +327,27 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
         .filter(|(key, _)| key.starts_with(ISTIO_META_PREFIX))
         .map(|(key, val)| (key.trim_start_matches(ISTIO_META_PREFIX).to_string(), val))
         .collect();
-    pc.proxy_metadata.extend(istio_env_vars.clone());
+    pc.proxy_metadata.extend(istio_env_vars);
 
     let istio_env_json_vars: Vec<(String, String)> = env::vars()
         .filter(|(key, _)| key.starts_with(ISTIO_META_JSON_PREFIX))
-        .map(|(key, val)| (key.trim_start_matches(ISTIO_META_JSON_PREFIX).to_string(), val))
+        .map(|(key, val)| {
+            (
+                key.trim_start_matches(ISTIO_META_JSON_PREFIX).to_string(),
+                val,
+            )
+        })
         .collect();
-    pc.proxy_metadata.extend(istio_env_json_vars.clone());
+    for (_, v) in istio_env_json_vars {
+        let json_obj: Value = serde_json::from_str(&v)?;
+        if let Value::Object(obj) = json_obj {
+            for (key, value) in obj {
+                if let Value::String(s) = value {
+                    pc.proxy_metadata.insert(key, s);
+                }
+            }
+        }
+    }
 
     // TODO if certain fields like trustDomainAliases are added, make sure they merge like:
     // https://github.com/istio/istio/blob/bdd47796d696ea5db604b623c51567d13ff7c11b/pkg/config/mesh/mesh.go#L244
@@ -381,13 +396,13 @@ pub mod tests {
 
         let json_str = r#"
             {
-                "foo": "bar",
-                "foobar": "foobar",
+                "JSONFOO": "foo",
+                "JSONBAR": "bar"
             }
         "#;
 
         env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
-        env::set_var("ISTIO_METAJSON_ANNOS", json_str);
+        env::set_var("ISTIO_METAJSON_OBJECT", json_str);
 
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
@@ -404,13 +419,14 @@ pub mod tests {
         let cfg = construct_config(pc).unwrap();
 
         env::remove_var("ISTIO_META_INCLUDE_THIS");
-        env::remove_var("ISTIO_METAJSON_ANNOS");
+        env::remove_var("ISTIO_METAJSON_OBJECT");
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
         assert_eq!(cfg.proxy_metadata["FOO"], "foo");
         assert_eq!(cfg.proxy_metadata["BAR"], "bar");
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
         assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
-        assert_eq!(cfg.proxy_metadata["ANNOS"], json_str);
+        assert_eq!(cfg.proxy_metadata["JSONFOO"], "foo");
+        assert_eq!(cfg.proxy_metadata["JSONBAR"], "bar");
     }
 }
