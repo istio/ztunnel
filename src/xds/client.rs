@@ -169,7 +169,6 @@ impl Config {
         }
     }
 }
-
 pub struct AdsClient {
     config: Config,
     /// Stores all known workload resources. Map from type_url to name
@@ -265,6 +264,25 @@ impl AdsClient {
                     .increment(&ConnectionTerminationReason::ConnectionError);
                 tokio::time::sleep(backoff).await;
                 backoff
+            }
+            Err(ref e @ Error::GrpcStatus(ref status)) => {
+                let err_detail = e.to_string();
+                if status.code() == tonic::Code::Unknown
+                    || status.code() == tonic::Code::Cancelled
+                    || status.code() == tonic::Code::DeadlineExceeded
+                    || (status.code() == tonic::Code::Unavailable
+                        && status.message().contains("transport is closing"))
+                {
+                    debug!("XDS client terminated: {}, retrying", err_detail);
+                    self.metrics
+                        .increment(&ConnectionTerminationReason::Reconnect);
+                } else {
+                    warn!("XDS client error: {}, retrying", err_detail);
+                    self.metrics.increment(&ConnectionTerminationReason::Error);
+                }
+                // For gRPC errors, we connect immediately
+                // Reset backoff
+                Duration::from_millis(10)
             }
             Err(e) => {
                 // For other errors, we connect immediately
