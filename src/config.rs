@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use std::{env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -43,6 +43,8 @@ const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
+
+const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -316,8 +318,20 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
     pc.proxy_metadata = pc
         .proxy_metadata
         .into_iter()
-        .filter_map(|(k, v)| Some((k.strip_prefix("")?.to_string(), v)))
+        .map(|(k, v)| {
+            if k.starts_with(ISTIO_META_PREFIX) {
+                (k.strip_prefix(ISTIO_META_PREFIX).unwrap().to_string(), v)
+            } else {
+                (k, v)
+            }
+        })
         .collect();
+
+    let istio_env_vars: Vec<(String, String)> = env::vars()
+        .filter(|(key, _)| key.starts_with(ISTIO_META_PREFIX))
+        .map(|(key, val)| (key.trim_start_matches(ISTIO_META_PREFIX).to_string(), val))
+        .collect();
+    pc.proxy_metadata.extend(istio_env_vars);
 
     // TODO if certain fields like trustDomainAliases are added, make sure they merge like:
     // https://github.com/istio/istio/blob/bdd47796d696ea5db604b623c51567d13ff7c11b/pkg/config/mesh/mesh.go#L244
@@ -350,19 +364,24 @@ pub mod tests {
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15099);
         // TODO remove prefix
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
+        assert_eq!(cfg.proxy_metadata["FOO"], "foo");
 
         // env only
         let pc_env = Some(
-            r#"{ 
-            "discoveryAddress": "istiod-rev0.istio-system-2:15012", 
+            r#"{
+            "discoveryAddress": "istiod-rev0.istio-system-2:15012",
             "proxyAdminPort": 15999,
             "proxyMetadata": {
               "ISTIO_META_BAR": "bar",
               "ISTIO_META_FOOBAR": "foobar-overwritten",
+              "NO_PREFIX": "no-prefix"
             }
         }"#,
         );
+
+        env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
+        env::set_var("NOT_INCLUDE", "not-include");
+
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
         assert_eq!(
@@ -370,22 +389,21 @@ pub mod tests {
             default_config.readiness_addr.port()
         );
         assert_eq!(cfg.xds_address.unwrap(), "istiod-rev0.istio-system-2:15012");
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
-        assert_eq!(
-            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
-            "foobar-overwritten"
-        );
+        assert_eq!(cfg.proxy_metadata["BAR"], "bar");
+        assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
+
+        env::remove_var("ISTIO_META_INCLUDE_THIS");
+        env::remove_var("NOT_INCLUDE");
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
-        assert_eq!(
-            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
-            "foobar-overwritten"
-        );
+        assert_eq!(cfg.proxy_metadata["FOO"], "foo");
+        assert_eq!(cfg.proxy_metadata["BAR"], "bar");
+        assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
+        assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
+        assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
     }
 }
