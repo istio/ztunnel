@@ -45,6 +45,7 @@ const DEFAULT_STATS_PORT: u16 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
+const ISTIO_META_JSON_PREFIX: &str = "ISTIO_METAJSON_";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -309,7 +310,7 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
 
     let mut pc = [mesh_config, proxy_config_env]
         .into_iter()
-        .flatten()
+        .flatten() 
         .fold(ProxyConfig::default(), |pc, v| pc.merge(v));
 
     // only include ISTIO_META_ prefixed fields in this map
@@ -318,21 +319,20 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
     pc.proxy_metadata = pc
         .proxy_metadata
         .into_iter()
-        .filter_map(|(k, v)| Some((k.strip_prefix("")?.to_string(), v)))
+        .filter_map(|(k, v)| Some((k.strip_prefix(ISTIO_META_PREFIX)?.to_string(), v)))
         .collect();
 
     let istio_env_vars: Vec<(String, String)> = env::vars()
         .filter(|(key, _)| key.starts_with(ISTIO_META_PREFIX))
-        .map(|(key, val)| {
-            (
-                key.trim_start_matches(ISTIO_META_PREFIX).to_lowercase(),
-                val,
-            )
-        })
+        .map(|(key, val)| (key.trim_start_matches(ISTIO_META_PREFIX).to_string(), val))
         .collect();
-    for (key, val) in istio_env_vars {
-        pc.proxy_metadata.insert(key, val);
-    }
+    pc.proxy_metadata.extend(istio_env_vars.clone());
+
+    let istio_env_json_vars: Vec<(String, String)> = env::vars()
+        .filter(|(key, _)| key.starts_with(ISTIO_META_JSON_PREFIX))
+        .map(|(key, val)| (key.trim_start_matches(ISTIO_META_JSON_PREFIX).to_string(), val))
+        .collect();
+    pc.proxy_metadata.extend(istio_env_json_vars.clone());
 
     // TODO if certain fields like trustDomainAliases are added, make sure they merge like:
     // https://github.com/istio/istio/blob/bdd47796d696ea5db604b623c51567d13ff7c11b/pkg/config/mesh/mesh.go#L244
@@ -365,12 +365,12 @@ pub mod tests {
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15099);
         // TODO remove prefix
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
+        assert_eq!(cfg.proxy_metadata["FOO"], "foo");
 
         // env only
         let pc_env = Some(
-            r#"{ 
-            "discoveryAddress": "istiod-rev0.istio-system-2:15012", 
+            r#"{
+            "discoveryAddress": "istiod-rev0.istio-system-2:15012",
             "proxyAdminPort": 15999,
             "proxyMetadata": {
               "ISTIO_META_BAR": "bar",
@@ -378,6 +378,17 @@ pub mod tests {
             }
         }"#,
         );
+
+        let json_str = r#"
+            {
+                "foo": "bar",
+                "foobar": "foobar",
+            }
+        "#;
+
+        env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
+        env::set_var("ISTIO_METAJSON_ANNOS", json_str);
+
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
         assert_eq!(
@@ -385,52 +396,21 @@ pub mod tests {
             default_config.readiness_addr.port()
         );
         assert_eq!(cfg.xds_address.unwrap(), "istiod-rev0.istio-system-2:15012");
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
-        assert_eq!(
-            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
-            "foobar-overwritten"
-        );
+        assert_eq!(cfg.proxy_metadata["BAR"], "bar");
+        assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
+
+        env::remove_var("ISTIO_META_INCLUDE_THIS");
+        env::remove_var("ISTIO_METAJSON_ANNOS");
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_FOO"], "foo");
-        assert_eq!(cfg.proxy_metadata["ISTIO_META_BAR"], "bar");
-        assert_eq!(
-            cfg.proxy_metadata["ISTIO_META_FOOBAR"],
-            "foobar-overwritten"
-        );
-    }
-
-    #[test]
-    fn test_istio_env_map() {
-        // Set up some test environment variables
-        env::set_var("ISTIO_META_FOO", "bar");
-        env::set_var("ISTIO_META_HELLO", "world");
-        env::set_var("NOT_ISTIO_VAR", "not_istio_value");
-
-        // Get all environment variables that start with "ISTIO_META_"
-        let istio_env_vars: Vec<(String, String)> = env::vars()
-            .filter(|(key, _)| key.starts_with("ISTIO_META_"))
-            .map(|(key, val)| (key.trim_start_matches("ISTIO_META_").to_lowercase(), val))
-            .collect();
-
-        // Create a HashMap from the environment variables
-        let mut istio_env_map: HashMap<String, String> = HashMap::new();
-        for (key, val) in istio_env_vars {
-            istio_env_map.insert(key, val);
-        }
-
-        // Check that the HashMap contains the expected key-value pairs
-        assert_eq!(istio_env_map.get("foo"), Some(&"bar".to_string()));
-        assert_eq!(istio_env_map.get("hello"), Some(&"world".to_string()));
-        assert_eq!(istio_env_map.get("not_istio_var"), None);
-
-        // Unset the test environment variables
-        env::remove_var("ISTIO_META_FOO");
-        env::remove_var("ISTIO_META_HELLO");
-        env::remove_var("NOT_ISTIO_VAR");
+        assert_eq!(cfg.proxy_metadata["FOO"], "foo");
+        assert_eq!(cfg.proxy_metadata["BAR"], "bar");
+        assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
+        assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata["ANNOS"], json_str);
     }
 }
