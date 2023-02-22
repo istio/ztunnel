@@ -14,8 +14,6 @@
 
 mod client;
 
-use std::convert::TryInto;
-
 pub use client::*;
 use tokio::sync::mpsc;
 mod types;
@@ -33,15 +31,4 @@ pub enum Error {
     RequestFailure(#[from] Box<mpsc::error::SendError<DeltaDiscoveryRequest>>),
     #[error("failed to send on demand resource")]
     OnDemandSend(),
-}
-
-impl TryInto<tonic::Status> for Error {
-    type Error = Error;
-    fn try_into(self) -> Result<tonic::Status, Self> {
-        match self {
-            Error::GrpcStatus(status) => Ok(status),
-            Error::Connection(status) => Ok(status),
-            e => Err(e),
-        }
-    }
 }

@@ -265,9 +265,8 @@ impl AdsClient {
                 tokio::time::sleep(backoff).await;
                 backoff
             }
-            Err(e @ Error::GrpcStatus(_)) => {
+            Err(ref e @ Error::GrpcStatus(ref status)) => {
                 let err_detail = e.to_string();
-                let status: tonic::Status = e.try_into().unwrap();
                 if status.code() == tonic::Code::Unknown
                     || status.code() == tonic::Code::Cancelled
                     || status.code() == tonic::Code::DeadlineExceeded
