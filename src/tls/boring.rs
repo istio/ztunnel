@@ -286,7 +286,13 @@ impl Certs {
         // key and certs
         conn.set_private_key(&self.key)?;
         conn.set_certificate(&self.cert.x509)?;
-        for chain_cert in self.chain.iter() {
+        for (i, chain_cert) in self.chain.iter().enumerate() {
+            // Only include intermediate certs in the chain.
+            // The last cert is the root cert which should already exist on the peer.
+            if i < (self.chain.len() - 1) {
+                // This is an intermediate cert that should be added to the cert chain
+                conn.add_extra_chain_cert(chain_cert.x509.clone())?;
+            }
             conn.cert_store_mut().add_cert(chain_cert.x509.clone())?;
         }
         conn.check_private_key()?;
