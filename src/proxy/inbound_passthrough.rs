@@ -57,7 +57,7 @@ impl InboundPassthrough {
                 Ok((stream, remote)) => {
                     tokio::spawn(async move {
                         if let Err(e) = Self::proxy_inbound_plaintext(
-                            pi.clone(),
+                            pi, // pi cloned above; OK to move
                             socket::to_canonical(remote),
                             stream,
                         )
@@ -145,7 +145,7 @@ impl InboundPassthrough {
             reporter: Reporter::destination,
             source: source_workload,
             derived_source: Some(derived_source),
-            destination: Some(upstream.clone()),
+            destination: Some(upstream),
             connection_security_policy: traffic::SecurityPolicy::unknown,
             destination_service: None,
             destination_service_namespace: None,

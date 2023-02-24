@@ -689,7 +689,7 @@ impl WorkloadStore {
                 wl_vips.iter().choose(&mut rand::thread_rng()).unwrap();
             if let Some(wl) = self.workloads.get(workload_ip) {
                 let mut us = Upstream {
-                    workload: wl.clone(),
+                    workload: wl.to_owned(),
                     port: *target_port,
                 };
                 Self::set_gateway_address(&mut us, hbone_port);
@@ -699,7 +699,7 @@ impl WorkloadStore {
         }
         if let Some(wl) = self.workloads.get(&addr.ip()) {
             let mut us = Upstream {
-                workload: wl.clone(),
+                workload: wl.to_owned(),
                 port: addr.port(),
             };
             Self::set_gateway_address(&mut us, hbone_port);
@@ -961,9 +961,9 @@ mod tests {
         // at least once, and no unexpected results
         for _ in 0..1000 {
             if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap(), 15008) {
-                let n = us.workload.name.clone();
-                found.insert(n.clone());
-                wants.remove(&n);
+                let n = &us.workload.name; // borrow name instead of cloning
+                found.insert(n.to_owned()); // insert an owned copy of the borrowed n
+                wants.remove(n); // remove using the borrow
             }
         }
         if !wants.is_empty() {

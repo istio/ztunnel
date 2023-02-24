@@ -315,7 +315,7 @@ impl Inbound {
                     reporter: Reporter::destination,
                     source,
                     derived_source: Some(derived_source),
-                    destination: Some(upstream.clone()),
+                    destination: Some(upstream),
                     connection_security_policy: traffic::SecurityPolicy::mutual_tls,
                     destination_service: None,
                     destination_service_namespace: None,

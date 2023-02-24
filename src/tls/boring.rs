@@ -121,9 +121,9 @@ pub struct ZtunnelCert {
 impl ZtunnelCert {
     pub fn new(cert: x509::X509) -> ZtunnelCert {
         ZtunnelCert {
-            x509: cert.clone(),
             not_before: asn1_time_to_system_time(cert.not_before()),
             not_after: asn1_time_to_system_time(cert.not_after()),
+            x509: cert, // cert is already owned, the asn1_ functions borrow cert so as long as we move cert to ZtunnelCert after the borrows this doesn't need cloning
         }
     }
 }
@@ -385,7 +385,7 @@ impl SanChecker for x509::X509 {
         let sans = extract_sans(self);
         sans.iter()
             .find(|id| id == &identity)
-            .ok_or_else(|| TlsError::SanError(identity.clone(), sans.clone()))
+            .ok_or_else(|| TlsError::SanError(identity.to_owned(), sans.clone()))
             .map(|_| ())
     }
 }
@@ -401,9 +401,9 @@ impl Service<Request<BoxBody>> for TlsGrpcChannel {
 
     fn call(&mut self, mut req: Request<BoxBody>) -> Self::Future {
         let uri = Uri::builder()
-            .scheme(self.uri.scheme().unwrap().clone())
-            .authority(self.uri.authority().unwrap().clone())
-            .path_and_query(req.uri().path_and_query().unwrap().clone())
+            .scheme(self.uri.scheme().unwrap().to_owned())
+            .authority(self.uri.authority().unwrap().to_owned())
+            .path_and_query(req.uri().path_and_query().unwrap().to_owned())
             .build()
             .unwrap();
         *req.uri_mut() = uri;

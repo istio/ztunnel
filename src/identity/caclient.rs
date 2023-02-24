@@ -82,7 +82,7 @@ impl CertificateProvider for CaClient {
         let leaf = resp
             .cert_chain
             .first()
-            .ok_or_else(|| Error::EmptyResponse(id.clone()))?
+            .ok_or_else(|| Error::EmptyResponse(id.to_owned()))?
             .as_bytes();
         let chain = if resp.cert_chain.len() > 1 {
             resp.cert_chain[1..].iter().map(|s| s.as_bytes()).collect()
@@ -93,7 +93,7 @@ impl CertificateProvider for CaClient {
         let certs = tls::cert_from(&pkey, leaf, chain);
         certs
             .verify_san(id)
-            .map_err(|_| Error::SanError(id.clone()))?;
+            .map_err(|_| Error::SanError(id.to_owned()))?;
         Ok(certs)
     }
 }
@@ -181,9 +181,9 @@ pub mod mock {
                 .expect("SystemTime cannot represent current time. Was the process started in extreme future?");
             let not_after = not_before + self.cfg.cert_lifetime;
 
-            let certs = generate_test_certs_at(&id.clone().into(), not_before, not_after);
+            let certs = generate_test_certs_at(&id.to_owned().into(), not_before, not_after);
 
-            self.state.write().await.fetches.push(id.clone());
+            self.state.write().await.fetches.push(id.to_owned());
             return Ok(certs);
         }
     }
