@@ -355,36 +355,28 @@ impl<T: CertificateProvider> SecretManager<T> {
                 drop(certs);
                 // Notify the background worker to start refreshing the certificate.
                 match self.requests.send((id.clone(), pri)).await {
-                    // Note that this should not happen, the background worker is expected to be
-                    // running.
-                    //
-                    // TODO: Better error propagation.
-                    Err(_) => Err(Error::EmptyResponse(id.clone())),
+                    Err(e) => unreachable!("SecretManager worker died: {e}"),
                     Ok(()) => Ok(rx),
                 }
             }
         }
     }
 
-    async fn wait(
-        &self,
-        id: &Identity,
-        mut rx: watch::Receiver<CertState>,
-    ) -> Result<tls::Certs, Error> {
+    async fn wait(&self, mut rx: watch::Receiver<CertState>) -> Result<tls::Certs, Error> {
         tokio::select! {
             // Wait for the initial value if not ready yet.
             res = rx.changed() => match res {
-                Err(_) => Err(Error::EmptyResponse(id.clone())),
+                Err(e) => unreachable!("the send end of the channel should still be reachable via self: {e}"),
                 Ok(()) => match *rx.borrow() {
                     CertState::Unavailable(ref err) => Err(err.clone()),
                     CertState::Available(ref certs) => Ok(certs.clone()),
                     CertState::Initializing => unreachable!("Only the initial state can be Initializing, but the state has changed"),
                 },
             },
-            // Fail if the background worker died. Ideally we'd detect it by rx.changed() failing
-            // above, but making sure that senders are owned by the background worker (and so drop
-            // on panic/other error) complicates the code.
-            _ = self.requests.closed() => Err(Error::EmptyResponse(id.clone())),
+            // Ideally we'd detect it by rx.changed() failing above, but making sure that senders
+            // are owned by the background worker (and so drop on panic/other error) complicates
+            // the code.
+            _ = self.requests.closed() => unreachable!("SecretManager worker died: requests channel is closed"),
         }
     }
 
@@ -396,7 +388,7 @@ impl<T: CertificateProvider> SecretManager<T> {
         // This method is intentionally left simple, since since unit tests are based on start_fetch
         // and wait. Any changes should go to one of those two methods, and if that proves
         // impossible - unit testing strategy may need to be rethinked.
-        self.wait(id, self.start_fetch(id, pri).await?).await
+        self.wait(self.start_fetch(id, pri).await?).await
     }
 }
 
@@ -682,7 +674,7 @@ mod tests {
             tokio::time::sleep(NANOSEC).await;
             let sm = secret_manager.clone();
             let rx = sm.start_fetch(&id, pri).await.unwrap();
-            tasks.push(tokio::spawn(async move { sm.wait(&id, rx).await }));
+            tasks.push(tokio::spawn(async move { sm.wait(rx).await }));
             // Now the request has either started (for the first request) or is queued in the
             // background worker.
         }
@@ -757,12 +749,9 @@ mod tests {
             rxs.push(rx);
         }
         let mut rxs_iter = rxs.into_iter();
-        let want = secret_manager
-            .wait(&id, rxs_iter.next().unwrap())
-            .await
-            .unwrap();
+        let want = secret_manager.wait(rxs_iter.next().unwrap()).await.unwrap();
         for rx in rxs_iter {
-            let got = secret_manager.wait(&id, rx).await.unwrap();
+            let got = secret_manager.wait(rx).await.unwrap();
             assert_eq!(got, want);
         }
         assert_eq!(secret_manager.client().fetches().await.len(), 1);
