@@ -267,9 +267,7 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     fn merge(mut self, other: Self) -> Self {
-        self.discovery_address = other
-            .discovery_address
-            .or(self.discovery_address);  // clone not required; self is moved and discovery_address is an owned type
+        self.discovery_address = other.discovery_address.or(self.discovery_address); // clone not required; self is moved and discovery_address is an owned type
         self.proxy_admin_port = other.proxy_admin_port.or(self.proxy_admin_port);
         self.status_port = other.status_port.or(self.status_port);
         self.concurrency = other.concurrency.or(self.concurrency);

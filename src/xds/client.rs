@@ -501,7 +501,7 @@ impl AdsClient {
             "sending response",
         );
         send.send(DeltaDiscoveryRequest {
-            type_url, // this is owned, OK to move
+            type_url,              // this is owned, OK to move
             response_nonce: nonce, // this is owned, OK to move
             error_detail: error.map(|msg| Status {
                 message: msg,
