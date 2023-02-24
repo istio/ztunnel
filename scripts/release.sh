@@ -36,7 +36,7 @@ SHA="$(git rev-parse --verify HEAD)"
 RELEASE_NAME="ztunnel-${SHA}-${ARCH}"
 ls -lh "${WD}/../out/rust/release/ztunnel"
 DEST="${DEST:-gs://istio-build/ztunnel}"
-if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
+if [[ "$CI" == "" ]]; then
   echo "Outside of CI, DEST must be explicitly set"
   exit 1
 fi
