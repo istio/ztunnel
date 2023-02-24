@@ -372,7 +372,6 @@ impl OutboundConnection {
         }
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
-            && !self.pi.cfg.local_node.is_none()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
             && us.workload.protocol == Protocol::HBONE
         {
