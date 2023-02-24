@@ -32,7 +32,7 @@ impl Ready {
     pub fn register_task(&self, name: &str) -> BlockReady {
         self.0.lock().unwrap().insert(name.to_string());
         BlockReady {
-            parent: self.clone(),
+            parent: self.to_owned(),
             name: name.to_string(),
         }
     }

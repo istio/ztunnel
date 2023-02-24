@@ -200,7 +200,7 @@ impl OutboundConnection {
                 InboundConnect::DirectPath(stream),
                 origin_src,
                 req.destination,
-                self.pi.metrics.clone(),
+                self.pi.metrics.to_owned(), // self is a borrow so this clone is to return an owned
                 connection_metrics,
                 Some(inbound_connection_metrics),
             )
@@ -372,7 +372,8 @@ impl OutboundConnection {
         }
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
-            && self.pi.cfg.local_node == Some(us.workload.node.clone())
+            && !self.pi.cfg.local_node.is_none()
+            && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
             && us.workload.protocol == Protocol::HBONE
         {
             trace!(

@@ -87,7 +87,7 @@ impl Authorization {
             .src_identity
             .as_ref()
             .map(|i| match i {
-                Identity::Spiffe { namespace, .. } => namespace.clone(),
+                Identity::Spiffe { namespace, .. } => namespace.to_owned(), // may be more clear if we use to_owned() to denote change from borrowed to owned
             })
             .unwrap_or_default();
         if self.groups.is_empty() {
@@ -383,9 +383,9 @@ impl TryFrom<&XdsAddress> for IpNet {
 impl From<&XdsStringMatch> for Option<StringMatch> {
     fn from(resource: &XdsStringMatch) -> Self {
         resource.match_type.as_ref().map(|m| match m {
-            MatchType::Exact(s) => StringMatch::Exact(s.clone()),
-            MatchType::Prefix(s) => StringMatch::Prefix(s.clone()),
-            MatchType::Suffix(s) => StringMatch::Suffix(s.clone()),
+            MatchType::Exact(s) => StringMatch::Exact(s.to_owned()),
+            MatchType::Prefix(s) => StringMatch::Prefix(s.to_owned()),
+            MatchType::Suffix(s) => StringMatch::Suffix(s.to_owned()),
             MatchType::Presence(_) => StringMatch::Presence(),
         })
     }

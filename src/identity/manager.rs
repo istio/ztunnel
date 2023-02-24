@@ -251,8 +251,8 @@ impl<C: CertificateProvider> Worker<C> {
                 },
                 true = maybe_sleep_until(next), if workers.len() < self.concurrency as usize => {
                     let (id, _) = pending.pop().unwrap();
-                    processing.insert(id.clone());
-                    workers.push(self.refresh(id.clone()));
+                    processing.insert(id.to_owned());
+                    workers.push(self.refresh(id.to_owned()));
                 },
             };
         }
@@ -265,7 +265,7 @@ impl<C: CertificateProvider> Worker<C> {
         id: Identity,
     ) -> Result<(Identity, Option<tls::Certs>), watch::error::SendError<CertState>> {
         let (state, res) = match self.client.fetch_certificate(&id).await {
-            Ok(certs) => (CertState::Available(certs.clone()), Some(certs)),
+            Ok(certs) => (CertState::Available(certs.clone()), Some(certs)), // TODO: must we return 2 copies of certs as different types?
             Err(err) => (CertState::Unavailable(err), None),
         };
         match self.update_certs(&id, state).await {
@@ -351,10 +351,10 @@ impl<T: CertificateProvider> SecretManager<T> {
             // New identity, start managing it and return the newly created channel.
             None => {
                 let (tx, rx) = watch::channel(CertState::Initializing);
-                certs.insert(id.clone(), CertChannel { rx: rx.clone(), tx });
+                certs.insert(id.to_owned(), CertChannel { rx: rx.clone(), tx });
                 drop(certs);
                 // Notify the background worker to start refreshing the certificate.
-                match self.requests.send((id.clone(), pri)).await {
+                match self.requests.send((id.to_owned(), pri)).await {
                     Err(e) => unreachable!("SecretManager worker died: {e}"),
                     Ok(()) => Ok(rx),
                 }
@@ -368,8 +368,8 @@ impl<T: CertificateProvider> SecretManager<T> {
             res = rx.changed() => match res {
                 Err(e) => unreachable!("the send end of the channel should still be reachable via self: {e}"),
                 Ok(()) => match *rx.borrow() {
-                    CertState::Unavailable(ref err) => Err(err.clone()),
-                    CertState::Available(ref certs) => Ok(certs.clone()),
+                    CertState::Unavailable(ref err) => Err(err.to_owned()),
+                    CertState::Available(ref certs) => Ok(certs.to_owned()),
                     CertState::Initializing => unreachable!("Only the initial state can be Initializing, but the state has changed"),
                 },
             },
@@ -401,7 +401,7 @@ impl<T: CertificateProvider + Clone> CertificateProvider for SecretManager<T> {
 
 impl SecretManager<CaClient> {
     pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
-        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert.clone(), cfg.auth)?;
+        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert, cfg.auth)?;
         Ok(Self::new_with_client(caclient))
     }
 }

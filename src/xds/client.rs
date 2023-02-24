@@ -427,7 +427,7 @@ impl AdsClient {
                     .get(request_type)
                     .map(|hs| {
                         hs.iter()
-                            .map(|n| (n.clone(), "".to_string())) // Proto expects Name -> Version. We don't care about version
+                            .map(|n| (n.to_owned(), "".to_string())) // Proto expects Name -> Version. We don't care about version
                             .collect()
                     })
                     .unwrap_or_default();
@@ -439,7 +439,7 @@ impl AdsClient {
                     (vec![], vec![])
                 };
                 DeltaDiscoveryRequest {
-                    type_url: request_type.clone(),
+                    type_url: request_type.to_owned(),
                     node: Some(node.clone()),
                     initial_resource_versions: irv,
                     resource_names_subscribe: sub,
@@ -462,7 +462,7 @@ impl AdsClient {
         let type_url = response.type_url.clone();
         let nonce = response.nonce.clone();
         info!(
-            type_url = type_url.clone(),
+            type_url = type_url, // this is a borrow, it's OK
             size = response.resources.len(),
             "received response"
         );
@@ -495,14 +495,14 @@ impl AdsClient {
         };
 
         debug!(
-            type_url=type_url.clone(),
+            type_url=type_url,
             nonce,
             "type"=?response_type,
             "sending response",
         );
         send.send(DeltaDiscoveryRequest {
-            type_url: type_url.clone(),
-            response_nonce: nonce.clone(),
+            type_url: type_url, // this is owned, OK to move
+            response_nonce: nonce, // this is owned, OK to move
             error_detail: error.map(|msg| Status {
                 message: msg,
                 ..Default::default()
@@ -551,7 +551,7 @@ impl AdsClient {
             .iter()
             .map(|res| {
                 let k = ResourceKey {
-                    name: res.clone(),
+                    name: res.to_owned(),
                     type_url: resp.type_url.clone(),
                 };
                 debug!("received delete resource {k}");
@@ -674,15 +674,12 @@ mod tests {
         let start_time = SystemTime::now();
         let converted: Option<Workload> = expected_workload
             .as_ref()
-            .map(|expected_workload| Workload::try_from(&expected_workload.clone()).unwrap());
+            .map(|expected_workload| Workload::try_from(expected_workload).unwrap()); // this is a borrow, Ok not to clone
         let mut matched = false;
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
             sleep(POLL_RATE).await;
             let wl = source.fetch_workload(&ip).await;
-            matched = converted.is_none() && wl.is_none()
-                || (wl.is_some()
-                    && converted.is_some()
-                    && wl.unwrap() == converted.clone().unwrap());
+            matched = wl == converted; // Option<Workload> is Ok to compare without needing to unwrap
         }
     }
 
