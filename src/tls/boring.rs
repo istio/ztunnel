@@ -233,7 +233,11 @@ pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel
 
     // Configure hyper's client to be h2 only and build with the
     // correct https connector.
-    let hyper = hyper::Client::builder().http2_only(true).build(https);
+    let hyper = hyper::Client::builder()
+        .http2_only(true)
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(10))
+        .build(https);
 
     Ok(TlsGrpcChannel { uri, client: hyper })
 }
