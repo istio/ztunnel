@@ -98,7 +98,7 @@ impl Default for Identity {
     }
 }
 
-#[derive(PartialOrd, PartialEq, Eq, Ord, Debug)]
+#[derive(PartialOrd, PartialEq, Eq, Ord, Debug, Copy, Clone)]
 pub enum Priority {
     // Needs to be in the order of the lowest priority.
     Background,
@@ -109,7 +109,7 @@ pub enum Priority {
 #[derive(Debug)]
 enum CertState {
     // Should happen only on the first request for an Identity.
-    Initializing,
+    Initializing(Priority),
     Available(tls::Certs),
     // The last attempt to fetch the certificate has failed and there is no previous certificate
     // available.
@@ -123,6 +123,9 @@ enum CertState {
 // Represents a watch::channel storing the certificate state. Contains None only during the first
 // request to the CertificateProvider.
 struct CertChannel {
+    // The initial value must be the last seen value, otherwise fetch_certificate may wait for the
+    // certificate to refresh instead of returning a cached one. Since the Receiver is never used
+    // directly (it is cloned out of here before reading) this never changes.
     rx: watch::Receiver<CertState>,
     // This struct is referenced by SecretManager, it contains both channel ends: the receiver
     // (used on the SecretManager side) and the sender (used by the background refreshing task).
@@ -410,11 +413,21 @@ impl<T: CertificateProvider> SecretManager<T> {
     ) -> Result<watch::Receiver<CertState>, Error> {
         let mut certs = self.worker.certs.lock().await;
         match certs.get(id) {
-            // Identity found in cache and is already being refreshed.
-            Some(st) => Ok(st.rx.clone()),
+            // Identity found in cache and is already being refreshed. Bump the priority if needed.
+            Some(st) => {
+                let rx = st.rx.clone();
+                drop(certs);
+
+                if let Some(existing_pri) = init_pri(&rx) {
+                    if pri > existing_pri {
+                        self.post(Request::Fetch(id.clone(), pri)).await;
+                    }
+                }
+                Ok(rx)
+            }
             // New identity, start managing it and return the newly created channel.
             None => {
-                let (tx, rx) = watch::channel(CertState::Initializing);
+                let (tx, rx) = watch::channel(CertState::Initializing(pri));
                 certs.insert(id.to_owned(), CertChannel { rx: rx.clone(), tx });
                 drop(certs);
                 // Notify the background worker to start refreshing the certificate.
@@ -425,20 +438,24 @@ impl<T: CertificateProvider> SecretManager<T> {
     }
 
     async fn wait(&self, mut rx: watch::Receiver<CertState>) -> Result<tls::Certs, Error> {
-        tokio::select! {
-            // Wait for the initial value if not ready yet.
-            res = rx.changed() => match res {
-                Ok(()) => match *rx.borrow() {
-                    CertState::Unavailable(ref err) => Err(err.to_owned()),
-                    CertState::Available(ref certs) => Ok(certs.to_owned()),
-                    CertState::Initializing => unreachable!("Only the initial state can be Initializing, but the state has changed"),
+        loop {
+            tokio::select! {
+                // Wait for the initial value if not ready yet.
+                res = rx.changed() => match res {
+                    Ok(()) => match *rx.borrow() {
+                        CertState::Unavailable(ref err) => return Err(err.to_owned()),
+                        CertState::Available(ref certs) => return Ok(certs.to_owned()),
+                        // Another call bumped up the priority, but still fetching the first
+                        // certificate.
+                        CertState::Initializing(_) => (),
+                    },
+                    Err(_) => return Err(Error::Forgotten),
                 },
-                Err(_) => Err(Error::Forgotten),
-            },
-            // Ideally we'd detect it by rx.changed() failing above, but making sure that senders
-            // are owned by the background worker (and so drop on panic/other error) complicates
-            // the code.
-            _ = self.requests.closed() => unreachable!("SecretManager worker died: requests channel is closed"),
+                // Ideally we'd detect it by rx.changed() failing above, but making sure that senders
+                // are owned by the background worker (and so drop on panic/other error) complicates
+                // the code.
+                _ = self.requests.closed() => unreachable!("SecretManager worker died: requests channel is closed"),
+            }
         }
     }
 
@@ -471,6 +488,15 @@ impl SecretManager<CaClient> {
     pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
         let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert, cfg.auth)?;
         Ok(Self::new_with_client(caclient))
+    }
+}
+
+// Matches CertState::Initializing(pri) from a Receiver, wrapped in a function to make borrow
+// lifetimes more manageable.
+fn init_pri(rx: &watch::Receiver<CertState>) -> Option<Priority> {
+    match *rx.borrow() {
+        CertState::Initializing(pri) => Some(pri),
+        _ => None,
     }
 }
 
@@ -779,13 +805,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_warmup() {
+    async fn test_warmup_new() {
         let secret_manager = setup(1);
 
         // Capture the start time of the test
-        let start = Instant::now();
         let mut tasks = Vec::new();
-        for i in 1..21 {
+        for i in 1..5 {
             let sm = secret_manager.clone();
             tasks.push(tokio::spawn(async move {
                 sm.fetch_certificate_pri(&identity_n("warmup-", i), Priority::Warmup)
@@ -794,13 +819,49 @@ mod tests {
             }));
         }
         // Ensure all requests are executing/queued in the background worker.
-        tokio::time::sleep(NANOSEC).await; // Expect this to advance the timer by exactly 1ms.
+        tokio::time::sleep(NANOSEC).await;
         secret_manager
             .fetch_certificate_pri(&identity("realtime"), Priority::RealTime)
             .await
             .unwrap();
-        assert!(Instant::now().duration_since(start) <= 2 * SEC);
+        assert_eq!(
+            collect_strings(secret_manager.client().fetches().await.iter()),
+            collect_strings(vec![identity("warmup-1"), identity("realtime")].iter()),
+        );
 
+        secret_manager.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_warmup_existing() {
+        let secret_manager = setup(1);
+
+        let mut fetches = Vec::new();
+        for i in 1..5 {
+            let sm = secret_manager.clone();
+            fetches.push(tokio::spawn(async move {
+                sm.fetch_certificate_pri(&identity_n("warmup-", i), Priority::Warmup)
+                    .await
+            }));
+            // Make sure that fetch order is well-defined (each fetch has a different timestamp).
+            // Also ensures that upon exit of the loop, the first fetch is already being processed
+            // while the remaining ones have proceeded as far as they could and are now blocked
+            // waiting on available workers.
+            tokio::time::sleep(MILLISEC).await;
+        }
+        secret_manager
+            .fetch_certificate_pri(&identity("warmup-4"), Priority::RealTime)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            collect_strings(secret_manager.client().fetches().await.iter()),
+            collect_strings(vec![identity("warmup-1"), identity("warmup-4")].iter()),
+        );
+
+        for result in futures::future::join_all(fetches).await {
+            assert_matches!(result, Ok(Ok(_)));
+        }
         secret_manager.tear_down().await;
     }
 
@@ -842,7 +903,7 @@ mod tests {
             });
         }
         for result in futures::future::join_all(futs).await {
-            result.unwrap();
+            assert_matches!(result, Ok(_));
         }
         assert_eq!(Instant::now().duration_since(start), SEC);
         secret_manager.tear_down().await;
