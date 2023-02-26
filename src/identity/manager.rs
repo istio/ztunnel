@@ -653,11 +653,11 @@ mod tests {
         }
     }
 
-    fn collect_strings<T: Iterator>(xs: T) -> Vec<String>
+    fn collect_strings<T: IntoIterator>(xs: T) -> Vec<String>
     where
         T::Item: ToString,
     {
-        xs.map(|x| x.to_string()).collect()
+        xs.into_iter().map(|x| x.to_string()).collect()
     }
 
     const NANOSEC: Duration = Duration::from_nanos(1);
@@ -780,8 +780,8 @@ mod tests {
         let client = secret_manager.client();
         // Ensure all requests have been issued in the expected order.
         assert_eq!(
-            collect_strings(client.fetches().await.iter()),
-            collect_strings(expected.iter()),
+            collect_strings(client.fetches().await),
+            collect_strings(&expected),
         );
 
         client.clear_fetches().await;
@@ -797,8 +797,8 @@ mod tests {
         let num_ids = expected.len() as u32;
         tokio::time::sleep_until(start + CERT_HALFLIFE + num_ids * (SEC + MILLISEC) + SEC).await;
         assert_eq!(
-            collect_strings(client.fetches().await.iter()),
-            collect_strings(expected.iter()),
+            collect_strings(client.fetches().await),
+            collect_strings(&expected),
         );
 
         secret_manager.tear_down().await;
@@ -825,8 +825,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            collect_strings(secret_manager.client().fetches().await.iter()),
-            collect_strings(vec![identity("warmup-1"), identity("realtime")].iter()),
+            collect_strings(secret_manager.client().fetches().await),
+            collect_strings(vec![identity("warmup-1"), identity("realtime")]),
         );
 
         secret_manager.tear_down().await;
@@ -855,8 +855,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            collect_strings(secret_manager.client().fetches().await.iter()),
-            collect_strings(vec![identity("warmup-1"), identity("warmup-4")].iter()),
+            collect_strings(secret_manager.client().fetches().await),
+            collect_strings(vec![identity("warmup-1"), identity("warmup-4")]),
         );
 
         for result in futures::future::join_all(fetches).await {
