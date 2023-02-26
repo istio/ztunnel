@@ -259,7 +259,10 @@ impl AdsClient {
             Err(e @ Error::Connection(_)) => {
                 // For connection errors, we add backoff
                 let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
-                warn!("XDS client connection error: {}, retrying in {:?}", e, backoff);
+                warn!(
+                    "XDS client connection error: {}, retrying in {:?}",
+                    e, backoff
+                );
                 self.metrics
                     .increment(&ConnectionTerminationReason::ConnectionError);
                 tokio::time::sleep(backoff).await;
@@ -275,11 +278,17 @@ impl AdsClient {
                     || (status.code() == tonic::Code::Unavailable
                         && status.message().contains("transport is closing"))
                 {
-                    debug!("XDS client terminated: {}, retrying in {:?}", err_detail, backoff);
+                    debug!(
+                        "XDS client terminated: {}, retrying in {:?}",
+                        err_detail, backoff
+                    );
                     self.metrics
                         .increment(&ConnectionTerminationReason::Reconnect);
                 } else {
-                    warn!("XDS client error: {}, retrying in {:?}", err_detail, backoff);
+                    warn!(
+                        "XDS client error: {}, retrying in {:?}",
+                        err_detail, backoff
+                    );
                     self.metrics.increment(&ConnectionTerminationReason::Error);
                 }
                 tokio::time::sleep(backoff).await;
