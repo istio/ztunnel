@@ -259,7 +259,10 @@ impl AdsClient {
             Err(e @ Error::Connection(_)) => {
                 // For connection errors, we add backoff
                 let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
-                warn!("XDS client error: {}, retrying in {:?}", e, backoff);
+                warn!(
+                    "XDS client connection error: {}, retrying in {:?}",
+                    e, backoff
+                );
                 self.metrics
                     .increment(&ConnectionTerminationReason::ConnectionError);
                 tokio::time::sleep(backoff).await;
@@ -267,22 +270,29 @@ impl AdsClient {
             }
             Err(ref e @ Error::GrpcStatus(ref status)) => {
                 let err_detail = e.to_string();
+                // For gRPC errors, we add backoff
+                let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
                 if status.code() == tonic::Code::Unknown
                     || status.code() == tonic::Code::Cancelled
                     || status.code() == tonic::Code::DeadlineExceeded
                     || (status.code() == tonic::Code::Unavailable
                         && status.message().contains("transport is closing"))
                 {
-                    debug!("XDS client terminated: {}, retrying", err_detail);
+                    debug!(
+                        "XDS client terminated: {}, retrying in {:?}",
+                        err_detail, backoff
+                    );
                     self.metrics
                         .increment(&ConnectionTerminationReason::Reconnect);
                 } else {
-                    warn!("XDS client error: {}, retrying", err_detail);
+                    warn!(
+                        "XDS client error: {}, retrying in {:?}",
+                        err_detail, backoff
+                    );
                     self.metrics.increment(&ConnectionTerminationReason::Error);
                 }
-                // For gRPC errors, we connect immediately
-                // Reset backoff
-                Duration::from_millis(10)
+                tokio::time::sleep(backoff).await;
+                backoff
             }
             Err(e) => {
                 // For other errors, we connect immediately
