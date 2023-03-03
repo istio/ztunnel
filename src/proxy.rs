@@ -28,7 +28,7 @@ use tracing::{error, trace, warn, Instrument};
 
 use inbound::Inbound;
 
-use crate::identity::CertificateProvider;
+use crate::identity::SecretManager;
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
@@ -52,7 +52,7 @@ pub struct Proxy {
 #[derive(Clone)]
 pub(super) struct ProxyInputs {
     cfg: config::Config,
-    cert_manager: Box<dyn CertificateProvider>,
+    cert_manager: Arc<SecretManager>,
     hbone_port: u16,
     workloads: WorkloadInformation,
     metrics: Arc<Metrics>,
@@ -62,7 +62,7 @@ impl Proxy {
     pub async fn new(
         cfg: config::Config,
         workloads: WorkloadInformation,
-        cert_manager: Box<dyn CertificateProvider>,
+        cert_manager: Arc<SecretManager>,
         metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Proxy, Error> {

@@ -26,8 +26,8 @@ use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::tls;
 
+use super::CaClient;
 use super::Error::{self, Spiffe};
-use super::{CaClient, CertificateProvider};
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
@@ -98,6 +98,11 @@ impl Default for Identity {
     }
 }
 
+#[async_trait]
+pub trait CaClientTrait: Send + Sync {
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error>;
+}
+
 #[derive(PartialOrd, PartialEq, Eq, Ord, Debug, Copy, Clone)]
 pub enum Priority {
     // Needs to be in the order of the lowest priority.
@@ -121,7 +126,7 @@ enum CertState {
 }
 
 // Represents a watch::channel storing the certificate state. Contains None only during the first
-// request to the CertificateProvider.
+// request to the CaClient.
 struct CertChannel {
     // The initial value must be the last seen value, otherwise fetch_certificate may wait for the
     // certificate to refresh instead of returning a cached one. Since the Receiver is never used
@@ -154,8 +159,8 @@ impl PartialOrd for PendingPriority {
 }
 
 // Implements the actual logic behind SecretManager.
-struct Worker<C: CertificateProvider> {
-    client: C,
+struct Worker {
+    client: Box<dyn CaClientTrait>,
     // For now, certificates contain SystemTime so we need to convert it to Instant. Using Converter
     // allows us to work on Instants without referring to the current SystemTime, which allows for
     // time control in unit tests.
@@ -168,9 +173,9 @@ struct Worker<C: CertificateProvider> {
     concurrency: u16,
 }
 
-impl<C: CertificateProvider> Worker<C> {
+impl Worker {
     fn new(
-        client: C,
+        client: Box<dyn CaClientTrait>,
         requests: mpsc::Receiver<Request>,
         cfg: SecretManagerConfig,
     ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
@@ -365,21 +370,24 @@ pub struct SecretManagerConfig {
     concurrency: u16,
 }
 
-/// SecretManager provides a wrapper around a CertificateProvider with caching.
-/// It is designed to be cheap to clone.
-#[derive(Clone)]
-pub struct SecretManager<C: CertificateProvider> {
-    worker: Arc<Worker<C>>,
+/// SecretManager provides a wrapper around a CaClient with caching.
+pub struct SecretManager {
+    worker: Arc<Worker>,
     // Channel to which certificate requests are sent to. The Identity for which request is being
     // sent for must have a corresponding entry in the worker's certs map (which is where the
     // result can be read from).
     requests: mpsc::Sender<Request>,
 }
 
-impl<T: CertificateProvider> SecretManager<T> {
-    pub fn new_with_client(client: T) -> Self {
+impl SecretManager {
+    pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
+        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert, cfg.auth)?;
+        Ok(Self::new_with_client(caclient))
+    }
+
+    pub fn new_with_client<C: 'static + CaClientTrait>(client: C) -> Self {
         Self::new_internal(
-            client,
+            Box::new(client),
             SecretManagerConfig {
                 time_conv: crate::time::Converter::new(),
                 concurrency: 8,
@@ -388,7 +396,10 @@ impl<T: CertificateProvider> SecretManager<T> {
         .0
     }
 
-    fn new_internal(client: T, cfg: SecretManagerConfig) -> (Self, tokio::task::JoinHandle<()>) {
+    fn new_internal(
+        client: Box<dyn CaClientTrait>,
+        cfg: SecretManagerConfig,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(10);
         let (worker, handle) = Worker::new(client, rx, cfg);
         (
@@ -470,24 +481,14 @@ impl<T: CertificateProvider> SecretManager<T> {
         self.wait(self.start_fetch(id, pri).await?).await
     }
 
+    pub async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
+        self.fetch_certificate_pri(id, Priority::RealTime).await
+    }
+
     pub async fn forget_certificate(&self, id: &Identity) {
         if self.worker.certs.lock().await.remove(id).is_some() {
             self.post(Request::Forget(id.clone())).await;
         }
-    }
-}
-
-#[async_trait]
-impl<T: CertificateProvider + Clone> CertificateProvider for SecretManager<T> {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
-        self.fetch_certificate_pri(id, Priority::RealTime).await
-    }
-}
-
-impl SecretManager<CaClient> {
-    pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
-        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert, cfg.auth)?;
-        Ok(Self::new_with_client(caclient))
     }
 }
 
@@ -501,36 +502,36 @@ fn init_pri(rx: &watch::Receiver<CertState>) -> Option<Priority> {
 }
 
 pub mod mock {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use crate::identity::caclient::mock::{self, CaClient as MockCaClient};
 
     use super::SecretManager;
 
-    pub fn new_secret_manager(cert_lifetime: Duration) -> SecretManager<MockCaClient> {
+    // There is no need to return Arc, but most callers want one so it simplifies the code - and we
+    // don't care about the extra overhead in tests.
+    pub fn new_secret_manager(cert_lifetime: Duration) -> Arc<SecretManager> {
         let time_conv = crate::time::Converter::new();
         let client = MockCaClient::new(mock::ClientConfig {
             cert_lifetime,
             time_conv: time_conv.clone(),
             ..Default::default()
         });
-        SecretManager::new_internal(
-            client,
-            super::SecretManagerConfig {
-                time_conv,
-                concurrency: 2,
-            },
+        Arc::new(
+            SecretManager::new_internal(
+                Box::new(client),
+                super::SecretManagerConfig {
+                    time_conv,
+                    concurrency: 2,
+                },
+            )
+            .0,
         )
-        .0
     }
 
-    impl SecretManager<MockCaClient> {
+    impl SecretManager {
         pub async fn cache_len(&self) -> usize {
             self.worker.certs.lock().await.len()
-        }
-
-        pub fn client(&self) -> &MockCaClient {
-            &self.worker.client
         }
     }
 }
@@ -541,11 +542,12 @@ mod tests {
 
     use matches::assert_matches;
 
+    use crate::identity::caclient::mock::CaClient as MockCaClient;
     use crate::identity::{self, *};
 
     use super::{mock, *};
 
-    async fn stress_many_ids(sm: SecretManager<caclient::mock::CaClient>, iterations: u32) {
+    async fn stress_many_ids(sm: Arc<SecretManager>, iterations: u32) {
         for i in 0..iterations {
             let id = identity::Identity::Spiffe {
                 trust_domain: "cluster.local".to_string(),
@@ -558,11 +560,7 @@ mod tests {
         }
     }
 
-    async fn stress_single_id(
-        sm: SecretManager<caclient::mock::CaClient>,
-        id: Identity,
-        dur: Duration,
-    ) {
+    async fn stress_single_id(sm: Arc<SecretManager>, id: Identity, dur: Duration) {
         let start_time = time::Instant::now();
         loop {
             let current_time = time::Instant::now();
@@ -577,12 +575,13 @@ mod tests {
     }
 
     async fn verify_cert_updates(
-        sm: SecretManager<caclient::mock::CaClient>,
+        sm: Arc<SecretManager>,
         id: Identity,
         dur: Duration,
+        cert_lifetime: Duration,
     ) {
         let start_time = time::Instant::now();
-        let expected_update_interval = sm.worker.client.cert_lifetime().as_millis() / 2;
+        let expected_update_interval = cert_lifetime.as_millis() / 2;
         let mut total_updates = 0;
         let mut current_cert = sm
             .fetch_certificate(&id)
@@ -629,13 +628,15 @@ mod tests {
         let id: Identity = Default::default();
 
         // Certs added to the cache should be refreshed every 80 millis
-        let secret_manager = mock::new_secret_manager(Duration::from_millis(160));
+        let cert_lifetime = Duration::from_millis(160);
+        let secret_manager = mock::new_secret_manager(cert_lifetime);
 
         // Spawn task that verifies cert updates.
         tasks.push(tokio::spawn(verify_cert_updates(
             secret_manager.clone(),
             id.clone(),
             test_dur,
+            cert_lifetime,
         )));
 
         // Start spamming fetches for that cert.
@@ -665,15 +666,15 @@ mod tests {
     const SEC: Duration = Duration::from_secs(1);
     const CERT_HALFLIFE: Duration = Duration::from_secs(50);
 
-    // Wraps SecretManager to retain the background worker handle, so that it can be waited on at
-    // the end of the test.
-    struct TestSecretManager {
-        secret_manager: SecretManager<caclient::mock::CaClient>,
+    // Represents common test case setup.
+    struct Test {
+        secret_manager: Arc<SecretManager>,
+        caclient: MockCaClient,
         worker: tokio::task::JoinHandle<()>,
     }
 
-    impl TestSecretManager {
-        // Deconstructs the TestSecretManager into the background worker handle. This drops the
+    impl Test {
+        // Deconstructs the Test into the background worker handle. This drops the
         // underlying SecretManager so that the underlying worker should terminate soon after this
         // call.
         fn into_worker(self) -> tokio::task::JoinHandle<()> {
@@ -686,16 +687,7 @@ mod tests {
         }
     }
 
-    // For an easy access to the underlying SecretManager.
-    impl std::ops::Deref for TestSecretManager {
-        type Target = SecretManager<caclient::mock::CaClient>;
-
-        fn deref(&self) -> &Self::Target {
-            &self.secret_manager
-        }
-    }
-
-    fn setup(concurrency: u16) -> TestSecretManager {
+    fn setup(concurrency: u16) -> Test {
         // Tests that use this function rely on Tokio's test time pause and auto-advance. It gets a
         // bit tricky so a few things to remember:
         //  - When *all* futures are blocked waiting for a specific time, the runtime will
@@ -706,22 +698,22 @@ mod tests {
         //    nearest millisecond. That means eg. sleep(1ms) will advance the timer by 2ms while
         //    sleep(600us) will advance the timer by only 1ms.
         let time_conv = crate::time::Converter::new();
-        let client = caclient::mock::CaClient::new(caclient::mock::ClientConfig {
+        let caclient = MockCaClient::new(caclient::mock::ClientConfig {
             time_conv: time_conv.clone(),
             fetch_latency: SEC,
             cert_lifetime: 2 * CERT_HALFLIFE,
         });
-
         let (secret_manager, worker) = SecretManager::new_internal(
-            client,
+            Box::new(caclient.clone()),
             SecretManagerConfig {
                 time_conv,
                 concurrency,
             },
         );
-        TestSecretManager {
-            secret_manager,
+        Test {
             worker,
+            caclient,
+            secret_manager: Arc::new(secret_manager),
         }
     }
 
@@ -743,7 +735,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_priority() {
-        let secret_manager = setup(1);
+        let test = setup(1);
 
         let requests = vec![
             (identity("id1"), Priority::Background),
@@ -766,7 +758,7 @@ mod tests {
             // (which happens in CaClient). This is technically not needed before the first
             // SecretManager call but putting it here makes for simpler computation later on.
             tokio::time::sleep(NANOSEC).await;
-            let sm = secret_manager.clone();
+            let sm = test.secret_manager.clone();
             let rx = sm.start_fetch(&id, pri).await.unwrap();
             tasks.push(tokio::spawn(async move { sm.wait(rx).await }));
             // Now the request has either started (for the first request) or is queued in the
@@ -777,18 +769,17 @@ mod tests {
             assert_matches!(result, Ok(Ok(_)));
         }
 
-        let client = secret_manager.client();
         // Ensure all requests have been issued in the expected order.
         assert_eq!(
-            collect_strings(client.fetches().await),
+            collect_strings(test.caclient.fetches().await),
             collect_strings(&expected),
         );
 
-        client.clear_fetches().await;
+        test.caclient.clear_fetches().await;
         // Certificates should start refreshing at start + CERT_HALFLIFE, so just before that there
         // should be no new CaClient calls.
         tokio::time::sleep_until(start + CERT_HALFLIFE - MILLISEC).await;
-        assert!(client.fetches().await.is_empty());
+        assert!(test.caclient.fetches().await.is_empty());
 
         // Each certificate request is delayed by 1ms, and each CaClient call takes 1s. So CaClient
         // calls complete at 1s1ms, 2s2ms, and so on. Wait till the last CaClient call completion +
@@ -797,21 +788,21 @@ mod tests {
         let num_ids = expected.len() as u32;
         tokio::time::sleep_until(start + CERT_HALFLIFE + num_ids * (SEC + MILLISEC) + SEC).await;
         assert_eq!(
-            collect_strings(client.fetches().await),
+            collect_strings(test.caclient.fetches().await),
             collect_strings(&expected),
         );
 
-        secret_manager.tear_down().await;
+        test.tear_down().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_warmup_new() {
-        let secret_manager = setup(1);
+        let test = setup(1);
 
         // Capture the start time of the test
         let mut tasks = Vec::new();
         for i in 1..5 {
-            let sm = secret_manager.clone();
+            let sm = test.secret_manager.clone();
             tasks.push(tokio::spawn(async move {
                 sm.fetch_certificate_pri(&identity_n("warmup-", i), Priority::Warmup)
                     .await
@@ -820,25 +811,25 @@ mod tests {
         }
         // Ensure all requests are executing/queued in the background worker.
         tokio::time::sleep(NANOSEC).await;
-        secret_manager
+        test.secret_manager
             .fetch_certificate_pri(&identity("realtime"), Priority::RealTime)
             .await
             .unwrap();
         assert_eq!(
-            collect_strings(secret_manager.client().fetches().await),
+            collect_strings(test.caclient.fetches().await),
             collect_strings(vec![identity("warmup-1"), identity("realtime")]),
         );
 
-        secret_manager.tear_down().await;
+        test.tear_down().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_warmup_existing() {
-        let secret_manager = setup(1);
+        let test = setup(1);
 
         let mut fetches = Vec::new();
         for i in 1..5 {
-            let sm = secret_manager.clone();
+            let sm = test.secret_manager.clone();
             fetches.push(tokio::spawn(async move {
                 sm.fetch_certificate_pri(&identity_n("warmup-", i), Priority::Warmup)
                     .await
@@ -849,55 +840,60 @@ mod tests {
             // waiting on available workers.
             tokio::time::sleep(MILLISEC).await;
         }
-        secret_manager
+        test.secret_manager
             .fetch_certificate_pri(&identity("warmup-4"), Priority::RealTime)
             .await
             .unwrap();
 
         assert_eq!(
-            collect_strings(secret_manager.client().fetches().await),
+            collect_strings(test.caclient.fetches().await),
             collect_strings(vec![identity("warmup-1"), identity("warmup-4")]),
         );
 
         for result in futures::future::join_all(fetches).await {
             assert_matches!(result, Ok(Ok(_)));
         }
-        secret_manager.tear_down().await;
+        test.tear_down().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_duplicate_requests() {
-        let secret_manager = setup(1);
+        let test = setup(1);
         let id = identity("id1");
         let mut rxs = Vec::new();
         for _ in 1..5 {
-            let rx = secret_manager
+            let rx = test
+                .secret_manager
                 .start_fetch(&id, Priority::RealTime)
                 .await
                 .unwrap();
             rxs.push(rx);
         }
         let mut rxs_iter = rxs.into_iter();
-        let want = secret_manager.wait(rxs_iter.next().unwrap()).await.unwrap();
+        let want = test
+            .secret_manager
+            .wait(rxs_iter.next().unwrap())
+            .await
+            .unwrap();
         for rx in rxs_iter {
-            let got = secret_manager.wait(rx).await.unwrap();
+            let got = test.secret_manager.wait(rx).await.unwrap();
             assert_eq!(got, want);
         }
-        assert_eq!(secret_manager.client().fetches().await.len(), 1);
+        assert_eq!(test.caclient.fetches().await.len(), 1);
 
-        secret_manager.tear_down().await;
+        test.tear_down().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_concurrency() {
         let start = Instant::now();
-        let secret_manager = setup(4);
+        let test = setup(4);
         let mut futs = Vec::new();
         for i in 0..4 {
             let id = identity_n("id-", i);
             futs.push(async {
                 let id = id; // Move instead of borrowing.
-                secret_manager
+                test.secret_manager
                     .fetch_certificate_pri(&id, Priority::RealTime)
                     .await
             });
@@ -906,7 +902,7 @@ mod tests {
             assert_matches!(result, Ok(_));
         }
         assert_eq!(Instant::now().duration_since(start), SEC);
-        secret_manager.tear_down().await;
+        test.tear_down().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -916,17 +912,19 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_forget_pending() {
-        let secret_manager = setup(1);
+        let test = setup(1);
         let start = Instant::now();
-        let sm = secret_manager.clone();
+        let sm = test.secret_manager.clone();
 
         let fetch = tokio::spawn(async move { sm.fetch_certificate(&identity("test")).await });
         // Proceed the fetch till it blocks waiting for the worker.
         tokio::time::sleep_until(start + NANOSEC).await;
-        secret_manager.forget_certificate(&identity("test")).await;
+        test.secret_manager
+            .forget_certificate(&identity("test"))
+            .await;
 
         assert_matches!(fetch.await.unwrap(), Err(Error::Forgotten));
-        secret_manager.tear_down().await;
+        test.tear_down().await;
     }
 
     #[test]

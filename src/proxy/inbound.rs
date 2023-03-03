@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 use crate::config::Config;
-use crate::identity::CertificateProvider;
+use crate::identity::SecretManager;
 use crate::metrics::traffic::{ConnectionOpen, Reporter};
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
@@ -42,7 +42,7 @@ use super::Error;
 pub(super) struct Inbound {
     cfg: Config,
     listener: TcpListener,
-    cert_manager: Box<dyn CertificateProvider>,
+    cert_manager: Arc<SecretManager>,
     workloads: WorkloadInformation,
     drain: Watch,
     metrics: Arc<Metrics>,
@@ -389,7 +389,7 @@ pub(super) enum InboundConnect {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: Box<dyn CertificateProvider>,
+    cert_manager: Arc<SecretManager>,
     workloads: WorkloadInformation,
 }
 

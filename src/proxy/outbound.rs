@@ -518,7 +518,7 @@ mod tests {
         };
         let outbound = OutboundConnection {
             pi: ProxyInputs {
-                cert_manager: Box::new(identity::mock::new_secret_manager(Duration::from_secs(10))),
+                cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
                 workloads: wi,
                 hbone_port: 15008,
                 cfg,

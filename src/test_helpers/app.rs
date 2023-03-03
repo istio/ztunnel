@@ -17,6 +17,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Deref;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::{body, Body, Client, Method, Request, Response};
@@ -26,7 +27,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
 use crate::app::Bound;
-use crate::identity::mock::CaClient as MockCaClient;
 use crate::identity::SecretManager;
 use crate::test_helpers::TEST_WORKLOAD_SOURCE;
 use crate::*;
@@ -39,11 +39,11 @@ pub struct TestApp {
     pub stats_address: SocketAddr,
     pub readiness_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
-    pub cert_manager: SecretManager<MockCaClient>,
+    pub cert_manager: Arc<SecretManager>,
 }
 
-impl From<(&Bound, SecretManager<MockCaClient>)> for TestApp {
-    fn from((app, cert_manager): (&Bound, SecretManager<MockCaClient>)) -> Self {
+impl From<(&Bound, Arc<SecretManager>)> for TestApp {
+    fn from((app, cert_manager): (&Bound, Arc<SecretManager>)) -> Self {
         Self {
             admin_address: app.admin_address,
             stats_address: app.stats_address,
