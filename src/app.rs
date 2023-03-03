@@ -130,10 +130,16 @@ pub async fn build_with_cert(
     })
 }
 
-pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
+pub async fn build(config: config::Config) -> anyhow::Result<Bound, anyhow::Error> {
     if config.fake_ca {
         let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(86400));
         build_with_cert(config, cert_manager).await
+    } else if config.k8s_custom_signer.is_some() {
+        let cert_manager = identity::SecretManager::origin(config.clone()).await;
+        match cert_manager {
+            Ok(cert_mgr) => build_with_cert(config, cert_mgr).await,
+            Err(_) => Err(anyhow::Error::msg("failed to build the client")),
+        }
     } else {
         let cert_manager = identity::SecretManager::new(config.clone())?;
         build_with_cert(config, cert_manager).await
