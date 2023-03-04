@@ -57,6 +57,7 @@ pub async fn build_with_cert(
         workload_manager.workloads(),
         shutdown.trigger(),
         drain_rx.clone(),
+        cert_manager.clone(),
     )
     .context("admin server starts")?;
     let stats_server = stats::Service::new(

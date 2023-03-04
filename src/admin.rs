@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::{net::SocketAddr, time::Duration};
 
+use boring::x509::X509;
 use drain::Watch;
 #[cfg(feature = "gperftools")]
 use gperftools::heap_profiler::HEAP_PROFILER;
@@ -30,6 +33,7 @@ use tracing::error;
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
+use crate::identity::SecretManager;
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
@@ -39,6 +43,7 @@ struct State {
     workload_info: WorkloadInformation,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
+    cert_manager: Arc<SecretManager>,
 }
 
 pub struct Service {
@@ -52,6 +57,13 @@ pub struct ConfigDump {
     static_config: LocalConfig,
     version: BuildInfo,
     config: Config,
+    certificates: Vec<CertsDump>,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct CertsDump {
+    leaf: String,
+    chain: Vec<String>,
 }
 
 impl Service {
@@ -60,6 +72,7 @@ impl Service {
         workload_info: WorkloadInformation,
         shutdown_trigger: signal::ShutdownTrigger,
         drain_rx: Watch,
+        cert_manager: Arc<SecretManager>,
     ) -> hyper::Result<Self> {
         Server::<State>::bind(
             "admin",
@@ -70,6 +83,7 @@ impl Service {
                 config,
                 workload_info,
                 shutdown_trigger,
+                cert_manager,
             },
         )
         .map(|s| Service { s })
@@ -94,6 +108,7 @@ impl Service {
                         static_config: Default::default(),
                         version: BuildInfo::new(),
                         config: state.config.clone(),
+                        certificates: dump_certs(state.cert_manager.borrow()).await,
                     },
                     req,
                 )
@@ -103,6 +118,25 @@ impl Service {
             }
         })
     }
+}
+
+fn x509_to_string(x509: &X509) -> String {
+    match x509.to_pem() {
+        Err(e) => format!("<pem construction error: {e}>"),
+        Ok(vec) => match String::from_utf8(vec) {
+            Err(e) => format!("<utf8 decode error: {e}>"),
+            Ok(s) => s,
+        },
+    }
+}
+
+async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
+    cert_manager
+        .collect_certs(|certs| CertsDump {
+            leaf: x509_to_string(certs.x509()),
+            chain: certs.iter_chain().map(x509_to_string).collect(),
+        })
+        .await
 }
 
 async fn handle_pprof(_req: Request<Body>) -> Response<Body> {

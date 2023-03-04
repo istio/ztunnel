@@ -20,6 +20,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use boring::x509::X509;
+use itertools::Itertools;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
@@ -489,6 +491,18 @@ impl SecretManager {
         if self.worker.certs.lock().await.remove(id).is_some() {
             self.post(Request::Forget(id.clone())).await;
         }
+    }
+
+    // TODO(qfel): It would be much nicer to have something like map_certs returning an iterator,
+    // but due to locking that would require a self-referential type.
+    pub async fn collect_certs<R>(&self, f: impl Fn(&tls::Certs) -> R) -> Vec<R> {
+        let mut ret = Vec::new();
+        for chan in self.worker.certs.lock().await.values() {
+            if let CertState::Available(ref certs) = *chan.rx.borrow() {
+                ret.push(f(certs));
+            }
+        }
+        ret
     }
 }
 

@@ -158,6 +158,13 @@ impl Certs {
     pub fn chain(&self) -> Result<bytes::Bytes, Error> {
         Ok(self.chain[0].x509.to_pem()?.into())
     }
+
+    // TODO: This works very differently from the chain method. Figure out what's the intention
+    // behind the chain method and make things more consistent.
+    pub fn iter_chain(&self) -> impl Iterator<Item = &x509::X509> {
+        self.chain.iter().map(|zcert| &zcert.x509)
+    }
+
     pub fn is_expired(&self) -> bool {
         SystemTime::now() > self.cert.not_after
     }
