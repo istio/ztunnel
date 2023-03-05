@@ -28,6 +28,7 @@ use crate::identity;
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
 const INSTANCE_IP: &str = "INSTANCE_IP";
+const CLUSTER_ID: &str = "CLUSTER_ID";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
@@ -43,6 +44,7 @@ const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
 const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
+const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 
@@ -86,6 +88,8 @@ pub struct Config {
     pub local_node: Option<String>,
     /// The local_ip we are running at.
     pub local_ip: Option<IpAddr>,
+    /// The Cluster ID of the cluster that his ztunnel belongs to
+    pub cluster_id: String,
 
     /// CA address to use. If fake_ca is set, this will be None.
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
@@ -182,6 +186,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .or_else(|| Some(default_istiod_address.clone())),
     );
 
+    let cluster_id = parse_default(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?;
+
     let fake_ca = parse_default(FAKE_CA, false)?;
     let ca_address = empty_to_none(if fake_ca {
         None
@@ -221,6 +227,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         local_node: parse(NODE_NAME)?,
         local_ip: parse(INSTANCE_IP)?,
+        cluster_id,
 
         xds_address,
         // TODO: full FindRootCAForXDS logic like in Istio
