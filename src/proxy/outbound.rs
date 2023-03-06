@@ -239,7 +239,10 @@ impl OutboundConnection {
                     .uri(&req.destination.to_string())
                     .method(hyper::Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
-                    .header(BAGGAGE_HEADER, baggage(&req))
+                    .header(
+                        BAGGAGE_HEADER,
+                        baggage(&req, self.pi.cfg.cluster_id.clone()),
+                    )
                     .header(FORWARDED, f.value().unwrap())
                     .header(TRACEPARENT_HEADER, self.id.header())
                     .body(hyper::Body::empty())
@@ -417,9 +420,8 @@ impl OutboundConnection {
     }
 }
 
-fn baggage(r: &Request) -> String {
+fn baggage(r: &Request, cluster: String) -> String {
     format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version}",
-            cluster = "Kubernetes",// todo
             namespace = r.source.namespace,
             workload_type = r.source.workload_type,
             workload_name = r.source.workload_name,
