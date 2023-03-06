@@ -24,14 +24,14 @@ use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
-use crate::tls;
+use crate::tls::{self, Certs};
 
 use super::CaClient;
 use super::Error::{self, Spiffe};
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(serde::Serialize, Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Identity {
     Spiffe {
         trust_domain: String,
@@ -448,6 +448,23 @@ impl SecretManager {
         }
     }
 
+    pub async fn dump_certs(&self) -> Vec<CertifcateInfo> {
+        let certs_map = self.worker.certs.lock().await;
+        let mut idents: Vec<Identity> = Vec::new();
+        for (ident, _chann) in certs_map.iter() {
+            idents.push(ident.clone())
+        }
+        drop(certs_map);
+        let mut certs: Vec<CertifcateInfo> = Vec::new();
+        for ident in idents {
+            let res = self.fetch_certificate(&ident).await.unwrap();
+            certs.push(CertifcateInfo { 
+                identity: ident.clone(),
+                certs: res })
+        }
+        return certs
+    }
+
     async fn wait(&self, mut rx: watch::Receiver<CertState>) -> Result<tls::Certs, Error> {
         loop {
             tokio::select! {
@@ -490,6 +507,12 @@ impl SecretManager {
             self.post(Request::Forget(id.clone())).await;
         }
     }
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct CertifcateInfo {
+    identity: Identity,
+    certs: Certs,
 }
 
 // Matches CertState::Initializing(pri) from a Receiver, wrapped in a function to make borrow

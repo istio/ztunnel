@@ -109,8 +109,9 @@ impl CsrOptions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct ZtunnelCert {
+    #[serde(skip_serializing)]
     x509: x509::X509,
     not_before: SystemTime,
     not_after: SystemTime,
@@ -128,12 +129,13 @@ impl ZtunnelCert {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct Certs {
     // the leaf cert
     cert: ZtunnelCert,
     // the remainder of the chain, not including the leaf cert
     chain: Vec<ZtunnelCert>,
+    #[serde(skip_serializing)]
     key: pkey::PKey<pkey::Private>,
 }
 

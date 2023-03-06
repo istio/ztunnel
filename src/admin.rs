@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::{net::SocketAddr, time::Duration};
+use std::sync::Arc;
 
 use drain::Watch;
 #[cfg(feature = "gperftools")]
@@ -30,6 +31,7 @@ use tracing::error;
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
+use crate::identity::{CertifcateInfo, SecretManager};
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
@@ -39,6 +41,7 @@ struct State {
     workload_info: WorkloadInformation,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
+    cert_manager: Arc<SecretManager>,
 }
 
 pub struct Service {
@@ -47,11 +50,11 @@ pub struct Service {
 
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct ConfigDump {
-    #[serde(flatten)]
     workload_info: WorkloadInformation,
     static_config: LocalConfig,
     version: BuildInfo,
     config: Config,
+    certs: Vec<CertifcateInfo>,
 }
 
 impl Service {
@@ -60,6 +63,7 @@ impl Service {
         workload_info: WorkloadInformation,
         shutdown_trigger: signal::ShutdownTrigger,
         drain_rx: Watch,
+        cert_manager: Arc<SecretManager>,
     ) -> hyper::Result<Self> {
         Server::<State>::bind(
             "admin",
@@ -70,6 +74,7 @@ impl Service {
                 config,
                 workload_info,
                 shutdown_trigger,
+                cert_manager,
             },
         )
         .map(|s| Service { s })
@@ -89,11 +94,12 @@ impl Service {
                     Ok(handle_server_shutdown(state.shutdown_trigger.clone(), req).await)
                 }
                 "/config_dump" => Ok(handle_config_dump(
-                    ConfigDump {
+                    ConfigDump{
                         workload_info: state.workload_info.clone(),
                         static_config: Default::default(),
                         version: BuildInfo::new(),
                         config: state.config.clone(),
+                        certs: state.cert_manager.clone().dump_certs().await,
                     },
                     req,
                 )
