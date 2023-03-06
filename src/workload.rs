@@ -29,7 +29,7 @@ use xds::istio::security::Authorization as XdsAuthorization;
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::ConfigSource;
-use crate::identity::{CertificateProvider, Identity};
+use crate::identity::{Identity, SecretManager};
 use crate::metrics::Metrics;
 use crate::rbac::{Authorization, RbacScope};
 use crate::workload::WorkloadError::EnumParse;
@@ -282,7 +282,7 @@ impl WorkloadManager {
         config: config::Config,
         metrics: Arc<Metrics>,
         awaiting_ready: readiness::BlockReady,
-        cert_manager: Box<dyn CertificateProvider>,
+        cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<WorkloadManager> {
         let (tx, mut rx) = mpsc::channel::<Identity>(256);
         // todo ratelimit prefetching to a reasonable limit

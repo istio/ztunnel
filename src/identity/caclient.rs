@@ -15,8 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::config::RootCert;
-use async_trait::*;
-use dyn_clone::DynClone;
+use async_trait::async_trait;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::codegen::InterceptedService;
@@ -29,17 +28,9 @@ use crate::tls::{self, SanChecker, TlsGrpcChannel};
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 use crate::xds::istio::ca::IstioCertificateRequest;
 
-#[derive(Clone)]
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
 }
-
-#[async_trait]
-pub trait CertificateProvider: DynClone + Send + Sync + 'static {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error>;
-}
-
-dyn_clone::clone_trait_object!(CertificateProvider);
 
 impl CaClient {
     pub fn new(address: String, root_cert: RootCert, auth: AuthSource) -> Result<CaClient, Error> {
@@ -49,8 +40,7 @@ impl CaClient {
     }
 }
 
-#[async_trait]
-impl CertificateProvider for CaClient {
+impl CaClient {
     #[instrument(skip_all)]
     async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
         let cs = tls::CsrOptions {
@@ -98,15 +88,21 @@ impl CertificateProvider for CaClient {
     }
 }
 
+#[async_trait]
+impl crate::identity::CaClientTrait for CaClient {
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
+        self.fetch_certificate(id).await
+    }
+}
+
 pub mod mock {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
     use tokio::sync::RwLock;
     use tokio::time::Instant;
 
-    use crate::identity::{CertificateProvider, Identity};
+    use crate::identity::Identity;
     use crate::tls::{generate_test_certs_at, Certs};
 
     use super::*;
@@ -164,10 +160,7 @@ pub mod mock {
         pub async fn clear_fetches(&self) {
             self.state.write().await.fetches.clear();
         }
-    }
 
-    #[async_trait]
-    impl CertificateProvider for CaClient {
         async fn fetch_certificate(&self, id: &Identity) -> Result<Certs, Error> {
             if self.cfg.fetch_latency != Duration::ZERO {
                 tokio::time::sleep(self.cfg.fetch_latency).await;
@@ -184,7 +177,14 @@ pub mod mock {
             let certs = generate_test_certs_at(&id.to_owned().into(), not_before, not_after);
 
             self.state.write().await.fetches.push(id.to_owned());
-            return Ok(certs);
+            Ok(certs)
+        }
+    }
+
+    #[async_trait]
+    impl crate::identity::CaClientTrait for CaClient {
+        async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
+            self.fetch_certificate(id).await
         }
     }
 }
@@ -200,8 +200,6 @@ mod tests {
         test_helpers, tls,
         xds::istio::ca::IstioCertificateResponse,
     };
-
-    use super::CertificateProvider;
 
     async fn test_ca_client_with_response(
         res: IstioCertificateResponse,

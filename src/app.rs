@@ -23,17 +23,16 @@ use prometheus_client::registry::Registry;
 use tokio::time;
 use tracing::{error, info, warn, Instrument};
 
-use crate::identity::CertificateProvider;
+use crate::identity::SecretManager;
 use crate::metrics::Metrics;
 use crate::{admin, config, identity, proxy, readiness, signal, stats, workload};
 
 pub async fn build_with_cert(
     config: config::Config,
-    cert_manager: impl CertificateProvider,
+    cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
     let mut registry = Registry::default();
     let metrics = Arc::new(Metrics::from(&mut registry));
-    let certificate_manager: Box<dyn CertificateProvider> = Box::new(cert_manager);
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
@@ -49,7 +48,7 @@ pub async fn build_with_cert(
         config.clone(),
         metrics.clone(),
         ready.register_task("workload manager"),
-        certificate_manager.clone(),
+        cert_manager.clone(),
     )
     .await?;
 
@@ -77,7 +76,7 @@ pub async fn build_with_cert(
     let proxy = proxy::Proxy::new(
         config.clone(),
         workload_manager.workloads(),
-        certificate_manager.clone(),
+        cert_manager.clone(),
         metrics.clone(),
         drain_rx.clone(),
     )
@@ -131,13 +130,12 @@ pub async fn build_with_cert(
 }
 
 pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
-    if config.fake_ca {
-        let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(86400));
-        build_with_cert(config, cert_manager).await
+    let cert_manager = if config.fake_ca {
+        identity::mock::new_secret_manager(Duration::from_secs(86400))
     } else {
-        let cert_manager = identity::SecretManager::new(config.clone())?;
-        build_with_cert(config, cert_manager).await
-    }
+        Arc::new(identity::SecretManager::new(config.clone())?)
+    };
+    build_with_cert(config, cert_manager).await
 }
 
 pub struct Bound {

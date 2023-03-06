@@ -23,7 +23,6 @@ use tokio::time::timeout;
 use tracing::{error, info};
 
 use ztunnel::identity;
-use ztunnel::identity::CertificateProvider;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::components::WorkloadManager;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
