@@ -62,6 +62,7 @@ pub struct ConfigDump {
 
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct CertsDump {
+    identity: String,
     leaf: String,
     chain: Vec<String>,
 }
@@ -132,7 +133,8 @@ fn x509_to_string(x509: &X509) -> String {
 
 async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     cert_manager
-        .collect_certs(|certs| CertsDump {
+        .collect_certs(|id, certs| CertsDump {
+            identity: id.to_string(),
             leaf: x509_to_string(certs.x509()),
             chain: certs.iter_chain().map(x509_to_string).collect(),
         })
