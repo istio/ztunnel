@@ -15,8 +15,10 @@
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::sync::Arc;
+
 use std::{net::SocketAddr, time::Duration};
 
+use boring::asn1::Asn1TimeRef;
 use boring::x509::X509;
 use drain::Watch;
 #[cfg(feature = "gperftools")]
@@ -34,6 +36,7 @@ use tracing::error;
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
 use crate::identity::SecretManager;
+use crate::tls::asn1_time_to_system_time;
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
@@ -61,10 +64,20 @@ pub struct ConfigDump {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+pub struct CertDump {
+    // Not available via Envoy, but still useful.
+    pem: String,
+    serial_number: String,
+    valid_from: String,
+    expiration_time: String,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct CertsDump {
     identity: String,
-    leaf: String,
-    chain: Vec<String>,
+    // Make it an array to keep compatibility with Envoy's config_dump.
+    ca_cert: [CertDump; 1],
+    cert_chain: Vec<CertDump>,
 }
 
 impl Service {
@@ -121,7 +134,7 @@ impl Service {
     }
 }
 
-fn x509_to_string(x509: &X509) -> String {
+fn x509_to_pem(x509: &X509) -> String {
     match x509.to_pem() {
         Err(e) => format!("<pem construction error: {e}>"),
         Ok(vec) => match String::from_utf8(vec) {
@@ -131,14 +144,32 @@ fn x509_to_string(x509: &X509) -> String {
     }
 }
 
+fn dump_cert(x509: &X509) -> CertDump {
+    fn rfc3339(t: &Asn1TimeRef) -> String {
+        use chrono::prelude::{DateTime, Utc};
+        let dt: DateTime<Utc> = asn1_time_to_system_time(t).into();
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    CertDump {
+        pem: x509_to_pem(x509),
+        serial_number: x509.serial_number().to_bn().unwrap().to_string(),
+        valid_from: rfc3339(x509.not_before()),
+        expiration_time: rfc3339(x509.not_after()),
+    }
+}
+
 async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
-    cert_manager
+    let mut dump = cert_manager
         .collect_certs(|id, certs| CertsDump {
             identity: id.to_string(),
-            leaf: x509_to_string(certs.x509()),
-            chain: certs.iter_chain().map(x509_to_string).collect(),
+            ca_cert: [dump_cert(certs.x509())],
+            cert_chain: certs.iter_chain().map(dump_cert).collect(),
         })
-        .await
+        .await;
+    // Sort for determinism.
+    dump.sort_by(|a, b| a.identity.cmp(&b.identity));
+    dump
 }
 
 async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
@@ -321,4 +352,161 @@ async fn handle_gprof_heap(_req: Request<Body>) -> Response<Body> {
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
         .body("gperftools not enabled".into())
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::identity;
+
+    use super::dump_certs;
+
+    fn diff_json<'a>(a: &'a serde_json::Value, b: &'a serde_json::Value) -> String {
+        let mut ret = String::new();
+        let a = serde_json::to_string_pretty(a).unwrap();
+        let b = serde_json::to_string_pretty(b).unwrap();
+        for diff in diff::lines(&a, &b) {
+            use diff::Result::*;
+            use std::fmt::Write;
+            match diff {
+                Left(l) => writeln!(ret, " - {l}"),
+                Right(r) => writeln!(ret, " + {r}"),
+                Both(s, _) => writeln!(ret, "{s}"),
+            }
+            .unwrap();
+        }
+        ret
+    }
+
+    // Not really much to test, mostly to make sure things format as expected.
+    #[tokio::test(start_paused = true)]
+    async fn test_dump_certs() {
+        let manager = identity::mock::new_secret_manager_cfg(identity::mock::SecretManagerConfig {
+            cert_lifetime: Duration::from_secs(7 * 60 * 60),
+            epoch: Some(
+                // Arbitrary point in time used to ensure deterministic certificate generation.
+                chrono::DateTime::parse_from_rfc3339("2023-03-11T05:57:27Z")
+                    .unwrap()
+                    .into(),
+            ),
+        });
+        for i in 0..2 {
+            manager
+                .fetch_certificate(&identity::Identity::Spiffe {
+                    trust_domain: "trust_domain".to_string(),
+                    namespace: "namespace".to_string(),
+                    service_account: format!("sa-{i}"),
+                })
+                .await
+                .unwrap();
+            // Make sure certificates are a significant amount of time apart, for better
+            // readability.
+            tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+        }
+        let got = serde_json::to_value(dump_certs(&manager).await).unwrap();
+        let want = serde_json::json!([
+          {
+            "ca_cert": [{
+              "expiration_time": "2023-03-11T12:57:26Z",
+              "pem": "-----BEGIN CERTIFICATE-----\n\
+                      MIICdzCCAV+gAwIBAgIUZyT929swtB8OHmjRaTEaD6yjqg4wDQYJKoZIhvcNAQEL\n\
+                      BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAeFw0yMzAzMTEwNTU3MjZaFw0y\n\
+                      MzAzMTExMjU3MjZaMAAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARar2BmIYAg\n\
+                      vJmOrSpCeFQ79JPy8cw4+zEE8fqr57k/umMp5jXZEGBpedBIY+qfmJPXEira9E92\n\
+                      dSmkfK5AKMWxo4GbMIGYMA4GA1UdDwEB/wQEAwIFoDAdBgNVHSUEFjAUBggrBgEF\n\
+                      BQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADAfBgNVHSMEGDAWgBQ/JOH9Wq5L\n\
+                      sEflEYSgHtiE2Sme1TA4BgNVHREBAf8ELjAshipzcGlmZmU6Ly90cnVzdF9kb21h\n\
+                      aW4vbnMvbmFtZXNwYWNlL3NhL3NhLTAwDQYJKoZIhvcNAQELBQADggEBAGdXco2B\n\
+                      7kNK35Q20OsF0f26nJWLWzxjXWqs5LtuxgEnTF3IstnQgfp5R0K3Exl+U8fXcnV2\n\
+                      SO8GPNGqH/6ILlC9vkPXyOtZBC0FRFgUj4v6VajiTFmQc2gKY8cFIKhF0thqnM7r\n\
+                      L07C+KQI1EolGcfGpdO/49MhPC/F/LnqgKps9K4vXuAfKYmUmsPAeQvutre6gvIu\n\
+                      s0wHYfpHdHjHOuHnIaNl93uZny0CCz/gl1+9ptr3/fEGCOdVDIJy0nSrl0wDicpX\n\
+                      O0WeAc1UeK/LYBGeyfekZRxstll33TlIRI5qKyJqmv8xj8TdWcQzbM6iFGInGtaQ\n\
+                      AJauM4JePEb8Fqw=\n\
+                      -----END CERTIFICATE-----\n",
+              "serial_number": "588850990443535479077311695632745359443207891470",
+              "valid_from": "2023-03-11T05:57:26Z"
+            }],
+            "cert_chain": [{
+              "expiration_time": "2296-12-24T18:31:28Z",
+              "pem": "-----BEGIN CERTIFICATE-----\n\
+                     MIIDEzCCAfugAwIBAgIUC+c/60e+F1eE+7VqxnaWcOOZnmEwDQYJKoZIhvcNAQEL\n\
+                     BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAgFw0yMzAzMTExODMxMjhaGA8y\n\
+                     Mjk2MTIyNDE4MzEyOFowGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDCCASIwDQYJ\n\
+                     KoZIhvcNAQEBBQADggEPADCCAQoCggEBAMeCTxPJtud0Uxw+CaaddWD7a+QEuQY+\n\
+                     BPTKJdnMej0sBMfUMbT16JLkYNFgrj1UVHHcpSoIHocp2sd32SY4bdbokQcop+Bj\n\
+                     tk55jQ46KLYsJgb2NwvYo1t8E1aetJqFGV7rmeZbFYeai+6q7iMjlbCGAu7/UnKJ\n\
+                     sdGnaJQgN8du0T1KDgjqKPyHqdsu9kbpCqiEXMRmw4/BEhFGzmID2oUDKB36duVb\n\
+                     dzSEm51QvgU5ILXIgyVrejN5CFsC+W+xjeOXLEztfHFUoqb3wWhkBuExmr81J2hG\n\
+                     W9pULJ2wkQgdfXP7gtMkB6EyKw/xIeaNmLzPIGrX01zQYIdZTuDwMY0CAwEAAaNT\n\
+                     MFEwHQYDVR0OBBYEFD8k4f1arkuwR+URhKAe2ITZKZ7VMB8GA1UdIwQYMBaAFD8k\n\
+                     4f1arkuwR+URhKAe2ITZKZ7VMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL\n\
+                     BQADggEBAKrnAeSsSSK3/8zx+hzj6SFXdJA9CQ02GEJ7hHrKijGWVYddal9dAbS5\n\
+                     tLd//qKO9uIsGety/Ok2bRQ6cqqMlgdNz3jmmrbSlYWmIXI0yHGmCiSazHsXVbEF\n\
+                     6Iwy3tcR4voXWKICWPh+C2cTgLmeZ0EuzFxq4wZnCf40wKoAJ9i1awSrBnE9jWtn\n\
+                     p4F4hWnJTpGky5dRALE0l/2Abrl38wgfM8r4IotmPThFKnFeIHU7bQ1rYAoqpbAh\n\
+                     Cv0BN5PjAQRWMk6boo3f0akS07nlYIVqXhxqcYnOgwkdlTtX9MqGIq26n8n1NWWw\n\
+                     nmKOjNsk6qRmulEgeGO4vxTvSJYb+hU=\n\
+                     -----END CERTIFICATE-----\n",
+              "serial_number": "67955938755654933561614970125599055831405010529",
+              "valid_from": "2023-03-11T18:31:28Z"
+            }],
+            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0"
+          },
+          {
+            "ca_cert": [{
+              "expiration_time": "2023-03-11T13:57:26Z",
+              "pem": "-----BEGIN CERTIFICATE-----\n\
+                      MIICdzCCAV+gAwIBAgIUXIP+orIQwt6EPdKHWQSEL934n7EwDQYJKoZIhvcNAQEL\n\
+                      BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAeFw0yMzAzMTEwNjU3MjZaFw0y\n\
+                      MzAzMTExMzU3MjZaMAAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARar2BmIYAg\n\
+                      vJmOrSpCeFQ79JPy8cw4+zEE8fqr57k/umMp5jXZEGBpedBIY+qfmJPXEira9E92\n\
+                      dSmkfK5AKMWxo4GbMIGYMA4GA1UdDwEB/wQEAwIFoDAdBgNVHSUEFjAUBggrBgEF\n\
+                      BQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADAfBgNVHSMEGDAWgBQ/JOH9Wq5L\n\
+                      sEflEYSgHtiE2Sme1TA4BgNVHREBAf8ELjAshipzcGlmZmU6Ly90cnVzdF9kb21h\n\
+                      aW4vbnMvbmFtZXNwYWNlL3NhL3NhLTEwDQYJKoZIhvcNAQELBQADggEBACynE+zR\n\
+                      H+Ktsys58NP67DGeh+D2/uxn3vG4SVCOThMM7DTwqfPUQqP4qJUqSx/rtXP2peN4\n\
+                      daI+G1PZQ3a6hWdYdMCa2+qftf4VCaYYFF9V51z8MqXjrOh9yXYxOXL+z3gzglio\n\
+                      buGLo7ou7T3SCCdQfPDOw3vSQWedPW9M2zEVOuuD2ZNGyDF3pC+4Jq31n0N9SL62\n\
+                      NZ5BtZK4tJbAuXbsfrGBTfFLMwG5K9DKqzqoaZ4Iqr6iGc7cjxbw3nlRUpXe8732\n\
+                      JOJf2IvOU6z4LO7YntAaSFohhYXMpCFjQkJFiX6voNoSfnfLN8sSqRIDpuBZ9G8R\n\
+                      hozHmFldMalh6Ss=\n\
+                      -----END CERTIFICATE-----\n",
+              "serial_number": "528170730419860468572163268563070820131458817969",
+              "valid_from": "2023-03-11T06:57:26Z"
+            }],
+            "cert_chain": [{
+              "expiration_time": "2296-12-24T18:31:28Z",
+              "pem": "-----BEGIN CERTIFICATE-----\n\
+                      MIIDEzCCAfugAwIBAgIUC+c/60e+F1eE+7VqxnaWcOOZnmEwDQYJKoZIhvcNAQEL\n\
+                      BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAgFw0yMzAzMTExODMxMjhaGA8y\n\
+                      Mjk2MTIyNDE4MzEyOFowGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDCCASIwDQYJ\n\
+                      KoZIhvcNAQEBBQADggEPADCCAQoCggEBAMeCTxPJtud0Uxw+CaaddWD7a+QEuQY+\n\
+                      BPTKJdnMej0sBMfUMbT16JLkYNFgrj1UVHHcpSoIHocp2sd32SY4bdbokQcop+Bj\n\
+                      tk55jQ46KLYsJgb2NwvYo1t8E1aetJqFGV7rmeZbFYeai+6q7iMjlbCGAu7/UnKJ\n\
+                      sdGnaJQgN8du0T1KDgjqKPyHqdsu9kbpCqiEXMRmw4/BEhFGzmID2oUDKB36duVb\n\
+                      dzSEm51QvgU5ILXIgyVrejN5CFsC+W+xjeOXLEztfHFUoqb3wWhkBuExmr81J2hG\n\
+                      W9pULJ2wkQgdfXP7gtMkB6EyKw/xIeaNmLzPIGrX01zQYIdZTuDwMY0CAwEAAaNT\n\
+                      MFEwHQYDVR0OBBYEFD8k4f1arkuwR+URhKAe2ITZKZ7VMB8GA1UdIwQYMBaAFD8k\n\
+                      4f1arkuwR+URhKAe2ITZKZ7VMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL\n\
+                      BQADggEBAKrnAeSsSSK3/8zx+hzj6SFXdJA9CQ02GEJ7hHrKijGWVYddal9dAbS5\n\
+                      tLd//qKO9uIsGety/Ok2bRQ6cqqMlgdNz3jmmrbSlYWmIXI0yHGmCiSazHsXVbEF\n\
+                      6Iwy3tcR4voXWKICWPh+C2cTgLmeZ0EuzFxq4wZnCf40wKoAJ9i1awSrBnE9jWtn\n\
+                      p4F4hWnJTpGky5dRALE0l/2Abrl38wgfM8r4IotmPThFKnFeIHU7bQ1rYAoqpbAh\n\
+                      Cv0BN5PjAQRWMk6boo3f0akS07nlYIVqXhxqcYnOgwkdlTtX9MqGIq26n8n1NWWw\n\
+                      nmKOjNsk6qRmulEgeGO4vxTvSJYb+hU=\n\
+                      -----END CERTIFICATE-----\n",
+              "serial_number": "67955938755654933561614970125599055831405010529",
+              "valid_from": "2023-03-11T18:31:28Z"
+            }],
+            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1"
+          }
+        ]);
+        assert!(
+            got == want,
+            "Certificate lists do not match (-want, +got):\n{}",
+            diff_json(&want, &got)
+        );
+    }
 }

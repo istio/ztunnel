@@ -515,18 +515,33 @@ fn init_pri(rx: &watch::Receiver<CertState>) -> Option<Priority> {
 }
 
 pub mod mock {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::Arc,
+        time::{Duration, SystemTime},
+    };
 
     use crate::identity::caclient::mock::{self, CaClient as MockCaClient};
 
     use super::SecretManager;
 
+    pub struct Config {
+        pub cert_lifetime: Duration,
+        pub epoch: Option<SystemTime>,
+    }
+
+    pub fn new_secret_manager(cert_lifetime: Duration) -> Arc<SecretManager> {
+        new_secret_manager_cfg(Config {
+            cert_lifetime,
+            epoch: None,
+        })
+    }
+
     // There is no need to return Arc, but most callers want one so it simplifies the code - and we
     // don't care about the extra overhead in tests.
-    pub fn new_secret_manager(cert_lifetime: Duration) -> Arc<SecretManager> {
-        let time_conv = crate::time::Converter::new();
+    pub fn new_secret_manager_cfg(cfg: Config) -> Arc<SecretManager> {
+        let time_conv = crate::time::Converter::new_at(cfg.epoch.unwrap_or_else(SystemTime::now));
         let client = MockCaClient::new(mock::ClientConfig {
-            cert_lifetime,
+            cert_lifetime: cfg.cert_lifetime,
             time_conv: time_conv.clone(),
             ..Default::default()
         });

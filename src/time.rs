@@ -22,8 +22,12 @@ pub struct Converter {
 
 impl Converter {
     pub fn new() -> Self {
+        Self::new_at(SystemTime::now())
+    }
+
+    pub fn new_at(sys_now: SystemTime) -> Self {
         Self {
-            sys_now: SystemTime::now(),
+            sys_now,
             now: Instant::now(),
         }
     }

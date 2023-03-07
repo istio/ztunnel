@@ -36,6 +36,7 @@ use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyResult
 use hyper::client::ResponseFuture;
 use hyper::server::conn::AddrStream;
 use hyper::{Request, Uri};
+use rand::RngCore;
 use tokio::net::TcpStream;
 use tonic::body::BoxBody;
 use tower::Service;
@@ -499,6 +500,7 @@ const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
 const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
 
 /// TestIdentity is an identity used for testing. This extends the Identity with test-only types
+#[derive(Debug)]
 pub enum TestIdentity {
     Identity(Identity),
     Ip(IpAddr),
@@ -515,6 +517,7 @@ impl From<IpAddr> for TestIdentity {
         Self::Ip(i)
     }
 }
+
 //
 // impl Display for TestIdentity {
 //     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -530,10 +533,11 @@ impl From<IpAddr> for TestIdentity {
 // TODO: Move towards code that doesn't rely on SystemTime::now() for easier time control with
 // tokio. Ideally we'll be able to also get rid of the sub-second timestamps on certificates
 // (since right now they are there only for testing).
-pub fn generate_test_certs_at(
+fn generate_test_certs_at(
     id: &TestIdentity,
     not_before: SystemTime,
     not_after: SystemTime,
+    rng: Option<&mut dyn rand::RngCore>,
 ) -> Certs {
     let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
     let (ca_cert, ca_key) = test_ca().unwrap();
@@ -547,10 +551,14 @@ pub fn generate_test_certs_at(
     builder.set_pubkey(&key).unwrap();
     builder.set_version(2).unwrap();
     let serial_number = {
-        let mut serial = BigNum::new().unwrap();
-        serial
-            .rand(159, boring::bn::MsbOption::MAYBE_ZERO, false)
-            .unwrap();
+        let mut data = [0u8; 20];
+        match rng {
+            None => rand::thread_rng().fill_bytes(&mut data),
+            Some(rng) => rng.fill_bytes(&mut data),
+        }
+        // Clear the most significant bit to make the resulting bignum effectively 159 bit long.
+        data[0] &= 0x7f;
+        let serial = BigNum::from_slice(&data).unwrap();
         serial.to_asn1_integer().unwrap()
     };
     builder.set_serial_number(&serial_number).unwrap();
@@ -611,7 +619,7 @@ pub fn generate_test_certs(
     duration_until_expiry: Duration,
 ) -> Certs {
     let not_before = SystemTime::now() + duration_until_valid;
-    generate_test_certs_at(id, not_before, not_before + duration_until_expiry)
+    generate_test_certs_at(id, not_before, not_before + duration_until_expiry, None)
 }
 
 fn test_ca() -> Result<(x509::X509, PKey<Private>), Error> {
@@ -625,6 +633,45 @@ pub fn test_certs() -> Certs {
     let key = pkey::PKey::private_key_from_pem(TEST_PKEY).unwrap();
     let chain = vec![cert.clone()];
     Certs { cert, key, chain }
+}
+
+pub mod mock {
+    use rand::{rngs::SmallRng, SeedableRng};
+    use std::time::SystemTime;
+
+    use super::{generate_test_certs_at, Certs, TestIdentity};
+
+    /// Allows generating test certificates in a deterministic manner.
+    pub struct CertGenerator {
+        rng: SmallRng,
+    }
+
+    impl CertGenerator {
+        /// Returns a new test certificate generator. The seed parameter sets the seed for any
+        /// randomized operations. Multiple CertGenerator instances created with the same seed will
+        /// return the same successive certificates, if same arguments to new_certs are given.
+        pub fn new(seed: u64) -> Self {
+            Self {
+                rng: SmallRng::seed_from_u64(seed),
+            }
+        }
+
+        pub fn new_certs(
+            &mut self,
+            id: &TestIdentity,
+            not_before: SystemTime,
+            not_after: SystemTime,
+        ) -> Certs {
+            generate_test_certs_at(id, not_before, not_after, Some(&mut self.rng))
+        }
+    }
+
+    impl Default for CertGenerator {
+        fn default() -> Self {
+            // Use arbitrary seed.
+            Self::new(427)
+        }
+    }
 }
 
 #[cfg(test)]

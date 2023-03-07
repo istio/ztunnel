@@ -1,6 +1,8 @@
 #!/bin/bash
 
-openssl ecparam -genkey -name prime256v1 -out ca-key.pem -noout
+# Specifically using RSA as this makes the signing deterministic, which is
+# useful for tests.
+openssl genrsa -f4 -out ca-key.pem
 openssl req -x509 -new -nodes -key "ca-key.pem" -days 100000 -out "root-cert.pem" -subj "/O=cluster.local"
 
 openssl ecparam -name prime256v1 -genkey -noout -out key.pem
