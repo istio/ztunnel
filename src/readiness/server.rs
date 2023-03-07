@@ -58,7 +58,7 @@ impl Service {
 
 async fn handle_ready(ready: &readiness::Ready, req: Request<Body>) -> Response<Body> {
     match *req.method() {
-        hyper::Method::GET | hyper::Method::HEAD => {
+        hyper::Method::GET => {
             let pending = ready.pending();
             if pending.is_empty() {
                 return plaintext_response(hyper::StatusCode::OK, "ready\n".into());

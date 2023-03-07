@@ -312,7 +312,7 @@ impl WorkloadManager {
                     .with_authorization_handler(xds_rbac)
                     .watch(xds::WORKLOAD_TYPE.into())
                     .watch(xds::AUTHORIZATION_TYPE.into())
-                    .build(metrics, awaiting_ready.subtask("ads client")),
+                    .build(metrics, awaiting_ready),
             )
         } else {
             None
