@@ -118,6 +118,9 @@ pub struct Workload {
 
     #[serde(default)]
     pub status: HealthStatus,
+
+    #[serde(default)]
+    pub cluster_id: String,
 }
 
 impl Workload {
@@ -240,6 +243,15 @@ impl TryFrom<&XdsWorkload> for Workload {
 
             native_hbone: resource.native_hbone,
             authorization_policies: resource.authorization_policies,
+
+            cluster_id: {
+                let result = resource.cluster_id;
+                if result.is_empty() {
+                    "Kubernetes".into()
+                } else {
+                    result
+                }
+            },
         })
     }
 }
