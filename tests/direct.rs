@@ -16,20 +16,20 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use hyper::{Body, Client, Method, Request};
+use bytes::Bytes;
+use http_body_util::Empty;
+use hyper::{Method, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
 
+use ztunnel::config;
 use ztunnel::identity::mock::new_secret_manager;
-
 use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::assert_eventually;
-
-use ztunnel::config;
 use ztunnel::test_helpers::*;
 
 #[tokio::test]
@@ -352,9 +352,11 @@ async fn admin_shutdown(addr: SocketAddr) {
         .method(Method::POST)
         .uri(format!("http://localhost:{}/quitquitquit", addr.port()))
         .header("content-type", "application/json")
-        .body(Body::default())
+        .body(Empty::<Bytes>::new())
         .unwrap();
-    let client = Client::new();
+    let client =
+        ::hyper_util::client::legacy::Client::builder(::hyper_util::rt::TokioExecutor::new())
+            .build_http();
     let resp = client.request(req).await.expect("admin shutdown request");
     assert_eq!(resp.status(), hyper::StatusCode::OK);
 }

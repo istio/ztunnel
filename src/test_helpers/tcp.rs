@@ -11,22 +11,24 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+use bytes::Bytes;
+use futures::StreamExt;
+use http_body_util::Full;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use std::{cmp, io};
 
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Response, Server};
-
+use hyper::server::conn::http2;
+use hyper::service::service_fn;
+use hyper::Response;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 use tracing::{debug, error, info};
 
+use crate::hyper_util::TokioExecutor;
 use crate::{identity, tls};
 
 #[derive(Copy, Clone, Debug)]
@@ -195,31 +197,33 @@ impl HboneTestServer {
             Duration::from_secs(100),
         );
         let acceptor = tls::ControlPlaneCertProvider(certs);
-        let tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
-        let incoming = hyper::server::accept::from_stream(tls_stream);
+        let mut tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mode = self.mode;
-        Server::builder(incoming)
-            .http2_only(true)
-            .serve(make_service_fn(|_| async move {
-                let mode = mode;
-                Ok::<_, Infallible>(service_fn(move |req| async move {
-                    info!("waypoint: received request");
-                    let mode = mode;
-                    tokio::task::spawn(async move {
-                        match hyper::upgrade::on(req).await {
-                            Ok(upgraded) => {
-                                let (mut ri, mut wi) = tokio::io::split(upgraded);
-                                // Signal we are the waypoint so tests can validate this
-                                wi.write_all(b"waypoint\n").await.unwrap();
-                                handle_stream(mode, &mut ri, &mut wi).await;
+        while let Some(socket) = tls_stream.next().await {
+            if let Err(err) = http2::Builder::new(TokioExecutor)
+                .serve_connection(
+                    socket,
+                    service_fn(move |req| async move {
+                        info!("waypoint: received request");
+                        let mode = mode;
+                        tokio::task::spawn(async move {
+                            match hyper::upgrade::on(req).await {
+                                Ok(upgraded) => {
+                                    let (mut ri, mut wi) = tokio::io::split(upgraded);
+                                    // Signal we are the waypoint so tests can validate this
+                                    wi.write_all(b"waypoint\n").await.unwrap();
+                                    handle_stream(mode, &mut ri, &mut wi).await;
+                                }
+                                Err(e) => error!("No upgrade {e}"),
                             }
-                            Err(e) => error!("No upgrade {e}"),
-                        }
-                    });
-                    Ok::<_, Infallible>(Response::new(Body::from("streaming...")))
-                }))
-            }))
-            .await
-            .unwrap();
+                        });
+                        Ok::<_, Infallible>(Response::new(Full::<Bytes>::from("streaming...")))
+                    }),
+                )
+                .await
+            {
+                error!("Error serving connection: {:?}", err);
+            }
+        }
     }
 }

@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
@@ -655,7 +654,19 @@ pub enum AdsError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::SystemTime,
+    };
+
+    use prost::Message;
+    use prost_types::Any;
+    use textnonce::TextNonce;
+    use tokio::time::sleep;
+
+    use workload::Workload;
+    use xds::istio::workload::Workload as XdsWorkload;
+
     use crate::{
         test_helpers::{
             helpers::{self},
@@ -664,16 +675,8 @@ mod tests {
         workload,
         xds::{istio::workload::WorkloadType, WORKLOAD_TYPE},
     };
-    use prost::Message;
-    use prost_types::Any;
-    use std::{
-        net::{IpAddr, Ipv4Addr},
-        time::SystemTime,
-    };
-    use textnonce::TextNonce;
-    use tokio::time::sleep;
-    use workload::Workload;
-    use xds::istio::workload::Workload as XdsWorkload;
+
+    use super::*;
 
     const POLL_RATE: Duration = Duration::from_millis(2);
     const TEST_TIMEOUT: Duration = Duration::from_millis(100);
