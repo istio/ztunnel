@@ -30,7 +30,8 @@ use crate::identity::SecretManager;
 use crate::metrics::traffic::{ConnectionOpen, Reporter};
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
-use crate::proxy::{ProxyInputs, TraceParent, TRACEPARENT_HEADER};
+use crate::proxy::util::parse_baggage_header;
+use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::tls::TlsError;
@@ -304,11 +305,15 @@ impl Inbound {
                     conn.src_ip
                 };
 
+                let baggage = parse_baggage_header(req.headers().get(BAGGAGE_HEADER));
                 // Find source info. We can lookup by XDS or from connection attributes
                 let source = workloads.fetch_workload(&source_ip).await;
                 let derived_source = traffic::DerivedWorkload {
                     identity: conn.src_identity,
-                    // TODO: use baggage for the rest
+                    cluster_id: baggage.cluster_id,
+                    namespace: baggage.namespace,
+                    workload_name: baggage.workload_name,
+                    revision: baggage.revision,
                     ..Default::default()
                 };
                 let connection_metrics = traffic::ConnectionOpen {

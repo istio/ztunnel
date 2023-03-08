@@ -138,7 +138,6 @@ impl InboundPassthrough {
         };
         let derived_source = traffic::DerivedWorkload {
             identity: conn.src_identity,
-            // TODO: use baggage for the rest
             ..Default::default()
         };
         let connection_metrics = traffic::ConnectionOpen {
