@@ -4,5 +4,14 @@
   "privileged": true,
   // "remoteUser": "gitpod",
   "runArgs": [ "-v","/var/run/docker.sock:/var/run/docker.sock" ],
-  "onCreateCommand": "cargo build"
+  "onCreateCommand": "cargo build",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "bungcip.better-toml",
+        "serayuzgur.crates"
+      ]
+    }
+  }
 }
