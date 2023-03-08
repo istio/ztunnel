@@ -114,6 +114,7 @@ pub struct DerivedWorkload {
     pub revision: Option<String>,
     pub namespace: Option<String>,
     pub identity: Option<Identity>,
+    pub cluster_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -156,7 +157,7 @@ impl CommonTrafficLabels {
         self.source_principal = w.identity().into();
         self.source_app = w.canonical_name.clone().into();
         self.source_version = w.canonical_revision.clone().into();
-        self.source_cluster = "Kubernetes".to_string().into(); // TODO
+        self.source_cluster = w.cluster_id.to_string().into();
         self
     }
 
@@ -171,7 +172,7 @@ impl CommonTrafficLabels {
         self.source_principal = w.identity.clone().into();
         self.source_app = w.workload_name.clone().into();
         self.source_version = w.revision.clone().into();
-        self.source_cluster = "Kubernetes".to_string().into(); // TODO
+        self.source_cluster = w.cluster_id.clone().into();
         self
     }
 
@@ -186,7 +187,7 @@ impl CommonTrafficLabels {
         self.destination_principal = w.identity().into();
         self.destination_app = w.canonical_name.clone().into();
         self.destination_version = w.canonical_revision.clone().into();
-        self.destination_cluster = "Kubernetes".to_string().into(); // TODO
+        self.destination_cluster = w.cluster_id.to_string().into();
         self
     }
 }
