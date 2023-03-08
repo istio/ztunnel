@@ -30,13 +30,22 @@ use crate::xds::istio::ca::IstioCertificateRequest;
 
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
+    pub enable_impersonated_identity: bool,
 }
 
 impl CaClient {
-    pub fn new(address: String, root_cert: RootCert, auth: AuthSource) -> Result<CaClient, Error> {
+    pub fn new(
+        address: String,
+        root_cert: RootCert,
+        auth: AuthSource,
+        enable_impersonated_identity: bool,
+    ) -> Result<CaClient, Error> {
         let svc = tls::grpc_connector(address, root_cert)?;
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
-        Ok(CaClient { client })
+        Ok(CaClient {
+            client,
+            enable_impersonated_identity,
+        })
     }
 }
 
@@ -54,14 +63,20 @@ impl CaClient {
         let req = IstioCertificateRequest {
             csr,
             validity_duration: 60 * 60 * 24, // 24 hours
-            metadata: Some(Struct {
-                fields: BTreeMap::from([(
-                    "ImpersonatedIdentity".into(),
-                    prost_types::Value {
-                        kind: Some(Kind::StringValue(id.to_string())),
-                    },
-                )]),
-            }),
+            metadata: {
+                if self.enable_impersonated_identity {
+                    Some(Struct {
+                        fields: BTreeMap::from([(
+                            "ImpersonatedIdentity".into(),
+                            prost_types::Value {
+                                kind: Some(Kind::StringValue(id.to_string())),
+                            },
+                        )]),
+                    })
+                } else {
+                    None
+                }
+            },
         };
         let resp = self
             .client
