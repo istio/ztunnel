@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use std::{env, fs};
@@ -47,6 +47,21 @@ const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
+
+/// Implement the full logic of FindRootCAForXDS like in Istio
+const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
+const PILOT_CERT_PROVIDER_ENV: &str = "PILOT_CERT_PROVIDER";
+const PROV_CERT_ENV: &str = "PROV_CERT";
+const FILE_MOUNTED_CERTS_ENV: &str = "FILE_MOUNTED_CERTS";
+const META_DATA_CLIENT_ROOT_CERT: &str = "ISTIO_META_TLS_CLIENT_ROOT_CERT";
+const SYSTEM_ROOT_CERTS: &str = "SYSTEM";
+const DEFAULT_ROOT_CERT_FILE_PATH: &str = "./etc/certs/root-cert.pem";
+const CERT_PROVIDER_ISTIOD: &str = "istiod";
+const CERT_PROVIDER_KUBERNETES: &str = "kubernetes";
+const K8S_CA_ISTIO_MOUNTED_PATH: &str = "./var/run/secrets/istio/kubernetes/ca.crt";
+const K8S_CA_PATH: &str = "./var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+const CERT_PROVIDER_NONE: &str = "none";
+const CITADEL_CA_CERT_PATH: &str = "./var/run/secrets/istio";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -194,6 +209,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     });
+    let citadel_ca_cert_path = if pc.proxy_metadata.contains_key(META_DATA_CLIENT_ROOT_CERT) {
+        pc.proxy_metadata.get(META_DATA_CLIENT_ROOT_CERT).unwrap().clone()
+    } else {
+        "".to_string()
+    };
 
     Ok(Config {
         window_size: 4 * 1024 * 1024,
@@ -230,8 +250,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         cluster_id,
 
         xds_address,
-        // TODO: full FindRootCAForXDS logic like in Istio
-        xds_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
+        // full FindRootCAForXDS logic like in Istio
+        xds_root_cert: find_rootca_for_xds(citadel_ca_cert_path).unwrap(),
         ca_address,
         // TODO: full FindRootCAForCA logic like in Istio
         ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
@@ -351,6 +371,45 @@ pub fn empty_to_none<A: AsRef<str>>(inp: Option<A>) -> Option<A> {
         }
     }
     inp
+}
+
+pub fn find_rootca_for_xds(citadel_ca_cert_path: String) -> Result<RootCert, Error> {
+    let mut root_ca_path = "".to_string();
+    let xds_root_ca = parse_default(XDS_ROOT_CA_ENV, "".to_string())?;
+    let pilot_cert_provider = parse_default(PILOT_CERT_PROVIDER_ENV, CERT_PROVIDER_ISTIOD.to_string())?;
+    let prov_cert = parse_default(PROV_CERT_ENV, "".to_string())?;
+    let file_mounted_certs = parse_default(FILE_MOUNTED_CERTS_ENV, false)?;
+    if xds_root_ca.eq(&SYSTEM_ROOT_CERTS.to_string()) {
+        // Special case input for root cert configuration to use system root certificates
+        return Ok(RootCert::Default);
+    } else if !xds_root_ca.is_empty() {
+        root_ca_path = xds_root_ca;
+    } else if Path::new(&DEFAULT_ROOT_CERT_FILE_PATH.to_string()).exists() {
+        root_ca_path = DEFAULT_ROOT_CERT_FILE_PATH.to_string();
+    } else if pilot_cert_provider.eq(&CERT_PROVIDER_KUBERNETES.to_string()) {
+        if Path::new(&K8S_CA_ISTIO_MOUNTED_PATH.to_string()).exists() {
+            root_ca_path = K8S_CA_ISTIO_MOUNTED_PATH.to_string()
+        } else {
+            root_ca_path = K8S_CA_PATH.to_string()
+        }
+    } else if !prov_cert.is_empty() {
+        root_ca_path.push_str(&prov_cert);
+        root_ca_path.push_str("/root-cert.pem");
+    } else if file_mounted_certs {
+        root_ca_path = citadel_ca_cert_path;
+    } else if pilot_cert_provider.eq(&CERT_PROVIDER_NONE.to_string()) {
+        eprintln!("root CA file for XDS required but configured provider as none");
+        return Ok(RootCert::Default);
+    } else {
+        root_ca_path.push_str(CITADEL_CA_CERT_PATH);
+        root_ca_path.push_str("/root-cert.pem");
+    }
+
+    if Path::new(&root_ca_path.clone()).exists() {
+        return Ok(RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()));
+    }
+    eprintln!("root CA file for XDS does not exist {root_ca_path}");
+    Ok(RootCert::Default)
 }
 
 #[cfg(test)]
