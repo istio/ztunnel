@@ -14,6 +14,9 @@
 
 use std::io::{Error, ErrorKind};
 
+use hyper::http::HeaderValue;
+use tracing::warn;
+
 pub fn is_runtime_shutdown(e: &Error) -> bool {
     if e.kind() == ErrorKind::Other
         && e.to_string() == "A Tokio 1.x context was found, but it is being shutdown."
@@ -21,4 +24,90 @@ pub fn is_runtime_shutdown(e: &Error) -> bool {
         return true;
     }
     false
+}
+
+#[derive(Default)]
+pub struct Baggage {
+    pub cluster_id: Option<String>,
+    pub namespace: Option<String>,
+    pub workload_name: Option<String>,
+    pub service_name: Option<String>,
+    pub revision: Option<String>,
+}
+
+pub fn parse_baggage_header(h: Option<&HeaderValue>) -> Baggage {
+    let mut baggage = Baggage {
+        ..Default::default()
+    };
+    if let Some(hv) = h {
+        match hv.to_str() {
+            Ok(v) => {
+                v.split(&[',']).for_each(|s| {
+                    let parts: Vec<&str> = s.split('=').collect();
+                    if parts.len() > 1 {
+                        let val = match parts[1] {
+                            "" => None,
+                            s => Some(s.to_string()),
+                        };
+                        match parts[0] {
+                            "k8s.cluster.name" => baggage.cluster_id = val,
+                            "k8s.namespace.name" => baggage.namespace = val,
+                            "k8s.deployment.name"
+                            | "k8s.cronjob.name"
+                            | "k8s.pod.name"
+                            | "k8s.job.name" => baggage.workload_name = val,
+                            "service.name" => baggage.service_name = val,
+                            "service.version" => baggage.revision = val,
+                            _ => {}
+                        }
+                    }
+                });
+            }
+            Err(e) => warn!("Failed to parse baggage header: {:?}", e),
+        }
+    }
+    baggage
+}
+
+#[cfg(test)]
+pub mod tests {
+    use hyper::http::HeaderValue;
+
+    use super::parse_baggage_header;
+
+    #[test]
+    fn baggage_parser() {
+        let baggage_str = "k8s.cluster.name=K1,k8s.namespace.name=NS1,k8s.deployment.name=N1,service.name=N2,service.version=V1";
+        if let Ok(header_value) = HeaderValue::from_str(baggage_str) {
+            let baggage = parse_baggage_header(Some(&header_value));
+            assert_eq!(baggage.cluster_id, Some("K1".to_string()));
+            assert_eq!(baggage.namespace, Some("NS1".to_string()));
+            assert_eq!(baggage.workload_name, Some("N1".to_string()));
+            assert_eq!(baggage.service_name, Some("N2".to_string()));
+            assert_eq!(baggage.revision, Some("V1".to_string()));
+        };
+    }
+
+    #[test]
+    fn baggage_parser_empty_values() {
+        let baggage_str = "k8s.cluster.name=,k8s.namespace.name=,k8s.deployment.name=,service.name=,service.version=";
+        if let Ok(header_value) = HeaderValue::from_str(baggage_str) {
+            let baggage = parse_baggage_header(Some(&header_value));
+            assert_eq!(baggage.cluster_id, None);
+            assert_eq!(baggage.namespace, None);
+            assert_eq!(baggage.workload_name, None);
+            assert_eq!(baggage.service_name, None);
+            assert_eq!(baggage.revision, None);
+        };
+    }
+
+    #[test]
+    fn baggage_parser_no_header() {
+        let baggage = parse_baggage_header(None);
+        assert_eq!(baggage.cluster_id, None);
+        assert_eq!(baggage.namespace, None);
+        assert_eq!(baggage.workload_name, None);
+        assert_eq!(baggage.service_name, None);
+        assert_eq!(baggage.revision, None);
+    }
 }
