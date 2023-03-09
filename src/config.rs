@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use std::{env, fs};
@@ -47,6 +47,11 @@ const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
+
+/// Fetch the XDS/CA root cert file path based on below constants
+const XDS_ROOT_CERT_PROVIDER_ENV: &str = "XDS_CERT_PROVIDER";
+const CA_ROOT_CERT_PROVIDER_ENV: &str = "CA_CERT_PROVIDER";
+const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -195,6 +200,26 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     });
 
+    let xds_root_cert_provider = parse_default(
+        XDS_ROOT_CERT_PROVIDER_ENV,
+        DEFAULT_ROOT_CERT_PROVIDER.to_string(),
+    )?;
+    let xds_root_cert = if Path::new(&xds_root_cert_provider).exists() {
+        RootCert::File(xds_root_cert_provider.parse().unwrap())
+    } else {
+        RootCert::Static(Bytes::from(xds_root_cert_provider))
+    };
+
+    let ca_root_cert_provider = parse_default(
+        CA_ROOT_CERT_PROVIDER_ENV,
+        DEFAULT_ROOT_CERT_PROVIDER.to_string(),
+    )?;
+    let ca_root_cert = if Path::new(&ca_root_cert_provider).exists() {
+        RootCert::File(ca_root_cert_provider.parse().unwrap())
+    } else {
+        RootCert::Static(Bytes::from(ca_root_cert_provider))
+    };
+
     Ok(Config {
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
@@ -230,11 +255,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         cluster_id,
 
         xds_address,
-        // TODO: full FindRootCAForXDS logic like in Istio
-        xds_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
+        xds_root_cert,
         ca_address,
-        // TODO: full FindRootCAForCA logic like in Istio
-        ca_root_cert: RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
+        ca_root_cert,
         local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
         proxy_metadata: pc.proxy_metadata,
