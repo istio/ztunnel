@@ -2696,6 +2696,7 @@ name = "ztunnel-fuzz"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "hyper",
  "libfuzzer-sys",
  "prost",
  "ztunnel",

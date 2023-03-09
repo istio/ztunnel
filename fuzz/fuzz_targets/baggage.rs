@@ -12,24 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod admin;
-pub mod app;
-pub mod baggage;
-pub mod config;
-pub mod identity;
-pub mod metrics;
-pub mod proxy;
-pub mod rbac;
-pub mod readiness;
-pub mod signal;
-pub mod socket;
-pub mod stats;
-pub mod telemetry;
-pub mod time;
-pub mod tls;
-pub mod version;
-pub mod workload;
-pub mod xds;
+#![no_main]
 
-pub mod hyper_util;
-pub mod test_helpers;
+use hyper::http::HeaderValue;
+use libfuzzer_sys::fuzz_target;
+use ztunnel::baggage::parse_baggage_header;
+
+fuzz_target!(|data: &[u8]| {
+    let _ = run_baggage_header_parser(data);
+});
+
+fn run_baggage_header_parser(data: &[u8]) -> anyhow::Result<()> {
+    let header_value = HeaderValue::from_bytes(data)?;
+    parse_baggage_header(Some(&header_value))?;
+    Ok(())
+}

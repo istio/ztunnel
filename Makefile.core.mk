@@ -48,3 +48,6 @@ gen-check: gen check-clean-repo
 
 presubmit: export RUSTFLAGS = -D warnings
 presubmit: check-features test lint gen-check
+
+clean:
+	cargo clean
