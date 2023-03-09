@@ -381,7 +381,12 @@ pub struct SecretManager {
 
 impl SecretManager {
     pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
-        let caclient = CaClient::new(cfg.ca_address.unwrap(), cfg.ca_root_cert, cfg.auth)?;
+        let caclient = CaClient::new(
+            cfg.ca_address.unwrap(),
+            cfg.ca_root_cert,
+            cfg.auth,
+            cfg.enable_impersonated_identity,
+        )?;
         Ok(Self::new_with_client(caclient))
     }
 
