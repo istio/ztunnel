@@ -25,12 +25,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
+use crate::baggage::parse_baggage_header;
 use crate::config::Config;
 use crate::identity::SecretManager;
 use crate::metrics::traffic::{ConnectionOpen, Reporter};
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
-use crate::proxy::util::parse_baggage_header;
 use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
@@ -305,7 +305,8 @@ impl Inbound {
                     conn.src_ip
                 };
 
-                let baggage = parse_baggage_header(req.headers().get(BAGGAGE_HEADER));
+                let baggage =
+                    parse_baggage_header(req.headers().get(BAGGAGE_HEADER)).unwrap_or_default();
                 // Find source info. We can lookup by XDS or from connection attributes
                 let source = workloads.fetch_workload(&source_ip).await;
                 let derived_source = traffic::DerivedWorkload {

@@ -8,6 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+hyper = "0.14.18"
 libfuzzer-sys = "0.4"
 prost = "0.11"
 anyhow = "1.0.65"
@@ -25,5 +26,11 @@ debug = 1
 [[bin]]
 name = "protobuf"
 path = "fuzz_targets/protobuf.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "baggage"
+path = "fuzz_targets/baggage.rs"
 test = false
 doc = false
