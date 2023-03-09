@@ -305,7 +305,8 @@ impl Inbound {
                     conn.src_ip
                 };
 
-                let baggage = parse_baggage_header(req.headers().get(BAGGAGE_HEADER)).unwrap_or_default();
+                let baggage =
+                    parse_baggage_header(req.headers().get(BAGGAGE_HEADER)).unwrap_or_default();
                 // Find source info. We can lookup by XDS or from connection attributes
                 let source = workloads.fetch_workload(&source_ip).await;
                 let derived_source = traffic::DerivedWorkload {

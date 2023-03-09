@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hyper::{http::HeaderValue, header::ToStrError};
+use hyper::{header::ToStrError, http::HeaderValue};
 
 #[derive(Default)]
 pub struct Baggage {
