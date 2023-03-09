@@ -43,7 +43,6 @@ pub async fn build_with_cert(
 
     let ready = readiness::Ready::new();
     let proxy_task = ready.register_task("proxy listeners");
-
     let workload_manager = workload::WorkloadManager::new(
         config.clone(),
         metrics.clone(),
