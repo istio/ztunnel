@@ -42,7 +42,7 @@ pub async fn build_with_cert(
     let (drain_tx, drain_rx) = drain::channel();
 
     let ready = readiness::Ready::new();
-
+    let proxy_task = ready.register_task("proxy listeners");
     let workload_manager = workload::WorkloadManager::new(
         config.clone(),
         metrics.clone(),
@@ -80,6 +80,7 @@ pub async fn build_with_cert(
         drain_rx.clone(),
     )
     .await?;
+    drop(proxy_task);
 
     // spawn all tasks that should run in the main thread
     admin_server.spawn();
