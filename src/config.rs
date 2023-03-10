@@ -52,9 +52,10 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 
 /// Fetch the XDS/CA root cert file path based on below constants
-const XDS_ROOT_CERT_PROVIDER_ENV: &str = "XDS_CERT_PROVIDER";
-const CA_ROOT_CERT_PROVIDER_ENV: &str = "CA_CERT_PROVIDER";
+const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA ";
+const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
+const CERT_SYSTEM: &str = "SYSTEM";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -212,22 +213,36 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     });
 
     let xds_root_cert_provider = parse_default(
-        XDS_ROOT_CERT_PROVIDER_ENV,
+        XDS_ROOT_CA_ENV,
         DEFAULT_ROOT_CERT_PROVIDER.to_string(),
     )?;
     let xds_root_cert = if Path::new(&xds_root_cert_provider).exists() {
-        RootCert::File(xds_root_cert_provider.parse().unwrap())
+        let xds_root_cert_match = match xds_root_cert_provider.parse::<PathBuf>() {
+            Ok(root_cert) => root_cert,
+            Err(_) => PathBuf::new(),
+        };
+        RootCert::File(xds_root_cert_match)
+    } else if xds_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
+        // handle SYSTEM special case for xds
+        RootCert::File(PathBuf::new())
     } else {
         RootCert::Static(Bytes::from(xds_root_cert_provider))
     };
 
     let ca_root_cert_provider = parse_default(
-        CA_ROOT_CERT_PROVIDER_ENV,
+        CA_ROOT_CA_ENV,
         DEFAULT_ROOT_CERT_PROVIDER.to_string(),
     )?;
     let ca_root_cert = if Path::new(&ca_root_cert_provider).exists() {
-        RootCert::File(ca_root_cert_provider.parse().unwrap())
-    } else {
+        let ca_root_cert_match = match ca_root_cert_provider.parse::<PathBuf>() {
+            Ok(root_cert) => root_cert,
+            Err(_) => PathBuf::new(),
+        };
+        RootCert::File(ca_root_cert_match)
+    } else if ca_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
+        // handle SYSTEM special case for ca
+        RootCert::File(PathBuf::new())
+    }else {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
 
