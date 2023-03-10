@@ -212,10 +212,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     });
 
-    let xds_root_cert_provider = parse_default(
-        XDS_ROOT_CA_ENV,
-        DEFAULT_ROOT_CERT_PROVIDER.to_string(),
-    )?;
+    let xds_root_cert_provider =
+        parse_default(XDS_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
     let xds_root_cert = if Path::new(&xds_root_cert_provider).exists() {
         let xds_root_cert_match = match xds_root_cert_provider.parse::<PathBuf>() {
             Ok(root_cert) => root_cert,
@@ -229,10 +227,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::Static(Bytes::from(xds_root_cert_provider))
     };
 
-    let ca_root_cert_provider = parse_default(
-        CA_ROOT_CA_ENV,
-        DEFAULT_ROOT_CERT_PROVIDER.to_string(),
-    )?;
+    let ca_root_cert_provider =
+        parse_default(CA_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
     let ca_root_cert = if Path::new(&ca_root_cert_provider).exists() {
         let ca_root_cert_match = match ca_root_cert_provider.parse::<PathBuf>() {
             Ok(root_cert) => root_cert,
@@ -242,7 +238,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else if ca_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
         // handle SYSTEM special case for ca
         RootCert::File(PathBuf::new())
-    }else {
+    } else {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
 
