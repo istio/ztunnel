@@ -27,8 +27,7 @@ use crate::identity;
 
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NODE_NAME: &str = "NODE_NAME";
-const POD_NAME: &str = "POD_NAME";
-const POD_NAMESPACE: &str = "POD_NAMESPACE";
+const PROXY_MODE: &str = "PROXY_MODE";
 const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
@@ -40,7 +39,6 @@ const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
-const ENABLE_IMPERSONATED_IDENTITY: &str = "ENABLE_IMPERSONATED_IDENTITY";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
@@ -55,6 +53,9 @@ const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const XDS_ROOT_CERT_PROVIDER_ENV: &str = "XDS_CERT_PROVIDER";
 const CA_ROOT_CERT_PROVIDER_ENV: &str = "CA_CERT_PROVIDER";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
+
+const PROXY_MODE_SIDECAR: &str = "sidecar";
+const PROXY_MODE_NODE: &str = "node";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -78,6 +79,13 @@ impl ConfigSource {
     }
 }
 
+#[derive(serde::Serialize, Default, Clone, Debug, PartialEq, Eq)]
+pub enum ProxyMode {
+    #[default]
+    Node,
+    Sidecar,
+}
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub window_size: u32,
@@ -94,10 +102,8 @@ pub struct Config {
 
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
-    /// The name of the pod this ztunnel is running as.
-    pub local_pod: Option<String>,
-    /// The namespace of the pod this ztunnel is running as.
-    pub local_pod_namespace: Option<String>,
+    /// The proxy mode of ztunnel, Node or Sidecar, default to Node.
+    pub proxy_mode: ProxyMode,
     /// The local_ip we are running at.
     pub local_ip: Option<IpAddr>,
     /// The Cluster ID of the cluster that his ztunnel belongs to
@@ -134,10 +140,6 @@ pub struct Config {
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
-
-    // If true, fetch certs for pod on the same node with impersonated identity.
-    // If false, only fetch cert for current pod (used in serverless environment).
-    pub enable_impersonated_identity: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -262,8 +264,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
         local_node: parse(NODE_NAME)?,
-        local_pod: parse(POD_NAME)?,
-        local_pod_namespace: parse(POD_NAMESPACE)?,
+        proxy_mode: match parse::<String>(PROXY_MODE)? {
+            Some(proxy_mode) => match proxy_mode.as_str() {
+                PROXY_MODE_SIDECAR => ProxyMode::Sidecar,
+                PROXY_MODE_NODE => ProxyMode::Node,
+                _ => return Err(Error::EnvVar(PROXY_MODE.to_string(), proxy_mode)),
+            },
+            None => ProxyMode::Node,
+        },
         local_ip: parse(INSTANCE_IP)?,
         cluster_id,
 
@@ -288,7 +296,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
-        enable_impersonated_identity: parse_default(ENABLE_IMPERSONATED_IDENTITY, true)?,
     })
 }
 

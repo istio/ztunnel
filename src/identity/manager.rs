@@ -19,6 +19,7 @@ use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::config::ProxyMode;
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
@@ -386,7 +387,7 @@ impl SecretManager {
             cfg.ca_address.unwrap(),
             cfg.ca_root_cert,
             cfg.auth,
-            cfg.enable_impersonated_identity,
+            cfg.proxy_mode == ProxyMode::Node,
         )?;
         Ok(Self::new_with_client(caclient))
     }
