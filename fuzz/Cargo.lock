@@ -2657,6 +2657,7 @@ dependencies = [
  "boring",
  "byteorder",
  "bytes",
+ "chrono",
  "drain",
  "dyn-clone",
  "futures",
