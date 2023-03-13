@@ -118,13 +118,15 @@ pub mod mock {
     use tokio::time::Instant;
 
     use crate::identity::Identity;
-    use crate::tls::{generate_test_certs_at, Certs};
+    use crate::tls::mock::CertGenerator;
+    use crate::tls::Certs;
 
     use super::*;
 
     #[derive(Default)]
     struct ClientState {
         fetches: Vec<Identity>,
+        gen: CertGenerator,
     }
 
     #[derive(Clone)]
@@ -189,9 +191,11 @@ pub mod mock {
                 .expect("SystemTime cannot represent current time. Was the process started in extreme future?");
             let not_after = not_before + self.cfg.cert_lifetime;
 
-            let certs = generate_test_certs_at(&id.to_owned().into(), not_before, not_after);
-
-            self.state.write().await.fetches.push(id.to_owned());
+            let mut state = self.state.write().await;
+            let certs = state
+                .gen
+                .new_certs(&id.to_owned().into(), not_before, not_after);
+            state.fetches.push(id.to_owned());
             Ok(certs)
         }
     }
