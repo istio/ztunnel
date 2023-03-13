@@ -75,7 +75,6 @@ impl CaServer {
             "https://".to_string() + &server_addr.to_string(),
             root_cert,
             AuthSource::Token(PathBuf::from(r"src/test_helpers/fake-jwt")),
-            false,
         )
         .unwrap();
         (tx, client)

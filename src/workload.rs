@@ -320,27 +320,7 @@ impl WorkloadManager {
         });
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
             cert_tx: Some(tx),
-            local_node: {
-                if config.enable_impersonated_identity {
-                    config.local_node.clone()
-                } else {
-                    None
-                }
-            },
-            local_pod: {
-                if config.enable_impersonated_identity {
-                    None
-                } else {
-                    config.local_pod.clone()
-                }
-            },
-            local_namespace: {
-                if config.enable_impersonated_identity {
-                    None
-                } else {
-                    config.local_pod_namespace.clone()
-                }
-            },
+            local_node: config.clone().local_node,
             ..Default::default()
         }));
         let xds_workloads = workloads.clone();
@@ -592,13 +572,8 @@ pub struct WorkloadStore {
     #[serde(skip_serializing, default)]
     cert_tx: Option<mpsc::Sender<Identity>>,
 
-    // needed to determine whether or not to prefetch certs, will be None if ENABLE_IMPERSONATED_IDENTITY
-    // is set to false.
+    // needed to determine whether or not to prefetch certs
     local_node: Option<String>,
-    // needed to determine whether or not to prefetch certs in serverless environment, will be None if
-    // ENABLE_IMPERSONATED_IDENTITY set to true.
-    local_pod: Option<String>,
-    local_namespace: Option<String>,
 }
 
 impl WorkloadStore {
@@ -638,10 +613,7 @@ impl WorkloadStore {
                 }
             }
         }
-        if Some(&w.node) == self.local_node.as_ref()
-            || (Some(&w.name) == self.local_pod.as_ref()
-                && Some(&w.namespace) == self.local_namespace.as_ref())
-        {
+        if Some(&w.node) == self.local_node.as_ref() {
             if let Some(tx) = self.cert_tx.as_mut() {
                 if let Err(e) = tx.try_send(widentity) {
                     info!("couldn't prefetch: {:?}", e)

@@ -83,9 +83,7 @@ impl InboundPassthrough {
         mut inbound: TcpStream,
     ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(&inbound);
-        // If it's not in serverless environment (enable_impersonated_identity is true), check if it
-        // is a recursive call.
-        if pi.cfg.enable_impersonated_identity && Some(orig.ip()) == pi.cfg.local_ip {
+        if Some(orig.ip()) == pi.cfg.local_ip {
             return Err(Error::SelfCall);
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
