@@ -222,7 +222,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::File(xds_root_cert_match)
     } else if xds_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
         // handle SYSTEM special case for xds
-        RootCert::File(PathBuf::new())
+        RootCert::Default
     } else {
         RootCert::Static(Bytes::from(xds_root_cert_provider))
     };
@@ -237,7 +237,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::File(ca_root_cert_match)
     } else if ca_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
         // handle SYSTEM special case for ca
-        RootCert::File(PathBuf::new())
+        RootCert::Default
     } else {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
