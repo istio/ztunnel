@@ -179,7 +179,6 @@ impl fmt::Display for Upstream {
 
 pub fn byte_to_ip(b: &bytes::Bytes) -> Result<IpAddr, WorkloadError> {
     match b.len() {
-        0 => Err(WorkloadError::ByteAddressParse(0)),
         4 => {
             let v: [u8; 4] = b.deref().try_into().expect("size already proven");
             Ok(IpAddr::from(v))
