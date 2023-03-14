@@ -280,15 +280,14 @@ impl OutboundConnection {
                     return Err(Error::HttpStatus(code));
                 }
                 let mut upgraded = hyper::upgrade::on(response).await?;
-                let res = super::copy_hbone(
+                super::copy_hbone(
                     &mut upgraded,
                     &mut stream,
                     &self.pi.metrics,
                     transferred_bytes,
                 )
                 .instrument(trace_span!("hbone client"))
-                .await;
-                res
+                .await
             }
             Protocol::TCP => {
                 info!(

@@ -103,7 +103,6 @@ impl TestApp {
         let body = body::to_bytes(body).await?;
         let iter = std::str::from_utf8(&body)?
             .lines()
-            .into_iter()
             .map(|x| Ok::<_, io::Error>(x.to_string()));
         let scrape = prometheus_parse::Scrape::parse(iter).unwrap();
         Ok(ParsedMetrics { scrape })
