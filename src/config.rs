@@ -215,11 +215,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let xds_root_cert_provider =
         parse_default(XDS_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
     let xds_root_cert = if Path::new(&xds_root_cert_provider).exists() {
-        let xds_root_cert_match = match xds_root_cert_provider.parse::<PathBuf>() {
-            Ok(root_cert) => root_cert,
-            Err(_) => PathBuf::new(),
-        };
-        RootCert::File(xds_root_cert_match)
+        RootCert::File(xds_root_cert_provider.into())
     } else if xds_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
         // handle SYSTEM special case for xds
         RootCert::Default
@@ -230,11 +226,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let ca_root_cert_provider =
         parse_default(CA_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
     let ca_root_cert = if Path::new(&ca_root_cert_provider).exists() {
-        let ca_root_cert_match = match ca_root_cert_provider.parse::<PathBuf>() {
-            Ok(root_cert) => root_cert,
-            Err(_) => PathBuf::new(),
-        };
-        RootCert::File(ca_root_cert_match)
+        RootCert::File(ca_root_cert_provider.into())
     } else if ca_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
         // handle SYSTEM special case for ca
         RootCert::Default
