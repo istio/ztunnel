@@ -35,8 +35,8 @@ use tracing::error;
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
-use crate::identity::{Identity, SecretManager};
-use crate::tls::{asn1_time_to_system_time, Certs};
+use crate::identity::SecretManager;
+use crate::tls::asn1_time_to_system_time;
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
@@ -162,25 +162,22 @@ fn dump_cert(x509: &X509) -> CertDump {
 
 async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     let mut dump = cert_manager
-        .collect_certs(|id, certs, state| build_cert_dump(id, certs, state))
+        .collect_certs(|id, certs, state| {
+            let mut dump = CertsDump {
+                identity: id.to_string(),
+                state,
+                ca_cert: [CertDump{pem: "".to_string(), serial_number: "".to_string(), valid_from: "".to_string(), expiration_time: "".to_string()}],
+                cert_chain: Vec::new(),
+            };
+            if let Some(cert) = certs {
+                dump.ca_cert = [dump_cert(cert.x509())];
+                dump.cert_chain = cert.iter_chain().map(dump_cert).collect();
+            }
+            dump
+        })
         .await;
     // Sort for determinism.
     dump.sort_by(|a, b| a.identity.cmp(&b.identity));
-    dump
-}
-
-fn build_cert_dump(ident: &Identity, certs: Option<&Certs>, state: String) -> CertsDump {
-    let mut dump = CertsDump {
-        identity: ident.to_string(),
-        state: state,
-        ca_cert: [CertDump{pem: "".to_string(), serial_number: "".to_string(), valid_from: "".to_string(), expiration_time: "".to_string()}],
-        cert_chain: Vec::new(),
-    };
-    if let Some(cert) = certs {
-        dump.ca_cert = [dump_cert(cert.x509())];
-        dump.cert_chain = cert.iter_chain().map(dump_cert).collect();
-    }
-
     dump
 }
 
