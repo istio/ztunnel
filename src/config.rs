@@ -59,7 +59,7 @@ const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem"
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
-    Static(Bytes),
+    Static(#[serde(skip)] Bytes),
     Default,
 }
 
