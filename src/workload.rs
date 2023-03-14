@@ -574,7 +574,7 @@ pub struct WorkloadStore {
 
     // needed to determine whether or not to prefetch certs
     proxy_mode: ProxyMode,
-    local_node: Option<String>
+    local_node: Option<String>,
 }
 
 impl WorkloadStore {
