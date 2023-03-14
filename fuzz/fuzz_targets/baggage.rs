@@ -14,16 +14,18 @@
 
 #![no_main]
 
-use hyper::http::HeaderValue;
+use hyper::{http::HeaderValue, HeaderMap};
 use libfuzzer_sys::fuzz_target;
 use ztunnel::baggage::parse_baggage_header;
+use ztunnel::proxy::BAGGAGE_HEADER;
 
 fuzz_target!(|data: &[u8]| {
     let _ = run_baggage_header_parser(data);
 });
 
 fn run_baggage_header_parser(data: &[u8]) -> anyhow::Result<()> {
-    let header_value = HeaderValue::from_bytes(data)?;
-    parse_baggage_header(Some(&header_value))?;
+    let mut hm = HeaderMap::new();
+    hm.append(BAGGAGE_HEADER, HeaderValue::from_bytes(data)?);
+    parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
     Ok(())
 }
