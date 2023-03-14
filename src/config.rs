@@ -16,11 +16,14 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
+use hyper::http::uri::InvalidUri;
+use hyper::Uri;
 use tokio::time;
 
 use crate::identity;
@@ -146,6 +149,14 @@ pub enum Error {
     EnvVar(String, String),
     #[error("error parsing proxy config: {0}")]
     ProxyConfig(anyhow::Error),
+    #[error("invalid uri: {0}")]
+    InvalidUri(#[from] Arc<InvalidUri>),
+}
+
+impl From<InvalidUri> for Error {
+    fn from(err: InvalidUri) -> Self {
+        Error::InvalidUri(Arc::new(err))
+    }
 }
 
 /// GoDuration wraps a Duration to implement golang Duration parsing semantics
@@ -196,20 +207,20 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else {
         "https://localhost:15012".to_string()
     };
-    let xds_address = empty_to_none(
+    let xds_address = validate_uri(empty_to_none(
         parse(XDS_ADDRESS)?
             .or(pc.discovery_address)
             .or_else(|| Some(default_istiod_address.clone())),
-    );
+    ))?;
 
     let cluster_id = parse_default(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?;
 
     let fake_ca = parse_default(FAKE_CA, false)?;
-    let ca_address = empty_to_none(if fake_ca {
+    let ca_address = validate_uri(empty_to_none(if fake_ca {
         None
     } else {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
-    });
+    }))?;
 
     let xds_root_cert_provider = parse_default(
         XDS_ROOT_CERT_PROVIDER_ENV,
@@ -290,6 +301,18 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         proxy_args: parse_args(),
         enable_impersonated_identity: parse_default(ENABLE_IMPERSONATED_IDENTITY, true)?,
     })
+}
+
+// tries to parse the URI so we can fail early
+fn validate_uri(uri_str: Option<String>) -> Result<Option<String>, Error> {
+    let Some(uri_str) = uri_str else {
+        return Ok(uri_str);
+    };
+    let uri = Uri::try_from(&uri_str)?;
+    if uri.scheme().is_none() {
+        return Ok(Some("https://".to_owned() + &uri_str));
+    }
+    Ok(Some(uri_str))
 }
 
 #[derive(serde::Deserialize, Default, Clone, PartialEq)]
@@ -430,7 +453,10 @@ pub mod tests {
             cfg.readiness_addr.port(),
             default_config.readiness_addr.port()
         );
-        assert_eq!(cfg.xds_address.unwrap(), "istiod-rev0.istio-system-2:15012");
+        assert_eq!(
+            cfg.xds_address.unwrap(),
+            "https://istiod-rev0.istio-system-2:15012"
+        );
         assert_eq!(cfg.proxy_metadata["BAR"], "bar");
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
 
