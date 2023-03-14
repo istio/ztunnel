@@ -20,6 +20,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
@@ -495,6 +496,18 @@ impl SecretManager {
             self.post(Request::Forget(id.clone())).await;
         }
     }
+
+    // TODO(qfel): It would be much nicer to have something like map_certs returning an iterator,
+    // but due to locking that would require a self-referential type.
+    pub async fn collect_certs<R>(&self, f: impl Fn(&Identity, &tls::Certs) -> R) -> Vec<R> {
+        let mut ret = Vec::new();
+        for (id, chan) in self.worker.certs.lock().await.iter() {
+            if let CertState::Available(ref certs) = *chan.rx.borrow() {
+                ret.push(f(id, certs));
+            }
+        }
+        ret
+    }
 }
 
 // Matches CertState::Initializing(pri) from a Receiver, wrapped in a function to make borrow
@@ -507,18 +520,33 @@ fn init_pri(rx: &watch::Receiver<CertState>) -> Option<Priority> {
 }
 
 pub mod mock {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::Arc,
+        time::{Duration, SystemTime},
+    };
 
     use crate::identity::caclient::mock::{self, CaClient as MockCaClient};
 
     use super::SecretManager;
 
+    pub struct Config {
+        pub cert_lifetime: Duration,
+        pub epoch: Option<SystemTime>,
+    }
+
+    pub fn new_secret_manager(cert_lifetime: Duration) -> Arc<SecretManager> {
+        new_secret_manager_cfg(Config {
+            cert_lifetime,
+            epoch: None,
+        })
+    }
+
     // There is no need to return Arc, but most callers want one so it simplifies the code - and we
     // don't care about the extra overhead in tests.
-    pub fn new_secret_manager(cert_lifetime: Duration) -> Arc<SecretManager> {
-        let time_conv = crate::time::Converter::new();
+    pub fn new_secret_manager_cfg(cfg: Config) -> Arc<SecretManager> {
+        let time_conv = crate::time::Converter::new_at(cfg.epoch.unwrap_or_else(SystemTime::now));
         let client = MockCaClient::new(mock::ClientConfig {
-            cert_lifetime,
+            cert_lifetime: cfg.cert_lifetime,
             time_conv: time_conv.clone(),
             ..Default::default()
         });

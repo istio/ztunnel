@@ -26,7 +26,9 @@ pub use auth::*;
 
 pub mod mock {
     pub use super::caclient::mock::CaClient;
-    pub use super::manager::mock::new_secret_manager;
+    pub use super::manager::mock::{
+        new_secret_manager, new_secret_manager_cfg, Config as SecretManagerConfig,
+    };
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
