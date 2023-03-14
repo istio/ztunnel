@@ -35,8 +35,8 @@ use tracing::error;
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
-use crate::identity::SecretManager;
-use crate::tls::asn1_time_to_system_time;
+use crate::identity::{Identity, SecretManager};
+use crate::tls::{asn1_time_to_system_time, Certs};
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
 use crate::workload::WorkloadInformation;
@@ -75,6 +75,7 @@ pub struct CertDump {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct CertsDump {
     identity: String,
+    state: String,
     // Make it an array to keep compatibility with Envoy's config_dump.
     ca_cert: [CertDump; 1],
     cert_chain: Vec<CertDump>,
@@ -161,14 +162,25 @@ fn dump_cert(x509: &X509) -> CertDump {
 
 async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     let mut dump = cert_manager
-        .collect_certs(|id, certs| CertsDump {
-            identity: id.to_string(),
-            ca_cert: [dump_cert(certs.x509())],
-            cert_chain: certs.iter_chain().map(dump_cert).collect(),
-        })
+        .collect_certs(|id, certs, state| build_cert_dump(id, certs, state))
         .await;
     // Sort for determinism.
     dump.sort_by(|a, b| a.identity.cmp(&b.identity));
+    dump
+}
+
+fn build_cert_dump(ident: &Identity, certs: Option<&Certs>, state: String) -> CertsDump {
+    let mut dump = CertsDump {
+        identity: ident.to_string(),
+        state: state,
+        ca_cert: [CertDump{pem: "".to_string(), serial_number: "".to_string(), valid_from: "".to_string(), expiration_time: "".to_string()}],
+        cert_chain: Vec::new(),
+    };
+    if let Some(cert) = certs {
+        dump.ca_cert = [dump_cert(cert.x509())];
+        dump.cert_chain = cert.iter_chain().map(dump_cert).collect();
+    }
+
     dump
 }
 
@@ -452,7 +464,8 @@ mod tests {
               "serial_number": "67955938755654933561614970125599055831405010529",
               "valid_from": "2023-03-11T18:31:28Z"
             }],
-            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0"
+            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0",
+            "state": "Available"
           },
           {
             "ca_cert": [{
@@ -500,7 +513,8 @@ mod tests {
               "serial_number": "67955938755654933561614970125599055831405010529",
               "valid_from": "2023-03-11T18:31:28Z"
             }],
-            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1"
+            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1",
+            "state": "Available"
           }
         ]);
         assert!(
