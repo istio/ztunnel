@@ -166,7 +166,12 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
             let mut dump = CertsDump {
                 identity: id.to_string(),
                 state,
-                ca_cert: [CertDump{pem: "".to_string(), serial_number: "".to_string(), valid_from: "".to_string(), expiration_time: "".to_string()}],
+                ca_cert: [CertDump {
+                    pem: "".to_string(),
+                    serial_number: "".to_string(),
+                    valid_from: "".to_string(),
+                    expiration_time: "".to_string(),
+                }],
                 cert_chain: Vec::new(),
             };
             if let Some(cert) = certs {

@@ -500,13 +500,20 @@ impl SecretManager {
 
     // TODO(qfel): It would be much nicer to have something like map_certs returning an iterator,
     // but due to locking that would require a self-referential type.
-    pub async fn collect_certs<R>(&self, f: impl Fn(&Identity, Option<&tls::Certs>, String, ) -> R) -> Vec<R> {
+    pub async fn collect_certs<R>(
+        &self,
+        f: impl Fn(&Identity, Option<&tls::Certs>, String) -> R,
+    ) -> Vec<R> {
         let mut ret = Vec::new();
         for (id, chan) in self.worker.certs.lock().await.iter() {
             //if let CertState::Available(ref certs) = *chan.rx.borrow() {
             match *chan.rx.borrow() {
-                CertState::Initializing(ref _pri) => ret.push(f(id, None, "Initializing".to_string())),
-                CertState::Available(ref certs) => ret.push(f(id, Some(certs), "Available".to_string())),
+                CertState::Initializing(ref _pri) => {
+                    ret.push(f(id, None, "Initializing".to_string()))
+                }
+                CertState::Available(ref certs) => {
+                    ret.push(f(id, Some(certs), "Available".to_string()))
+                }
                 CertState::Unavailable(ref err) => {
                     warn!("cert for identity {} in Unavailable state: {}", id, err);
                     ret.push(f(id, None, "Unavailable".to_string()));
