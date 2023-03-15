@@ -22,6 +22,7 @@ use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
+use crate::config::ProxyMode;
 use crate::identity::Identity;
 use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
@@ -127,7 +128,9 @@ impl OutboundConnection {
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
     ) -> Result<(), Error> {
-        if Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip {
+        if self.pi.cfg.proxy_mode == ProxyMode::Node
+            && Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip
+        {
             return Err(Error::SelfCall);
         }
         let req = self.build_request(remote_addr, orig_dst_addr).await?;
@@ -140,7 +143,8 @@ impl OutboundConnection {
             // domains. But for socks5
             return Err(Error::SelfCall);
         }
-        let can_fastpath = req.protocol == Protocol::HBONE
+        let can_fastpath = self.pi.cfg.proxy_mode == ProxyMode::Node
+            && req.protocol == Protocol::HBONE
             && !req
                 .destination_workload
                 .as_ref()
