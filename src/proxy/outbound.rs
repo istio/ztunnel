@@ -141,7 +141,7 @@ impl OutboundConnection {
         if block_passthrough && req.destination_workload.is_none() {
             // This is mostly used by socks5. For typical outbound calls, we need to allow calls to arbitrary
             // domains. But for socks5
-            return Err(Error::SelfCall);
+            return Err(Error::UnknownDestination(req.destination.ip()));
         }
         let can_fastpath = self.pi.cfg.proxy_mode == ProxyMode::Node
             && req.protocol == Protocol::HBONE
