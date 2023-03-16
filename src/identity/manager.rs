@@ -506,7 +506,6 @@ impl SecretManager {
     ) -> Vec<R> {
         let mut ret = Vec::new();
         for (id, chan) in self.worker.certs.lock().await.iter() {
-            //if let CertState::Available(ref certs) = *chan.rx.borrow() {
             match *chan.rx.borrow() {
                 CertState::Initializing(ref _pri) => {
                     ret.push(f(id, None, "Initializing".to_string()))

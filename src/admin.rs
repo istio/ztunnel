@@ -63,7 +63,7 @@ pub struct ConfigDump {
     certificates: Vec<CertsDump>,
 }
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct CertDump {
     // Not available via Envoy, but still useful.
     pem: String,
@@ -167,10 +167,7 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
                 identity: id.to_string(),
                 state,
                 ca_cert: [CertDump {
-                    pem: "".to_string(),
-                    serial_number: "".to_string(),
-                    valid_from: "".to_string(),
-                    expiration_time: "".to_string(),
+                    ..Default::default()
                 }],
                 cert_chain: Vec::new(),
             };
