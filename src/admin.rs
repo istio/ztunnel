@@ -63,7 +63,7 @@ pub struct ConfigDump {
     certificates: Vec<CertsDump>,
 }
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct CertDump {
     // Not available via Envoy, but still useful.
     pem: String,
@@ -75,6 +75,7 @@ pub struct CertDump {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct CertsDump {
     identity: String,
+    state: String,
     // Make it an array to keep compatibility with Envoy's config_dump.
     ca_cert: [CertDump; 1],
     cert_chain: Vec<CertDump>,
@@ -161,10 +162,20 @@ fn dump_cert(x509: &X509) -> CertDump {
 
 async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     let mut dump = cert_manager
-        .collect_certs(|id, certs| CertsDump {
-            identity: id.to_string(),
-            ca_cert: [dump_cert(certs.x509())],
-            cert_chain: certs.iter_chain().map(dump_cert).collect(),
+        .collect_certs(|id, certs, state| {
+            let mut dump = CertsDump {
+                identity: id.to_string(),
+                state,
+                ca_cert: [CertDump {
+                    ..Default::default()
+                }],
+                cert_chain: Vec::new(),
+            };
+            if let Some(cert) = certs {
+                dump.ca_cert = [dump_cert(cert.x509())];
+                dump.cert_chain = cert.iter_chain().map(dump_cert).collect();
+            }
+            dump
         })
         .await;
     // Sort for determinism.
@@ -452,7 +463,8 @@ mod tests {
               "serial_number": "67955938755654933561614970125599055831405010529",
               "valid_from": "2023-03-11T18:31:28Z"
             }],
-            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0"
+            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0",
+            "state": "Available"
           },
           {
             "ca_cert": [{
@@ -500,7 +512,8 @@ mod tests {
               "serial_number": "67955938755654933561614970125599055831405010529",
               "valid_from": "2023-03-11T18:31:28Z"
             }],
-            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1"
+            "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1",
+            "state": "Available"
           }
         ]);
         assert!(
