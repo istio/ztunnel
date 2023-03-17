@@ -96,9 +96,11 @@ impl CaClient {
             vec![]
         };
         let certs = tls::cert_from(&pkey, leaf, chain);
-        certs
-            .verify_san(id)
-            .map_err(|_| Error::SanError(id.to_owned()))?;
+        if self.enable_impersonated_identity {
+            certs
+                .verify_san(id)
+                .map_err(|_| Error::SanError(id.to_owned()))?;
+        }
         Ok(certs)
     }
 }
