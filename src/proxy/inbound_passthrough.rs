@@ -85,7 +85,7 @@ impl InboundPassthrough {
     ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(&inbound);
         // Check if it is a recursive call when proxy mode is Node.
-        if pi.cfg.proxy_mode == ProxyMode::Node && Some(orig.ip()) == pi.cfg.local_ip {
+        if pi.cfg.proxy_mode == ProxyMode::Shared && Some(orig.ip()) == pi.cfg.local_ip {
             return Err(Error::SelfCall);
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");

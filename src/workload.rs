@@ -615,7 +615,7 @@ impl WorkloadStore {
             }
         }
 
-        if self.proxy_mode == ProxyMode::Node && Some(&w.node) == self.local_node.as_ref() {
+        if self.proxy_mode == ProxyMode::Shared && Some(&w.node) == self.local_node.as_ref() {
             if let Some(tx) = self.cert_tx.as_mut() {
                 if let Err(e) = tx.try_send(widentity) {
                     info!("couldn't prefetch: {:?}", e)

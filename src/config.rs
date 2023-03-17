@@ -57,8 +57,8 @@ const XDS_ROOT_CERT_PROVIDER_ENV: &str = "XDS_CERT_PROVIDER";
 const CA_ROOT_CERT_PROVIDER_ENV: &str = "CA_CERT_PROVIDER";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
 
-const PROXY_MODE_SIDECAR: &str = "sidecar";
-const PROXY_MODE_NODE: &str = "node";
+const PROXY_MODE_DEDICATED: &str = "dedicated";
+const PROXY_MODE_SHARED: &str = "shared";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -85,8 +85,8 @@ impl ConfigSource {
 #[derive(serde::Serialize, Default, Clone, Debug, PartialEq, Eq)]
 pub enum ProxyMode {
     #[default]
-    Node,
-    Sidecar,
+    Shared,
+    Dedicated,
 }
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
@@ -105,7 +105,7 @@ pub struct Config {
 
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
-    /// The proxy mode of ztunnel, Node or Sidecar, default to Node.
+    /// The proxy mode of ztunnel, Shared or Dedicated, default to Shared.
     pub proxy_mode: ProxyMode,
     /// The local_ip we are running at.
     pub local_ip: Option<IpAddr>,
@@ -277,11 +277,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         local_node: parse(NODE_NAME)?,
         proxy_mode: match parse::<String>(PROXY_MODE)? {
             Some(proxy_mode) => match proxy_mode.as_str() {
-                PROXY_MODE_SIDECAR => ProxyMode::Sidecar,
-                PROXY_MODE_NODE => ProxyMode::Node,
+                PROXY_MODE_DEDICATED => ProxyMode::Dedicated,
+                PROXY_MODE_SHARED => ProxyMode::Shared,
                 _ => return Err(Error::EnvVar(PROXY_MODE.to_string(), proxy_mode)),
             },
-            None => ProxyMode::Node,
+            None => ProxyMode::Shared,
         },
         local_ip: parse(INSTANCE_IP)?,
         cluster_id,
