@@ -53,9 +53,10 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 
 /// Fetch the XDS/CA root cert file path based on below constants
-const XDS_ROOT_CERT_PROVIDER_ENV: &str = "XDS_CERT_PROVIDER";
-const CA_ROOT_CERT_PROVIDER_ENV: &str = "CA_CERT_PROVIDER";
+const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA ";
+const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
+const CERT_SYSTEM: &str = "SYSTEM";
 
 const PROXY_MODE_DEDICATED: &str = "dedicated";
 const PROXY_MODE_SHARED: &str = "shared";
@@ -224,22 +225,24 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     }))?;
 
-    let xds_root_cert_provider = parse_default(
-        XDS_ROOT_CERT_PROVIDER_ENV,
-        DEFAULT_ROOT_CERT_PROVIDER.to_string(),
-    )?;
+    let xds_root_cert_provider =
+        parse_default(XDS_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
     let xds_root_cert = if Path::new(&xds_root_cert_provider).exists() {
-        RootCert::File(xds_root_cert_provider.parse().unwrap())
+        RootCert::File(xds_root_cert_provider.into())
+    } else if xds_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
+        // handle SYSTEM special case for xds
+        RootCert::Default
     } else {
         RootCert::Static(Bytes::from(xds_root_cert_provider))
     };
 
-    let ca_root_cert_provider = parse_default(
-        CA_ROOT_CERT_PROVIDER_ENV,
-        DEFAULT_ROOT_CERT_PROVIDER.to_string(),
-    )?;
+    let ca_root_cert_provider =
+        parse_default(CA_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
     let ca_root_cert = if Path::new(&ca_root_cert_provider).exists() {
-        RootCert::File(ca_root_cert_provider.parse().unwrap())
+        RootCert::File(ca_root_cert_provider.into())
+    } else if ca_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
+        // handle SYSTEM special case for ca
+        RootCert::Default
     } else {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
