@@ -400,7 +400,7 @@ mod tests {
 
         let manager = identity::mock::new_secret_manager_cfg(identity::mock::SecretManagerConfig {
             cert_lifetime: Duration::from_secs(7 * 60 * 60),
-            fetch_latency:Duration::from_secs(1),
+            fetch_latency: Duration::from_secs(1),
             epoch: Some(
                 // Arbitrary point in time used to ensure deterministic certificate generation.
                 chrono::DateTime::parse_from_rfc3339("2023-03-11T05:57:26Z")
@@ -422,12 +422,17 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(60 * 60 - 1)).await;
         }
 
-        manager.fetch_certificate(&identity("spiffe://error/ns/forgotten/sa/sa-failed")).await.unwrap_err();
+        manager
+            .fetch_certificate(&identity("spiffe://error/ns/forgotten/sa/sa-failed"))
+            .await
+            .unwrap_err();
 
         // Start a fetch asynchronously and proceed enough to have it pending, but not finish.
         let pending_manager = manager.clone();
         let pending_fetch = tokio::task::spawn(async move {
-            pending_manager.fetch_certificate(&identity("spiffe://test/ns/test/sa/sa-pending")).await
+            pending_manager
+                .fetch_certificate(&identity("spiffe://test/ns/test/sa/sa-pending"))
+                .await
         });
         tokio::time::sleep(Duration::from_nanos(1)).await;
 

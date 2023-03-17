@@ -179,11 +179,15 @@ pub mod mock {
         }
 
         async fn fetch_certificate(&self, id: &Identity) -> Result<Certs, Error> {
-            let Identity::Spiffe {trust_domain: td, namespace: ns, ..} = id;
+            let Identity::Spiffe {
+                trust_domain: td,
+                namespace: ns,
+                ..
+            } = id;
             if td == "error" {
                 return Err(match ns.as_str() {
                     "forgotten" => Error::Forgotten,
-                    _ => panic!("cannot parse injected error: {ns}")
+                    _ => panic!("cannot parse injected error: {ns}"),
                 });
             }
 
