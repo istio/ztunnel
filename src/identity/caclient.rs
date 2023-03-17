@@ -55,7 +55,7 @@ impl CaClient {
         let cs = tls::CsrOptions {
             san: id.to_string(),
         }
-        .generate()?;
+            .generate()?;
         let csr: Vec<u8> = cs.csr;
         let pkey = cs.pkey;
 
@@ -96,9 +96,11 @@ impl CaClient {
             vec![]
         };
         let certs = tls::cert_from(&pkey, leaf, chain);
-        certs
-            .verify_san(id)
-            .map_err(|_| Error::SanError(id.to_owned()))?;
+        if self.enable_impersonated_identity {
+            certs
+                .verify_san(id)
+                .map_err(|_| Error::SanError(id.to_owned()))?;
+        }
         Ok(certs)
     }
 }
@@ -248,7 +250,7 @@ mod tests {
         let res = test_ca_client_with_response(IstioCertificateResponse {
             cert_chain: vec![String::from_utf8(certs.x509().to_pem().unwrap()).unwrap()],
         })
-        .await;
+            .await;
         assert_matches!(res, Err(Error::SanError(_)));
     }
 
@@ -262,7 +264,7 @@ mod tests {
         let res = test_ca_client_with_response(IstioCertificateResponse {
             cert_chain: vec![String::from_utf8(certs.x509().to_pem().unwrap()).unwrap()],
         })
-        .await;
+            .await;
         assert_matches!(res, Ok(_));
     }
 }
