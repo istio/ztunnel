@@ -35,7 +35,7 @@ use tracing::error;
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
-use crate::identity::{self, SecretManager};
+use crate::identity::SecretManager;
 use crate::tls::asn1_time_to_system_time;
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
@@ -167,7 +167,7 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
                 identity: id.to_string(),
                 ..Default::default()
             };
-            use identity::CertState::*;
+            use crate::identity::CertState::*;
             match certs {
                 Initializing(_) => dump.state = "Initializing".to_string(),
                 Unavailable(err) => dump.state = format!("Unavailable: {err}"),
