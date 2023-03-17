@@ -545,12 +545,14 @@ pub mod mock {
 
     pub struct Config {
         pub cert_lifetime: Duration,
+        pub fetch_latency: Duration,
         pub epoch: Option<SystemTime>,
     }
 
     pub fn new_secret_manager(cert_lifetime: Duration) -> Arc<SecretManager> {
         new_secret_manager_cfg(Config {
             cert_lifetime,
+            fetch_latency: Duration::ZERO,
             epoch: None,
         })
     }
@@ -561,8 +563,8 @@ pub mod mock {
         let time_conv = crate::time::Converter::new_at(cfg.epoch.unwrap_or_else(SystemTime::now));
         let client = MockCaClient::new(mock::ClientConfig {
             cert_lifetime: cfg.cert_lifetime,
+            fetch_latency: cfg.fetch_latency,
             time_conv: time_conv.clone(),
-            ..Default::default()
         });
         Arc::new(
             SecretManager::new_internal(
