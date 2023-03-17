@@ -2883,6 +2883,7 @@ dependencies = [
  "tonic-build",
  "tower",
  "tracing",
+ "tracing-core",
  "tracing-subscriber",
  "url",
 ]

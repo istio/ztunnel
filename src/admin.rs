@@ -398,6 +398,7 @@ mod tests {
             identity::Identity::from_str(s.as_ref()).unwrap()
         }
 
+        let _trace = crate::test_helpers::asynctrace::print_on_exit();
         let manager = identity::mock::new_secret_manager_cfg(identity::mock::SecretManagerConfig {
             cert_lifetime: Duration::from_secs(7 * 60 * 60),
             fetch_latency: Duration::from_secs(1),

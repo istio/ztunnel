@@ -19,13 +19,14 @@ use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::config::ProxyMode;
 use async_trait::async_trait;
-
+use futures::stream::FuturesUnordered;
+use priority_queue::PriorityQueue;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
+use crate::config::ProxyMode;
 use crate::tls;
 
 use super::CaClient;
@@ -161,6 +162,40 @@ impl PartialOrd for PendingPriority {
     }
 }
 
+#[derive(Eq, PartialEq)]
+enum Fetch {
+    Processing,
+    Forgetting,
+}
+
+struct WorkerState<F> {
+    // A set of futures refreshing the certificates. Each future completes with the identity for
+    // which it was invoked and a resulting certificate or error.
+    fetches: FuturesUnordered<F>,
+    // The set of identities for which there are pending fetches. Elements of `fetches` and
+    // `processing` correspond to each other.
+    processing: HashMap<Identity, Fetch>,
+    // Identities for which we will need to refresh certificates in the future, ordered by the
+    // priority and time at which the refresh needs to happen.
+    //
+    // Note that while the sorting criteria may seem too simple, it is in fact correct due to
+    // the specifics of values inserted. Only Background priority items are ever inserted into
+    // the future, for all other priorities Instant::now() is used as the scheduled time of the
+    // refresh. In other words, at any point in time, there are no high-priority
+    // (not Background) items scheduled to run in the future.
+    pending: PriorityQueue<Identity, PendingPriority>,
+}
+
+impl<F> WorkerState<F> {
+    fn new() -> Self {
+        WorkerState {
+            fetches: FuturesUnordered::new(),
+            processing: HashMap::new(),
+            pending: PriorityQueue::new(),
+        }
+    }
+}
+
 // Implements the actual logic behind SecretManager.
 struct Worker {
     client: Box<dyn CaClientTrait>,
@@ -202,129 +237,144 @@ impl Worker {
         self.certs.lock().await.contains_key(id)
     }
 
+    #[tracing::instrument(skip_all, fields(req=req.tracing()))]
+    async fn handle_request<F>(&self, state: &mut WorkerState<F>, req: Request) {
+        // Handle requests from SecretManager. Those are generally split between the client-side
+        // processing (operations on the `certs` map) and the worker-side processing (receiving the
+        // relevant request and taking action on it). The order of processing of requests here may
+        // not match with the order the `certs` map was processed by clients: it is possible for
+        // concurrent calls fetch_certificate(id) and forget_certificate(id) to result in id not
+        // being present in the `certs` map, but the Fetch and Forget requests arriving in the
+        // reverse order in the worker here.
+        //
+        // For that reason, we check the `certs` map (via the has_id call) before processing each
+        // request to decide if it's still relevant. After the check we are free to not worry about
+        // ordering and proceed with handling the request - a contradicting call made later by the
+        // client would result in another request being delivered to the worker.
+        match req {
+            Request::Fetch(id, pri) => {
+                if !self.has_id(&id).await {
+                    // Nobody interested in the Identity anymore, do nothing.
+                    tracing::info!("ignoring, no calls waiting for the result anymore");
+                    return;
+                }
+                match state.processing.get(&id) {
+                    None => {
+                        let previous = state
+                            .pending
+                            .push_increase(id, PendingPriority(pri, Instant::now()));
+                        match previous {
+                            None => tracing::info!("request queued"),
+                            Some(PendingPriority(prev_pri, _)) => {
+                                if prev_pri > pri {
+                                    tracing::info!("increased priority from {prev_pri:?}");
+                                } else {
+                                    tracing::info!("request already queued at the right priority, nothing to do");
+                                }
+                            }
+                        }
+                    }
+                    Some(Fetch::Forgetting) => {
+                        tracing::info!("pending Forget request was made obsolete");
+                        state.processing.insert(id, Fetch::Processing);
+                    }
+                    Some(Fetch::Processing) => {
+                        tracing::info!("certificates are already being requested");
+                    }
+                }
+            }
+            Request::Forget(id) => {
+                if self.has_id(&id).await {
+                    // After the forget was queued, there was another request to start
+                    // managing the Identity. Do nothing.
+                    tracing::info!("ignoring, new fetch requested since");
+                    return;
+                }
+                match state.processing.get(&id) {
+                    None => {
+                        state.pending.remove(&id);
+                        tracing::info!("identity has been forgotten");
+                    }
+                    Some(Fetch::Processing) => {
+                        // Once the associated future completes, the result will be dropped
+                        // instead of communicated back to the `certs` map and queued for
+                        // refresh.
+                        tracing::info!("the identity will be forgotten once the current certificate fetch completes");
+                        state.processing.insert(id, Fetch::Forgetting);
+                    }
+                    Some(Fetch::Forgetting) => {
+                        tracing::info!("the identity is already marked to be forgotten once the current certificate fetch completes ");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(%id))]
+    async fn handle_fetch_results<F>(
+        &self,
+        state: &mut WorkerState<F>,
+        id: Identity,
+        res: Result<tls::Certs, Error>,
+    ) {
+        match state.processing.remove(&id) {
+            Some(Fetch::Processing) => (),
+            Some(Fetch::Forgetting) => return,
+            None => unreachable!("processing should represent all fetches"),
+        }
+        let (cert_state, refresh_at) = match res {
+            Err(err) => {
+                let refresh_at = Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY;
+                (CertState::Unavailable(err), refresh_at)
+            }
+            Ok(certs) => {
+                let certs: tls::Certs = certs; // Type annotation.
+                let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
+                let refresh_at = if let Some(t) = refresh_at {
+                    t.into()
+                } else {
+                    // Malformed certificate (not_after is way too much into the
+                    // past or the future). Queue another refresh soon.
+                    //
+                    // TODO: This is a bit inconsistent since we still return the
+                    // certificate to the caller successfully. Basically the
+                    // behavior is silly, but simple and avoid panics in time math.
+                    // We'll try to get rid of the SystemTime <-> Instant
+                    // conversion here, so for now leaving the code as is.
+                    Instant::now()
+                };
+                (CertState::Available(certs), refresh_at)
+            }
+        };
+        if self.update_certs(&id, cert_state).await {
+            state
+                .pending
+                .push_increase(id, PendingPriority(Priority::Background, refresh_at));
+        }
+    }
+
     // Manages certificate updates. Since all the work is done in a single task, the code is
     // lock-free. This is OK as the code is I/O bound so we don't need the extra parallelism.
+    #[tracing::instrument(skip_all)]
     async fn run(&self, mut requests: mpsc::Receiver<Request>) {
-        use futures::stream::FuturesUnordered;
         use futures::StreamExt;
-        use priority_queue::PriorityQueue;
-
-        #[derive(Eq, PartialEq)]
-        enum Fetch {
-            Processing,
-            Forgetting,
-        }
-
-        // A set of futures refreshing the certificates. Each future completes with the identity for
-        // which it was invoked and a resulting certificate or error.
-        let mut fetches = FuturesUnordered::new();
-        // The set of identities for which there are pending fetches. Elements of `fetches` and
-        // `processing` correspond to each other.
-        let mut processing: HashMap<Identity, Fetch> = HashMap::new();
-        // Identities for which we will need to refresh certificates in the future, ordered by the
-        // priority and time at which the refresh needs to happen.
-        //
-        // Note that while the sorting criteria may seem too simple, it is in fact correct due to
-        // the specifics of values inserted. Only Background priority items are ever inserted into
-        // the future, for all other priorities Instant::now() is used as the scheduled time of the
-        // refresh. In other words, at any point in time, there are no high-priority
-        // (not Background) items scheduled to run in the future.
-        let mut pending: PriorityQueue<Identity, PendingPriority> = PriorityQueue::new();
-
+        let mut state = WorkerState::new();
         'main: loop {
-            let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
+            let next = state.pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
             tokio::select! {
-                // Handle requests from SecretManager. Those are generally split between the
-                // client-side processing (operations on the `certs` map) and the worker-side
-                // processing (receiving the relevant request and taking action on it). The order
-                // of processing of requests here may not match with the order the `certs` map was
-                // processed by clients: it is possible for concurrent calls fetch_certificate
-                // (id) and forget_certificate(id) to result in id not being present in the `certs`
-                // map, but the Fetch and Forget requests arriving in the reverse order in the
-                // worker here.
-                //
-                // For that reason, we check the `certs` map (via the has_id call) before processing
-                // each request to decide if it's still relevant. After the check we are free to
-                // not worry about ordering and proceed with handling the request - a contradicting
-                // call made later by the client would result in another request being delivered to
-                // the worker.
-                res = requests.recv() => match res {
-                    Some(Request::Fetch(id, pri)) => {
-                        if !self.has_id(&id).await {
-                            // Nobody interested in the Identity anymore, do nothing.
-                            continue 'main;
-                        }
-                        match processing.get(&id) {
-                            None => {
-                                pending.push_increase(id, PendingPriority(pri, Instant::now()));
-                            },
-                            Some(Fetch::Forgetting) => {
-                                // Once the associated future completes, the result will be dropped
-                                // instead of communicated back to the `certs` map and queued for
-                                // refresh.
-                                processing.insert(id, Fetch::Processing);
-                            },
-                            Some(Fetch::Processing) => (),
-                        }
-                    },
-                    Some(Request::Forget(id)) => {
-                        if self.has_id(&id).await {
-                            // After the forget was queued, there was another request to start
-                            // managing the Identity. Do nothing.
-                            continue 'main;
-                        }
-                        match processing.get(&id) {
-                            None => {
-                                pending.remove(&id);
-                            },
-                            Some(Fetch::Processing) => {
-                                processing.insert(id, Fetch::Forgetting);
-                            },
-                            Some(Fetch::Forgetting) => (),
-                        }
-                    },
+                req = requests.recv() => match req {
+                    Some(req) => self.handle_request(&mut state, req).await,
                     None => break 'main,
                 },
                 // Handle fetch results.
-                Some((id, res)) = fetches.next() => {
-                    match processing.remove(&id) {
-                        Some(Fetch::Processing) => (),
-                        Some(Fetch::Forgetting) => continue 'main,
-                        None => unreachable!("processing should represent all fetches"),
-                    }
-                    let (state, refresh_at) = match res {
-                        Err(err) => {
-                            let refresh_at = Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY;
-                            (CertState::Unavailable(err), refresh_at)
-                        },
-                        Ok(certs) => {
-                            let certs: tls::Certs = certs; // Type annotation.
-                            let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
-                            let refresh_at = if let Some(t) = refresh_at {
-                                t.into()
-                            } else {
-                                // Malformed certificate (not_after is way too much into the
-                                // past or the future). Queue another refresh soon.
-                                //
-                                // TODO: This is a bit inconsistent since we still return the
-                                // certificate to the caller successfully. Basically the
-                                // behavior is silly, but simple and avoid panics in time math.
-                                // We'll try to get rid of the SystemTime <-> Instant
-                                // conversion here, so for now leaving the code as is.
-                                Instant::now()
-                            };
-                            (CertState::Available(certs), refresh_at)
-                        },
-                    };
-                    if self.update_certs(&id, state).await {
-                        pending.push_increase(id, PendingPriority(Priority::Background, refresh_at));
-                    }
+                Some((id, res)) = state.fetches.next() => {
+                    self.handle_fetch_results(&mut state, id, res).await;
                 },
                 // Initiate the next fetch.
-                true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
-                    let (id, _) = pending.pop().unwrap();
-                    processing.insert(id.to_owned(), Fetch::Processing);
-                    fetches.push(async move {
+                true = maybe_sleep_until(next), if state.fetches.len() < self.concurrency as usize => {
+                    let (id, _) = state.pending.pop().unwrap();
+                    state.processing.insert(id.to_owned(), Fetch::Processing);
+                    state.fetches.push(async move {
                         let res = self.client.fetch_certificate(&id).await;
                         (id, res)
                     });
@@ -332,7 +382,7 @@ impl Worker {
             };
         }
         // SecretManager dropped, drain remaining requests and terminate background processing.
-        while fetches.next().await.is_some() {}
+        while state.fetches.next().await.is_some() {}
     }
 
     // Returns whether the Identity is still managed.
@@ -363,9 +413,29 @@ async fn maybe_sleep_until(till: Option<Instant>) -> bool {
     }
 }
 
+struct LiteralDebug(String);
+
+impl std::fmt::Debug for LiteralDebug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+#[derive(Debug)]
 enum Request {
     Fetch(Identity, Priority),
     Forget(Identity),
+}
+
+impl Request {
+    // Debug representation of Identity isn't great for tracing, so implement a custom Debug
+    // representation for Request that uses Display representation of the contained Identity.
+    fn tracing(&self) -> impl tracing::Value {
+        tracing::field::debug(LiteralDebug(match self {
+            Request::Fetch(id, pri) => format!("Fetch({id}, {pri:?})"),
+            other => format!("{other:?}"),
+        }))
+    }
 }
 
 pub struct SecretManagerConfig {
@@ -425,6 +495,8 @@ impl SecretManager {
         }
     }
 
+    // Include arguments in the span since some tests call this method directly.
+    #[tracing::instrument(skip_all, fields(%id, pri))]
     async fn start_fetch(
         &self,
         id: &Identity,
@@ -456,6 +528,7 @@ impl SecretManager {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn wait(&self, mut rx: watch::Receiver<CertState>) -> Result<tls::Certs, Error> {
         loop {
             tokio::select! {
@@ -478,6 +551,7 @@ impl SecretManager {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(%id, pri))]
     pub async fn fetch_certificate_pri(
         &self,
         id: &Identity,
@@ -493,6 +567,7 @@ impl SecretManager {
         self.fetch_certificate_pri(id, Priority::RealTime).await
     }
 
+    #[tracing::instrument(skip_all, fields(%id))]
     pub async fn forget_certificate(&self, id: &Identity) {
         if self.worker.certs.lock().await.remove(id).is_some() {
             self.post(Request::Forget(id.clone())).await;
@@ -720,6 +795,7 @@ mod tests {
         secret_manager: Arc<SecretManager>,
         caclient: MockCaClient,
         worker: tokio::task::JoinHandle<()>,
+        _trace: crate::test_helpers::asynctrace::PrintGuard,
     }
 
     impl Test {
@@ -746,6 +822,17 @@ mod tests {
         //  - In practice, sleep calls add some number of microseconds and then round down to the
         //    nearest millisecond. That means eg. sleep(1ms) will advance the timer by 2ms while
         //    sleep(600us) will advance the timer by only 1ms.
+
+        // use tracing_subscriber::fmt::format::FmtSpan;
+        // let tracing = tracing::subscriber::set_default(
+        //     tracing_subscriber::fmt()
+        //         .without_time()
+        //         .with_target(false)
+        //         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        //         .finish(),
+        // );
+
+        let trace = crate::test_helpers::asynctrace::print_on_exit();
         let time_conv = crate::time::Converter::new();
         let caclient = MockCaClient::new(caclient::mock::ClientConfig {
             time_conv: time_conv.clone(),
@@ -763,6 +850,7 @@ mod tests {
             worker,
             caclient,
             secret_manager: Arc::new(secret_manager),
+            _trace: trace,
         }
     }
 

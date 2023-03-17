@@ -94,4 +94,5 @@ diff = "0.1.13"
 matches = "0.1.9"
 netns-rs = "0.1.0"
 test-case = "3.0.0"
+tracing-core = "0.1.30"
 #debug = true

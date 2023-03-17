@@ -180,6 +180,7 @@ pub mod mock {
             self.state.write().await.fetches.clear();
         }
 
+        #[instrument(skip_all, fields(%id))]
         async fn fetch_certificate(&self, id: &Identity) -> Result<Certs, Error> {
             let Identity::Spiffe {
                 trust_domain: td,

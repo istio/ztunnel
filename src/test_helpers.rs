@@ -29,6 +29,8 @@ use crate::workload::Protocol::{HBONE, TCP};
 use crate::workload::{LocalConfig, LocalWorkload, Workload};
 
 pub mod app;
+#[cfg(any(test, doc))]
+pub mod asynctrace;
 pub mod ca;
 pub mod components;
 pub mod helpers;
