@@ -388,7 +388,7 @@ impl SecretManager {
             cfg.ca_address.unwrap(),
             cfg.ca_root_cert,
             cfg.auth,
-            cfg.proxy_mode == ProxyMode::Node,
+            cfg.proxy_mode == ProxyMode::Shared,
         )?;
         Ok(Self::new_with_client(caclient))
     }

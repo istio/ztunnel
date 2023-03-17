@@ -128,7 +128,7 @@ impl OutboundConnection {
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
     ) -> Result<(), Error> {
-        if self.pi.cfg.proxy_mode == ProxyMode::Node
+        if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip
         {
             return Err(Error::SelfCall);
@@ -143,7 +143,7 @@ impl OutboundConnection {
             // domains. But for socks5
             return Err(Error::UnknownDestination(req.destination.ip()));
         }
-        let can_fastpath = self.pi.cfg.proxy_mode == ProxyMode::Node
+        let can_fastpath = self.pi.cfg.proxy_mode == ProxyMode::Shared
             && req.protocol == Protocol::HBONE
             && !req
                 .destination_workload
