@@ -321,6 +321,7 @@ impl WorkloadManager {
         let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore {
             cert_tx: Some(tx),
             proxy_mode: config.proxy_mode.clone(),
+            local_node: config.local_node.clone(),
             ..Default::default()
         }));
         let xds_workloads = workloads.clone();
