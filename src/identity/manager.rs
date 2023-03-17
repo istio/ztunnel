@@ -30,7 +30,7 @@ use crate::tls;
 
 use super::CaClient;
 use super::Error::{self, Spiffe};
-use tracing::warn;
+
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
@@ -114,8 +114,11 @@ pub enum Priority {
     RealTime,
 }
 
+// Arguably this type is overloaded - it's used both for internal bookkeeping and reporting state
+// to /config_dump (collect_certs). It may be the case we'll wont to fork off a similar copy in the
+// future.
 #[derive(Debug)]
-enum CertState {
+pub enum CertState {
     // Should happen only on the first request for an Identity.
     Initializing(Priority),
     Available(tls::Certs),
@@ -501,24 +504,10 @@ impl SecretManager {
 
     // TODO(qfel): It would be much nicer to have something like map_certs returning an iterator,
     // but due to locking that would require a self-referential type.
-    pub async fn collect_certs<R>(
-        &self,
-        f: impl Fn(&Identity, Option<&tls::Certs>, String) -> R,
-    ) -> Vec<R> {
+    pub async fn collect_certs<R>(&self, f: impl Fn(&Identity, &CertState) -> R) -> Vec<R> {
         let mut ret = Vec::new();
         for (id, chan) in self.worker.certs.lock().await.iter() {
-            match *chan.rx.borrow() {
-                CertState::Initializing(ref _pri) => {
-                    ret.push(f(id, None, "Initializing".to_string()))
-                }
-                CertState::Available(ref certs) => {
-                    ret.push(f(id, Some(certs), "Available".to_string()))
-                }
-                CertState::Unavailable(ref err) => {
-                    warn!("cert for identity {} in Unavailable state: {}", id, err);
-                    ret.push(f(id, None, "Unavailable".to_string()));
-                }
-            }
+            ret.push(f(id, &chan.rx.borrow()));
         }
         ret
     }

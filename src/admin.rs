@@ -35,7 +35,7 @@ use tracing::error;
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
-use crate::identity::SecretManager;
+use crate::identity::{self, SecretManager};
 use crate::tls::asn1_time_to_system_time;
 use crate::version::BuildInfo;
 use crate::workload::LocalConfig;
@@ -72,12 +72,12 @@ pub struct CertDump {
     expiration_time: String,
 }
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct CertsDump {
     identity: String,
     state: String,
     // Make it an array to keep compatibility with Envoy's config_dump.
-    ca_cert: [CertDump; 1],
+    ca_cert: Vec<CertDump>,
     cert_chain: Vec<CertDump>,
 }
 
@@ -162,19 +162,21 @@ fn dump_cert(x509: &X509) -> CertDump {
 
 async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     let mut dump = cert_manager
-        .collect_certs(|id, certs, state| {
+        .collect_certs(|id, certs| {
             let mut dump = CertsDump {
                 identity: id.to_string(),
-                state,
-                ca_cert: [CertDump {
-                    ..Default::default()
-                }],
-                cert_chain: Vec::new(),
+                ..Default::default()
             };
-            if let Some(cert) = certs {
-                dump.ca_cert = [dump_cert(cert.x509())];
-                dump.cert_chain = cert.iter_chain().map(dump_cert).collect();
-            }
+            use identity::CertState::*;
+            match certs {
+                Initializing(_) => dump.state = "Initializing".to_string(),
+                Unavailable(err) => dump.state = format!("Unavailable: {err}"),
+                Available(certs) => {
+                    dump.state = "Available".to_string();
+                    dump.ca_cert = vec![dump_cert(certs.x509())];
+                    dump.cert_chain = certs.iter_chain().map(dump_cert).collect();
+                }
+            };
             dump
         })
         .await;
@@ -439,23 +441,13 @@ mod tests {
         let got = serde_json::to_value(dump_certs(&manager).await).unwrap();
         let want = serde_json::json!([
           {
-            "ca_cert": [{
-              "expiration_time": "",
-              "pem": "",
-              "serial_number": "",
-              "valid_from": ""
-            }],
+            "ca_cert": [],
             "cert_chain": [],
             "identity": "spiffe://error/ns/forgotten/sa/sa-failed",
-            "state": "Unavailable"
+            "state": "Unavailable: the identity is no longer needed"
           },
           {
-            "ca_cert": [{
-              "expiration_time": "",
-              "pem": "",
-              "serial_number": "",
-              "valid_from": ""
-            }],
+            "ca_cert": [],
             "cert_chain": [],
             "identity": "spiffe://test/ns/test/sa/sa-pending",
             "state": "Initializing"
