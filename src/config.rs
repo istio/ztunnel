@@ -53,7 +53,7 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 
 /// Fetch the XDS/CA root cert file path based on below constants
-const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA ";
+const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
 const CERT_SYSTEM: &str = "SYSTEM";
