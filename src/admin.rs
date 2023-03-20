@@ -139,9 +139,18 @@ impl Service {
 
 async fn handle_dashboard(_req: Request<Body>) -> Response<Body> {
     let apis = &[
-        ("debug/pprof/profile", "build profile using the pprof profiler (if supported)"),
-        ("debug/gprof/profile", "build profile using the gperftools profiler (if supported)"),
-        ("debug/gprof/heap", "collect heap profiling data (if supported)"),
+        (
+            "debug/pprof/profile",
+            "build profile using the pprof profiler (if supported)",
+        ),
+        (
+            "debug/gprof/profile",
+            "build profile using the gperftools profiler (if supported)",
+        ),
+        (
+            "debug/gprof/heap",
+            "collect heap profiling data (if supported)",
+        ),
         ("quitquitquit", "shut down the server"),
         ("config_dump", "dump the current Ztunnel configuration"),
         ("logging", "query/changing logging levels"),
