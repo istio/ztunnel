@@ -14,6 +14,7 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 
 use std::{net::SocketAddr, time::Duration};
@@ -25,7 +26,7 @@ use drain::Watch;
 use gperftools::heap_profiler::HEAP_PROFILER;
 #[cfg(feature = "gperftools")]
 use gperftools::profiler::PROFILER;
-use hyper::{Body, Request, Response};
+use hyper::{header::HeaderValue, header::CONTENT_TYPE, Body, Request, Response};
 use pprof::protos::Message;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
@@ -129,10 +130,45 @@ impl Service {
                 )
                 .await),
                 "/logging" => Ok(handle_logging(req).await),
+                "/" => Ok(handle_dashboard(req).await),
                 _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
     }
+}
+
+async fn handle_dashboard(_req: Request<Body>) -> Response<Body> {
+    let apis = &[
+        ("debug/pprof/profile", "build profile using the pprof profiler (if supported)"),
+        ("debug/gprof/profile", "build profile using the gperftools profiler (if supported)"),
+        ("debug/gprof/heap", "collect heap profiling data (if supported)"),
+        ("quitquitquit", "shut down the server"),
+        ("config_dump", "dump the current Ztunnel configuration"),
+        ("logging", "query/changing logging levels"),
+    ];
+
+    let mut api_rows = String::new();
+
+    for (index, (path, description)) in apis.iter().enumerate() {
+        api_rows.push_str(&format!(
+            "<tr class=\"{row_class}\"><td class=\"home-data\"><a href=\"{path}\">{path}</a></td><td class=\"home-data\">{description}</td></tr>\n",
+            row_class = if index % 2 == 1 { "gray" } else { "vert-space" },
+            path = path,
+            description = description
+        ));
+    }
+
+    let html = fs::read("src/assets/dashboard.html").unwrap();
+    let html_str = std::str::from_utf8(&html).unwrap();
+    let html_str = html_str.replace("<!--API_ROWS_PLACEHOLDER-->", &api_rows);
+
+    let mut response = Response::new(Body::from(html_str));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+
+    response
 }
 
 fn x509_to_pem(x509: &X509) -> String {
