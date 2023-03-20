@@ -38,7 +38,7 @@ pub fn setup_logging() {
 }
 
 fn fmt_layer() -> impl Layer<Registry> + Sized {
-    let format = fmt::format();
+    let format = fmt::format().with_ansi(false);
     let (filter_layer, reload_handle) = reload::Layer::new(
         tracing_subscriber::fmt::layer()
             .event_format(format)
