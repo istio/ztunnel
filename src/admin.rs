@@ -76,7 +76,6 @@ pub struct CertDump {
 pub struct CertsDump {
     identity: String,
     state: String,
-    // Make it an array to keep compatibility with Envoy's config_dump.
     ca_cert: Vec<CertDump>,
     cert_chain: Vec<CertDump>,
 }
