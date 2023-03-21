@@ -14,7 +14,6 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::fs;
 use std::sync::Arc;
 
 use std::{net::SocketAddr, time::Duration};
@@ -167,8 +166,7 @@ async fn handle_dashboard(_req: Request<Body>) -> Response<Body> {
         ));
     }
 
-    let html = fs::read("src/assets/dashboard.html").unwrap();
-    let html_str = std::str::from_utf8(&html).unwrap();
+    let html_str = include_str!("./assets/dashboard.html");
     let html_str = html_str.replace("<!--API_ROWS_PLACEHOLDER-->", &api_rows);
 
     let mut response = Response::new(Body::from(html_str));
