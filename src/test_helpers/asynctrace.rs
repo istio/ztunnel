@@ -264,7 +264,7 @@ impl Formatter {
                     // use floats). Not sure this can happen in practice, perhaps only if we call
                     // advance with a very granular value?
                     let mut fraction = subms_ns;
-                    while fraction % 10 != 0 {
+                    while fraction % 10 == 0 {
                         fraction /= 10;
                     }
                     format!("{ms}ms.{fraction}")
