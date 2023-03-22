@@ -52,7 +52,7 @@ impl Service {
     pub fn spawn(self) {
         self.s.spawn(|registry, req| async move {
             match req.uri().path() {
-                "/metrics" => Ok(handle_metrics(registry, req).await),
+                "/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
                 _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
