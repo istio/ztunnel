@@ -277,6 +277,8 @@ impl AdsClient {
                     || status.code() == tonic::Code::DeadlineExceeded
                     || (status.code() == tonic::Code::Unavailable
                         && status.message().contains("transport is closing"))
+                    || (status.code() == tonic::Code::Unavailable
+                        && status.message().contains("received prior goaway"))
                 {
                     debug!(
                         "XDS client terminated: {}, retrying in {:?}",
