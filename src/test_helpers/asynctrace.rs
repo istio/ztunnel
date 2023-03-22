@@ -73,11 +73,13 @@ impl Event {
 struct Span {
     labels: Labels,
     meta: &'static tracing::Metadata<'static>,
+    items: Vec<Item>,
     // The first time the span was entered.
     enter: Option<Instant>,
     // The last time the span was exited.
-    exit: Option<Instant>,
-    items: Vec<Item>,
+    last_exit: Option<Instant>,
+    // Whether the span has been closed.
+    closed: bool,
 }
 
 impl Span {
@@ -87,9 +89,21 @@ impl Span {
         Span {
             labels,
             enter: None,
-            exit: None,
+            last_exit: None,
+            closed: false,
             meta: attrs.metadata(),
             items: Vec::new(),
+        }
+    }
+
+    // Returns the time the Span was last exited, if it is closed. In particular it means this will
+    // return None for instrumented async functions that have made some (but not all) progress in
+    // their execution.
+    fn exit(&self) -> Option<Instant> {
+        if self.closed {
+            self.last_exit
+        } else {
+            None
         }
     }
 }
@@ -129,7 +143,7 @@ impl Subscriber {
         static SPAN_STACK: RefCell<Vec<u64>>  = Default::default()
     }
 
-    fn enter_or_exit(&self, id: &tracing::Id, f: impl FnOnce(&mut Span)) {
+    fn with_span(&self, id: &tracing::Id, f: impl FnOnce(&mut Span)) {
         let mut state = self.state.lock().unwrap();
         f(state.get_span_mut(id.into_u64()));
     }
@@ -192,7 +206,7 @@ impl tracing::Subscriber for Subscriber {
     }
 
     fn enter(&self, span_id: &tracing::Id) {
-        self.enter_or_exit(span_id, |span| {
+        self.with_span(span_id, |span| {
             Self::SPAN_STACK.with(|stack| {
                 stack.borrow_mut().push(span_id.into_u64());
             });
@@ -203,12 +217,19 @@ impl tracing::Subscriber for Subscriber {
     }
 
     fn exit(&self, span_id: &tracing::Id) {
-        self.enter_or_exit(span_id, |span| {
-            span.exit = Some(Instant::now());
+        self.with_span(span_id, |span| {
+            span.last_exit = Some(Instant::now());
             Self::SPAN_STACK.with(|stack| {
                 stack.borrow_mut().pop().unwrap();
             });
         });
+    }
+
+    fn try_close(&self, span_id: tracing_core::span::Id) -> bool {
+        self.with_span(&span_id, |span| {
+            span.closed = true;
+        });
+        true
     }
 
     fn current_span(&self) -> Current {
@@ -228,8 +249,6 @@ pub struct Formatter {
     root: String,
     epoch: tokio::time::Instant,
 }
-
-type FmtResult<T> = Result<T, std::fmt::Error>;
 
 impl Formatter {
     fn new(spans: Arc<Mutex<State>>, root: String) -> Self {
@@ -281,17 +300,18 @@ impl Formatter {
             }
         }
 
+        // Returns the time the last item finished.
         fn write<W: std::fmt::Write>(
             env: &mut Env<W>,
             items: &Vec<Item>,
-        ) -> FmtResult<Option<Instant>> {
+        ) -> Result<Option<Instant>, std::fmt::Error> {
             let mut exit = None;
             for item in items {
                 match item {
                     Item::Span(id) => {
                         let span = env.spans.get_span(*id);
                         write_span(env, span)?;
-                        exit = span.exit;
+                        exit = span.exit();
                     }
                     Item::Event(event) => {
                         write_event(env, event)?;
@@ -320,7 +340,7 @@ impl Formatter {
             // Span header.
             env.write_indent()?;
             if span.items.is_empty() {
-                match (span.enter, span.exit) {
+                match (span.enter, span.exit()) {
                     (Some(enter), Some(exit)) => {
                         if enter == exit {
                             write!(env.w, "@{} ", env.fmttime(enter))?;
@@ -344,7 +364,7 @@ impl Formatter {
             // Children.
             env.indent += 2;
             if let Some(items_exit) = write(env, &span.items)? {
-                if let Some(exit) = span.exit {
+                if let Some(exit) = span.exit() {
                     if items_exit < exit {
                         env.write_indent()?;
                         writeln!(env.w, "@{} (done)", env.fmttime(exit))?;
