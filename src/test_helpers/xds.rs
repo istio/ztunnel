@@ -96,7 +96,7 @@ impl AdsServer {
         let xds_rbac = workloads.clone();
 
         let xds_client = xds::Config::new(cfg)
-            .with_workload_handler(xds_workloads)
+            .with_address_handler(xds_workloads)
             .with_authorization_handler(xds_rbac)
             .watch(xds::WORKLOAD_TYPE.into())
             .watch(xds::AUTHORIZATION_TYPE.into())

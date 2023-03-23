@@ -64,6 +64,7 @@ impl WorkloadManager {
         let lc = LocalConfig {
             workloads: self.workloads.clone(),
             policies: vec![],
+            services: vec![],
         };
         let mut b = bytes::BytesMut::new().writer();
         serde_yaml::to_writer(&mut b, &lc)?;

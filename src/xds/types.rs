@@ -39,4 +39,5 @@ pub mod istio {
 }
 
 pub const WORKLOAD_TYPE: &str = "type.googleapis.com/istio.workload.Workload";
+pub const ADDRESS_TYPE: &str = "type.googleapis.com/istio.workload.Address";
 pub const AUTHORIZATION_TYPE: &str = "type.googleapis.com/istio.security.Authorization";

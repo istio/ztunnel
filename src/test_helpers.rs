@@ -168,6 +168,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
     let lc = LocalConfig {
         workloads: res,
         policies: vec![],
+        services: vec![],
     };
     let mut b = bytes::BytesMut::new().writer();
     serde_yaml::to_writer(&mut b, &lc)?;

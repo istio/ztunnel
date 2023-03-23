@@ -31,7 +31,7 @@ use crate::config::RootCert;
 use crate::metrics::xds::*;
 use crate::metrics::{IncrementRecorder, Metrics};
 use crate::xds::istio::security::Authorization;
-use crate::xds::istio::workload::Workload;
+use crate::xds::istio::workload::Address;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
@@ -120,7 +120,7 @@ pub struct Config {
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
 
-    workload_handler: Box<dyn Handler<Workload>>,
+    address_handler: Box<dyn Handler<Address>>,
     authorization_handler: Box<dyn Handler<Authorization>>,
     initial_watches: Vec<String>,
     on_demand: bool,
@@ -132,7 +132,7 @@ impl Config {
             address: config.xds_address.clone().unwrap(),
             root_cert: config.xds_root_cert.clone(),
             auth: config.auth,
-            workload_handler: Box::new(NopHandler {}),
+            address_handler: Box::new(NopHandler {}),
             authorization_handler: Box::new(NopHandler {}),
             initial_watches: Vec::new(),
             on_demand: config.xds_on_demand,
@@ -140,8 +140,8 @@ impl Config {
         }
     }
 
-    pub fn with_workload_handler(mut self, f: impl Handler<Workload>) -> Config {
-        self.workload_handler = Box::new(f);
+    pub fn with_address_handler(mut self, f: impl Handler<Address>) -> Config {
+        self.address_handler = Box::new(f);
         self
     }
 
@@ -481,8 +481,8 @@ impl AdsClient {
         // Due to lack of dynamic typing in Rust we have some code duplication here. In the future this could be a macro,
         // but for now its easier to just have a bit of duplication.
         let handler_response: Result<(), Vec<RejectedConfig>> = match type_url.as_str() {
-            xds::WORKLOAD_TYPE => {
-                self.decode_and_handle::<Workload, _>(|a| &a.config.workload_handler, response)
+            xds::ADDRESS_TYPE => {
+                self.decode_and_handle::<Address, _>(|a| &a.config.address_handler, response)
             }
             xds::AUTHORIZATION_TYPE => self.decode_and_handle::<Authorization, _>(
                 |a| &a.config.authorization_handler,
