@@ -2837,6 +2837,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "atty",
  "boring",
  "byteorder",
  "bytes",

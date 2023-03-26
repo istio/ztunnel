@@ -13,9 +13,9 @@ use std::time::Instant;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use atty::Stream;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
-use std::env;
 use thiserror::Error;
 use tracing::{error, info, warn};
 use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Layer, Registry};
@@ -38,19 +38,13 @@ pub fn setup_logging() {
     tracing_subscriber::registry().with(fmt_layer()).init();
 }
 
-fn is_local_dev() -> bool {
-    let fake_ca = env::var("FAKE_CA").unwrap_or_else(|_| String::from("false"));
-    let xds_address = env::var("XDS_ADDRESS").ok();
-    let local_xds_path = env::var("LOCAL_XDS_PATH").unwrap_or_else(|_| String::new());
-
-    fake_ca.to_lowercase() == "true"
-        || xds_address.as_ref().map(|s| s.is_empty()).unwrap_or(false)
-        || !local_xds_path.is_empty()
-}
-
 fn fmt_layer() -> impl Layer<Registry> + Sized {
-    let is_local_dev = is_local_dev();
-    let format = fmt::format().with_ansi(is_local_dev);
+    let format = fmt::format();
+    let format = if atty::isnt(Stream::Stdout) {
+        format.with_ansi(false)
+    } else {
+        format
+    };
     let (filter_layer, reload_handle) = reload::Layer::new(
         tracing_subscriber::fmt::layer()
             .event_format(format)
