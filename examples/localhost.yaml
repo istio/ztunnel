@@ -28,3 +28,19 @@ policies:
     name: deny-9999
     namespace: default
     scope: Namespace
+services:
+- name: local
+  namespace: default
+  hostname: example.com
+  vip: "127.10.0.1"
+  endpoints:
+    "127.0.0.1":
+      address: "127.0.0.1"
+      port:
+        80: 8080
+    "127.0.0.2":
+      address: "127.0.0.2"
+      port:
+        80: 8080
+  ports:
+    80: 8080

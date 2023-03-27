@@ -92,7 +92,7 @@ impl InboundPassthrough {
         let Some(upstream) = pi.workloads.fetch_workload(&orig.ip()).await else {
             return Err(Error::UnknownDestination(orig.ip()))
         };
-        if !upstream.waypoint_addresses.is_empty() {
+        if upstream.waypoint.address.is_some() {
             // This is an inbound request not over HBONE, but we have a waypoint.
             // The request needs to go through the waypoint for policy enforcement.
             // This can happen from clients that are not part of the mesh; they won't know to send

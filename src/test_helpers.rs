@@ -26,7 +26,9 @@ use tracing::trace;
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::workload::Protocol::{HBONE, TCP};
-use crate::workload::{LocalConfig, LocalWorkload, Workload};
+use crate::workload::{
+    gatewayaddress, Endpoint, GatewayAddress, LocalConfig, LocalWorkload, Service, Workload,
+};
 
 pub mod app;
 pub mod ca;
@@ -91,7 +93,14 @@ pub const TEST_VIP: &str = "127.10.0.1";
 pub fn test_default_workload() -> Workload {
     Workload {
         workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        waypoint_addresses: Vec::new(),
+        waypoint: GatewayAddress {
+            address: None,
+            port: 0,
+        },
+        network_gateway: GatewayAddress {
+            address: None,
+            port: 0,
+        },
         gateway_address: None,
         protocol: Default::default(),
         name: "".to_string(),
@@ -159,16 +168,33 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
                 node: "local".to_string(),
-                waypoint_addresses: vec![waypoint_ip],
+                waypoint: GatewayAddress {
+                    address: Some(gatewayaddress::Address::IP(waypoint_ip)),
+                    port: 15008,
+                },
                 ..test_default_workload()
             },
             vips: Default::default(),
         })
     }
+    let svcs: Vec<Service> = vec![Service {
+        name: "local-vip".to_string(),
+        namespace: "default".to_string(),
+        hostname: "local-vip.default.svc.cluster.local".to_string(),
+        vip: TEST_VIP.parse()?,
+        ports: HashMap::from([(80u16, echo_port)]),
+        endpoints: HashMap::from([(
+            TEST_WORKLOAD_HBONE.parse()?,
+            Endpoint {
+                address: TEST_WORKLOAD_HBONE.parse()?,
+                port: HashMap::from([(80u16, echo_port)]),
+            },
+        )]),
+    }];
     let lc = LocalConfig {
         workloads: res,
         policies: vec![],
-        services: vec![],
+        services: svcs,
     };
     let mut b = bytes::BytesMut::new().writer();
     serde_yaml::to_writer(&mut b, &lc)?;

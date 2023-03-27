@@ -82,12 +82,32 @@ impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
     }
 }
 
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayAddress {
+    #[serde(default)]
+    pub address: Option<gatewayaddress::Address>,
+    #[serde(default)]
+    pub port: u32,
+}
+
+pub mod gatewayaddress {
+    #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "address", content = "content")]
+    pub enum Address {
+        Hostname(String),
+        IP(std::net::IpAddr),
+    }
+}
+
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
     pub workload_ip: IpAddr,
     #[serde(default)]
-    pub waypoint_addresses: Vec<IpAddr>,
+    pub waypoint: GatewayAddress,
+    #[serde(default)]
+    pub network_gateway: GatewayAddress,
     #[serde(default)]
     pub gateway_address: Option<SocketAddr>,
     #[serde(default)]
@@ -136,10 +156,11 @@ impl Workload {
         }
     }
     pub fn choose_waypoint_address(&self) -> Option<IpAddr> {
-        self.waypoint_addresses
-            .iter()
-            .choose(&mut rand::thread_rng())
-            .copied()
+        match self.waypoint.address.as_ref() {
+            Some(gatewayaddress::Address::Hostname(_)) => None, // TODO: handle this case once we have network-prefixed xds names
+            Some(gatewayaddress::Address::IP(ip)) => Some(*ip),
+            None => None,
+        }
     }
 }
 
@@ -210,15 +231,54 @@ impl TryFrom<&XdsWorkload> for Workload {
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource: XdsWorkload = resource.to_owned();
 
-        let mut waypoint_addresses: Vec<IpAddr> = Vec::new();
-        for addr in &resource.waypoint_addresses {
-            waypoint_addresses.push(byte_to_ip(addr)?)
-        }
+        let wp: GatewayAddress = match &resource.waypoint {
+            Some(w) => GatewayAddress {
+                address: match &w.address {
+                    Some(a) => match a {
+                        xds::istio::workload::gateway_address::Address::Ip(ip) => {
+                            Some(gatewayaddress::Address::IP(byte_to_ip(ip)?))
+                        }
+                        xds::istio::workload::gateway_address::Address::Hostname(hn) => {
+                            Some(gatewayaddress::Address::Hostname(hn.clone()))
+                        }
+                    },
+                    None => None,
+                },
+                port: w.port,
+            },
+            None => GatewayAddress {
+                address: None,
+                port: 0,
+            },
+        };
+
+        let network_gw: GatewayAddress = match &resource.network_gateway {
+            Some(w) => GatewayAddress {
+                address: match &w.address {
+                    Some(a) => match a {
+                        xds::istio::workload::gateway_address::Address::Ip(ip) => {
+                            Some(gatewayaddress::Address::IP(byte_to_ip(ip)?))
+                        }
+                        xds::istio::workload::gateway_address::Address::Hostname(hn) => {
+                            Some(gatewayaddress::Address::Hostname(hn.clone()))
+                        }
+                    },
+                    None => None,
+                },
+                port: w.port,
+            },
+            None => GatewayAddress {
+                address: None,
+                port: 0,
+            },
+        };
+
         let address = byte_to_ip(&resource.address)?;
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ip: address,
-            waypoint_addresses,
+            waypoint: wp,
+            network_gateway: network_gw,
             gateway_address: None,
 
             protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
@@ -362,7 +422,7 @@ impl WorkloadManager {
                 xds::Config::new(config.clone())
                     .with_address_handler(xds_workloads)
                     .with_authorization_handler(xds_rbac)
-                    .watch(xds::WORKLOAD_TYPE.into())
+                    .watch(xds::ADDRESS_TYPE.into())
                     .watch(xds::AUTHORIZATION_TYPE.into())
                     .build(metrics, awaiting_ready),
             )
@@ -416,8 +476,11 @@ pub struct LocalWorkload {
 #[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalConfig {
+    #[serde(default)]
     pub workloads: Vec<LocalWorkload>,
+    #[serde(default)]
     pub policies: Vec<Authorization>,
+    #[serde(default)]
     pub services: Vec<Service>,
 }
 
@@ -438,24 +501,12 @@ impl LocalClient {
                 &wl.workload.namespace, &wl.workload.name
             );
             wli.insert_workload(wl.workload);
-            for (vip, pl) in wl.vips {
-                let vip = vip.parse::<IpAddr>()?;
-
-                let ep = Endpoint {
-                    address: wip,
-                    port: pl,
-                };
-                if let Some(svc) = wli.vips.get_mut(&vip) {
-                    svc.endpoints.insert(ep.address, ep);
-                    wli.workload_to_vip.entry(wip).or_default().insert(vip);
-                } else {
-                    // Can happen due to ordering issues
-                    trace!("pod has VIP {vip}, but not found");
-                }
-            }
         }
         for rbac in r.policies {
             wli.insert_authorization(rbac);
+        }
+        for svc in r.services {
+            wli.insert_svc(svc);
         }
         info!(%workloads, %policies, "local config initialized");
         Ok(())
@@ -594,18 +645,19 @@ impl WorkloadInformation {
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Service {
-    name: String,
-    namespace: String,
-    hostname: String,
-    ports: HashMap<u16, u16>,
-    endpoints: HashMap<IpAddr, Endpoint>,
+    pub name: String,
+    pub namespace: String,
+    pub hostname: String,
+    pub vip: IpAddr,
+    pub ports: HashMap<u16, u16>,
+    pub endpoints: HashMap<IpAddr, Endpoint>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
-    address: IpAddr,
-    port: HashMap<u16, u16>,
+    pub address: IpAddr,
+    pub port: HashMap<u16, u16>,
 }
 
 /// A WorkloadStore encapsulates all information about workloads in the mesh
@@ -617,7 +669,9 @@ pub struct WorkloadStore {
     /// vips maintains a mapping of socket address with service port to workload ip and socket address
     /// with target ports in hashset.
     vips: HashMap<IpAddr, Service>,
-
+    /// staged_vips maintains a mapping of VIP -> (workload IP -> Endpoint)
+    /// this is used to handle ordering issues if workloads with VIPs are received before services.
+    staged_vips: HashMap<IpAddr, HashMap<IpAddr, Endpoint>>,
     /// policies maintains a mapping of ns/name to policy.
     policies: HashMap<String, rbac::Authorization>,
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
@@ -651,16 +705,25 @@ impl WorkloadStore {
 
     fn insert_xds_service(&mut self, s: XdsService) -> anyhow::Result<()> {
         let ip = byte_to_ip(&s.address)?;
-        // self.vips;
-        let svc = Service {
+        let mut svc = Service {
             name: s.name,
             namespace: s.namespace,
             hostname: s.hostname,
+            vip: ip,
             ports: (&PortList { ports: s.ports }).into(),
             endpoints: Default::default(),
         };
-        self.vips.insert(ip, svc);
-        // TODO: populate endpoints, in case we get them out of order
+
+        // due to ordering issues, we may have gotten workloads with VIPs before we got the service
+        // we should add those workloads to the vips map now
+        if let Some(wips_to_endpoints) = self.staged_vips.remove(&ip) {
+            for (wip, ep) in wips_to_endpoints {
+                self.workload_to_vip.entry(wip).or_default().insert(ip);
+                svc.endpoints.insert(wip, ep);
+            }
+        }
+
+        self.insert_svc(svc);
         Ok(())
     }
 
@@ -688,7 +751,14 @@ impl WorkloadStore {
                     self.workload_to_vip.entry(wip).or_default().insert(vip);
                 } else {
                     // Can happen due to ordering issues
-                    trace!("pod has VIP {vip}, but not found");
+                    trace!("pod has VIP {vip}, but VIP not found");
+                    if let Some(ep_map) = self.staged_vips.get_mut(&vip) {
+                        ep_map.insert(wip, ep);
+                    } else {
+                        let mut ep_map = HashMap::new();
+                        ep_map.insert(wip, ep);
+                        self.staged_vips.insert(vip, ep_map);
+                    }
                 }
             }
         }
@@ -753,6 +823,19 @@ impl WorkloadStore {
         self.workloads.insert(wip, w);
     }
 
+    fn insert_svc(&mut self, svc: Service) {
+        // if svc already exists, just add new endpoints to existing svc
+        if let Some(prev) = self.vips.get_mut(&svc.vip) {
+            for (wip, ep) in svc.endpoints {
+                prev.endpoints.insert(wip, ep);
+                self.workload_to_vip.entry(wip).or_default().insert(svc.vip);
+            }
+        } else {
+            // svc is net new, add it as is
+            self.vips.insert(svc.vip, svc);
+        }
+    }
+
     fn remove(&mut self, ip: String) {
         use std::str::FromStr;
         let ip: IpAddr = match IpAddr::from_str(&ip) {
@@ -805,7 +888,7 @@ impl WorkloadStore {
                 port: *target_port,
             };
             Self::set_gateway_address(&mut us, hbone_port);
-            debug!("found upstream from VIP: {}", us);
+            debug!("found upstream {} from VIP {}", us, addr.ip());
             return Some(us);
         }
         if let Some(wl) = self.workloads.get(&addr.ip()) {
@@ -948,6 +1031,7 @@ mod tests {
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
+        assert_eq!((wi.staged_vips.len()), 0);
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
         let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
@@ -1005,6 +1089,7 @@ mod tests {
         assert_vips(&wi, vec![]);
 
         // Add two workloads into the VIP. Add out of order to further test
+        assert_eq!((wi.staged_vips.len()), 0);
         wi.insert_xds_workload(XdsWorkload {
             address: xds_ip1.clone(),
             name: "some name".to_string(),
@@ -1012,6 +1097,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        assert_eq!((wi.staged_vips.len()), 1);
         wi.insert_xds_service(XdsService {
             name: "svc1".to_string(),
             namespace: "ns".to_string(),
@@ -1021,8 +1107,11 @@ mod tests {
                 service_port: 80,
                 target_port: 80,
             }],
+            subject_alt_names: vec![],
         })
         .unwrap();
+        assert_eq!((wi.staged_vips.len()), 0);
+
         wi.insert_xds_workload(XdsWorkload {
             address: xds_ip2.clone(),
             name: "some name2".to_string(),

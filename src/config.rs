@@ -325,13 +325,13 @@ fn validate_uri(uri_str: Option<String>) -> Result<Option<String>, Error> {
     Ok(Some(uri_str))
 }
 
-#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[derive(serde::Deserialize, Default, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshConfig {
     pub default_config: Option<ProxyConfig>,
 }
 
-#[derive(serde::Deserialize, Default, Debug, Clone, PartialEq)]
+#[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyConfig {
     pub discovery_address: Option<String>,

@@ -56,12 +56,14 @@ message Service {
   // Address represents the IPv4/IPv6 address for the service.
   // This should be globally unique.
   // This should not have a port number.
+  // TODO: Add network as discriminator
+  // TODO: Add dual stack support
   bytes address = 4;
   // Ports for the service
   repeated Port ports = 5;
   // Optional; if set, the SAN to verify for TLS connections.
   // Typically, this is not set and per-workload identity is used to verfiy
-  repeated string subject_alt_name = 6;
+  repeated string subject_alt_names = 6;
 }
 
 message Workload {
@@ -76,6 +78,8 @@ message Workload {
   // Address represents the IPv4/IPv6 address for the workload.
   // This should be globally unique.
   // This should not have a port number.
+  // TODO: Add network as discriminator
+  // TODO: Add dual stack support
   bytes address = 3;
   // Network represents the network this workload is on. This may be elided for the default network.
   // A (network,address) pair makeup a unique key for a workload *at a point in time*.
@@ -163,34 +167,13 @@ enum Protocol {
   HTTP = 1;
 }
 
-// GatewayAddres represents the address of a gateway
+// GatewayAddress represents the address of a gateway
 message GatewayAddress {
-  // address can either a hostname (ex: gateway.example.com) or an IP (ex: 1.2.3.4).
+  // address can either be a hostname (ex: gateway.example.com) or an IP (ex: 1.2.3.4).
   oneof address {
     string hostname = 1;
     bytes ip = 2;
   }
   // port to reach the gateway at
   uint32 port = 3;
-}
-
-// Route defines an L4 route rule, allowing rewriting requests to alternative destinations.
-message Route {
-  message RouteMatch {
-    bytes ip = 1;
-    uint32 prefix_len = 2;
-    uint32 port = 3;
-  }
-  message SocketAddress {
-    bytes ip = 1;
-    uint32 port = 2;
-  }
-  // name of the route
-  string name = 1;
-  // Matching criteria. When multiple routes are present, the most exact route will be applied first.
-  // Only one route may apply to any given connection.
-  RouteMatch match = 2;
-  // Target is where to send the request to. Note that this is not terminal; if the resolved address
-  // is a known Workload or Service, the typical standard behavior for that Workload/Service is applied.
-  SocketAddress target = 3;
 }

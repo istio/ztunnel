@@ -92,6 +92,10 @@ async fn test_vip_request() -> anyhow::Result<()> {
     let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
     let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
+    // TODO(kdorosh) make this a stronger assertion to ensure we load balance to the two endpoints
+    // switches between 10.0.2.2 (TCP) and 10.0.2.3 (HBONE):
+    // Proxying to 10.0.2.3:8080 using HBONE via 10.0.2.3:15008 type Direct
+    // Proxying to 10.0.2.2:8080 using TCP via 10.0.2.2:8080 type Direct
     run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
 
     let metrics = [
@@ -215,6 +219,11 @@ async fn verify_metrics(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let metrics = ztunnel.metrics().await.unwrap();
+
+    // TODO(kdorosh) use these signals to test load balancing
+    // assert!(&metrics.dump().contains("\"connection_security_policy\": \"unknown\"")); // for direct
+    // assert!(&metrics.dump().contains("\"connection_security_policy\": \"mutual_tls\"")); // for direct
+
     // Now run our assertions
     for (metric, expected) in assertions {
         assert_eq!(
@@ -487,7 +496,7 @@ fn run_tcp_to_hbone_client(
 fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
     server.run_ready(|ready| async move {
         let echo = tcp::TestServer::new(tcp::Mode::ReadDoubleWrite, SERVER_PORT).await;
-        info!("Running echo server");
+        info!("Running echo server at {}", echo.address());
         ready.set_ready();
         echo.run().await;
         Ok(())
@@ -499,7 +508,7 @@ fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
 fn run_hbone_server(server: Namespace) -> anyhow::Result<()> {
     server.run_ready(|ready| async move {
         let echo = tcp::HboneTestServer::new(tcp::Mode::ReadWrite).await;
-        info!("Running echo server");
+        info!("Running hbone echo server at {}", echo.address());
         ready.set_ready();
         echo.run().await;
         Ok(())

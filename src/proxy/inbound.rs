@@ -35,7 +35,7 @@ use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER}
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::tls::TlsError;
-use crate::workload::{Workload, WorkloadInformation};
+use crate::workload::{gatewayaddress, Workload, WorkloadInformation};
 use crate::{proxy, rbac};
 
 use super::Error;
@@ -363,11 +363,16 @@ impl Inbound {
         upstream: &Workload,
         conn: &Connection,
     ) -> (bool, bool) {
-        let has_waypoint = !upstream.waypoint_addresses.is_empty();
-        for i in upstream.waypoint_addresses.iter() {
-            if workloads.fetch_workload(i).await.map(|w| w.identity()) == conn.src_identity {
-                return (has_waypoint, true);
-            }
+        let has_waypoint = upstream.waypoint.address.is_some();
+        let i = match upstream.waypoint.address.as_ref() {
+            Some(addr) => match addr {
+                gatewayaddress::Address::IP(i) => i,
+                gatewayaddress::Address::Hostname(_) => return (has_waypoint, false),
+            },
+            None => return (has_waypoint, false),
+        };
+        if workloads.fetch_workload(i).await.map(|w| w.identity()) == conn.src_identity {
+            return (has_waypoint, true);
         }
         (has_waypoint, false)
     }

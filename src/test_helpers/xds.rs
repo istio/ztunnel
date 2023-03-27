@@ -98,7 +98,7 @@ impl AdsServer {
         let xds_client = xds::Config::new(cfg)
             .with_address_handler(xds_workloads)
             .with_authorization_handler(xds_rbac)
-            .watch(xds::WORKLOAD_TYPE.into())
+            .watch(xds::ADDRESS_TYPE.into())
             .watch(xds::AUTHORIZATION_TYPE.into())
             .build(metrics, ready.register_task("ads client"));
 

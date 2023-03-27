@@ -350,8 +350,8 @@ impl OutboundConnection {
 
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
-        if !us.workload.waypoint_addresses.is_empty() {
-            let waypoint_address = us.workload.choose_waypoint_address().unwrap();
+        let waypoint_addr = us.workload.choose_waypoint_address();
+        if let Some(waypoint_address) = waypoint_addr {
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
             let waypoint_workload = match self.pi.workloads.fetch_workload(&waypoint_address).await
@@ -487,7 +487,7 @@ mod tests {
     use crate::workload::WorkloadInformation;
     use crate::xds::istio::workload::Protocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
-    use crate::{identity, workload};
+    use crate::{identity, workload, xds};
 
     use super::*;
 
@@ -683,7 +683,12 @@ mod tests {
             "127.0.0.1:80",
             XdsWorkload {
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                waypoint_addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    address: Some(xds::istio::workload::gateway_address::Address::Ip(
+                        Bytes::copy_from_slice(&[127, 0, 0, 10]),
+                    )),
+                    port: 15008,
+                }),
                 ..Default::default()
             },
             // Even though source has a waypoint, we don't use it
@@ -703,7 +708,12 @@ mod tests {
             "127.0.0.2:80",
             XdsWorkload {
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                waypoint_addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    address: Some(xds::istio::workload::gateway_address::Address::Ip(
+                        Bytes::copy_from_slice(&[127, 0, 0, 10]),
+                    )),
+                    port: 15008,
+                }),
                 ..Default::default()
             },
             // Should use the waypoint
