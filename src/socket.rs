@@ -143,46 +143,12 @@ mod linux {
         Ok(())
     }
 
-    // Replace with socket2's version once there is a release that contains
-    // https://github.com/rust-lang/socket2/pull/360
     pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
-        // Safety: `getsockopt` initialises the `SockAddr` for us.
-        unsafe {
-            SockAddr::init(|storage, len| {
-                match libc::getsockopt(
-                    sock.as_raw_fd(),
-                    libc::SOL_IP,
-                    libc::SO_ORIGINAL_DST,
-                    storage.cast(),
-                    len,
-                ) {
-                    -1 => Err(std::io::Error::last_os_error()),
-                    retval => Ok(retval),
-                }
-            })
-        }
-        .map(|(_, addr)| addr)
+        sock.original_dst()
     }
 
-    // Replace with socket2's version once there is a release that contains
-    // https://github.com/rust-lang/socket2/pull/360
     pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
-        // Safety: `getsockopt` initialises the `SockAddr` for us.
-        unsafe {
-            SockAddr::init(|storage, len| {
-                match libc::getsockopt(
-                    sock.as_raw_fd(),
-                    libc::SOL_IPV6,
-                    libc::IP6T_SO_ORIGINAL_DST,
-                    storage.cast(),
-                    len,
-                ) {
-                    -1 => Err(std::io::Error::last_os_error()),
-                    retval => Ok(retval),
-                }
-            })
-        }
-        .map(|(_, addr)| addr)
+        sock.original_dst_ipv6()
     }
 }
 
