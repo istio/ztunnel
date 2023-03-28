@@ -28,6 +28,7 @@ harness = false
 anyhow = "1.0.65"
 async-stream = "0.3.3"
 async-trait = "0.1.58"
+atty = "0.2"
 boring = { version = "2.1.0"}
 bytes = { version = "1", features=["serde"]}
 console-subscriber = { version = "0.1.6" , optional = true}

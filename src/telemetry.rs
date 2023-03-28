@@ -13,6 +13,7 @@ use std::time::Instant;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use atty::Stream;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use thiserror::Error;
@@ -39,6 +40,11 @@ pub fn setup_logging() {
 
 fn fmt_layer() -> impl Layer<Registry> + Sized {
     let format = fmt::format();
+    let format = if atty::isnt(Stream::Stdout) {
+        format.with_ansi(false)
+    } else {
+        format
+    };
     let (filter_layer, reload_handle) = reload::Layer::new(
         tracing_subscriber::fmt::layer()
             .event_format(format)
