@@ -88,7 +88,7 @@ pub struct GatewayAddress {
     #[serde(default)]
     pub address: Option<gatewayaddress::Address>,
     #[serde(default)]
-    pub port: u32,
+    pub port: u16,
 }
 
 pub mod gatewayaddress {
@@ -244,7 +244,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                     },
                     None => None,
                 },
-                port: w.port,
+                port: w.port as u16,
             },
             None => GatewayAddress {
                 address: None,
@@ -265,7 +265,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                     },
                     None => None,
                 },
-                port: w.port,
+                port: w.port as u16,
             },
             None => GatewayAddress {
                 address: None,

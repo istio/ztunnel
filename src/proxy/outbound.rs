@@ -28,7 +28,7 @@ use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::workload::{Protocol, Workload};
+use crate::workload::{gatewayaddress, Protocol, Workload};
 use crate::{proxy, rbac, socket};
 
 pub struct Outbound {
@@ -350,14 +350,28 @@ impl OutboundConnection {
 
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
-        let waypoint_addr = us.workload.choose_waypoint_address();
-        if let Some(waypoint_address) = waypoint_addr {
+        let waypoint_addr = &us.workload.waypoint;
+        if let Some(waypoint_address) = &waypoint_addr.address {
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-            let waypoint_workload = match self.pi.workloads.fetch_workload(&waypoint_address).await
-            {
-                Some(wl) => wl,
-                None => return Err(Error::UnknownWaypoint(waypoint_address, downstream)),
+            let wp_ip_addr = match waypoint_address {
+                gatewayaddress::Address::IP(ip) => ip,
+                gatewayaddress::Address::Hostname(_) => {
+                    return Err(Error::UnsupportedFeature(
+                        "hostname lookup not supported yet".into(),
+                    ))
+                }
+            };
+            let wp_socket_addr = SocketAddr::new(*wp_ip_addr, waypoint_addr.port);
+            let waypoint_us = self
+                .pi
+                .workloads
+                .find_upstream(wp_socket_addr, self.pi.hbone_port)
+                .await;
+
+            let waypoint_workload = match waypoint_us {
+                Some(wl) => wl.workload,
+                None => return Err(Error::UnknownWaypoint(*wp_ip_addr, downstream)),
             };
             return Ok(Request {
                 // Always use HBONE here
@@ -367,7 +381,7 @@ impl OutboundConnection {
                 destination: target,
                 destination_workload: Some(us.workload),
                 expected_identity: Some(waypoint_workload.identity()),
-                gateway: SocketAddr::from((waypoint_address, 15008)),
+                gateway: wp_socket_addr,
                 // Let the client remote know we are on the inbound path.
                 direction: Direction::Inbound,
                 request_type: RequestType::ToServerWaypoint,

@@ -158,6 +158,9 @@ pub enum Error {
 
     #[error("no gateway address: {0}")]
     NoGatewayAddress(Box<crate::workload::Workload>),
+
+    #[error("unsupported feature: {0}")]
+    UnsupportedFeature(String),
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
