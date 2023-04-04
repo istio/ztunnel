@@ -55,6 +55,7 @@ const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
+const OUTPUT_CERTS: &str = "OUTPUT_CERTS";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
 const CERT_SYSTEM: &str = "SYSTEM";
 
@@ -66,6 +67,18 @@ pub enum RootCert {
     File(PathBuf),
     Static(#[serde(skip)] Bytes),
     Default,
+}
+
+impl RootCert {
+    fn new(root_cert_provider: String) -> Result<Self, Error> {
+        Ok(if Path::new(&root_cert_provider).exists() {
+            RootCert::File(root_cert_provider.into())
+        } else if root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
+            RootCert::Default
+        } else {
+            RootCert::Static(Bytes::from(root_cert_provider))
+        })
+    }
 }
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
@@ -88,6 +101,19 @@ pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
+}
+
+impl ProxyMode {
+    fn from_env() -> Result<ProxyMode, Error> {
+        Ok(match parse::<String>(PROXY_MODE)? {
+            Some(proxy_mode) => match proxy_mode.as_str() {
+                PROXY_MODE_DEDICATED => ProxyMode::Dedicated,
+                PROXY_MODE_SHARED => ProxyMode::Shared,
+                _ => return Err(Error::EnvVar(PROXY_MODE.to_string(), proxy_mode)),
+            },
+            None => ProxyMode::Shared,
+        })
+    }
 }
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
@@ -118,6 +144,8 @@ pub struct Config {
     pub ca_address: Option<String>,
     /// Root cert for CA TLS verification.
     pub ca_root_cert: RootCert,
+    /// If set, certs for the local identity will be written here
+    pub output_cert_dir: Option<PathBuf>,
     /// XDS address to use. If unset, XDS will not be used.
     pub xds_address: Option<String>,
     /// Root cert for XDS TLS verification.
@@ -205,6 +233,8 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
 }
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
+    let proxy_mode = ProxyMode::from_env()?;
+
     let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {
@@ -227,25 +257,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     let xds_root_cert_provider =
         parse_default(XDS_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
-    let xds_root_cert = if Path::new(&xds_root_cert_provider).exists() {
-        RootCert::File(xds_root_cert_provider.into())
-    } else if xds_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
-        // handle SYSTEM special case for xds
-        RootCert::Default
-    } else {
-        RootCert::Static(Bytes::from(xds_root_cert_provider))
-    };
+    let xds_root_cert = RootCert::new(xds_root_cert_provider)?;
 
     let ca_root_cert_provider =
         parse_default(CA_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
-    let ca_root_cert = if Path::new(&ca_root_cert_provider).exists() {
-        RootCert::File(ca_root_cert_provider.into())
-    } else if ca_root_cert_provider.eq(&CERT_SYSTEM.to_string()) {
-        // handle SYSTEM special case for ca
-        RootCert::Default
-    } else {
-        RootCert::Static(Bytes::from(ca_root_cert_provider))
-    };
+    let ca_root_cert = RootCert::new(ca_root_cert_provider)?;
+
+    let output_cert_dir = (proxy_mode == ProxyMode::Dedicated)
+        .then_some(parse(OUTPUT_CERTS)?).flatten();
 
     Ok(Config {
         window_size: 4 * 1024 * 1024,
@@ -278,14 +297,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
         local_node: parse(NODE_NAME)?,
-        proxy_mode: match parse::<String>(PROXY_MODE)? {
-            Some(proxy_mode) => match proxy_mode.as_str() {
-                PROXY_MODE_DEDICATED => ProxyMode::Dedicated,
-                PROXY_MODE_SHARED => ProxyMode::Shared,
-                _ => return Err(Error::EnvVar(PROXY_MODE.to_string(), proxy_mode)),
-            },
-            None => ProxyMode::Shared,
-        },
+        proxy_mode,
         local_ip: parse(INSTANCE_IP)?,
         cluster_id,
 
@@ -293,6 +305,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         xds_root_cert,
         ca_address,
         ca_root_cert,
+        output_cert_dir,
+
         local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
         proxy_metadata: pc.proxy_metadata,
@@ -369,7 +383,7 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
             }
         }
     }
-    .map_err(|e| anyhow!("failed parsing mesh config file {}: {}", mc_path, e))?;
+        .map_err(|e| anyhow!("failed parsing mesh config file {}: {}", mc_path, e))?;
 
     let proxy_config_env = pc_env
         .map(|pc_env| {

@@ -14,15 +14,19 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fmt;
 use std::fmt::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::{fmt, fs};
 
 use crate::config::ProxyMode;
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
@@ -166,16 +170,10 @@ impl PartialOrd for PendingPriority {
 // Implements the actual logic behind SecretManager.
 struct Worker {
     client: Box<dyn CaClientTrait>,
-    // For now, certificates contain SystemTime so we need to convert it to Instant. Using Converter
-    // allows us to work on Instants without referring to the current SystemTime, which allows for
-    // time control in unit tests.
-    //
-    // TODO: Change tls::Certs to use Instant instead of SystemTime.
-    time_conv: crate::time::Converter,
     // Maps Identity to the certificate state.
     certs: Mutex<HashMap<Identity, CertChannel>>,
-    // How many concurrent fetch_certificate calls can be pending at a time.
-    concurrency: u16,
+
+    cfg: SecretManagerConfig,
 }
 
 impl Worker {
@@ -189,8 +187,7 @@ impl Worker {
         }
         let worker = Arc::new(Self {
             client,
-            time_conv: cfg.time_conv,
-            concurrency: cfg.concurrency,
+            cfg,
             certs: Default::default(),
         });
 
@@ -301,7 +298,7 @@ impl Worker {
                         },
                         Ok(certs) => {
                             let certs: tls::Certs = certs; // Type annotation.
-                            let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
+                            let refresh_at = self.cfg.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
                                 t.into()
                             } else {
@@ -318,12 +315,16 @@ impl Worker {
                             (CertState::Available(certs), refresh_at)
                         },
                     };
+
+                    // TODO log. also don't block on this before updating cert for user traffic
+                    let _ = self.output_cert(&state).await;
+
                     if self.update_certs(&id, state).await {
                         pending.push_increase(id, PendingPriority(Priority::Background, refresh_at));
                     }
                 },
                 // Initiate the next fetch.
-                true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
+                true = maybe_sleep_until(next), if fetches.len() < self.cfg.concurrency as usize => {
                     let (id, _) = pending.pop().unwrap();
                     processing.insert(id.to_owned(), Fetch::Processing);
                     fetches.push(async move {
@@ -351,6 +352,65 @@ impl Worker {
             None => false,
         }
     }
+
+    async fn output_cert(&self, certs: &CertState) -> anyhow::Result<()> {
+        let Some(output_dir) = self.cfg.output_cert_dir.clone() else {
+            return Ok(());
+        };
+        let CertState::Available(certs) = certs else {
+            return Ok(());
+        };
+
+        let cert_file_mode: fs::Permissions = fs::Permissions::from_mode(0o600);
+        atomic_write(
+            output_dir.join("key.pem"),
+            certs.key()?.as_ref(),
+            cert_file_mode.clone(),
+        )
+        .await?;
+        atomic_write(
+            output_dir.join("cert-chain.pem"),
+            certs.chain()?.as_ref(),
+            cert_file_mode,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+// Write atomically by writing to a temporary file in the same directory then renaming
+async fn atomic_write(
+    path: PathBuf,
+    data: &[u8],
+    mode: fs::Permissions,
+) -> Result<(), std::io::Error> {
+    let mut tmp_file_path = path.clone();
+    tmp_file_path.set_extension("tmp");
+
+    // Open the temporary file
+    let mut tmp_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_file_path)
+        .await?;
+
+    // Set the permissions on the temporary file
+    tmp_file.set_permissions(mode).await?;
+
+    // Write the data to the temporary file
+    let write_result = tmp_file.write_all(data.as_ref()).await;
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_file_path).await;
+        return write_result;
+    }
+
+    // Rename the temporary file to the final path
+    let rename_result = tokio::fs::rename(&tmp_file_path, path).await;
+    if rename_result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_file_path).await;
+        return rename_result;
+    }
+    Ok(())
 }
 
 // tokio::select evaluates each pattern before checking the (optional) associated condition. Work
@@ -371,8 +431,16 @@ enum Request {
 }
 
 pub struct SecretManagerConfig {
-    time_conv: crate::time::Converter,
+    // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
+    // For now, certificates contain SystemTime so we need to convert it to Instant. Using Converter
+    // allows us to work on Instants without referring to the current SystemTime, which allows for
+    // time control in unit tests.
+    //
+    // TODO: Change tls::Certs to use Instant instead of SystemTime.
+    time_conv: crate::time::Converter,
+    // If specified, write certs here. Should only be used in dedicated proxy mode.
+    output_cert_dir: Option<PathBuf>,
 }
 
 /// SecretManager provides a wrapper around a CaClient with caching.
@@ -386,24 +454,23 @@ pub struct SecretManager {
 
 impl SecretManager {
     pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
-        let caclient = CaClient::new(
+        let output_cert_dir = cfg.output_cert_dir;
+        let client = CaClient::new(
             cfg.ca_address.unwrap(),
             cfg.ca_root_cert,
             cfg.auth,
+            output_cert_dir.clone(),
             cfg.proxy_mode == ProxyMode::Shared,
         )?;
-        Ok(Self::new_with_client(caclient))
-    }
-
-    pub fn new_with_client<C: 'static + CaClientTrait>(client: C) -> Self {
-        Self::new_internal(
+        Ok(Self::new_internal(
             Box::new(client),
             SecretManagerConfig {
                 time_conv: crate::time::Converter::new(),
                 concurrency: 8,
+                output_cert_dir,
             },
         )
-        .0
+        .0)
     }
 
     fn new_internal(
@@ -560,6 +627,7 @@ pub mod mock {
                 super::SecretManagerConfig {
                     time_conv,
                     concurrency: 2,
+                    output_cert_dir: None,
                 },
             )
             .0,
@@ -745,6 +813,7 @@ mod tests {
             SecretManagerConfig {
                 time_conv,
                 concurrency,
+                output_cert_dir: None,
             },
         );
         Test {
@@ -995,7 +1064,7 @@ mod tests {
             Some(Identity::Spiffe {
                 trust_domain: "td".to_string(),
                 namespace: "".to_string(),
-                service_account: "".to_string()
+                service_account: "".to_string(),
             })
         );
         assert_matches!(Identity::from_str("td/ns/ns/sa/sa"), Err(_));

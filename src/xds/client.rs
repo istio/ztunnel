@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
@@ -116,6 +117,7 @@ pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyho
 pub struct Config {
     address: String,
     root_cert: RootCert,
+    key_cert_dir: Option<PathBuf>,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
 
@@ -130,6 +132,7 @@ impl Config {
         Config {
             address: config.xds_address.clone().unwrap(),
             root_cert: config.xds_root_cert.clone(),
+            key_cert_dir: config.output_cert_dir.clone(),
             auth: config.auth,
             workload_handler: Box::new(NopHandler {}),
             authorization_handler: Box::new(NopHandler {}),
@@ -168,6 +171,7 @@ impl Config {
         }
     }
 }
+
 pub struct AdsClient {
     config: Config,
     /// Stores all known workload resources. Map from type_url to name
@@ -366,7 +370,12 @@ impl AdsClient {
 
     async fn run_internal(&mut self) -> Result<(), Error> {
         let address = self.config.address.clone();
-        let svc = tls::grpc_connector(address, self.config.root_cert.clone()).unwrap();
+        let svc = tls::grpc_connector(
+            address,
+            self.config.root_cert.clone(),
+            self.config.key_cert_dir.clone(),
+        )
+        .unwrap();
         let mut client =
             AggregatedDiscoveryServiceClient::with_interceptor(svc, self.config.auth.clone());
         let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);
@@ -468,7 +477,7 @@ impl AdsClient {
         send: &mpsc::Sender<DeltaDiscoveryRequest>,
     ) -> Result<XdsSignal, Error> {
         let Some(response) = stream_event else {
-            return Ok( XdsSignal::None);
+            return Ok(XdsSignal::None);
         };
         let type_url = response.type_url.clone();
         let nonce = response.nonce.clone();

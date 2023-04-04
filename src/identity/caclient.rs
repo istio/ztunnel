@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use prost_types::value::Kind;
@@ -39,9 +40,10 @@ impl CaClient {
         address: String,
         root_cert: RootCert,
         auth: AuthSource,
+        cert_key_dir: Option<PathBuf>,
         enable_impersonated_identity: bool,
     ) -> Result<CaClient, Error> {
-        let svc = tls::grpc_connector(address, root_cert)?;
+        let svc = tls::grpc_connector(address, root_cert, cert_key_dir)?;
         // let client = IstioCertificateServiceClient::new(svc);
         // let svc =
         //     tower_hyper_http_body_compat::Hyper1HttpServiceAsTowerService03HttpService::new(svc);

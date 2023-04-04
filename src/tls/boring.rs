@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::future::Future;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
 // Copyright Istio Authors
 //
@@ -26,7 +27,7 @@ use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey;
 use boring::pkey::{PKey, Private};
-use boring::ssl::{self, SslContextBuilder};
+use boring::ssl::{self, SslContextBuilder, SslFiletype};
 use boring::stack::Stack;
 use boring::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
@@ -161,6 +162,10 @@ impl Certs {
         Ok(self.chain[0].x509.to_pem()?.into())
     }
 
+    pub fn key(&self) -> Result<bytes::Bytes, Error> {
+        Ok(self.key.private_key_to_pem_pkcs8()?.into())
+    }
+
     // TODO: This works very differently from the chain method. Figure out what's the intention
     // behind the chain method and make things more consistent.
     pub fn iter_chain(&self) -> impl Iterator<Item = &x509::X509> {
@@ -209,7 +214,11 @@ pub struct TlsGrpcChannel {
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_connector(
+    uri: String,
+    root_cert: RootCert,
+    cert_key_dir: Option<PathBuf>,
+) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
 
     let uri = Uri::try_from(uri)?;
@@ -228,6 +237,10 @@ pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel
                 .map_err(Error::InvalidRootCert)?;
         }
         RootCert::Default => {} // Already configured to use system root certs
+    }
+    if let Some(cert_key_dir) = cert_key_dir {
+        conn.set_certificate_chain_file(cert_key_dir.join("cert-chain.pem"))?;
+        conn.set_private_key_file(cert_key_dir.join("key.pem"), SslFiletype::PEM)?;
     }
     let mut http = hyper_util::client::connect::HttpConnector::new();
     http.enforce_http(false);
