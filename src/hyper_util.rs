@@ -217,6 +217,7 @@ impl<S> Server<S> {
             let stream = tokio_stream::wrappers::TcpListenerStream::new(self.bind);
             let mut stream = stream.take_until(Box::pin(drain_stream.signaled()));
             while let Some(Ok(socket)) = stream.next().await {
+                socket.set_nodelay(true).unwrap();
                 let drain = drain_connections.clone();
                 let f = f.clone();
                 let state = state.clone();

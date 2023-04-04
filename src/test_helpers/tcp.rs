@@ -110,6 +110,7 @@ impl TestServer {
     pub async fn run(self) {
         loop {
             let (mut socket, _) = self.listener.accept().await.unwrap();
+            socket.set_nodelay(true).unwrap();
 
             tokio::spawn(async move {
                 let (mut r, mut w) = socket.split();

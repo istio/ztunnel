@@ -266,7 +266,7 @@ impl OutboundConnection {
                     .configure()
                     .expect("configure");
                 let tcp_stream = super::freebind_connect(local, req.gateway).await?;
-                tcp_stream.set_nodelay(false)?; // TODO: this is backwards of expectations
+                tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
                 let tls_stream = connect_tls(connector, tcp_stream).await?;
                 let (mut request_sender, connection) = builder
                     .handshake(tls_stream)
