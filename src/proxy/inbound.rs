@@ -364,14 +364,23 @@ impl Inbound {
         conn: &Connection,
     ) -> (bool, bool) {
         let has_waypoint = upstream.waypoint.address.is_some();
-        let i = match upstream.waypoint.address.as_ref() {
+        let wp_ip = match upstream.waypoint.address.as_ref() {
             Some(addr) => match addr {
-                gatewayaddress::Address::IP(i) => i,
+                gatewayaddress::Address::IP(wp_ip) => wp_ip,
                 gatewayaddress::Address::Hostname(_) => return (has_waypoint, false),
             },
             None => return (has_waypoint, false),
         };
-        if workloads.fetch_workload(i).await.map(|w| w.identity()) == conn.src_identity {
+
+        if let Some(svc) = workloads.service_by_vip(*wp_ip).await {
+            for (ip, _ep) in svc.endpoints.iter() {
+                if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity {
+                    return (has_waypoint, true);
+                }
+            }
+        }
+
+        if workloads.fetch_workload(wp_ip).await.map(|w| w.identity()) == conn.src_identity {
             return (has_waypoint, true);
         }
         (has_waypoint, false)

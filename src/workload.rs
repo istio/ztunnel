@@ -606,14 +606,14 @@ impl WorkloadInformation {
     }
 
     // Support workload and VIP
-    // It is to do on demand workload fetch if necessary, it handles both workload ip and clusterIP
+    // It is to do on demand workload fetch if necessary, it handles both workload ip and services
     async fn fetch_address(&self, addr: &SocketAddr) {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch address");
-        // 1. handle workload ip, if workload not found fallback to clusterIP.
+        // 1. handle workload ip, if workload not found fallback to service.
         if self.find_workload(&addr.ip()).is_none() {
-            // 2. handle clusterIP
-            if self.workload_by_vip_exist(addr) {
+            // 2. handle service
+            if self.service_by_vip(addr.ip()).await.is_some() {
                 return;
             }
             // if both cache not found, start on demand fetch
@@ -635,10 +635,11 @@ impl WorkloadInformation {
         wi.find_workload(addr).cloned()
     }
 
-    // check the workload by clusterIP exist or not
-    fn workload_by_vip_exist(&self, vip: &SocketAddr) -> bool {
+    // return the service by clusterIP
+    pub async fn service_by_vip(&self, vip: IpAddr) -> Option<Service> {
         let wi = self.info.lock().unwrap();
-        wi.vips.get(&vip.ip()).is_some()
+        let svc = wi.vips.get(&vip);
+        svc.cloned()
     }
 }
 
