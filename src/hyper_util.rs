@@ -234,13 +234,16 @@ impl<S> Server<S> {
                                 f(state, req)
                             }),
                         );
+                    // Wait for drain to signal or connection serving to complete
                     match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
-                        futures_util::future::Either::Left((_shutdown, mut server)) => {
-                            let drain = std::pin::Pin::new(&mut server);
+                        // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
+                        futures_util::future::Either::Left((_shutdown, mut serve)) => {
+                            let drain = std::pin::Pin::new(&mut serve);
                             drain.graceful_shutdown();
-                            server.await
+                            serve.await
                         }
-                        futures_util::future::Either::Right((server, _shutdown)) => server,
+                        // Serving finished, just return the result.
+                        futures_util::future::Either::Right((serve, _shutdown)) => serve,
                     }
                 });
             }

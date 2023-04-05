@@ -21,7 +21,6 @@ use std::time::Instant;
 use bytes::Bytes;
 use drain::Watch;
 use futures::stream::StreamExt;
-
 use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -107,7 +106,7 @@ impl Inbound {
                 };
                 debug!(%conn, "accepted connection");
                 let enable_original_source = self.cfg.enable_original_source;
-                let server = crate::hyper_util::http2_server()
+                let serve = crate::hyper_util::http2_server()
                     .initial_stream_window_size(self.cfg.window_size)
                     .initial_connection_window_size(self.cfg.connection_window_size)
                     .max_frame_size(self.cfg.frame_size)
@@ -123,12 +122,15 @@ impl Inbound {
                             )
                         }),
                     );
-                match futures_util::future::select(Box::pin(drain.signaled()), server).await {
+                // Wait for drain to signal or connection serving to complete
+                match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
+                    // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
                     futures_util::future::Either::Left((_shutdown, mut server)) => {
                         let drain = std::pin::Pin::new(&mut server);
                         drain.graceful_shutdown();
                         server.await
                     }
+                    // Serving finished, just return the result.
                     futures_util::future::Either::Right((server, _shutdown)) => server,
                 }
             });
