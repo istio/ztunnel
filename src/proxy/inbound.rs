@@ -18,11 +18,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytes::Bytes;
 use drain::Watch;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use futures::stream::StreamExt;
+use http_body_util::Empty;
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 use crate::baggage::parse_baggage_header;
@@ -78,67 +81,61 @@ impl Inbound {
     }
 
     pub(super) async fn run(self) {
-        let (tx, rx) = oneshot::channel();
-        let service = make_service_fn(|socket: &tokio_boring::SslStream<TcpStream>| {
-            let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
-            let conn = rbac::Connection {
-                src_identity: socket
-                    .ssl()
-                    .peer_certificate()
-                    .and_then(|x| crate::tls::boring::extract_sans(&x).first().cloned()),
-                src_ip: to_canonical(socket.get_ref().peer_addr().unwrap()).ip(),
-                dst,
-            };
-            let workloads = self.workloads.clone();
-            debug!(%conn, "accepted connection");
-            let enable_original_source = self.cfg.enable_original_source;
-            let metrics = self.metrics.clone();
-            async move {
-                Ok::<_, hyper::Error>(service_fn(move |req| {
-                    Self::serve_connect(
-                        workloads.clone(),
-                        conn.clone(),
-                        enable_original_source.unwrap_or_default(),
-                        req,
-                        metrics.clone(),
-                    )
-                }))
-            }
-        });
-
+        // let (tx, rx) = oneshot::channel();
         let acceptor = InboundCertProvider {
             workloads: self.workloads.clone(),
             cert_manager: self.cert_manager.clone(),
         };
-        let tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
-        let incoming = hyper::server::accept::from_stream(tls_stream);
-
-        let server = Server::builder(incoming)
-            .http2_only(true)
-            .http2_initial_stream_window_size(self.cfg.window_size)
-            .http2_initial_connection_window_size(self.cfg.connection_window_size)
-            .http2_max_frame_size(self.cfg.frame_size)
-            .serve(service)
-            .with_graceful_shutdown(async {
-                // Wait until the drain is signaled
-                let shutdown = self.drain.signaled().await;
-                // Once `shutdown` is dropped, we are declaring the drain is complete. Hyper will start draining
-                // once with_graceful_shutdown function exists, so we need to exit the function but later
-                // drop `shutdown`.
-                if tx.send(shutdown).is_err() {
-                    error!("HBONE receiver dropped")
+        let workloads = self.workloads;
+        let drain_stream = self.drain.clone();
+        let stream = crate::hyper_util::tls_server(acceptor, self.listener);
+        let mut stream = stream.take_until(Box::pin(drain_stream.signaled()));
+        while let Some(socket) = stream.next().await {
+            let workloads = workloads.clone();
+            let metrics = self.metrics.clone();
+            let drain = self.drain.clone();
+            tokio::task::spawn(async move {
+                let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
+                let conn = rbac::Connection {
+                    src_identity: socket
+                        .ssl()
+                        .peer_certificate()
+                        .and_then(|x| crate::tls::boring::extract_sans(&x).first().cloned()),
+                    src_ip: to_canonical(socket.get_ref().peer_addr().unwrap()).ip(),
+                    dst,
+                };
+                debug!(%conn, "accepted connection");
+                let enable_original_source = self.cfg.enable_original_source;
+                let serve = crate::hyper_util::http2_server()
+                    .initial_stream_window_size(self.cfg.window_size)
+                    .initial_connection_window_size(self.cfg.connection_window_size)
+                    .max_frame_size(self.cfg.frame_size)
+                    .serve_connection(
+                        socket,
+                        service_fn(move |req| {
+                            Self::serve_connect(
+                                workloads.clone(),
+                                conn.clone(),
+                                enable_original_source.unwrap_or_default(),
+                                req,
+                                metrics.clone(),
+                            )
+                        }),
+                    );
+                // Wait for drain to signal or connection serving to complete
+                match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
+                    // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
+                    futures_util::future::Either::Left((_shutdown, mut server)) => {
+                        let drain = std::pin::Pin::new(&mut server);
+                        drain.graceful_shutdown();
+                        server.await
+                    }
+                    // Serving finished, just return the result.
+                    futures_util::future::Either::Right((server, _shutdown)) => server,
                 }
-                info!("starting drain of inbound connections");
             });
-
-        if let Err(e) = server.await {
-            error!("server error: {}", e);
         }
-        // Now that the server has gracefully exited, drop `shutdown` to allow draining to proceed
-        match rx.await {
-            Ok(shutdown) => drop(shutdown),
-            Err(_) => info!("HBONE sender dropped"),
-        }
+        info!("all inbound connections drained");
     }
 
     /// handle_inbound serves an inbound connection with a target address `addr`.
@@ -226,7 +223,7 @@ impl Inbound {
         }
     }
 
-    fn extract_traceparent(req: &Request<Body>) -> TraceParent {
+    fn extract_traceparent(req: &Request<Incoming>) -> TraceParent {
         req.headers()
             .get(TRACEPARENT_HEADER)
             .and_then(|b| b.to_str().ok())
@@ -243,9 +240,9 @@ impl Inbound {
         workloads: WorkloadInformation,
         conn: rbac::Connection,
         enable_original_source: bool,
-        req: Request<Body>,
+        req: Request<Incoming>,
         metrics: Arc<Metrics>,
-    ) -> Result<Response<Body>, hyper::Error> {
+    ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
@@ -254,8 +251,8 @@ impl Inbound {
                 if addr.is_err() {
                     info!("Sending 400, {:?}", addr.err());
                     return Ok(Response::builder()
-                        .status(hyper::StatusCode::BAD_REQUEST)
-                        .body(Body::empty())
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Empty::new())
                         .unwrap());
                 }
 
@@ -264,7 +261,7 @@ impl Inbound {
                     info!("Sending 400, ip mismatch {addr} != {}", conn.dst);
                     return Ok(Response::builder()
                         .status(StatusCode::BAD_REQUEST)
-                        .body(Body::empty())
+                        .body(Empty::new())
                         .unwrap());
                 }
                 // Orig has 15008, swap with the real port
@@ -273,7 +270,7 @@ impl Inbound {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
-                        .body(Body::empty())
+                        .body(Empty::new())
                         .unwrap());
                 };
                 let (has_waypoint, from_waypoint) =
@@ -285,14 +282,14 @@ impl Inbound {
                     info!(%conn, "RBAC rejected");
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::empty())
+                        .body(Empty::new())
                         .unwrap());
                 }
                 if has_waypoint && !from_waypoint {
                     info!(%conn, "bypassed waypoint");
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::empty())
+                        .body(Empty::new())
                         .unwrap());
                 }
                 let source_ip = if from_waypoint {
@@ -344,15 +341,15 @@ impl Inbound {
 
                 Ok(Response::builder()
                     .status(status_code)
-                    .body(Body::empty())
+                    .body(Empty::new())
                     .unwrap())
             }
             // Return the 404 Not Found for other routes.
             method => {
                 info!("Sending 404, got {method}");
                 Ok(Response::builder()
-                    .status(hyper::StatusCode::NOT_FOUND)
-                    .body(Body::empty())
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Empty::new())
                     .unwrap())
             }
         }
@@ -390,7 +387,7 @@ pub(super) enum InboundConnect {
     /// context directly to the inbound handling in memory.
     DirectPath(TcpStream),
     /// Hbone is a standard HBONE request coming from the network.
-    Hbone(Request<Body>),
+    Hbone(Request<Incoming>),
 }
 
 #[derive(Clone)]

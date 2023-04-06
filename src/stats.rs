@@ -12,37 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Bytes;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
 
 use drain::Watch;
-use hyper::{Body, Request, Response};
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::{Request, Response};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, Server};
-use crate::signal;
 
 pub struct Service {
     s: Server<Mutex<Registry>>,
 }
 
 impl Service {
-    pub fn new(
-        config: Config,
-        registry: Registry,
-        shutdown_trigger: signal::ShutdownTrigger,
-        drain_rx: Watch,
-    ) -> hyper::Result<Self> {
-        Server::<Mutex<Registry>>::bind(
-            "stats",
-            config.stats_addr,
-            shutdown_trigger,
-            drain_rx,
-            Mutex::new(registry),
-        )
-        .map(|s| Service { s })
+    pub async fn new(config: Config, registry: Registry, drain_rx: Watch) -> anyhow::Result<Self> {
+        Server::<Mutex<Registry>>::bind("stats", config.stats_addr, drain_rx, Mutex::new(registry))
+            .await
+            .map(|s| Service { s })
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -59,7 +51,10 @@ impl Service {
     }
 }
 
-async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Response<Body> {
+async fn handle_metrics(
+    reg: Arc<Mutex<Registry>>,
+    _req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
     let mut buf = String::new();
     let reg = reg.lock().unwrap();
     encode(&mut buf, &reg).unwrap();
@@ -70,6 +65,6 @@ async fn handle_metrics(reg: Arc<Mutex<Registry>>, _req: Request<Body>) -> Respo
             hyper::header::CONTENT_TYPE,
             "application/openmetrics-text;charset=utf-8;version=1.0.0",
         )
-        .body(Body::from(buf))
+        .body(buf.into())
         .unwrap()
 }

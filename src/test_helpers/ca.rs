@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::future;
-use hyper::service::make_service_fn;
+use futures::StreamExt;
+
 use tokio::sync::watch;
-use tonic::codegen::Service;
+
+use tracing::error;
 
 use crate::config::RootCert;
+
 use crate::identity::{AuthSource, CaClient};
 use crate::xds::istio::ca::istio_certificate_service_server::{
     IstioCertificateService, IstioCertificateServiceServer,
@@ -56,20 +57,21 @@ impl CaServer {
         );
         let root_cert = RootCert::Static(certs.chain().unwrap());
         let acceptor = tls::ControlPlaneCertProvider(certs);
-        let tls_stream = crate::hyper_util::tls_server(acceptor, listener);
-        let incoming = hyper::server::accept::from_stream(tls_stream);
-
+        let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
         let srv = IstioCertificateServiceServer::new(server);
         tokio::spawn(async move {
-            hyper::Server::builder(incoming)
-                .serve(make_service_fn(move |_| {
-                    let mut srv = srv.clone();
-                    future::ok::<_, Infallible>(tower::service_fn(
-                        move |req: hyper::Request<hyper::Body>| srv.call(req),
-                    ))
-                }))
-                .await
-                .unwrap()
+            while let Some(socket) = tls_stream.next().await {
+                let srv = srv.clone();
+                if let Err(err) = crate::hyper_util::http2_server()
+                    .serve_connection(
+                        socket,
+                        tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
+                    )
+                    .await
+                {
+                    error!("Error serving connection: {:?}", err);
+                }
+            }
         });
         let client = CaClient::new(
             "https://".to_string() + &server_addr.to_string(),

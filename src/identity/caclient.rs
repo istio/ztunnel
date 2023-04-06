@@ -14,13 +14,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::RootCert;
 use async_trait::async_trait;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::codegen::InterceptedService;
+
 use tracing::{instrument, warn};
 
+use crate::config::RootCert;
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
 use crate::identity::Error;
@@ -41,6 +42,9 @@ impl CaClient {
         enable_impersonated_identity: bool,
     ) -> Result<CaClient, Error> {
         let svc = tls::grpc_connector(address, root_cert)?;
+        // let client = IstioCertificateServiceClient::new(svc);
+        // let svc =
+        //     tower_hyper_http_body_compat::Hyper1HttpServiceAsTowerService03HttpService::new(svc);
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
         Ok(CaClient {
             client,

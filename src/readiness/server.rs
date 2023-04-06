@@ -14,32 +14,29 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use drain::Watch;
-use hyper::{Body, Request, Response};
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::{Request, Response};
 use itertools::Itertools;
 
 use crate::hyper_util::{empty_response, plaintext_response, Server};
-use crate::{config, readiness, signal};
+use crate::{config, readiness};
 
 pub struct Service {
     s: Server<readiness::Ready>,
 }
 
 impl Service {
-    pub fn new(
+    pub async fn new(
         config: config::Config,
         ready: readiness::Ready,
-        shutdown_trigger: signal::ShutdownTrigger,
         drain_rx: Watch,
-    ) -> hyper::Result<Self> {
-        Server::<readiness::Ready>::bind(
-            "readiness",
-            config.readiness_addr,
-            shutdown_trigger,
-            drain_rx,
-            ready,
-        )
-        .map(|s| Service { s })
+    ) -> anyhow::Result<Self> {
+        Server::<readiness::Ready>::bind("readiness", config.readiness_addr, drain_rx, ready)
+            .await
+            .map(|s| Service { s })
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -56,7 +53,7 @@ impl Service {
     }
 }
 
-async fn handle_ready(ready: &readiness::Ready, req: Request<Body>) -> Response<Body> {
+async fn handle_ready(ready: &readiness::Ready, req: Request<Incoming>) -> Response<Full<Bytes>> {
     match *req.method() {
         hyper::Method::GET => {
             let pending = ready.pending();

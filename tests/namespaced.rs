@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Bytes;
+use http_body_util::Empty;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use hyper::{Body, Method};
+use hyper::Method;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -335,14 +337,14 @@ async fn test_waypoint_bypass() -> anyhow::Result<()> {
     let srv = resolve_target(manager.resolver(), "server");
     client
         .run(move || async move {
-            let mut builder = hyper::client::conn::Builder::new();
-            let builder = builder.http2_only(true);
+            let builder =
+                hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
 
             let request = hyper::Request::builder()
                 .uri(&srv.to_string())
                 .method(Method::CONNECT)
                 .version(hyper::Version::HTTP_2)
-                .body(Body::empty())
+                .body(Empty::<Bytes>::new())
                 .unwrap();
 
             let id = &identity::Identity::default();
@@ -390,14 +392,14 @@ async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
     let srv = resolve_target(manager.resolver(), "server");
     client
         .run(move || async move {
-            let mut builder = hyper::client::conn::Builder::new();
-            let builder = builder.http2_only(true);
+            let builder =
+                hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
 
             let request = hyper::Request::builder()
                 .uri(&srv.to_string())
                 .method(Method::CONNECT)
                 .version(hyper::Version::HTTP_2)
-                .body(Body::empty())
+                .body(Empty::<Bytes>::new())
                 .unwrap();
 
             let id = &identity::Identity::default();
