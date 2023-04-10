@@ -16,6 +16,7 @@ use bytes::Bytes;
 use http_body_util::Empty;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::time::Duration;
 
 use hyper::Method;
@@ -25,7 +26,7 @@ use tokio::time::timeout;
 use tracing::{error, info};
 
 use ztunnel::identity;
-use ztunnel::identity::Identity;
+
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::components::WorkloadManager;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
@@ -349,9 +350,12 @@ async fn test_waypoint_bypass() -> anyhow::Result<()> {
                 .unwrap();
 
             let id = &identity::Identity::default();
+            let dst_id =
+                identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                    .unwrap();
             let cert = app.cert_manager.fetch_certificate(id).await?;
             let mut connector = cert
-                .connector(&Identity::default())
+                .connector(&dst_id)
                 .unwrap()
                 .configure()
                 .expect("configure");
@@ -404,9 +408,12 @@ async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
                 .unwrap();
 
             let id = &identity::Identity::default();
+            let dst_id =
+                identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                    .unwrap();
             let cert = app.cert_manager.fetch_certificate(id).await?;
             let mut connector = cert
-                .connector(&Identity::default())
+                .connector(&dst_id)
                 .unwrap()
                 .configure()
                 .expect("configure");
