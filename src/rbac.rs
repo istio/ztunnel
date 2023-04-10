@@ -153,6 +153,10 @@ impl Authorization {
                     trace!(matches = rule_match, "rule");
                 }
                 group_match &= rule_match;
+                if !group_match {
+                    // Short circuit
+                    break;
+                }
             }
             trace!(matches = group_match, "group");
             if group_match {
@@ -537,6 +541,52 @@ mod tests {
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
             dst: "127.0.0.2:12345".parse().unwrap(),
+        }));
+    }
+
+    #[test]
+    fn rbac_multi_rule() {
+        let pol = allow_policy(
+            "nested".to_string(),
+            vec![
+                vec![vec![RbacMatch {
+                    namespaces: vec![StringMatch::Exact("a".to_string())],
+                    ..Default::default()
+                }]],
+                vec![vec![RbacMatch {
+                    namespaces: vec![StringMatch::Exact("b".to_string())],
+                    ..Default::default()
+                }]],
+            ],
+        );
+        // Can match either namespace...
+        assert!(pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "a".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        assert!(pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "b".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        // Wrong namespace
+        assert!(!pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "bad".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst: "127.0.0.2:80".parse().unwrap(),
         }));
     }
 
