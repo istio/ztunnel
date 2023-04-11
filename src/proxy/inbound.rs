@@ -414,7 +414,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
             "fetching cert"
         );
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
-        let acc = cert.mtls_acceptor()?;
+        let acc = cert.mtls_acceptor(Some(&identity))?;
         Ok(acc)
     }
 }
