@@ -378,6 +378,7 @@ async fn test_waypoint_bypass() -> anyhow::Result<()> {
     Ok(())
 }
 
+
 #[tokio::test]
 async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
@@ -598,3 +599,58 @@ async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
         .unwrap()?;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    run_tcp_server(
+        manager
+            .workload_builder("server", REMOTE_NODE)
+            .vip(TEST_VIP, 80, SERVER_PORT)
+            .register()?,
+    )?;
+    let _ = manager.deploy_ztunnel(REMOTE_NODE)?;
+
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
+        .register()?;
+    let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    let srv = resolve_target(manager.resolver(), &format!("{TEST_VIP}:80"));
+
+    // run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
+
+    client
+        .run(move || async move {
+
+            let id = match identity::Identity::default() {
+                identity::Identity::Spiffe { namespace, .. } => {
+                    identity::Identity::Spiffe {
+                        trust_domain: "clusterset.local".to_string(), // change to mismatched trustdomain
+                        service_account: "my-app".to_string(),
+                        namespace,
+                    }
+                }
+            };
+            
+            let cert = local.cert_manager.fetch_certificate(&id).await?;
+            let mut connector = cert
+                .connector(None)
+                .unwrap()
+                .configure()
+                .expect("configure");
+            connector.set_verify_hostname(false);
+            connector.set_use_server_name_indication(false);
+            let tcp_stream = TcpStream::connect(&srv.to_string()).await;
+
+            // We sent the request with the wrong trust domain; expect a bad connection
+            assert!(tcp_stream.is_err());
+            assert!(tcp_stream.unwrap_err().to_string().contains("certificate verify failed"));
+                
+            Ok(())
+        })?
+        .join()
+        .unwrap()?;
+    Ok(())
+}
+

@@ -336,6 +336,7 @@ impl Certs {
         let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
         self.setup_ctx(&mut conn)?;
 
+        conn.set_verify_callback(ssl::SslVerifyMode::NONE, Verifier::None.callback());
         Ok(conn.build())
     }
 
@@ -376,7 +377,6 @@ impl Certs {
 
         // by default, allow boringssl to do standard validation
         conn.set_verify_callback(Self::verify_mode(), Verifier::None.callback());
-
 
         Ok(())
     }
