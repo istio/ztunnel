@@ -316,11 +316,19 @@ impl Certs {
         ssl::SslVerifyMode::PEER | ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT
     }
 
-    pub fn mtls_acceptor(&self) -> Result<ssl::SslAcceptor, Error> {
+    pub fn mtls_acceptor(&self, dest_id: Option<&Identity>) -> Result<ssl::SslAcceptor, Error> {
         let _ctx = ssl::SslContext::builder(ssl::SslMethod::tls_server())?;
         // mozilla_intermediate_v5 is the only variant that enables TLSv1.3, so we use that.
         let mut conn = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls_server())?;
         self.setup_ctx(&mut conn)?;
+
+        if let Some(dest_id) = dest_id {
+            // Validate that the source cert shares the same trust domain
+            conn.set_verify_callback(
+                Self::verify_mode(),
+                Verifier::SanTrustDomain(dest_id.clone()).callback(),
+            );
+        }
 
         Ok(conn.build())
     }
@@ -381,8 +389,11 @@ enum Verifier {
     // Does not verify an individual identity.
     None,
 
-    // Allows exactly one identity, making sure at least one of the presented certs
+    // Allows exactly one identity, making sure at least one of the presented certs matches that identity
     San(Identity),
+
+    // Allows all identities that share the same trust domain
+    SanTrustDomain(Identity),
 }
 
 impl Verifier {
@@ -411,9 +422,31 @@ impl Verifier {
         cert.verify_san(identity)
     }
 
+    fn verifiy_san_trust_domain(&self, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+        let Self::SanTrustDomain(identity) = self else {
+            // not verifying san
+            return Ok(());
+        };
+
+        // internally, openssl tends to .expect the results of these methods.
+        // TODO bubble up better error message
+        let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
+        let cert = ctx
+            .ex_data(ssl_idx)
+            .ok_or(TlsError::ExDataError)?
+            .peer_certificate()
+            .ok_or(TlsError::PeerCertError)?;
+
+        cert.verify_san_trust_domain(identity)
+    }
+
     fn verify(&self, verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         Self::base_verifier(verified, ctx)?;
-        self.verifiy_san(ctx)?;
+        match self {
+            Self::San(_) => self.verifiy_san(ctx)?,
+            Self::SanTrustDomain(_) => self.verifiy_san_trust_domain(ctx)?,
+            Self::None => (),
+        };
         Ok(())
     }
 
@@ -431,11 +464,16 @@ impl Verifier {
 
 pub trait SanChecker {
     fn verify_san(&self, identity: &Identity) -> Result<(), TlsError>;
+    fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError>;
 }
 
 impl SanChecker for Certs {
     fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
         self.cert.x509.verify_san(identity)
+    }
+
+    fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
+        self.cert.x509.verify_san_trust_domain(identity)
     }
 }
 
@@ -455,6 +493,21 @@ impl SanChecker for x509::X509 {
         sans.iter()
             .find(|id| id == &identity)
             .ok_or_else(|| TlsError::SanError(identity.to_owned(), sans.clone()))
+            .map(|_| ())
+    }
+
+    fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
+        let source_trust_domain = match identity {
+            Identity::Spiffe { trust_domain, .. } => trust_domain,
+        };
+        let sans = extract_sans(self);
+        sans.iter()
+            .find(|id| match id {
+                Identity::Spiffe { trust_domain, .. } => trust_domain == source_trust_domain,
+            })
+            .ok_or_else(|| {
+                TlsError::SanTrustDomainError(source_trust_domain.to_string(), sans.clone())
+            })
             .map(|_| ())
     }
 }
@@ -506,6 +559,10 @@ pub enum TlsError {
     SigningError(#[from] identity::Error),
     #[error("san verification error: remote did not present the expected SAN ({0}), got {1:?}")]
     SanError(Identity, Vec<Identity>),
+    #[error(
+        "san verification error: remote did not present the expected trustdomain ({0}), got {1:?}"
+    )]
+    SanTrustDomainError(String, Vec<Identity>),
     #[error("failed getting ex data")]
     ExDataError,
     #[error("failed getting peer cert")]

@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use futures::future::poll_fn;
 use http_body_util::Empty;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use hyper::Method;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{error, info};
@@ -592,6 +593,56 @@ async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
                 }
                 res.unwrap();
             }
+            Ok(())
+        })?
+        .join()
+        .unwrap()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
+    let mut manager = setup_netns_test!();
+    let id = match identity::Identity::default() {
+        identity::Identity::Spiffe { .. } => {
+            identity::Identity::Spiffe {
+                trust_domain: "clusterset.local".to_string(), // change to mismatched trustdomain
+                service_account: "my-app".to_string(),
+                namespace: "default".to_string(),
+            }
+        }
+    };
+    run_tcp_server(
+        manager
+            .workload_builder("server", REMOTE_NODE)
+            .vip(TEST_VIP, 80, SERVER_PORT)
+            .hbone()
+            .register()?,
+    )?;
+    let _ = manager.deploy_ztunnel(REMOTE_NODE)?;
+
+    let client = manager
+        .workload_builder("client", DEFAULT_NODE)
+        .identity(id)
+        .register()?;
+    let _ = manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+    let srv = resolve_target(manager.resolver(), &format!("{TEST_VIP}:80"));
+
+    client
+        .run(move || async move {
+            let mut tcp_stream = TcpStream::connect(&srv.to_string()).await?;
+            tcp_stream.write_all(b"hello world!").await?;
+            let mut buf = [0; 10];
+            let mut buf = ReadBuf::new(&mut buf);
+
+            let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
+            assert!(result.is_err()); // exepct a connection reset due to TLS SAN mismatch
+            assert_eq!(
+                result.err().unwrap().kind(),
+                std::io::ErrorKind::ConnectionReset
+            );
+
             Ok(())
         })?
         .join()

@@ -173,6 +173,21 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
+    pub fn identity(mut self, identity: identity::Identity) -> Self {
+        match identity {
+            identity::Identity::Spiffe {
+                trust_domain,
+                namespace,
+                service_account,
+            } => {
+                self.w.workload.service_account = service_account;
+                self.w.workload.namespace = namespace;
+                self.w.workload.trust_domain = trust_domain;
+            }
+        }
+        self
+    }
+
     /// Append a waypoint to the workload
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
         self.w.workload.waypoint_addresses.push(waypoint);
