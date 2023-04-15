@@ -636,10 +636,12 @@ async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
             let mut buf = [0; 10];
             let mut buf = ReadBuf::new(&mut buf);
 
-            let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf))
-            .await;
+            let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
             assert!(result.is_err()); // exepct a connection reset due to TLS SAN mismatch
-            assert_eq!(result.err().unwrap().kind(),std::io::ErrorKind::ConnectionReset);
+            assert_eq!(
+                result.err().unwrap().kind(),
+                std::io::ErrorKind::ConnectionReset
+            );
 
             Ok(())
         })?

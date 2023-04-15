@@ -505,7 +505,9 @@ impl SanChecker for x509::X509 {
             .find(|id| match id {
                 Identity::Spiffe { trust_domain, .. } => trust_domain == source_trust_domain,
             })
-            .ok_or_else(|| TlsError::SanTrustDomainError(source_trust_domain.to_string(), sans.clone()))
+            .ok_or_else(|| {
+                TlsError::SanTrustDomainError(source_trust_domain.to_string(), sans.clone())
+            })
             .map(|_| ())
     }
 }
@@ -557,7 +559,9 @@ pub enum TlsError {
     SigningError(#[from] identity::Error),
     #[error("san verification error: remote did not present the expected SAN ({0}), got {1:?}")]
     SanError(Identity, Vec<Identity>),
-    #[error("san verification error: remote did not present the expected trustdomain ({0}), got {1:?}")]
+    #[error(
+        "san verification error: remote did not present the expected trustdomain ({0}), got {1:?}"
+    )]
     SanTrustDomainError(String, Vec<Identity>),
     #[error("failed getting ex data")]
     ExDataError,
