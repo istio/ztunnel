@@ -324,7 +324,10 @@ impl Certs {
 
         if let Some(dest_id) = dest_id {
             // Validate that the source cert shares the same trust domain
-            conn.set_verify_callback(Self::verify_mode(), Verifier::SanTrustDomain(dest_id.clone()).callback());
+            conn.set_verify_callback(
+                Self::verify_mode(),
+                Verifier::SanTrustDomain(dest_id.clone()).callback(),
+            );
         }
 
         Ok(conn.build())
@@ -495,16 +498,14 @@ impl SanChecker for x509::X509 {
 
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
         let source_trust_domain = match identity {
-            Identity::Spiffe { trust_domain, .. } => trust_domain
+            Identity::Spiffe { trust_domain, .. } => trust_domain,
         };
         let sans = extract_sans(self);
         sans.iter()
-            .find(|id| {
-                match id {
-                    Identity::Spiffe { trust_domain, .. } => trust_domain == source_trust_domain,
-                }
+            .find(|id| match id {
+                Identity::Spiffe { trust_domain, .. } => trust_domain == source_trust_domain,
             })
-            .ok_or_else(|| TlsError::SanError(identity.to_owned(), sans.clone()))
+            .ok_or_else(|| TlsError::SanTrustDomainError(source_trust_domain.to_string(), sans.clone()))
             .map(|_| ())
     }
 }
@@ -556,6 +557,8 @@ pub enum TlsError {
     SigningError(#[from] identity::Error),
     #[error("san verification error: remote did not present the expected SAN ({0}), got {1:?}")]
     SanError(Identity, Vec<Identity>),
+    #[error("san verification error: remote did not present the expected trustdomain ({0}), got {1:?}")]
+    SanTrustDomainError(String, Vec<Identity>),
     #[error("failed getting ex data")]
     ExDataError,
     #[error("failed getting peer cert")]
