@@ -178,8 +178,7 @@ pub async fn copy_hbone(
 
     let client_to_server = async {
         let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
-        let mut wo = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wo);
-        let res = tokio::io::copy(&mut ri, &mut wo).await;
+        let res = tokio::io::copy_buf(&mut ri, &mut wo).await;
         trace!(?res, "hbone -> tcp");
         received = res?;
         wo.shutdown().await
@@ -187,8 +186,7 @@ pub async fn copy_hbone(
 
     let server_to_client = async {
         let mut ro = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ro);
-        let mut wi = tokio::io::BufWriter::with_capacity(HBONE_BUFFER_SIZE, &mut wi);
-        let res = tokio::io::copy(&mut ro, &mut wi).await;
+        let res = tokio::io::copy_buf(&mut ro, &mut wi).await;
         trace!(?res, "tcp -> hbone");
         sent = res?;
         wi.shutdown().await
