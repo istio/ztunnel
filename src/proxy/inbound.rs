@@ -38,7 +38,7 @@ use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER}
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::tls::TlsError;
-use crate::workload::{gatewayaddress, Workload, WorkloadInformation};
+use crate::workload::{address, gatewayaddress, Workload, WorkloadInformation};
 use crate::{proxy, rbac};
 
 use super::Error;
@@ -361,26 +361,29 @@ impl Inbound {
         conn: &Connection,
     ) -> (bool, bool) {
         let has_waypoint = upstream.waypoint.address.is_some();
-        let wp_ip = match upstream.waypoint.address.as_ref() {
+        let waypoint_ip = match upstream.waypoint.address.as_ref() {
             Some(addr) => match addr {
-                gatewayaddress::Address::IP(wp_ip) => wp_ip,
-                gatewayaddress::Address::Hostname(_) => return (has_waypoint, false),
+                gatewayaddress::Address::IP(waypoint_ip) => waypoint_ip,
+                gatewayaddress::Address::Hostname(_) => return (has_waypoint, false), // TODO look this up from service
             },
             None => return (has_waypoint, false),
         };
-
-        if let Some(svc) = workloads.service_by_vip(*wp_ip).await {
-            for (ip, _ep) in svc.endpoints.iter() {
-                if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity {
-                    return (has_waypoint, true);
+        let from_waypoint = match workloads.fetch_address(waypoint_ip).await {
+            Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
+            Some(address::Address::Service(svc)) => {
+                let mut from_wp = false;
+                for (ip, _ep) in svc.endpoints.iter() {
+                    if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
+                    {
+                        from_wp = true;
+                        break;
+                    }
                 }
+                from_wp
             }
-        }
-
-        if workloads.fetch_workload(wp_ip).await.map(|w| w.identity()) == conn.src_identity {
-            return (has_waypoint, true);
-        }
-        (has_waypoint, false)
+            None => false,
+        };
+        (has_waypoint, from_waypoint)
     }
 }
 

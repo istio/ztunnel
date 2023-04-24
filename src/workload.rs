@@ -35,6 +35,7 @@ use crate::config::{ConfigSource, ProxyMode};
 use crate::identity::{Identity, SecretManager};
 use crate::metrics::Metrics;
 use crate::rbac::{Authorization, RbacScope};
+use crate::workload::address::Address;
 use crate::workload::WorkloadError::EnumParse;
 use crate::xds::istio::workload::PortList;
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
@@ -100,6 +101,16 @@ pub mod gatewayaddress {
     }
 }
 
+pub mod address {
+    use crate::workload::{Service, Workload};
+
+    #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "address", content = "content")]
+    pub enum Address {
+        Workload(Box<Workload>),
+        Service(Box<Service>),
+    }
+}
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
@@ -600,25 +611,22 @@ impl WorkloadInformation {
     }
 
     pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
-        self.fetch_address(&addr).await;
+        self.fetch_address(&addr.ip()).await;
         let wi = self.info.lock().unwrap();
         wi.find_upstream(addr, hbone_port)
     }
 
     // Support workload and VIP
     // It is to do on demand workload fetch if necessary, it handles both workload ip and services
-    async fn fetch_address(&self, addr: &SocketAddr) {
+    pub async fn fetch_address(&self, addr: &IpAddr) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch address");
-        // 1. handle workload ip, if workload not found fallback to service.
-        if self.find_workload(&addr.ip()).is_none() {
-            // 2. handle service
-            if self.service_by_vip(addr.ip()).await.is_some() {
-                return;
-            }
-            // if both cache not found, start on demand fetch
-            self.fetch_on_demand(&addr.ip()).await;
+        if let Some(address) = self.find_address(addr) {
+            return Some(address);
         }
+        // if both cache not found, start on demand fetch
+        self.fetch_on_demand(addr).await;
+        self.find_address(addr)
     }
 
     async fn fetch_on_demand(&self, ip: &IpAddr) {
@@ -629,17 +637,26 @@ impl WorkloadInformation {
         }
     }
 
+    // keep private so that we can ensure that we always use fetch_address
+    fn find_address(&self, addr: &IpAddr) -> Option<Address> {
+        // 1. handle workload ip, if workload not found fallback to service.
+        match self.find_workload(addr) {
+            None => {
+                // 2. handle service
+                let wi = self.info.lock().unwrap();
+                if let Some(svc) = wi.vips.get(addr).cloned() {
+                    return Some(Address::Service(Box::new(svc)));
+                }
+                None
+            }
+            Some(wl) => Some(Address::Workload(Box::new(wl))),
+        }
+    }
+
     // keep private so that we can ensure that we always use fetch_workload
     fn find_workload(&self, addr: &IpAddr) -> Option<Workload> {
         let wi = self.info.lock().unwrap();
         wi.find_workload(addr).cloned()
-    }
-
-    // return the service by clusterIP
-    pub async fn service_by_vip(&self, vip: IpAddr) -> Option<Service> {
-        let wi = self.info.lock().unwrap();
-        let svc = wi.vips.get(&vip);
-        svc.cloned()
     }
 }
 
