@@ -360,15 +360,15 @@ impl Inbound {
         upstream: &Workload,
         conn: &Connection,
     ) -> (bool, bool) {
-        let has_waypoint = upstream.waypoint.address.is_some();
-        let waypoint_ip = match upstream.waypoint.address.as_ref() {
-            Some(addr) => match addr {
+        let has_waypoint = upstream.waypoint.is_some();
+        let waypoint_ip = match upstream.waypoint.as_ref() {
+            Some(addr) => match addr.address {
                 gatewayaddress::Address::IP(waypoint_ip) => waypoint_ip,
                 gatewayaddress::Address::Hostname(_) => return (has_waypoint, false), // TODO look this up from service
             },
             None => return (has_waypoint, false),
         };
-        let from_waypoint = match workloads.fetch_address(waypoint_ip).await {
+        let from_waypoint = match workloads.fetch_address(&waypoint_ip).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
                 let mut from_wp = false;

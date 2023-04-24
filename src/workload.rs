@@ -83,12 +83,10 @@ impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
     }
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GatewayAddress {
-    #[serde(default)]
-    pub address: Option<gatewayaddress::Address>,
-    #[serde(default)]
+    pub address: gatewayaddress::Address,
     pub port: u16,
 }
 
@@ -115,10 +113,10 @@ pub mod address {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
     pub workload_ip: IpAddr,
-    #[serde(default)]
-    pub waypoint: GatewayAddress,
-    #[serde(default)]
-    pub network_gateway: GatewayAddress,
+
+    pub waypoint: Option<GatewayAddress>,
+
+    pub network_gateway: Option<GatewayAddress>,
     #[serde(default)]
     pub gateway_address: Option<SocketAddr>,
     #[serde(default)]
@@ -167,11 +165,13 @@ impl Workload {
         }
     }
     pub fn waypoint_svc_ip_address(&self) -> Option<IpAddr> {
-        match self.waypoint.address.as_ref() {
-            Some(gatewayaddress::Address::Hostname(_)) => None, // TODO: support this
-            Some(gatewayaddress::Address::IP(ip)) => Some(*ip),
-            None => None, // should never happen
+        if let Some(gw_address) = self.waypoint.as_ref() {
+            match gw_address.address {
+                gatewayaddress::Address::Hostname(_) => return None, // TODO: support this
+                gatewayaddress::Address::IP(ip) => return Some(ip),
+            }
         }
+        None
     }
 }
 
@@ -242,46 +242,46 @@ impl TryFrom<&XdsWorkload> for Workload {
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource: XdsWorkload = resource.to_owned();
 
-        let wp: GatewayAddress = match &resource.waypoint {
-            Some(w) => GatewayAddress {
-                address: match &w.address {
-                    Some(a) => match a {
-                        xds::istio::workload::gateway_address::Address::Ip(ip) => {
-                            Some(gatewayaddress::Address::IP(byte_to_ip(ip)?))
-                        }
-                        xds::istio::workload::gateway_address::Address::Hostname(hn) => {
-                            Some(gatewayaddress::Address::Hostname(hn.clone()))
-                        }
-                    },
-                    None => None,
+        let wp: Option<GatewayAddress> = match &resource.waypoint {
+            Some(w) => match &w.address {
+                Some(a) => match a {
+                    xds::istio::workload::gateway_address::Address::Ip(ip) => {
+                        Some(GatewayAddress {
+                            address: gatewayaddress::Address::IP(byte_to_ip(ip)?),
+                            port: w.port as u16,
+                        })
+                    }
+                    xds::istio::workload::gateway_address::Address::Hostname(hn) => {
+                        Some(GatewayAddress {
+                            address: gatewayaddress::Address::Hostname(hn.clone()),
+                            port: w.port as u16,
+                        })
+                    }
                 },
-                port: w.port as u16,
+                None => None,
             },
-            None => GatewayAddress {
-                address: None,
-                port: 0,
-            },
+            None => None,
         };
 
-        let network_gw: GatewayAddress = match &resource.network_gateway {
-            Some(w) => GatewayAddress {
-                address: match &w.address {
-                    Some(a) => match a {
-                        xds::istio::workload::gateway_address::Address::Ip(ip) => {
-                            Some(gatewayaddress::Address::IP(byte_to_ip(ip)?))
-                        }
-                        xds::istio::workload::gateway_address::Address::Hostname(hn) => {
-                            Some(gatewayaddress::Address::Hostname(hn.clone()))
-                        }
-                    },
-                    None => None,
+        let network_gw: Option<GatewayAddress> = match &resource.network_gateway {
+            Some(w) => match &w.address {
+                Some(a) => match a {
+                    xds::istio::workload::gateway_address::Address::Ip(ip) => {
+                        Some(GatewayAddress {
+                            address: gatewayaddress::Address::IP(byte_to_ip(ip)?),
+                            port: w.port as u16,
+                        })
+                    }
+                    xds::istio::workload::gateway_address::Address::Hostname(hn) => {
+                        Some(GatewayAddress {
+                            address: gatewayaddress::Address::Hostname(hn.clone()),
+                            port: w.port as u16,
+                        })
+                    }
                 },
-                port: w.port as u16,
+                None => None,
             },
-            None => GatewayAddress {
-                address: None,
-                port: 0,
-            },
+            None => None,
         };
 
         let address = byte_to_ip(&resource.address)?;
@@ -624,19 +624,18 @@ impl WorkloadInformation {
     }
 
     pub async fn find_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
-        let waypoint_addr = &wl.waypoint;
-        if let Some(waypoint_address) = &waypoint_addr.address {
+        if let Some(gw_address) = &wl.waypoint {
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-            let wp_ip_addr = match waypoint_address {
+            let wp_ip_addr = match gw_address.address {
                 gatewayaddress::Address::IP(ip) => ip,
                 gatewayaddress::Address::Hostname(_) => {
                     info!(%wl.name, "waypoint hostname lookup not supported yet");
                     return Ok(None); // TODO unsupported feature
                 }
             };
-            let wp_socket_addr = SocketAddr::new(*wp_ip_addr, waypoint_addr.port);
-            match self.find_upstream(wp_socket_addr, waypoint_addr.port).await {
+            let wp_socket_addr = SocketAddr::new(wp_ip_addr, gw_address.port);
+            match self.find_upstream(wp_socket_addr, gw_address.port).await {
                 Some(upstream) => {
                     debug!(%wl.name, "found waypoint upstream");
                     return Ok(Some(upstream));

@@ -93,14 +93,8 @@ pub const TEST_VIP: &str = "127.10.0.1";
 pub fn test_default_workload() -> Workload {
     Workload {
         workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        waypoint: GatewayAddress {
-            address: None,
-            port: 0,
-        },
-        network_gateway: GatewayAddress {
-            address: None,
-            port: 0,
-        },
+        waypoint: None,
+        network_gateway: None,
         gateway_address: None,
         protocol: Default::default(),
         name: "".to_string(),
@@ -168,10 +162,10 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
                 node: "local".to_string(),
-                waypoint: GatewayAddress {
-                    address: Some(gatewayaddress::Address::IP(waypoint_ip)),
+                waypoint: Some(GatewayAddress {
+                    address: gatewayaddress::Address::IP(waypoint_ip),
                     port: 15008,
-                },
+                }),
                 ..test_default_workload()
             },
             vips: Default::default(),
