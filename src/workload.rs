@@ -166,11 +166,11 @@ impl Workload {
             service_account: self.service_account.clone(),
         }
     }
-    pub fn choose_waypoint_address(&self) -> Option<IpAddr> {
+    pub fn waypoint_svc_ip_address(&self) -> Option<IpAddr> {
         match self.waypoint.address.as_ref() {
-            Some(gatewayaddress::Address::Hostname(_)) => None, // TODO: handle this case once we have network-prefixed xds names
+            Some(gatewayaddress::Address::Hostname(_)) => None, // TODO: support this
             Some(gatewayaddress::Address::IP(ip)) => Some(*ip),
-            None => None,
+            None => None, // should never happen
         }
     }
 }
@@ -961,7 +961,7 @@ impl WorkloadStore {
                 Protocol::HBONE => {
                     let ip = us
                         .workload
-                        .choose_waypoint_address()
+                        .waypoint_svc_ip_address()
                         .unwrap_or(us.workload.workload_ip);
                     SocketAddr::from((ip, hbone_port))
                 }
