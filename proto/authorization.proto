@@ -45,13 +45,14 @@ message Rule {
 message Clause {
   // The logical behavior between the matches (if there are more than one)
   //  MatchBehavior match_behavior = 1;
+  // Matches are OR-ed
   // Match is a generic form of the authz policy's expressions contained in To, From and When.
   repeated Match matches = 2;
 }
 
 message Match {
-  // Values of specific type are ORed
-  // If multiple types are set, they are ANDed
+  // Values of specific type are OR-ed
+  // If multiple types are set, they are AND-ed
 
   repeated StringMatch namespaces = 1;
   repeated StringMatch not_namespaces = 2;
