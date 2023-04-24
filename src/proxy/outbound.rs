@@ -16,6 +16,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
+use bytes::Bytes;
 use drain::Watch;
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
@@ -29,7 +30,8 @@ use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::workload::{gatewayaddress, Protocol, Workload};
-use crate::{proxy, rbac, socket};
+use crate::{hyper_util, proxy, rbac, socket};
+use http_body_util::Empty;
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -229,12 +231,12 @@ impl OutboundConnection {
                 // Using the raw connection API, instead of client, is a bit annoying, but the only reasonable
                 // way to work around https://github.com/hyperium/hyper/issues/2863
                 // Eventually we will need to implement our own smarter pooling, TLS handshaking, etc anyways.
-                let mut builder = hyper::client::conn::Builder::new();
+                let mut builder =
+                    hyper::client::conn::http2::Builder::new(hyper_util::TokioExecutor);
                 let builder = builder
-                    .http2_only(true)
-                    .http2_initial_stream_window_size(self.pi.cfg.window_size)
-                    .http2_max_frame_size(self.pi.cfg.frame_size)
-                    .http2_initial_connection_window_size(self.pi.cfg.connection_window_size);
+                    .initial_stream_window_size(self.pi.cfg.window_size)
+                    .max_frame_size(self.pi.cfg.frame_size)
+                    .initial_connection_window_size(self.pi.cfg.connection_window_size);
 
                 let mut f = http_types::proxies::Forwarded::new();
                 f.add_for(remote_addr.to_string());
@@ -249,7 +251,7 @@ impl OutboundConnection {
                     )
                     .header(FORWARDED, f.value().unwrap())
                     .header(TRACEPARENT_HEADER, self.id.header())
-                    .body(hyper::Body::empty())
+                    .body(Empty::<Bytes>::new())
                     .unwrap();
                 let local = self
                     .pi
@@ -264,7 +266,7 @@ impl OutboundConnection {
                     .configure()
                     .expect("configure");
                 let tcp_stream = super::freebind_connect(local, req.gateway).await?;
-                tcp_stream.set_nodelay(true)?;
+                tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
                 let tls_stream = connect_tls(connector, tcp_stream).await?;
                 let (mut request_sender, connection) = builder
                     .handshake(tls_stream)
@@ -284,6 +286,7 @@ impl OutboundConnection {
                     return Err(Error::HttpStatus(code));
                 }
                 let mut upgraded = hyper::upgrade::on(response).await?;
+
                 super::copy_hbone(
                     &mut upgraded,
                     &mut stream,

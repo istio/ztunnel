@@ -20,7 +20,11 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper::{body, Body, Client, Method, Request, Response};
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use http_body_util::Empty;
+use hyper::body::Incoming;
+use hyper::{Method, Request, Response};
 use itertools::Itertools;
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -77,7 +81,7 @@ where
 }
 
 impl TestApp {
-    pub async fn admin_request(&self, path: &str) -> hyper::Result<Response<Body>> {
+    pub async fn admin_request(&self, path: &str) -> anyhow::Result<Response<Incoming>> {
         let req = Request::builder()
             .method(Method::GET)
             .uri(format!(
@@ -85,10 +89,10 @@ impl TestApp {
                 self.admin_address.port()
             ))
             .header("content-type", "application/json")
-            .body(Body::default())
+            .body(Empty::<Bytes>::new())
             .unwrap();
-        let client = Client::new();
-        client.request(req).await
+        let client = hyper_util::pooling_client();
+        Ok(client.request(req).await?)
     }
 
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {
@@ -96,11 +100,11 @@ impl TestApp {
             .method(Method::GET)
             .uri(format!("http://{}/metrics", self.stats_address))
             .header("content-type", "application/json")
-            .body(Body::default())
+            .body(Empty::<Bytes>::new())
             .unwrap();
-        let client = Client::new();
+        let client = hyper_util::pooling_client();
         let body = client.request(req).await?.into_body();
-        let body = body::to_bytes(body).await?;
+        let body = body.collect().await?.to_bytes();
         let iter = std::str::from_utf8(&body)?
             .lines()
             .map(|x| Ok::<_, io::Error>(x.to_string()));
@@ -115,9 +119,9 @@ impl TestApp {
                 "http://localhost:{}/healthz/ready",
                 self.readiness_address.port()
             ))
-            .body(Body::default())
+            .body(Empty::<Bytes>::new())
             .unwrap();
-        let client = Client::new();
+        let client = hyper_util::pooling_client();
         let resp = client
             .request(req)
             .await

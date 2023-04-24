@@ -7,7 +7,7 @@ This folder provides Rust benchmarks.
 ```shell
 $ cargo bench # Just run benchmarks
 $ cargo bench -- --quick # Just run benchmarks, with less samples
-$ cargo bench -- --profile-time 10s # run benchmarks with cpu profile; results will be in out/rust/criterion/<group>/<test>/profile/profile.pb
+$ cargo bench -- --profile-time 10 # run benchmarks with cpu profile; results will be in out/rust/criterion/<group>/<test>/profile/profile.pb
 $ # Compare to a baseline
 $ cargo bench -- --save-baseline <name> # save baseline
 $ # ...change something...

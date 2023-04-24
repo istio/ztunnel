@@ -126,8 +126,8 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
- "http-body",
- "hyper",
+ "http-body 0.4.5",
+ "hyper 0.14.25",
  "itoa",
  "matchit",
  "memchr",
@@ -152,7 +152,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
- "http-body",
+ "http-body 0.4.5",
  "mime",
  "rustversion",
  "tower-layer",
@@ -214,8 +214,7 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 [[package]]
 name = "boring"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c713ad6d8d7a681a43870ac37b89efd2a08015ceb4b256d82707509c1f0b6bb"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0#d7ae5903fbcb469a31b0d00897f0bb4b17532fa2"
 dependencies = [
  "bitflags",
  "boring-sys",
@@ -227,8 +226,7 @@ dependencies = [
 [[package]]
 name = "boring-sys"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7663d3069437a5ccdb2b5f4f481c8b80446daea10fa8503844e89ac65fcdc363"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0#d7ae5903fbcb469a31b0d00897f0bb4b17532fa2"
 dependencies = [
  "bindgen",
  "cmake",
@@ -973,6 +971,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-body"
+version = "1.0.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "951dfc2e32ac02d67c90c0d65bd27009a635dc9b381a2cc7d284ab01e3a0150d"
+dependencies = [
+ "bytes",
+ "http",
+]
+
+[[package]]
+name = "http-body-util"
+version = "0.1.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92445bc9cc14bfa0a3ce56817dc3b5bcc227a168781a356b702410789cec0d10"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body 1.0.0-rc.2",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "http-types"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1022,7 +1043,7 @@ dependencies = [
  "futures-util",
  "h2",
  "http",
- "http-body",
+ "http-body 0.4.5",
  "httparse",
  "httpdate",
  "itoa",
@@ -1035,20 +1056,43 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-boring"
-version = "2.1.2"
+name = "hyper"
+version = "1.0.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7419ead5df56b00201fc95d01b2b5fed1329216f72306e3480c5dd6c2b8aa0a"
+checksum = "7b75264b2003a3913f118d35c586e535293b3e22e41f074930762929d071e092"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-core",
+ "futures-util",
+ "h2",
+ "http",
+ "http-body 1.0.0-rc.2",
+ "httparse",
+ "httpdate",
+ "itoa",
+ "pin-project-lite",
+ "tokio",
+ "tracing",
+ "want",
+]
+
+[[package]]
+name = "hyper-boring"
+version = "3.0.0"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0#d7ae5903fbcb469a31b0d00897f0bb4b17532fa2"
 dependencies = [
  "antidote",
  "boring",
  "http",
- "hyper",
+ "hyper 1.0.0-rc.3",
+ "hyper-util",
  "linked_hash_set",
  "once_cell",
  "tokio",
  "tokio-boring",
  "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -1057,10 +1101,28 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbb958482e8c7be4bc3cf272a766a2b0bf1a6755e7a6ae777f017a31d11b13b1"
 dependencies = [
- "hyper",
+ "hyper 0.14.25",
  "pin-project-lite",
  "tokio",
  "tokio-io-timeout",
+]
+
+[[package]]
+name = "hyper-util"
+version = "0.0.0"
+source = "git+https://github.com/howardjohn/hyper-util?branch=client/h2-timer#5f15fb087d2b2b64e2019a06990b07a055f479f5"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "http",
+ "hyper 1.0.0-rc.3",
+ "once_cell",
+ "pin-project-lite",
+ "socket2 0.4.9",
+ "tokio",
+ "tower",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -2322,7 +2384,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97abcaa5d5850d3b469898d1e0939b57c3afb4475122e792cdd1c82b07f5de06"
 dependencies = [
  "futures-util",
- "hyper",
  "pin-project-lite",
  "thiserror",
  "tokio",
@@ -2351,8 +2412,7 @@ dependencies = [
 [[package]]
 name = "tokio-boring"
 version = "2.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb059337235a89f03252c6285da8f0a6747a85bbd42e9ece70178d578054cba7"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0#d7ae5903fbcb469a31b0d00897f0bb4b17532fa2"
 dependencies = [
  "boring",
  "boring-sys",
@@ -2420,8 +2480,8 @@ dependencies = [
  "futures-util",
  "h2",
  "http",
- "http-body",
- "hyper",
+ "http-body 0.4.5",
+ "hyper 0.14.25",
  "hyper-timeout",
  "percent-encoding",
  "pin-project",
@@ -2469,6 +2529,21 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "tower-hyper-http-body-compat"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af2373750972dd4efeef7ac0971cebd6597c6f3f98202bb5217763dcca99617d"
+dependencies = [
+ "http",
+ "http-body 0.4.5",
+ "http-body 1.0.0-rc.2",
+ "hyper 1.0.0-rc.3",
+ "pin-project-lite",
+ "tower",
+ "tower-service",
 ]
 
 [[package]]
@@ -2882,11 +2957,16 @@ dependencies = [
  "diff",
  "drain",
  "futures",
+ "futures-util",
  "go-parse-duration",
  "gperftools",
+ "http-body 0.4.5",
+ "http-body 1.0.0-rc.2",
+ "http-body-util",
  "http-types",
- "hyper",
+ "hyper 1.0.0-rc.3",
  "hyper-boring",
+ "hyper-util",
  "ipnet",
  "itertools",
  "libc",
@@ -2918,6 +2998,7 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tower",
+ "tower-hyper-http-body-compat",
  "tracing",
  "tracing-subscriber",
  "url",

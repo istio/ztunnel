@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::Context;
 use prometheus_client::registry::Registry;
 use tokio::time;
-use tracing::{error, info, warn, Instrument};
+use tracing::{info, warn, Instrument};
 
 use crate::identity::SecretManager;
 use crate::metrics::Metrics;
@@ -58,17 +58,14 @@ pub async fn build_with_cert(
         drain_rx.clone(),
         cert_manager.clone(),
     )
+    .await
     .context("admin server starts")?;
-    let stats_server = stats::Service::new(
-        config.clone(),
-        registry,
-        shutdown.trigger(),
-        drain_rx.clone(),
-    )
-    .context("stats server starts")?;
-    let readiness_server =
-        readiness::Service::new(config.clone(), ready, shutdown.trigger(), drain_rx.clone())
-            .context("readiness server starts")?;
+    let stats_server = stats::Service::new(config.clone(), registry, drain_rx.clone())
+        .await
+        .context("stats server starts")?;
+    let readiness_server = readiness::Service::new(config.clone(), ready, drain_rx.clone())
+        .await
+        .context("readiness server starts")?;
     let readiness_address = readiness_server.address();
     let admin_address = admin_server.address();
     let stats_address = stats_server.address();
@@ -86,14 +83,7 @@ pub async fn build_with_cert(
     // spawn all tasks that should run in the main thread
     admin_server.spawn();
     stats_server.spawn();
-    tokio::spawn(
-        async move {
-            if let Err(e) = workload_manager.run().await {
-                error!("workload manager: {}", e);
-            }
-        }
-        .in_current_span(),
-    );
+    tokio::spawn(workload_manager.run());
 
     let proxy_addresses = proxy.addresses();
     let span = tracing::span::Span::current();

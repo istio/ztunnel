@@ -12,27 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::config::RootCert;
-use crate::readiness::Ready;
-use crate::workload::{WorkloadInformation, WorkloadStore};
 use async_trait::async_trait;
-use futures::{future, Stream};
-use hyper::service::make_service_fn;
+use futures::Stream;
+use futures::StreamExt;
+
+use hyper::server::conn::http2;
+
 use log::info;
 use prometheus_client::registry::Registry;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::client::GrpcService;
-use tonic::{Response, Status, Streaming};
-use tracing::warn;
 
+use tonic::{Response, Status, Streaming};
+use tracing::{error, warn};
+
+use crate::config::RootCert;
+use crate::hyper_util::TokioExecutor;
 use crate::metrics::Metrics;
+use crate::readiness::Ready;
 use crate::tls;
+use crate::workload::{WorkloadInformation, WorkloadStore};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_server::{
     AggregatedDiscoveryService, AggregatedDiscoveryServiceServer,
 };
@@ -66,20 +69,21 @@ impl AdsServer {
         let root_cert = RootCert::Static(certs.chain().unwrap());
         let acceptor = tls::ControlPlaneCertProvider(certs);
         let listener_addr_string = "https://".to_string() + &server_addr.to_string();
-        let tls_stream = crate::hyper_util::tls_server(acceptor, listener);
-        let incoming = hyper::server::accept::from_stream(tls_stream);
-
+        let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
         let srv = AggregatedDiscoveryServiceServer::new(server);
         tokio::spawn(async move {
-            hyper::Server::builder(incoming)
-                .serve(make_service_fn(move |_| {
-                    let mut srv = srv.clone();
-                    future::ok::<_, Infallible>(tower::service_fn(
-                        move |req: hyper::Request<hyper::Body>| srv.call(req),
-                    ))
-                }))
-                .await
-                .unwrap()
+            while let Some(socket) = tls_stream.next().await {
+                let srv = srv.clone();
+                if let Err(err) = http2::Builder::new(TokioExecutor)
+                    .serve_connection(
+                        socket,
+                        tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
+                    )
+                    .await
+                {
+                    error!("Error serving connection: {:?}", err);
+                }
+            }
         });
 
         let ready = Ready::new();

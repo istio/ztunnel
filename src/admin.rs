@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Bytes;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,7 +26,9 @@ use drain::Watch;
 use gperftools::heap_profiler::HEAP_PROFILER;
 #[cfg(feature = "gperftools")]
 use gperftools::profiler::PROFILER;
-use hyper::{header::HeaderValue, header::CONTENT_TYPE, Body, Request, Response};
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
 use pprof::protos::Message;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
@@ -81,17 +84,16 @@ pub struct CertsDump {
 }
 
 impl Service {
-    pub fn new(
+    pub async fn new(
         config: Config,
         workload_info: WorkloadInformation,
         shutdown_trigger: signal::ShutdownTrigger,
         drain_rx: Watch,
         cert_manager: Arc<SecretManager>,
-    ) -> hyper::Result<Self> {
+    ) -> anyhow::Result<Self> {
         Server::<State>::bind(
             "admin",
             config.admin_addr,
-            shutdown_trigger.clone(),
             drain_rx,
             State {
                 config,
@@ -100,6 +102,7 @@ impl Service {
                 cert_manager,
             },
         )
+        .await
         .map(|s| Service { s })
     }
 
@@ -135,7 +138,7 @@ impl Service {
     }
 }
 
-async fn handle_dashboard(_req: Request<Body>) -> Response<Body> {
+async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     let apis = &[
         (
             "debug/pprof/profile",
@@ -168,7 +171,7 @@ async fn handle_dashboard(_req: Request<Body>) -> Response<Body> {
     let html_str = include_str!("./assets/dashboard.html");
     let html_str = html_str.replace("<!--API_ROWS_PLACEHOLDER-->", &api_rows);
 
-    let mut response = Response::new(Body::from(html_str));
+    let mut response = plaintext_response(hyper::StatusCode::OK, html_str);
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
@@ -227,7 +230,7 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     dump
 }
 
-async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
+async fn handle_pprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(1000)
         // .blocklist(&["libc", "libgcc", "pthread", "vdso"])
@@ -255,8 +258,8 @@ async fn handle_pprof(_req: Request<Body>) -> Response<Body> {
 
 async fn handle_server_shutdown(
     shutdown_trigger: signal::ShutdownTrigger,
-    _req: Request<Body>,
-) -> Response<Body> {
+    _req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
     match *_req.method() {
         hyper::Method::POST => {
             shutdown_trigger.shutdown_now().await;
@@ -266,7 +269,10 @@ async fn handle_server_shutdown(
     }
 }
 
-async fn handle_config_dump(mut dump: ConfigDump, _req: Request<Body>) -> Response<Body> {
+async fn handle_config_dump(
+    mut dump: ConfigDump,
+    _req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
     if let Some(cfg) = dump.config.local_xds_config.clone() {
         match cfg.read_to_string().await {
             Ok(data) => match serde_yaml::from_str(&data) {
@@ -301,7 +307,7 @@ usage: POST /logging?level={mod1}:{level1},{mod2}:{level2}\t(To change specific 
 hint: loglevel:\terror|warn|info|debug|trace|off
 hint: mod_name:\tthe module name, i.e. ztunnel::proxy
 ";
-async fn handle_logging(req: Request<Body>) -> Response<Body> {
+async fn handle_logging(req: Request<Incoming>) -> Response<Full<Bytes>> {
     match *req.method() {
         hyper::Method::POST => {
             let qp = req
@@ -328,7 +334,7 @@ async fn handle_logging(req: Request<Body>) -> Response<Body> {
     }
 }
 
-fn list_loggers() -> Response<Body> {
+fn list_loggers() -> Response<Full<Bytes>> {
     match telemetry::get_current_loglevel() {
         Ok(loglevel) => plaintext_response(
             hyper::StatusCode::OK,
@@ -341,7 +347,7 @@ fn list_loggers() -> Response<Body> {
     }
 }
 
-fn change_log_level(reset: bool, level: &str) -> Response<Body> {
+fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
     match telemetry::set_level(reset, level) {
         Ok(_) => list_loggers(),
         Err(e) => plaintext_response(
@@ -352,7 +358,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Body> {
 }
 
 #[cfg(feature = "gperftools")]
-async fn handle_gprof(_req: Request<Body>) -> Response<Body> {
+async fn handle_gprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     const FILE_PATH: &str = "/tmp/profile.prof";
     PROFILER.lock().unwrap().start(FILE_PATH).unwrap();
 
@@ -373,7 +379,7 @@ async fn handle_gprof(_req: Request<Body>) -> Response<Body> {
 }
 
 #[cfg(not(feature = "gperftools"))]
-async fn handle_gprof(_req: Request<Body>) -> Response<Body> {
+async fn handle_gprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     Response::builder()
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
         .body("gperftools not enabled".into())
@@ -381,7 +387,7 @@ async fn handle_gprof(_req: Request<Body>) -> Response<Body> {
 }
 
 #[cfg(feature = "gperftools")]
-async fn handle_gprof_heap(_req: Request<Body>) -> Response<Body> {
+async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     const FILE_PATH: &str = "/tmp/profile.prof";
     HEAP_PROFILER.lock().unwrap().start(FILE_PATH).unwrap();
 
@@ -402,7 +408,7 @@ async fn handle_gprof_heap(_req: Request<Body>) -> Response<Body> {
 }
 
 #[cfg(not(feature = "gperftools"))]
-async fn handle_gprof_heap(_req: Request<Body>) -> Response<Body> {
+async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     Response::builder()
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
         .body("gperftools not enabled".into())

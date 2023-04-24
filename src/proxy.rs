@@ -20,7 +20,8 @@ use std::{fmt, io};
 
 use boring::error::ErrorStack;
 use drain::Watch;
-use hyper::{header, Body, Request};
+
+use hyper::{header, Request};
 use rand::Rng;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
@@ -302,7 +303,7 @@ fn parse_socket_or_ip(i: &str) -> Option<IpAddr> {
         .or_else(|| i.parse::<IpAddr>().ok())
 }
 
-pub fn get_original_src_from_fwded(req: &Request<Body>) -> Option<IpAddr> {
+pub fn get_original_src_from_fwded<T>(req: &Request<T>) -> Option<IpAddr> {
     req.headers()
         .get(header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
@@ -382,6 +383,8 @@ pub async fn relay(
 mod tests {
     use std::assert_eq;
 
+    use bytes::Bytes;
+    use http_body_util::Empty;
     use hyper::http::request;
     use test_case::test_case;
 
@@ -403,7 +406,7 @@ mod tests {
     fn string_match(header: &str, expect: Option<&str>) {
         let headers = request::Builder::new()
             .header(header::FORWARDED, header)
-            .body(Body::empty())
+            .body(Empty::<Bytes>::new())
             .unwrap();
         let expect = expect.map(|i| i.parse::<IpAddr>().unwrap());
         assert_eq!(get_original_src_from_fwded(&headers), expect)
