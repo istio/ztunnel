@@ -536,6 +536,13 @@ pub struct WorkloadInformation {
     pub demand: Option<Demander>,
 }
 
+#[allow(clippy::enum_variant_names)]
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum WaypointError {
+    #[error("failed to find waypoint for workload: {0}")]
+    FindWaypointError(String),
+}
+
 impl WorkloadInformation {
     pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {
         let Some(wl) = self.fetch_workload(&conn.dst.ip()).await else {
@@ -614,6 +621,33 @@ impl WorkloadInformation {
         self.fetch_address(&addr.ip()).await;
         let wi = self.info.lock().unwrap();
         wi.find_upstream(addr, hbone_port)
+    }
+
+    pub async fn find_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
+        let waypoint_addr = &wl.waypoint;
+        if let Some(waypoint_address) = &waypoint_addr.address {
+            // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
+            // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
+            let wp_ip_addr = match waypoint_address {
+                gatewayaddress::Address::IP(ip) => ip,
+                gatewayaddress::Address::Hostname(_) => {
+                    info!(%wl.name, "waypoint hostname lookup not supported yet");
+                    return Ok(None); // TODO unsupported feature
+                }
+            };
+            let wp_socket_addr = SocketAddr::new(*wp_ip_addr, waypoint_addr.port);
+            match self.find_upstream(wp_socket_addr, waypoint_addr.port).await {
+                Some(upstream) => {
+                    debug!(%wl.name, "found waypoint upstream");
+                    return Ok(Some(upstream));
+                }
+                None => {
+                    debug!(%wl.name, "waypoint upstream not found");
+                    return Err(WaypointError::FindWaypointError(wl.name));
+                }
+            };
+        }
+        Ok(None)
     }
 
     // Support workload and VIP
