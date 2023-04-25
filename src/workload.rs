@@ -795,6 +795,7 @@ impl WorkloadStore {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
                     self.staged_vips.entry(vip).or_default().insert(wip, ep);
+                    self.workload_to_vip.entry(wip).or_default().insert(vip);
                 }
             }
         }
@@ -893,6 +894,13 @@ impl WorkloadStore {
         if let Some(prev) = self.workloads.remove(&ip) {
             if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
                 for vip in vips {
+                    self.staged_vips
+                        .entry(vip)
+                        .or_default()
+                        .remove(&prev.workload_ip);
+                    if self.staged_vips[&vip].is_empty() {
+                        self.staged_vips.remove(&vip);
+                    }
                     if let Some(wls) = self.vips.get_mut(&vip) {
                         wls.endpoints.remove(&prev.workload_ip);
                     }
@@ -900,8 +908,12 @@ impl WorkloadStore {
             }
         }
         if let Some(prev) = self.vips.remove(&ip) {
-            for (wl, _) in prev.endpoints {
-                self.workload_to_vip.remove(&wl);
+            for (ep_ip, _) in prev.endpoints {
+                self.workload_to_vip.remove(&ep_ip);
+                self.staged_vips.entry(prev.vip).or_default().remove(&ep_ip);
+                if self.staged_vips[&prev.vip].is_empty() {
+                    self.staged_vips.remove(&prev.vip);
+                }
             }
         }
     }
@@ -1166,6 +1178,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        assert_eq!((wi.staged_vips.len()), 0); // vip already in a service, should not be staged
 
         assert_vips(&wi, vec!["some name", "some name2"]);
         wi.remove("127.0.0.2".to_string());
@@ -1213,6 +1226,60 @@ mod tests {
         // Remove the VIP entirely
         wi.remove("127.0.1.1".to_string());
         assert_eq!(wi.vips.len(), 0);
+    }
+
+    #[test]
+    fn staged_vips_cleanup() {
+        initialize_telemetry();
+        let mut wi = WorkloadStore::default();
+        assert_eq!((wi.workloads.len()), 0);
+        assert_eq!((wi.vips.len()), 0);
+        assert_eq!((wi.staged_vips.len()), 0);
+
+        let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
+
+        let vip = HashMap::from([(
+            "127.0.1.1".to_string(),
+            XdsPortList {
+                ports: vec![XdsPort {
+                    service_port: 80,
+                    target_port: 8080,
+                }],
+            },
+        )]);
+        assert_vips(&wi, vec![]);
+
+        // Add 2 workload with VIP
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip1.clone(),
+            name: "some name".to_string(),
+            virtual_ips: vip.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!((wi.staged_vips.len()), 1);
+
+        // now update it without the VIP
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip1.clone(),
+            name: "some name".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!((wi.staged_vips.len()), 0); // should remove the VIP if no longer needed
+
+        // Add 2 workload with VIP again
+        wi.insert_xds_workload(XdsWorkload {
+            address: xds_ip1.clone(),
+            name: "some name".to_string(),
+            virtual_ips: vip.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!((wi.staged_vips.len()), 1); // VIP should be staged again
+
+        wi.remove("127.0.0.1".to_string());
+        assert_eq!((wi.staged_vips.len()), 0); // should remove the VIP if no longer needed
     }
 
     #[track_caller]
