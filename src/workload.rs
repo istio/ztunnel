@@ -28,6 +28,7 @@ use tracing::{debug, error, info, instrument, trace};
 use xds::istio::security::Authorization as XdsAuthorization;
 use xds::istio::workload::address::Type as XdsType;
 use xds::istio::workload::Address as XdsAddress;
+use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Service as XdsService;
 use xds::istio::workload::Workload as XdsWorkload;
 
@@ -237,50 +238,39 @@ impl From<&PortList> for HashMap<u16, u16> {
     }
 }
 
+impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
+    type Error = WorkloadError;
+
+    fn try_from(value: &xds::istio::workload::GatewayAddress) -> Result<Self, Self::Error> {
+        let gw_addr: GatewayAddress = match &value.address {
+            Some(a) => match a {
+                xds::istio::workload::gateway_address::Address::Ip(ip) => GatewayAddress {
+                    address: gatewayaddress::Address::IP(byte_to_ip(ip)?),
+                    port: value.port as u16,
+                },
+                xds::istio::workload::gateway_address::Address::Hostname(hn) => GatewayAddress {
+                    address: gatewayaddress::Address::Hostname(hn.clone()),
+                    port: value.port as u16,
+                },
+            },
+            None => return Err(WorkloadError::MissingGatewayAddress),
+        };
+        Ok(gw_addr)
+    }
+}
+
 impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource: XdsWorkload = resource.to_owned();
 
-        let wp: Option<GatewayAddress> = match &resource.waypoint {
-            Some(w) => match &w.address {
-                Some(a) => match a {
-                    xds::istio::workload::gateway_address::Address::Ip(ip) => {
-                        Some(GatewayAddress {
-                            address: gatewayaddress::Address::IP(byte_to_ip(ip)?),
-                            port: w.port as u16,
-                        })
-                    }
-                    xds::istio::workload::gateway_address::Address::Hostname(hn) => {
-                        Some(GatewayAddress {
-                            address: gatewayaddress::Address::Hostname(hn.clone()),
-                            port: w.port as u16,
-                        })
-                    }
-                },
-                None => None,
-            },
+        let wp = match &resource.waypoint {
+            Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,
         };
 
-        let network_gw: Option<GatewayAddress> = match &resource.network_gateway {
-            Some(w) => match &w.address {
-                Some(a) => match a {
-                    xds::istio::workload::gateway_address::Address::Ip(ip) => {
-                        Some(GatewayAddress {
-                            address: gatewayaddress::Address::IP(byte_to_ip(ip)?),
-                            port: w.port as u16,
-                        })
-                    }
-                    xds::istio::workload::gateway_address::Address::Hostname(hn) => {
-                        Some(GatewayAddress {
-                            address: gatewayaddress::Address::Hostname(hn.clone()),
-                            port: w.port as u16,
-                        })
-                    }
-                },
-                None => None,
-            },
+        let network_gw = match &resource.network_gateway {
+            Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,
         };
 
@@ -981,6 +971,8 @@ pub enum WorkloadError {
     PrefixParse(#[from] ipnet::PrefixLenError),
     #[error("unknown enum: {0}")]
     EnumParse(String),
+    #[error("nonempty gateway address is missing address")]
+    MissingGatewayAddress,
 }
 
 #[cfg(test)]
