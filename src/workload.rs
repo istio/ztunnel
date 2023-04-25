@@ -1270,9 +1270,9 @@ mod tests {
 
         // Add 2 workload with VIP again
         wi.insert_xds_workload(XdsWorkload {
-            address: xds_ip1.clone(),
+            address: xds_ip1,
             name: "some name".to_string(),
-            virtual_ips: vip.clone(),
+            virtual_ips: vip,
             ..Default::default()
         })
         .unwrap();
