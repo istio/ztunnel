@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -82,8 +83,11 @@ impl Poolable for Client {
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct Key {
-    pub src: Identity,
-    pub dst: Identity,
+    pub src_id: Identity,
+    pub dst_id: Identity,
+    // In theory we can just use src,dst,node. However, the dst has a check that
+    // the L3 destination IP matches the HBONE IP. This could be loosened to just assert they are the same identity maybe.
+    pub dst: SocketAddr,
 }
 
 #[derive(Debug)]
@@ -106,10 +110,11 @@ impl Pool {
         let reuse_connection = self.pool.checkout(key.clone());
 
         let connect_pool = async {
-            let ver = hyper_util::client::pool::Ver::Http2;
+            let ver = pool::Ver::Http2;
             let Some(connecting) = self.pool.connecting(&key, ver) else {
-                // TODO: this is obscure, make it more explicit
-                return Err(Error::Dropped)
+                // There is already an existing connection establishment in flight.
+                // Return an error so
+                return Err(Error::PoolAlreadyConnecting)
             };
             let pc = Client(connect.await?);
             let pooled = self.pool.pooled(connecting, pc);
@@ -118,13 +123,17 @@ impl Pool {
         pin_mut!(connect_pool);
         let request_sender: Pooled<Client, _> =
             match future::select(reuse_connection, connect_pool).await {
+                // Checkout won.
                 Either::Left((Ok(conn), _)) => {
                     debug!(?key, "fetched existing connection");
                     conn
                 }
+                // Checkout won, but had an error.
                 Either::Left((Err(err), connecting)) => match err {
+                    // Checked out a closed connection. Just keep connecting then
                     pool::Error::CheckedOutClosedValue => connecting.await?,
-                    _ => return Err(Error::Dropped),
+                    // Some other error, bubble it up
+                    _ => return Err(Error::Pool(err)),
                 },
                 // Connect won, checkout can just be dropped.
                 Either::Right((Ok(request_sender), _checkout)) => {
@@ -133,8 +142,10 @@ impl Pool {
                 }
                 // Connect won, checkout can just be dropped.
                 Either::Right((Err(err), checkout)) => match err {
-                    Error::Dropped => checkout.await?,
-                    _ => return Err(Error::Dropped),
+                    // Connect won but we already had an in-flight connection, so use that.
+                    Error::PoolAlreadyConnecting => checkout.await?,
+                    // Some other connection error
+                    err => return Err(err),
                 },
             };
 
@@ -186,8 +197,9 @@ mod test {
         });
         let pool = Pool::new();
         let key = Key {
-            src: Identity::default(),
-            dst: Identity::default(),
+            src_id: Identity::default(),
+            dst_id: Identity::default(),
+            dst: addr,
         };
         let connect = || async {
             let builder = http2::Builder::new(TokioExec);

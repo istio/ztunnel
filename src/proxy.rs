@@ -126,9 +126,11 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] io::Error),
-
-    #[error("dropped")]
-    Dropped,
+    //
+    // #[error("dropped")]
+    // Dropped,
+    #[error("pool is already connecting")]
+    PoolAlreadyConnecting,
 
     #[error("pool: {0}")]
     Pool(#[from] hyper_util::client::pool::Error),

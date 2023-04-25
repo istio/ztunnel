@@ -235,8 +235,9 @@ impl OutboundConnection {
                     .expect("hbone requires destination workload");
 
                 let pool_key = pool::Key {
-                    src: req.source.identity(),
-                    dst: dst_identity.clone(),
+                    src_id: req.source.identity(),
+                    dst_id: dst_identity.clone(),
+                    dst: req.gateway,
                 };
 
                 // Setup our connection future. This won't always run if we have an existing connection
