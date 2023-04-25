@@ -701,6 +701,25 @@ pub struct Endpoint {
     pub port: HashMap<u16, u16>,
 }
 
+impl TryFrom<&XdsService> for Service {
+    type Error = WorkloadError;
+
+    fn try_from(s: &XdsService) -> Result<Self, Self::Error> {
+        let svc = Service {
+            name: s.name.to_string(),
+            namespace: s.namespace.to_string(),
+            hostname: s.hostname.to_string(),
+            vip: byte_to_ip(&s.address)?,
+            ports: (&PortList {
+                ports: s.ports.clone(),
+            })
+                .into(),
+            endpoints: Default::default(), // intentionally empty; will be populated once inserted into the workload store
+        };
+        Ok(svc)
+    }
+}
+
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
@@ -745,25 +764,7 @@ impl WorkloadStore {
     }
 
     fn insert_xds_service(&mut self, s: XdsService) -> anyhow::Result<()> {
-        let ip = byte_to_ip(&s.address)?;
-        let mut svc = Service {
-            name: s.name,
-            namespace: s.namespace,
-            hostname: s.hostname,
-            vip: ip,
-            ports: (&PortList { ports: s.ports }).into(),
-            endpoints: Default::default(),
-        };
-
-        // due to ordering issues, we may have gotten workloads with VIPs before we got the service
-        // we should add those workloads to the vips map now
-        if let Some(wips_to_endpoints) = self.staged_vips.remove(&ip) {
-            for (wip, ep) in wips_to_endpoints {
-                self.workload_to_vip.entry(wip).or_default().insert(ip);
-                svc.endpoints.insert(wip, ep);
-            }
-        }
-
+        let svc: Service = Service::try_from(&s)?;
         self.insert_svc(svc);
         Ok(())
     }
@@ -858,7 +859,16 @@ impl WorkloadStore {
         self.workloads.insert(wip, w);
     }
 
-    fn insert_svc(&mut self, svc: Service) {
+    fn insert_svc(&mut self, mut svc: Service) {
+        // due to ordering issues, we may have gotten workloads with VIPs before we got the service
+        // we should add those workloads to the vips map now
+        if let Some(wips_to_endpoints) = self.staged_vips.remove(&svc.vip) {
+            for (wip, ep) in wips_to_endpoints {
+                self.workload_to_vip.entry(wip).or_default().insert(svc.vip);
+                svc.endpoints.insert(wip, ep);
+            }
+        }
+
         // if svc already exists, just add new endpoints to existing svc
         if let Some(prev) = self.vips.get_mut(&svc.vip) {
             for (wip, ep) in svc.endpoints {
