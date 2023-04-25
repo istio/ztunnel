@@ -793,13 +793,7 @@ impl WorkloadStore {
                 } else {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
-                    if let Some(ep_map) = self.staged_vips.get_mut(&vip) {
-                        ep_map.insert(wip, ep);
-                    } else {
-                        let mut ep_map = HashMap::new();
-                        ep_map.insert(wip, ep);
-                        self.staged_vips.insert(vip, ep_map);
-                    }
+                    self.staged_vips.entry(vip).or_default().insert(wip, ep);
                 }
             }
         }
