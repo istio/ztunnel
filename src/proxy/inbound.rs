@@ -38,7 +38,7 @@ use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER}
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::tls::TlsError;
-use crate::workload::{address, gatewayaddress, Workload, WorkloadInformation};
+use crate::workload::{address, gatewayaddress, NetworkAddress, Workload, WorkloadInformation};
 use crate::{proxy, rbac};
 
 use super::Error;
@@ -368,7 +368,11 @@ impl Inbound {
             },
             None => return (has_waypoint, false),
         };
-        let from_waypoint = match workloads.fetch_address(&waypoint_ip).await {
+        let nw_addr = NetworkAddress {
+            network: upstream.network.clone(),
+            address: waypoint_ip,
+        };
+        let from_waypoint = match workloads.fetch_address(nw_addr).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
                 let mut from_wp = false;

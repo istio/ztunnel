@@ -603,17 +603,31 @@ impl WorkloadInformation {
         debug!(%addr, "fetch workload");
         match self.find_workload(addr) {
             None => {
-                self.fetch_on_demand(addr).await;
+                // TODO(kdorosh) ensure we updaet workloads to use network key too..
+                self.fetch_on_demand(&NetworkAddress {
+                    network: "".to_string(),
+                    address: *addr,
+                })
+                .await;
                 self.find_workload(addr)
             }
             wl @ Some(_) => wl,
         }
     }
 
-    pub async fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
-        self.fetch_address(&addr.ip()).await;
+    pub async fn find_upstream(
+        &self,
+        network: &str,
+        addr: SocketAddr,
+        hbone_port: u16,
+    ) -> Option<Upstream> {
+        self.fetch_address(NetworkAddress {
+            network: network.to_string(),
+            address: addr.ip(),
+        })
+        .await;
         let wi = self.info.lock().unwrap();
-        wi.find_upstream(addr, hbone_port)
+        wi.find_upstream(network, addr, hbone_port)
     }
 
     pub async fn find_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
@@ -628,7 +642,10 @@ impl WorkloadInformation {
                 }
             };
             let wp_socket_addr = SocketAddr::new(wp_ip_addr, gw_address.port);
-            match self.find_upstream(wp_socket_addr, gw_address.port).await {
+            match self
+                .find_upstream(&wl.network, wp_socket_addr, gw_address.port)
+                .await
+            {
                 Some(upstream) => {
                     debug!(%wl.name, "found waypoint upstream");
                     return Ok(Some(upstream));
@@ -644,33 +661,37 @@ impl WorkloadInformation {
 
     // Support workload and VIP
     // It is to do on demand workload fetch if necessary, it handles both workload ip and services
-    pub async fn fetch_address(&self, addr: &IpAddr) -> Option<Address> {
+    pub async fn fetch_address(&self, network_addr: NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
-        debug!(%addr, "fetch address");
-        if let Some(address) = self.find_address(addr) {
+        debug!(%network_addr.address, "fetch address");
+        if let Some(address) = self.find_address(network_addr.clone()) {
             return Some(address);
         }
         // if both cache not found, start on demand fetch
-        self.fetch_on_demand(addr).await;
-        self.find_address(addr)
+
+        // TODO(kdorosh) handle prefixed workload
+        self.fetch_on_demand(&network_addr).await;
+        self.find_address(network_addr)
     }
 
-    async fn fetch_on_demand(&self, ip: &IpAddr) {
+    async fn fetch_on_demand(&self, key: &NetworkAddress) {
         if let Some(demand) = &self.demand {
-            debug!(%ip, "sending demand request");
-            demand.demand(ip.to_string()).await.recv().await;
-            debug!(%ip, "on demand ready");
+            debug!(%key, "sending demand request");
+            demand.demand(key.to_string()).await.recv().await;
+            debug!(%key, "on demand ready");
         }
     }
 
     // keep private so that we can ensure that we always use fetch_address
-    fn find_address(&self, addr: &IpAddr) -> Option<Address> {
+    fn find_address(&self, network_addr: NetworkAddress) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
-        match self.find_workload(addr) {
+
+        // TODO(kdorosh) update workloads to be prefixed by network
+        match self.find_workload(&network_addr.address) {
             None => {
                 // 2. handle service
                 let wi = self.info.lock().unwrap();
-                if let Some(svc) = wi.vips.get(addr).cloned() {
+                if let Some(svc) = wi.vips.get(&network_addr).cloned() {
                     return Some(Address::Service(Box::new(svc)));
                 }
                 None
@@ -704,33 +725,23 @@ pub struct ServicePrimaryKey {
     pub hostname: String,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkAddress {
     pub network: String,
     pub address: IpAddr,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkAddressKey {
-    pub network: String,
-    pub ip: IpAddr,
-}
-
-impl NetworkAddress {
-    fn to_key(&self) -> NetworkAddressKey {
-        NetworkAddressKey {
-            network: self.network.clone(),
-            ip: self.address,
-        }
+impl fmt::Display for NetworkAddress {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}/{}", self.network, self.address,)
     }
 }
 
-pub fn network_addr_key(network: &str, vip: IpAddr) -> NetworkAddressKey {
-    NetworkAddressKey {
+pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
+    NetworkAddress {
         network: network.to_owned(),
-        ip: vip,
+        address: vip,
     }
 }
 
@@ -776,10 +787,10 @@ pub struct WorkloadStore {
     workload_to_vip: HashMap<IpAddr, HashSet<IpAddr>>,
     /// vips maintains a mapping of socket address with service port to workload ip and socket address
     /// with target ports in hashset.
-    vips: HashMap<IpAddr, Service>,
+    vips: HashMap<NetworkAddress, Service>,
     /// staged_vips maintains a mapping of ServiceSecondaryKey -> (workload IP -> Endpoint)
     /// this is used to handle ordering issues if workloads with VIPs are received before services.
-    staged_vips: HashMap<NetworkAddressKey, HashMap<IpAddr, Endpoint>>,
+    staged_vips: HashMap<NetworkAddress, HashMap<IpAddr, Endpoint>>,
     /// policies maintains a mapping of ns/name to policy.
     policies: HashMap<String, rbac::Authorization>,
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
@@ -836,14 +847,14 @@ impl WorkloadStore {
                     address: wip,
                     port: pl.into(),
                 };
-                if let Some(svc) = self.vips.get_mut(&vip) {
+                if let Some(svc) = self.vips.get_mut(&network_addr(&w.network, vip)) {
                     svc.endpoints.insert(ep.address, ep);
                     self.workload_to_vip.entry(wip).or_default().insert(vip);
                 } else {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
                     self.staged_vips
-                        .entry(network_addr_key(&workload.network, vip))
+                        .entry(network_addr(&workload.network, vip))
                         .or_default()
                         .insert(wip, ep);
                     self.workload_to_vip.entry(wip).or_default().insert(vip);
@@ -912,13 +923,11 @@ impl WorkloadStore {
     }
 
     fn insert_svc(&mut self, mut svc: Service) {
-        // let svc = &svc;
-
         // first mutate the service and add all missing endpoints
         for network_addr in svc.addresses.as_slice() {
             // due to ordering issues, we may have gotten workloads with VIPs before we got the service
             // we should add those workloads to the vips map now
-            if let Some(wips_to_endpoints) = self.staged_vips.remove(&network_addr.to_key()) {
+            if let Some(wips_to_endpoints) = self.staged_vips.remove(network_addr) {
                 for (wip, ep) in wips_to_endpoints {
                     self.workload_to_vip
                         .entry(wip)
@@ -929,12 +938,10 @@ impl WorkloadStore {
             }
         }
 
-        // TODO(kdorosh) key the internal maps on network/address!!!
-
         // now persist copies of the service to our persisted map, passing ownership to the map
         for network_addr in svc.addresses.as_slice() {
             // if svc already exists, just add new endpoints to existing svc
-            if let Some(prev) = self.vips.get_mut(&network_addr.address) {
+            if let Some(prev) = self.vips.get_mut(network_addr) {
                 for (wip, ep) in &svc.endpoints {
                     prev.endpoints.insert(*wip, ep.clone());
                     self.workload_to_vip
@@ -944,7 +951,7 @@ impl WorkloadStore {
                 }
             } else {
                 // svc is new, add it as is
-                self.vips.insert(network_addr.address, svc.clone());
+                self.vips.insert(network_addr.clone(), svc.clone());
             }
         }
     }
@@ -962,29 +969,29 @@ impl WorkloadStore {
             if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
                 for vip in vips {
                     self.staged_vips
-                        .entry(network_addr_key(&prev.network, vip))
+                        .entry(network_addr(&prev.network, vip))
                         .or_default()
                         .remove(&prev.workload_ip);
-                    if self.staged_vips[&network_addr_key(&prev.network, vip)].is_empty() {
-                        self.staged_vips
-                            .remove(&network_addr_key(&prev.network, vip));
+                    if self.staged_vips[&network_addr(&prev.network, vip)].is_empty() {
+                        self.staged_vips.remove(&network_addr(&prev.network, vip));
                     }
-                    if let Some(wls) = self.vips.get_mut(&vip) {
+                    if let Some(wls) = self.vips.get_mut(&network_addr(&prev.network, vip)) {
                         wls.endpoints.remove(&prev.workload_ip);
                     }
                 }
             }
         }
-        if let Some(prev) = self.vips.remove(&ip) {
+        // TODO(kdorosh)!! actually update network to be honored next line
+        if let Some(prev) = self.vips.remove(&network_addr("", ip)) {
             for (ep_ip, _) in prev.endpoints {
                 self.workload_to_vip.remove(&ep_ip);
                 for network_addr in &prev.addresses {
                     self.staged_vips
-                        .entry(network_addr.to_key())
+                        .entry(network_addr.clone())
                         .or_default()
                         .remove(&ep_ip);
-                    if self.staged_vips[&network_addr.to_key()].is_empty() {
-                        self.staged_vips.remove(&network_addr.to_key());
+                    if self.staged_vips[network_addr].is_empty() {
+                        self.staged_vips.remove(network_addr);
                     }
                 }
             }
@@ -995,8 +1002,8 @@ impl WorkloadStore {
         self.workloads.get(addr)
     }
 
-    fn find_upstream(&self, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
-        if let Some(svc) = self.vips.get(&addr.ip()) {
+    fn find_upstream(&self, network: &str, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
+        if let Some(svc) = self.vips.get(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
                 debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
                 return None
@@ -1368,7 +1375,7 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            if let Some(us) = wi.find_upstream("127.0.1.1:80".parse().unwrap(), 15008) {
+            if let Some(us) = wi.find_upstream("", "127.0.1.1:80".parse().unwrap(), 15008) {
                 let n = &us.workload.name; // borrow name instead of cloning
                 found.insert(n.to_owned()); // insert an owned copy of the borrowed n
                 wants.remove(n); // remove using the borrow
@@ -1401,7 +1408,7 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.unwrap().service_account, "default");
-        let us = store.find_upstream("127.10.0.1:80".parse().unwrap(), 15008);
+        let us = store.find_upstream("", "127.10.0.1:80".parse().unwrap(), 15008);
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.unwrap().port, 8080);

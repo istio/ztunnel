@@ -335,7 +335,7 @@ impl OutboundConnection {
         let us = self
             .pi
             .workloads
-            .find_upstream(target, self.pi.hbone_port)
+            .find_upstream(&source_workload.network, target, self.pi.hbone_port)
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it

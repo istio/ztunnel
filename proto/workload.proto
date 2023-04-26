@@ -135,7 +135,9 @@ message Workload {
 
   // Virtual IPs defines a set of virtual IP addresses the workload can be reached at.
   // Typically these represent Service ClusterIPs.
-  // The key is an IP address.
+  // TODO(kdorosh) implement this
+  // The key is a NetworkAddress string of the format network/IP, or just an IP if network
+  // of the service desired matches the network of the workload.
   map<string, PortList> virtual_ips = 15;
 
   // A list of authorization policies applicable to this workload.
