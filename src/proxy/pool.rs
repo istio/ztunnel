@@ -66,8 +66,7 @@ struct Client(http2::SendRequest<Empty<Bytes>>);
 
 impl Poolable for Client {
     fn is_open(&self) -> bool {
-        // self.0.is_ready()
-        true
+        self.0.is_ready()
     }
 
     fn reserve(self) -> Reservation<Self> {
