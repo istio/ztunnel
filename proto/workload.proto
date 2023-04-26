@@ -44,6 +44,8 @@ message Address {
 }
 
 // Service represents a service - a group of workloads that can be accessed together.
+// The primary key is "namespace/hostname".
+// Secondary (alias) keys are the unique `network/IP` pairs that the service can be reached at.
 message Service {
   // Name represents the name for the service.
   // For Kubernetes, this is the Service name.
@@ -53,12 +55,9 @@ message Service {
   // Hostname represents the FQDN of the service.
   // For Kubernetes, this would be <name>.<namespace>.svc.<cluster domain>
   string hostname = 3;
-  // Address represents the IPv4/IPv6 address for the service.
-  // This should be globally unique.
-  // This should not have a port number.
-  // TODO: Add network as discriminator
-  // TODO: Add dual stack support
-  bytes address = 4;
+  // Address represents the addresses the service can be reached at.
+  // There may be multiple addresses for a single service if it resides in multiple networks.
+  repeated NetworkAddress addresses = 4;
   // Ports for the service
   repeated Port ports = 5;
   // Optional; if set, the SAN to verify for TLS connections.
@@ -176,4 +175,12 @@ message GatewayAddress {
   }
   // port to reach the gateway at
   uint32 port = 3;
+}
+
+// NetworkAddress represents an address bound to a specific network.
+message NetworkAddress {
+  // Address presents the IP (v4 or v6).
+  bytes address = 1;
+  // Network represents the network this address is on.
+  string network = 2;
 }

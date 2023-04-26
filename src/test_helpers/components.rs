@@ -242,20 +242,26 @@ impl<'a> TestWorkloadBuilder<'a> {
                 name: "svc".to_string(),
                 namespace: self.w.workload.namespace.clone(),
                 hostname: format!("{}.{}.svc.cluster.local", "svc", self.w.workload.namespace),
-                vip: vip.parse().unwrap(),
+                addresses: vec![NetworkAddress {
+                    network: "default".to_string(),
+                    address: vip.parse().unwrap(),
+                }],
                 ports: ports.to_owned(),
                 endpoints: HashMap::from([(self.w.workload.workload_ip, ep.clone())]),
             };
 
-            let prev_svc = self.manager.services.get(&svc.vip);
-            if let Some(prev) = prev_svc {
-                let mut updated = prev.clone();
-                updated
-                    .endpoints
-                    .insert(self.w.workload.workload_ip, ep.clone());
-                self.manager.services.insert(svc.vip, updated);
-            } else {
-                self.manager.services.insert(svc.vip, svc);
+            for network_address in &svc.addresses {
+                let vip = network_address.address;
+                let prev_svc = self.manager.services.get(&vip);
+                if let Some(prev) = prev_svc {
+                    let mut updated = prev.clone();
+                    updated
+                        .endpoints
+                        .insert(self.w.workload.workload_ip, ep.clone());
+                    self.manager.services.insert(vip, updated);
+                } else {
+                    self.manager.services.insert(vip, svc.clone());
+                }
             }
         }
 

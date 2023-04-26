@@ -32,7 +32,9 @@ services:
 - name: local
   namespace: default
   hostname: example.com
-  vip: "127.10.0.1"
+  addresses:
+    - network: default
+      address: "127.10.0.1"
   endpoints:
     "127.0.0.1":
       address: "127.0.0.1"

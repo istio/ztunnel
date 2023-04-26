@@ -27,7 +27,8 @@ use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::workload::Protocol::{HBONE, TCP};
 use crate::workload::{
-    gatewayaddress, Endpoint, GatewayAddress, LocalConfig, LocalWorkload, Service, Workload,
+    gatewayaddress, Endpoint, GatewayAddress, LocalConfig, LocalWorkload, NetworkAddress, Service,
+    Workload,
 };
 
 pub mod app;
@@ -175,7 +176,10 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
         name: "local-vip".to_string(),
         namespace: "default".to_string(),
         hostname: "local-vip.default.svc.cluster.local".to_string(),
-        vip: TEST_VIP.parse()?,
+        addresses: vec![NetworkAddress {
+            network: "default".to_string(),
+            address: TEST_VIP.parse()?,
+        }],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: HashMap::from([(
             TEST_WORKLOAD_HBONE.parse()?,

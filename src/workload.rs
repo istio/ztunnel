@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
@@ -689,9 +690,16 @@ pub struct Service {
     pub name: String,
     pub namespace: String,
     pub hostname: String,
-    pub vip: IpAddr,
+    pub addresses: Vec<NetworkAddress>,
     pub ports: HashMap<u16, u16>,
     pub endpoints: HashMap<IpAddr, Endpoint>,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkAddress {
+    pub network: String,
+    pub address: IpAddr,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -705,11 +713,19 @@ impl TryFrom<&XdsService> for Service {
     type Error = WorkloadError;
 
     fn try_from(s: &XdsService) -> Result<Self, Self::Error> {
+        let mut nw_addrs = Vec::new();
+        for addr in &s.addresses {
+            let network_address = NetworkAddress {
+                network: addr.network.to_string(),
+                address: byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
+            };
+            nw_addrs.push(network_address);
+        }
         let svc = Service {
             name: s.name.to_string(),
             namespace: s.namespace.to_string(),
             hostname: s.hostname.to_string(),
-            vip: byte_to_ip(&s.address)?,
+            addresses: nw_addrs,
             ports: (&PortList {
                 ports: s.ports.clone(),
             })
@@ -861,24 +877,40 @@ impl WorkloadStore {
     }
 
     fn insert_svc(&mut self, mut svc: Service) {
-        // due to ordering issues, we may have gotten workloads with VIPs before we got the service
-        // we should add those workloads to the vips map now
-        if let Some(wips_to_endpoints) = self.staged_vips.remove(&svc.vip) {
-            for (wip, ep) in wips_to_endpoints {
-                self.workload_to_vip.entry(wip).or_default().insert(svc.vip);
-                svc.endpoints.insert(wip, ep);
+        // let svc = &svc;
+
+        // first mutate the service and add all missing endpoints
+        for network_addr in svc.addresses.as_slice() {
+            // due to ordering issues, we may have gotten workloads with VIPs before we got the service
+            // we should add those workloads to the vips map now
+            if let Some(wips_to_endpoints) = self.staged_vips.remove(&network_addr.address) {
+                for (wip, ep) in wips_to_endpoints {
+                    self.workload_to_vip
+                        .entry(wip)
+                        .or_default()
+                        .insert(network_addr.address);
+                    svc.endpoints.insert(wip, ep);
+                }
             }
         }
 
-        // if svc already exists, just add new endpoints to existing svc
-        if let Some(prev) = self.vips.get_mut(&svc.vip) {
-            for (wip, ep) in svc.endpoints {
-                prev.endpoints.insert(wip, ep);
-                self.workload_to_vip.entry(wip).or_default().insert(svc.vip);
+        // TODO(kdorosh) key the internal maps on network/address!!!
+
+        // now persist copies of the service to our persisted map, passing ownership to the map
+        for network_addr in svc.addresses.as_slice() {
+            // if svc already exists, just add new endpoints to existing svc
+            if let Some(prev) = self.vips.get_mut(&network_addr.address) {
+                for (wip, ep) in &svc.endpoints {
+                    prev.endpoints.insert(*wip, ep.clone());
+                    self.workload_to_vip
+                        .entry(*wip)
+                        .or_default()
+                        .insert(network_addr.address);
+                }
+            } else {
+                // svc is new, add it as is
+                self.vips.insert(network_addr.address, svc.clone());
             }
-        } else {
-            // svc is net new, add it as is
-            self.vips.insert(svc.vip, svc);
         }
     }
 
@@ -910,9 +942,14 @@ impl WorkloadStore {
         if let Some(prev) = self.vips.remove(&ip) {
             for (ep_ip, _) in prev.endpoints {
                 self.workload_to_vip.remove(&ep_ip);
-                self.staged_vips.entry(prev.vip).or_default().remove(&ep_ip);
-                if self.staged_vips[&prev.vip].is_empty() {
-                    self.staged_vips.remove(&prev.vip);
+                for network_addr in &prev.addresses {
+                    self.staged_vips
+                        .entry(network_addr.address)
+                        .or_default()
+                        .remove(&ep_ip);
+                    if self.staged_vips[&network_addr.address].is_empty() {
+                        self.staged_vips.remove(&network_addr.address);
+                    }
                 }
             }
         }
@@ -1003,6 +1040,8 @@ mod tests {
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::WorkloadStatus as XdsStatus;
+
+    use xds::istio::workload::NetworkAddress as XdsNetworkAddress;
 
     use super::*;
 
@@ -1161,7 +1200,10 @@ mod tests {
             name: "svc1".to_string(),
             namespace: "ns".to_string(),
             hostname: "svc1.ns.svc.cluster.local".to_string(),
-            address: Bytes::copy_from_slice(&[127, 0, 1, 1]),
+            addresses: vec![XdsNetworkAddress {
+                network: "default".to_string(),
+                address: [127, 0, 1, 1].to_vec(),
+            }],
             ports: vec![XdsPort {
                 service_port: 80,
                 target_port: 80,
