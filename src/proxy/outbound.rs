@@ -29,7 +29,7 @@ use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::workload::{Protocol, Workload};
+use crate::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 use http_body_util::Empty;
 
@@ -326,7 +326,17 @@ impl OutboundConnection {
         downstream: IpAddr,
         target: SocketAddr,
     ) -> Result<Request, Error> {
-        let source_workload = match self.pi.workloads.fetch_workload(&downstream).await {
+        let downstream_network_addr = NetworkAddress {
+            network: "defaultnw".to_string(), // TODO(kdorosh) fixme (use self?)
+            address: downstream,
+        };
+
+        let source_workload = match self
+            .pi
+            .workloads
+            .fetch_workload(&downstream_network_addr)
+            .await
+        {
             Some(wl) => wl,
             None => return Err(Error::UnknownSource(downstream)),
         };
@@ -504,6 +514,7 @@ mod tests {
             ..crate::config::parse_config().unwrap()
         };
         let source = XdsWorkload {
+            network: "defaultnw".to_string(),
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),
             address: Bytes::copy_from_slice(&[127, 0, 0, 1]),
@@ -511,6 +522,7 @@ mod tests {
             ..Default::default()
         };
         let waypoint = XdsWorkload {
+            network: "defaultnw".to_string(),
             name: "waypoint-workload".to_string(),
             namespace: "ns".to_string(),
             address: Bytes::copy_from_slice(&[127, 0, 0, 10]),
@@ -559,6 +571,7 @@ mod tests {
             "127.0.0.1",
             "1.2.3.4:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 ..Default::default()
             },
@@ -578,6 +591,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -601,6 +615,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -624,6 +639,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -647,6 +663,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -670,6 +687,7 @@ mod tests {
             "1.2.3.4",
             "127.0.0.2:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 ..Default::default()
             },
@@ -684,6 +702,7 @@ mod tests {
             "127.0.0.2",
             "127.0.0.1:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     address: Some(xds::istio::workload::gateway_address::Address::Ip(
@@ -709,6 +728,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                network: "defaultnw".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     address: Some(xds::istio::workload::gateway_address::Address::Ip(

@@ -7,6 +7,7 @@ workloads:
   workloadIp: "127.0.0.1"
   protocol: HBONE
   node: local
+  network: defaultnw
   vips:
     "127.10.0.1":
       80: 8080
@@ -17,6 +18,7 @@ workloads:
   workloadIp: "127.0.0.2"
   protocol: TCP
   node: local
+  network: defaultnw
   vips:
     "127.10.0.1":
       80: 8080
@@ -33,15 +35,23 @@ services:
   namespace: default
   hostname: example.com
   addresses:
-    - network: default
+    - network: defaultnw
       address: "127.10.0.1"
   endpoints:
-    "127.0.0.1":
-      address: "127.0.0.1"
+    ? address: "127.0.0.1"
+      network: defaultnw
+    :
+      address:
+        network: defaultnw
+        address: "127.0.0.1"
       port:
         80: 8080
-    "127.0.0.2":
-      address: "127.0.0.2"
+    ? address: "127.0.0.2"
+      network: defaultnw
+    :
+      address:
+        network: defaultnw
+        address: "127.0.0.2"
       port:
         80: 8080
   ports:

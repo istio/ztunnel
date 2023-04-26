@@ -45,6 +45,7 @@ use tracing::{error, info};
 
 use crate::config::RootCert;
 use crate::identity::{self, Identity};
+use crate::workload::NetworkAddress;
 
 use super::Error;
 
@@ -554,7 +555,7 @@ pub enum TlsError {
     #[error("tls verification error: {0}")]
     Verification(X509VerifyResult),
     #[error("certificate lookup error: {0} is not a known destination")]
-    CertificateLookup(IpAddr),
+    CertificateLookup(NetworkAddress),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
     #[error("san verification error: remote did not present the expected SAN ({0}), got {1:?}")]

@@ -24,6 +24,7 @@ use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, ProxyInputs};
 use crate::proxy::{Error, TraceParent};
 use crate::rbac;
+use crate::workload::NetworkAddress;
 use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
@@ -89,7 +90,14 @@ impl InboundPassthrough {
             return Err(Error::SelfCall);
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
-        let Some(upstream) = pi.workloads.fetch_workload(&orig.ip()).await else {
+
+        // TODO(kdorosh) ensure network works
+        let network_addr = NetworkAddress {
+            network: "defaultnw".to_string(),
+            address: orig.ip(),
+        };
+
+        let Some(upstream) = pi.workloads.fetch_workload(&network_addr).await else {
             return Err(Error::UnknownDestination(orig.ip()))
         };
         if upstream.waypoint.is_some() {
@@ -134,7 +142,12 @@ impl InboundPassthrough {
 
         // Find source info. We can lookup by XDS or from connection attributes
         let source_workload = if let Some(source_ip) = source_ip {
-            pi.workloads.fetch_workload(&source_ip).await
+            // TODO(kdorosh) ensure network works
+            let network_addr_srcip = NetworkAddress {
+                network: "defaultnw".to_string(),
+                address: source_ip,
+            };
+            pi.workloads.fetch_workload(&network_addr_srcip).await
         } else {
             None
         };

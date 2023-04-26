@@ -664,6 +664,7 @@ mod tests {
     use textnonce::TextNonce;
     use tokio::time::sleep;
 
+    use crate::workload::NetworkAddress;
     use workload::Workload;
     use xds::istio::workload::Workload as XdsWorkload;
 
@@ -691,9 +692,15 @@ mod tests {
             .as_ref()
             .map(|expected_workload| Workload::try_from(expected_workload).unwrap()); // this is a borrow, Ok not to clone
         let mut matched = false;
+
+        let ip_network_addr = NetworkAddress {
+            network: "defaultnw".to_string(), // TODO(kdorosh) fixme (use self?)
+            address: ip,
+        };
+
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
             sleep(POLL_RATE).await;
-            let wl = source.fetch_workload(&ip).await;
+            let wl = source.fetch_workload(&ip_network_addr).await;
             matched = wl == converted; // Option<Workload> is Ok to compare without needing to unwrap
         }
     }
@@ -708,7 +715,7 @@ mod tests {
         let workloads = vec![XdsWorkload {
             name: "1.1.1.1".to_string(),
             namespace: "default".to_string(),
-            network: "".to_string(),
+            network: "defaultnw".to_string(),
             address: ip.octets().to_vec().into(),
             protocol: 0,
             trust_domain: "local".to_string(),

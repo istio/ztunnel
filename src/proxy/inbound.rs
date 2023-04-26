@@ -266,7 +266,13 @@ impl Inbound {
                 }
                 // Orig has 15008, swap with the real port
                 let conn = rbac::Connection { dst: addr, ..conn };
-                let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
+
+                let network_addr = NetworkAddress {
+                    network: "defaultnw".to_string(), // TODO(kdorosh) fixme
+                    address: addr.ip(),
+                };
+
+                let Some(upstream) = workloads.fetch_workload(&network_addr).await else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
@@ -305,7 +311,13 @@ impl Inbound {
                 let baggage =
                     parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
                 // Find source info. We can lookup by XDS or from connection attributes
-                let source = workloads.fetch_workload(&source_ip).await;
+
+                let src_network_addr = NetworkAddress {
+                    network: "defaultnw".to_string(), // TODO(kdorosh) fixme
+                    address: source_ip,
+                };
+
+                let source = workloads.fetch_workload(&src_network_addr).await;
                 let derived_source = traffic::DerivedWorkload {
                     identity: conn.src_identity,
                     cluster_id: baggage.cluster_id,
@@ -422,7 +434,10 @@ impl crate::tls::CertProvider for InboundCertProvider {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
-            let wip = orig_dst_addr.ip();
+            let wip = NetworkAddress {
+                network: "defaultnw".to_string(), // TODO(kdorosh) fixme
+                address: orig_dst_addr.ip(),
+            };
             self.workloads
                 .fetch_workload(&wip)
                 .await

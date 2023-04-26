@@ -233,8 +233,13 @@ impl<'a> TestWorkloadBuilder<'a> {
         self.w.workload.workload_ip = network_namespace.ip();
 
         for (vip, ports) in &self.w.vips {
-            let ep = Endpoint {
+            let ep_network_addr = NetworkAddress {
+                network: "defaultnw".to_string(), // TODO(kdorosh) fixme (use self?)
                 address: self.w.workload.workload_ip,
+            };
+
+            let ep = Endpoint {
+                address: ep_network_addr.clone(),
                 port: ports.to_owned(),
             };
 
@@ -243,11 +248,11 @@ impl<'a> TestWorkloadBuilder<'a> {
                 namespace: self.w.workload.namespace.clone(),
                 hostname: format!("{}.{}.svc.cluster.local", "svc", self.w.workload.namespace),
                 addresses: vec![NetworkAddress {
-                    network: "default".to_string(),
+                    network: "defaultnw".to_string(),
                     address: vip.parse().unwrap(),
                 }],
                 ports: ports.to_owned(),
-                endpoints: HashMap::from([(self.w.workload.workload_ip, ep.clone())]),
+                endpoints: HashMap::from([(ep_network_addr.clone(), ep.clone())]),
             };
 
             for network_address in &svc.addresses {
@@ -257,7 +262,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                     let mut updated = prev.clone();
                     updated
                         .endpoints
-                        .insert(self.w.workload.workload_ip, ep.clone());
+                        .insert(ep_network_addr.clone(), ep.clone());
                     self.manager.services.insert(vip, updated);
                 } else {
                     self.manager.services.insert(vip, svc.clone());
