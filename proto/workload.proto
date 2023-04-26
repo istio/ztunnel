@@ -17,11 +17,16 @@ syntax = "proto3";
 package istio.workload;
 option go_package="pkg/workloadapi";
 
-// Address represents a unique address, keyed by IP address and network.
-// An Address can represent a Service or an individual workload.
-// Address is intended to be able to be looked up on-demand, allowing a workload
+// Address represents a unique address.
+//
+// Address joins two sub-resources, Workload and Service, to support querying by IP address.
+// Address is intended to be able to be looked up on-demand, allowing a client
 // to answer a question like "what is this IP address", similar to a reverse DNS lookup.
-// Keyed by network/IP address. Example: "default/1.2.3.4".
+//
+// Each resource will have a mesh-wide unique opaque name, defined in the individual messages.
+// In addition, to support lookup by IP address, they will have *alias* names for each IP the resource represents.
+// There may be multiple aliases for the same resource (examples: service in multiple networks, or a dual-stack workload).
+// Aliases are keyed by network/IP address. Example: "default/1.2.3.4".
 //
 // In some cases, we do not know the IP address of a Workload. For instance, we may simply know
 // that there is a workload behind a gateway, and rely on the gateway to handle the rest.
@@ -58,11 +63,24 @@ message Service {
   // Address represents the addresses the service can be reached at.
   // There may be multiple addresses for a single service if it resides in multiple networks.
   repeated NetworkAddress addresses = 4;
-  // Ports for the service
+  // Ports for the service.
+  // The target_port may be overridden on a per-workload basis.
   repeated Port ports = 5;
   // Optional; if set, the SAN to verify for TLS connections.
   // Typically, this is not set and per-workload identity is used to verfiy
   repeated string subject_alt_names = 6;
+  // The presence of the opaque_service field indicates this service is an "Opaque Service".
+  // This means that the service is not associated with any Workloads, and should instead be reached
+  // directly by its address/hostname.
+  // This field serves both to indicate that this is an "Opaque Service", as well as how to connect to
+  // it; typical services do not need these properties as they are expressed on the workloads themselves.
+  // TODO: support this field
+  OpaqueEndpoint opaque_endpoint = 7;
+}
+
+message OpaqueEndpoint {
+  // Tunneling protocol to use when connecting to the service, if any.
+  TunnelProtocol tunnel_protocol = 1;
 }
 
 message Workload {
@@ -77,8 +95,7 @@ message Workload {
   // Address represents the IPv4/IPv6 address for the workload.
   // This should be globally unique.
   // This should not have a port number.
-  // TODO: Add network as discriminator
-  // TODO: Add dual stack support
+  // TODO: support multi network by making this repeated
   bytes address = 3;
   // Network represents the network this workload is on. This may be elided for the default network.
   // A (network,address) pair makeup a unique key for a workload *at a point in time*.
@@ -164,6 +181,16 @@ enum Protocol {
   // HTTP means requests should be tunneled over HTTP.
   // This does not dictate HTTP/1.1 vs HTTP/2; ALPN should be used for that purpose.
   HTTP = 1;
+}
+
+// TunnelProtocol indicates the tunneling protocol for requests.
+enum TunnelProtocol {
+  // NONE means requests should be forwarded as-is, without tunneling.
+  NONE = 0;
+  // HBONE means requests should be tunneled over HTTP.
+  // This does not dictate HTTP/1.1 vs HTTP/2; ALPN should be used for that purpose.
+  HBONE = 1;
+  // Future options may include things like QUIC/HTTP3, etc.
 }
 
 // GatewayAddress represents the address of a gateway
