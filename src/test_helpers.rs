@@ -102,6 +102,7 @@ pub fn test_default_workload() -> Workload {
         namespace: "".to_string(),
         trust_domain: "cluster.local".to_string(),
         service_account: "default".to_string(),
+        network: "".to_string(),
         workload_name: "".to_string(),
         workload_type: "deployment".to_string(),
         canonical_name: "".to_string(),

@@ -132,6 +132,8 @@ pub struct Workload {
     pub trust_domain: String,
     #[serde(default)]
     pub service_account: String,
+    #[serde(default)]
+    pub network: String,
 
     #[serde(default)]
     pub workload_name: String,
@@ -306,7 +308,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                 }
             },
             node: resource.node,
-
+            network: resource.network,
             workload_name: resource.workload_name,
             workload_type,
             canonical_name: resource.canonical_name,
@@ -695,6 +697,34 @@ pub struct Service {
     pub endpoints: HashMap<IpAddr, Endpoint>,
 }
 
+#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServicePrimaryKey {
+    pub namespace: String,
+    pub hostname: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceSecondaryKey {
+    pub network: String,
+    pub ip: IpAddr,
+}
+
+pub fn service_key(nw_addr: &NetworkAddress) -> ServiceSecondaryKey {
+    ServiceSecondaryKey {
+        network: nw_addr.network.clone(),
+        ip: nw_addr.address,
+    }
+}
+
+pub fn service_nwaddr_key(network: &str, vip: IpAddr) -> ServiceSecondaryKey {
+    ServiceSecondaryKey {
+        network: network.to_owned(),
+        ip: vip,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkAddress {
@@ -745,9 +775,9 @@ pub struct WorkloadStore {
     /// vips maintains a mapping of socket address with service port to workload ip and socket address
     /// with target ports in hashset.
     vips: HashMap<IpAddr, Service>,
-    /// staged_vips maintains a mapping of VIP -> (workload IP -> Endpoint)
+    /// staged_vips maintains a mapping of ServiceSecondaryKey -> (workload IP -> Endpoint)
     /// this is used to handle ordering issues if workloads with VIPs are received before services.
-    staged_vips: HashMap<IpAddr, HashMap<IpAddr, Endpoint>>,
+    staged_vips: HashMap<ServiceSecondaryKey, HashMap<IpAddr, Endpoint>>,
     /// policies maintains a mapping of ns/name to policy.
     policies: HashMap<String, rbac::Authorization>,
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
@@ -793,7 +823,7 @@ impl WorkloadStore {
         self.remove(wip.to_string());
         let widentity = workload.identity();
         let status = workload.status;
-        self.insert_workload(workload);
+        self.insert_workload(workload.clone());
         // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
         // include them in load balancing we do to Services.
         if status == HealthStatus::Healthy {
@@ -810,7 +840,10 @@ impl WorkloadStore {
                 } else {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
-                    self.staged_vips.entry(vip).or_default().insert(wip, ep);
+                    self.staged_vips
+                        .entry(service_nwaddr_key(&workload.network, vip))
+                        .or_default()
+                        .insert(wip, ep);
                     self.workload_to_vip.entry(wip).or_default().insert(vip);
                 }
             }
@@ -883,7 +916,7 @@ impl WorkloadStore {
         for network_addr in svc.addresses.as_slice() {
             // due to ordering issues, we may have gotten workloads with VIPs before we got the service
             // we should add those workloads to the vips map now
-            if let Some(wips_to_endpoints) = self.staged_vips.remove(&network_addr.address) {
+            if let Some(wips_to_endpoints) = self.staged_vips.remove(&service_key(network_addr)) {
                 for (wip, ep) in wips_to_endpoints {
                     self.workload_to_vip
                         .entry(wip)
@@ -927,11 +960,12 @@ impl WorkloadStore {
             if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
                 for vip in vips {
                     self.staged_vips
-                        .entry(vip)
+                        .entry(service_nwaddr_key(&prev.network, vip))
                         .or_default()
                         .remove(&prev.workload_ip);
-                    if self.staged_vips[&vip].is_empty() {
-                        self.staged_vips.remove(&vip);
+                    if self.staged_vips[&service_nwaddr_key(&prev.network, vip)].is_empty() {
+                        self.staged_vips
+                            .remove(&service_nwaddr_key(&prev.network, vip));
                     }
                     if let Some(wls) = self.vips.get_mut(&vip) {
                         wls.endpoints.remove(&prev.workload_ip);
@@ -944,11 +978,11 @@ impl WorkloadStore {
                 self.workload_to_vip.remove(&ep_ip);
                 for network_addr in &prev.addresses {
                     self.staged_vips
-                        .entry(network_addr.address)
+                        .entry(service_key(network_addr))
                         .or_default()
                         .remove(&ep_ip);
-                    if self.staged_vips[&network_addr.address].is_empty() {
-                        self.staged_vips.remove(&network_addr.address);
+                    if self.staged_vips[&service_key(network_addr)].is_empty() {
+                        self.staged_vips.remove(&service_key(network_addr));
                     }
                 }
             }
@@ -1201,7 +1235,7 @@ mod tests {
             namespace: "ns".to_string(),
             hostname: "svc1.ns.svc.cluster.local".to_string(),
             addresses: vec![XdsNetworkAddress {
-                network: "default".to_string(),
+                network: "".to_string(),
                 address: [127, 0, 1, 1].to_vec(),
             }],
             ports: vec![XdsPort {
