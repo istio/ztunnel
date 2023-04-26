@@ -704,32 +704,34 @@ pub struct ServicePrimaryKey {
     pub hostname: String,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ServiceSecondaryKey {
-    pub network: String,
-    pub ip: IpAddr,
-}
-
-pub fn service_key(nw_addr: &NetworkAddress) -> ServiceSecondaryKey {
-    ServiceSecondaryKey {
-        network: nw_addr.network.clone(),
-        ip: nw_addr.address,
-    }
-}
-
-pub fn service_nwaddr_key(network: &str, vip: IpAddr) -> ServiceSecondaryKey {
-    ServiceSecondaryKey {
-        network: network.to_owned(),
-        ip: vip,
-    }
-}
-
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkAddress {
     pub network: String,
     pub address: IpAddr,
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkAddressKey {
+    pub network: String,
+    pub ip: IpAddr,
+}
+
+impl NetworkAddress {
+    fn to_key(&self) -> NetworkAddressKey {
+        NetworkAddressKey {
+            network: self.network.clone(),
+            ip: self.address,
+        }
+    }
+}
+
+pub fn network_addr_key(network: &str, vip: IpAddr) -> NetworkAddressKey {
+    NetworkAddressKey {
+        network: network.to_owned(),
+        ip: vip,
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -777,7 +779,7 @@ pub struct WorkloadStore {
     vips: HashMap<IpAddr, Service>,
     /// staged_vips maintains a mapping of ServiceSecondaryKey -> (workload IP -> Endpoint)
     /// this is used to handle ordering issues if workloads with VIPs are received before services.
-    staged_vips: HashMap<ServiceSecondaryKey, HashMap<IpAddr, Endpoint>>,
+    staged_vips: HashMap<NetworkAddressKey, HashMap<IpAddr, Endpoint>>,
     /// policies maintains a mapping of ns/name to policy.
     policies: HashMap<String, rbac::Authorization>,
     // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
@@ -841,7 +843,7 @@ impl WorkloadStore {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
                     self.staged_vips
-                        .entry(service_nwaddr_key(&workload.network, vip))
+                        .entry(network_addr_key(&workload.network, vip))
                         .or_default()
                         .insert(wip, ep);
                     self.workload_to_vip.entry(wip).or_default().insert(vip);
@@ -916,7 +918,7 @@ impl WorkloadStore {
         for network_addr in svc.addresses.as_slice() {
             // due to ordering issues, we may have gotten workloads with VIPs before we got the service
             // we should add those workloads to the vips map now
-            if let Some(wips_to_endpoints) = self.staged_vips.remove(&service_key(network_addr)) {
+            if let Some(wips_to_endpoints) = self.staged_vips.remove(&network_addr.to_key()) {
                 for (wip, ep) in wips_to_endpoints {
                     self.workload_to_vip
                         .entry(wip)
@@ -960,12 +962,12 @@ impl WorkloadStore {
             if let Some(vips) = self.workload_to_vip.remove(&prev.workload_ip) {
                 for vip in vips {
                     self.staged_vips
-                        .entry(service_nwaddr_key(&prev.network, vip))
+                        .entry(network_addr_key(&prev.network, vip))
                         .or_default()
                         .remove(&prev.workload_ip);
-                    if self.staged_vips[&service_nwaddr_key(&prev.network, vip)].is_empty() {
+                    if self.staged_vips[&network_addr_key(&prev.network, vip)].is_empty() {
                         self.staged_vips
-                            .remove(&service_nwaddr_key(&prev.network, vip));
+                            .remove(&network_addr_key(&prev.network, vip));
                     }
                     if let Some(wls) = self.vips.get_mut(&vip) {
                         wls.endpoints.remove(&prev.workload_ip);
@@ -978,11 +980,11 @@ impl WorkloadStore {
                 self.workload_to_vip.remove(&ep_ip);
                 for network_addr in &prev.addresses {
                     self.staged_vips
-                        .entry(service_key(network_addr))
+                        .entry(network_addr.to_key())
                         .or_default()
                         .remove(&ep_ip);
-                    if self.staged_vips[&service_key(network_addr)].is_empty() {
-                        self.staged_vips.remove(&service_key(network_addr));
+                    if self.staged_vips[&network_addr.to_key()].is_empty() {
+                        self.staged_vips.remove(&network_addr.to_key());
                     }
                 }
             }
