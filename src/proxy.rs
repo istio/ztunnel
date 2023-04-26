@@ -40,6 +40,7 @@ use crate::{config, identity, socket, tls};
 mod inbound;
 mod inbound_passthrough;
 mod outbound;
+mod pool;
 mod socks5;
 mod util;
 
@@ -57,6 +58,7 @@ pub(super) struct ProxyInputs {
     hbone_port: u16,
     workloads: WorkloadInformation,
     metrics: Arc<Metrics>,
+    pool: pool::Pool,
 }
 
 impl Proxy {
@@ -72,6 +74,7 @@ impl Proxy {
             workloads,
             cert_manager,
             metrics,
+            pool: pool::Pool::new(),
             hbone_port: 0,
         };
         // We setup all the listeners first so we can capture any errors that should block startup
@@ -123,6 +126,17 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] io::Error),
+    //
+    // #[error("dropped")]
+    // Dropped,
+    #[error("pool is already connecting")]
+    PoolAlreadyConnecting,
+
+    #[error("pool: {0}")]
+    Pool(#[from] hyper_util::client::pool::Error),
+
+    #[error("{0}")]
+    Generic(Box<dyn std::error::Error + Send + Sync>),
 
     #[error("tls handshake failed: {0:?}")]
     TlsHandshake(#[from] tokio_boring::HandshakeError<TcpStream>),

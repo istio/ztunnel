@@ -18,6 +18,7 @@ use std::time::Instant;
 use boring::ssl::ConnectConfiguration;
 use bytes::Bytes;
 use drain::Watch;
+use http_body_util::Empty;
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
 use tokio::net::{TcpListener, TcpStream};
@@ -28,10 +29,10 @@ use crate::identity::Identity;
 use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
+use crate::proxy::pool;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::workload::{Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
-use http_body_util::Empty;
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -228,15 +229,55 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
 
-                // Using the raw connection API, instead of client, is a bit annoying, but the only reasonable
-                // way to work around https://github.com/hyperium/hyper/issues/2863
-                // Eventually we will need to implement our own smarter pooling, TLS handshaking, etc anyways.
-                let mut builder =
-                    hyper::client::conn::http2::Builder::new(hyper_util::TokioExecutor);
-                let builder = builder
-                    .initial_stream_window_size(self.pi.cfg.window_size)
-                    .max_frame_size(self.pi.cfg.frame_size)
-                    .initial_connection_window_size(self.pi.cfg.connection_window_size);
+                let dst_identity = req
+                    .expected_identity
+                    .as_ref()
+                    .expect("hbone requires destination workload");
+
+                let pool_key = pool::Key {
+                    src_id: req.source.identity(),
+                    dst_id: dst_identity.clone(),
+                    dst: req.gateway,
+                };
+
+                // Setup our connection future. This won't always run if we have an existing connection
+                // in the pool.
+                let connect = async {
+                    let mut builder =
+                        hyper::client::conn::http2::Builder::new(hyper_util::TokioExecutor);
+                    let builder = builder
+                        .initial_stream_window_size(self.pi.cfg.window_size)
+                        .max_frame_size(self.pi.cfg.frame_size)
+                        .initial_connection_window_size(self.pi.cfg.connection_window_size);
+
+                    let local = self
+                        .pi
+                        .cfg
+                        .enable_original_source
+                        .unwrap_or_default()
+                        .then_some(remote_addr);
+                    let id = &req.source.identity();
+                    let cert = self.pi.cert_manager.fetch_certificate(id).await?;
+                    let connector = cert
+                        .connector(dst_identity)?
+                        .configure()
+                        .expect("configure");
+                    let tcp_stream = super::freebind_connect(local, req.gateway).await?;
+                    tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
+                    let tls_stream = connect_tls(connector, tcp_stream).await?;
+                    let (request_sender, connection) = builder
+                        .handshake(tls_stream)
+                        .await
+                        .map_err(Error::HttpHandshake)?;
+                    // spawn a task to poll the connection and drive the HTTP state
+                    tokio::spawn(async move {
+                        if let Err(e) = connection.await {
+                            error!("Error in HBONE connection handshake: {:?}", e);
+                        }
+                    });
+                    Ok(request_sender)
+                };
+                let mut connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
 
                 let mut f = http_types::proxies::Forwarded::new();
                 f.add_for(remote_addr.to_string());
@@ -253,33 +294,8 @@ impl OutboundConnection {
                     .header(TRACEPARENT_HEADER, self.id.header())
                     .body(Empty::<Bytes>::new())
                     .unwrap();
-                let local = self
-                    .pi
-                    .cfg
-                    .enable_original_source
-                    .unwrap_or_default()
-                    .then_some(remote_addr);
-                let id = &req.source.identity();
-                let cert = self.pi.cert_manager.fetch_certificate(id).await?;
-                let connector = cert
-                    .connector(req.expected_identity.as_ref())?
-                    .configure()
-                    .expect("configure");
-                let tcp_stream = super::freebind_connect(local, req.gateway).await?;
-                tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
-                let tls_stream = connect_tls(connector, tcp_stream).await?;
-                let (mut request_sender, connection) = builder
-                    .handshake(tls_stream)
-                    .await
-                    .map_err(Error::HttpHandshake)?;
-                // spawn a task to poll the connection and drive the HTTP state
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        error!("Error in HBONE connection handshake: {:?}", e);
-                    }
-                });
 
-                let response = request_sender.send_request(request).await?;
+                let response = connection.send_request(request).await?;
 
                 let code = response.status();
                 if code != 200 {
@@ -531,6 +547,7 @@ mod tests {
                 hbone_port: 15008,
                 cfg,
                 metrics: Arc::new(Default::default()),
+                pool: pool::Pool::new(),
             },
             id: TraceParent::new(),
         };
