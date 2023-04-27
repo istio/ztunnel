@@ -52,13 +52,13 @@ pub enum Protocol {
     HBONE,
 }
 
-impl TryFrom<Option<xds::istio::workload::Protocol>> for Protocol {
+impl TryFrom<Option<xds::istio::workload::TunnelProtocol>> for Protocol {
     type Error = WorkloadError;
 
-    fn try_from(value: Option<xds::istio::workload::Protocol>) -> Result<Self, Self::Error> {
+    fn try_from(value: Option<xds::istio::workload::TunnelProtocol>) -> Result<Self, Self::Error> {
         match value {
-            Some(xds::istio::workload::Protocol::Http) => Ok(Protocol::HBONE),
-            Some(xds::istio::workload::Protocol::Direct) => Ok(Protocol::TCP),
+            Some(xds::istio::workload::TunnelProtocol::Hbone) => Ok(Protocol::HBONE),
+            Some(xds::istio::workload::TunnelProtocol::None) => Ok(Protocol::TCP),
             None => Err(EnumParse("unknown type".into())),
         }
     }
@@ -296,8 +296,8 @@ impl TryFrom<&XdsWorkload> for Workload {
             network_gateway: network_gw,
             gateway_address: None,
 
-            protocol: Protocol::try_from(xds::istio::workload::Protocol::from_i32(
-                resource.protocol,
+            protocol: Protocol::try_from(xds::istio::workload::TunnelProtocol::from_i32(
+                resource.tunnel_protocol,
             ))?,
 
             name: resource.name,
@@ -329,7 +329,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                 resource.status,
             ))?,
 
-            native_hbone: resource.native_hbone,
+            native_hbone: resource.native_tunnel,
             authorization_policies: resource.authorization_policies,
 
             cluster_id: {

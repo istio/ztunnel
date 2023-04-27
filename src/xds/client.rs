@@ -717,13 +717,13 @@ mod tests {
             namespace: "default".to_string(),
             network: "defaultnw".to_string(),
             address: ip.octets().to_vec().into(),
-            protocol: 0,
+            tunnel_protocol: 0,
             trust_domain: "local".to_string(),
             service_account: "default".to_string(),
             node: "default".to_string(),
             workload_type: WorkloadType::Deployment.into(),
             workload_name: "".to_string(),
-            native_hbone: true,
+            native_tunnel: true,
             ..Default::default()
         }];
         for wl in workloads.clone() {

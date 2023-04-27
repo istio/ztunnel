@@ -499,7 +499,7 @@ mod tests {
     use crate::config::Config;
     use crate::workload::WorkloadInformation;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
-    use crate::xds::istio::workload::Protocol as XdsProtocol;
+    use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, workload, xds};
 
@@ -597,7 +597,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Direct as i32,
+                tunnel_protocol: XdsProtocol::None as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
             },
@@ -621,7 +621,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Http as i32,
+                tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
             },
@@ -645,7 +645,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Direct as i32,
+                tunnel_protocol: XdsProtocol::None as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
             },
@@ -669,7 +669,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Http as i32,
+                tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
             },

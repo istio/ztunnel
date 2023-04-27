@@ -59,6 +59,7 @@ message Service {
   string namespace = 2;
   // Hostname represents the FQDN of the service.
   // For Kubernetes, this would be <name>.<namespace>.svc.<cluster domain>
+  // TODO: support this field
   string hostname = 3;
   // Address represents the addresses the service can be reached at.
   // There may be multiple addresses for a single service if it resides in multiple networks.
@@ -68,6 +69,7 @@ message Service {
   repeated Port ports = 5;
   // Optional; if set, the SAN to verify for TLS connections.
   // Typically, this is not set and per-workload identity is used to verfiy
+  // TODO: support this field
   repeated string subject_alt_names = 6;
   // The presence of the opaque_service field indicates this service is an "Opaque Service".
   // This means that the service is not associated with any Workloads, and should instead be reached
@@ -95,14 +97,14 @@ message Workload {
   // Address represents the IPv4/IPv6 address for the workload.
   // This should be globally unique.
   // This should not have a port number.
-  // TODO: support multi network by making this repeated
+  // TODO: support dual stack by making this repeated
   bytes address = 3;
   // Network represents the network this workload is on. This may be elided for the default network.
   // A (network,address) pair makeup a unique key for a workload *at a point in time*.
   string network = 4;
 
   // Protocol that should be used to connect to this workload.
-  Protocol protocol = 5;
+  TunnelProtocol tunnel_protocol = 5;
 
   // The SPIFFE identity of the workload. The identity is joined to form spiffe://<trust_domain>/ns/<namespace>/sa/<service_account>.
   // TrustDomain of the workload. May be elided if this is the mesh wide default (typically cluster.local)
@@ -130,14 +132,17 @@ message Workload {
   // WorkloadName represents the name for the workload (of type WorkloadType). Used for telemetry.
   string workload_name = 13;
 
-  // If set, indicates this workload directly speaks HBONE, and we should forward HBONE requests as-is.
-  bool native_hbone = 14;
+  // If set, this indicates a workload expects to directly receive tunnel traffic.
+  // In ztunnel, this means:
+  // * Requests *from* this workload do not need to be tunneled if they already are tunneled by the tunnel_protocol.
+  // * Requests *to* this workload, via the tunnel_protocol, do not need to be de-tunneled.
+  bool native_tunnel = 14;
 
   // Virtual IPs defines a set of virtual IP addresses the workload can be reached at.
   // Typically these represent Service ClusterIPs.
-  // TODO(kdorosh) implement this
   // The key is a NetworkAddress string of the format network/IP, or just an IP if network
   // of the service desired matches the network of the workload.
+  // TODO: add support for network-prefixed IPs so services can select workloads in another network
   map<string, PortList> virtual_ips = 15;
 
   // A list of authorization policies applicable to this workload.
@@ -175,14 +180,6 @@ message Port {
   uint32 service_port = 1;
   // Port the service forwards to (backend).
   uint32 target_port = 2;
-}
-
-enum Protocol {
-  // DIRECT means requests should be forwarded as-is.
-  DIRECT = 0;
-  // HTTP means requests should be tunneled over HTTP.
-  // This does not dictate HTTP/1.1 vs HTTP/2; ALPN should be used for that purpose.
-  HTTP = 1;
 }
 
 // TunnelProtocol indicates the tunneling protocol for requests.
