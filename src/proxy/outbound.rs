@@ -181,6 +181,7 @@ impl OutboundConnection {
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
                 src_ip: remote_addr,
+                dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
             if !self.pi.workloads.assert_rbac(&conn).await {
@@ -327,7 +328,7 @@ impl OutboundConnection {
         target: SocketAddr,
     ) -> Result<Request, Error> {
         let downstream_network_addr = NetworkAddress {
-            network: "defaultnw".to_string(), // TODO(kdorosh) fixme (use self?)
+            network: self.pi.cfg.network.clone(),
             address: downstream,
         };
 

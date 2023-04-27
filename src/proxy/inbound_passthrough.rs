@@ -91,9 +91,8 @@ impl InboundPassthrough {
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
 
-        // TODO(kdorosh) ensure network works
         let network_addr = NetworkAddress {
-            network: "defaultnw".to_string(),
+            network: pi.cfg.network.clone(), // inbound request must be on our network
             address: orig.ip(),
         };
 
@@ -123,6 +122,7 @@ impl InboundPassthrough {
         let conn = rbac::Connection {
             src_identity: None,
             src_ip: source.ip(),
+            dst_network: pi.cfg.network.clone(), // inbound request must be on our network
             dst: orig,
         };
         if !pi.workloads.assert_rbac(&conn).await {
@@ -142,9 +142,8 @@ impl InboundPassthrough {
 
         // Find source info. We can lookup by XDS or from connection attributes
         let source_workload = if let Some(source_ip) = source_ip {
-            // TODO(kdorosh) ensure network works
             let network_addr_srcip = NetworkAddress {
-                network: "defaultnw".to_string(),
+                network: pi.cfg.network.clone(), // inbound request must be on our network
                 address: source_ip,
             };
             pi.workloads.fetch_workload(&network_addr_srcip).await

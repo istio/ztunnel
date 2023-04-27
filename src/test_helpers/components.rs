@@ -234,7 +234,7 @@ impl<'a> TestWorkloadBuilder<'a> {
 
         for (vip, ports) in &self.w.vips {
             let ep_network_addr = NetworkAddress {
-                network: "defaultnw".to_string(), // TODO(kdorosh) fixme (use self?)
+                network: "defaultnw".to_string(),
                 address: self.w.workload.workload_ip,
             };
 

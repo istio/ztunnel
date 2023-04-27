@@ -694,7 +694,7 @@ mod tests {
         let mut matched = false;
 
         let ip_network_addr = NetworkAddress {
-            network: "defaultnw".to_string(), // TODO(kdorosh) fixme (use self?)
+            network: "defaultnw".to_string(),
             address: ip,
         };
 

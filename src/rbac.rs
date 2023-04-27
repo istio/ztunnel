@@ -45,6 +45,7 @@ pub struct Authorization {
 pub struct Connection {
     pub src_identity: Option<Identity>,
     pub src_ip: IpAddr,
+    pub dst_network: String,
     pub dst: SocketAddr,
 }
 
@@ -430,6 +431,7 @@ mod tests {
         Connection {
             src_identity: None,
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
     }
@@ -442,6 +444,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
     }
@@ -454,6 +457,7 @@ mod tests {
                 service_account: "sa=alt".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 3]),
+            dst_network: "defaultnw".to_string(),
             dst: "127.0.0.4:9090".parse().unwrap(),
         }
     }

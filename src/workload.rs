@@ -538,10 +538,9 @@ pub enum WaypointError {
 
 impl WorkloadInformation {
     pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {
-        // TODO(kdorosh) fixme use network
-        let nw_addr = network_addr("defaultnw", conn.dst.ip());
+        let nw_addr = network_addr(&conn.dst_network, conn.dst.ip());
         let Some(wl) = self.fetch_workload(&nw_addr).await else {
-            debug!("destination workload not found");
+            debug!("destination workload not found {}", nw_addr);
             return false;
         };
 
@@ -977,7 +976,6 @@ impl WorkloadStore {
             Ok(i) => i,
         };
 
-        // TODO(kdorosh)!! actually update network to be honored next line
         if let Some(prev) = self
             .workloads
             .remove(&network_addr(network_or_namespace, ip))
@@ -1001,7 +999,7 @@ impl WorkloadStore {
                 }
             }
         }
-        // TODO(kdorosh)!! actually update network to be honored next line
+
         if let Some(prev) = self.vips.remove(&network_addr(network_or_namespace, ip)) {
             for (ep_ip, _) in prev.endpoints {
                 self.workload_to_vip.remove(&ep_ip);

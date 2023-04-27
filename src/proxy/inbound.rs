@@ -94,6 +94,7 @@ impl Inbound {
             let workloads = workloads.clone();
             let metrics = self.metrics.clone();
             let drain = self.drain.clone();
+            let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
                 let conn = rbac::Connection {
@@ -102,6 +103,7 @@ impl Inbound {
                         .peer_certificate()
                         .and_then(|x| crate::tls::boring::extract_sans(&x).first().cloned()),
                     src_ip: to_canonical(socket.get_ref().peer_addr().unwrap()).ip(),
+                    dst_network: network, // inbound request must be on our network
                     dst,
                 };
                 debug!(%conn, "accepted connection");
@@ -268,7 +270,7 @@ impl Inbound {
                 let conn = rbac::Connection { dst: addr, ..conn };
 
                 let network_addr = NetworkAddress {
-                    network: "defaultnw".to_string(), // TODO(kdorosh) fixme
+                    network: conn.dst_network.to_string(),
                     address: addr.ip(),
                 };
 
@@ -310,13 +312,11 @@ impl Inbound {
 
                 let baggage =
                     parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
-                // Find source info. We can lookup by XDS or from connection attributes
-
                 let src_network_addr = NetworkAddress {
-                    network: "defaultnw".to_string(), // TODO(kdorosh) fixme
+                    network: conn.dst_network.to_string(),
                     address: source_ip,
                 };
-
+                // Find source info. We can lookup by XDS or from connection attributes
                 let source = workloads.fetch_workload(&src_network_addr).await;
                 let derived_source = traffic::DerivedWorkload {
                     identity: conn.src_identity,
