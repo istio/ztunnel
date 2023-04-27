@@ -38,7 +38,7 @@ pub struct Authorization {
     pub namespace: String,
     pub scope: RbacScope,
     pub action: RbacAction,
-    pub groups: Vec<Vec<Vec<RbacMatch>>>,
+    pub rules: Vec<Vec<Vec<RbacMatch>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,21 +90,23 @@ impl Authorization {
                 Identity::Spiffe { namespace, .. } => namespace.to_owned(), // may be more clear if we use to_owned() to denote change from borrowed to owned
             })
             .unwrap_or_default();
-        if self.groups.is_empty() {
-            trace!(matches = false, "empty groups");
+        if self.rules.is_empty() {
+            trace!(matches = false, "empty rules");
             return false;
         }
-        for group in self.groups.iter() {
-            // Group typically has 1-3 elements (from,to,when)
-            // If ALL group matches, it is a match...
-            let mut group_match = true;
-            for rule in group.iter() {
-                // We can have multiple rules in a group, for example "Match ns=A,SA=B or ns=C"
-                // So we need ANY rule to match...
-                let mut rule_match = false;
-                for mg in rule.iter() {
+        // An Authorization Policy can have multiple rules
+        // If ANY rule matches it's a match...
+        for rule in self.rules.iter() {
+            // Rule typically has 1-3 clauses (from,to,when)
+            // If ALL clauses match, it is a match...
+            let mut rule_match = true;
+            for clause in rule.iter() {
+                // We can have multiple mg (RbacMatch) in a clause, for example "Match ns=A,SA=B or ns=C"
+                // So we need ANY mg to match...
+                let mut clause_match = false;
+                for mg in clause.iter() {
                     if mg.is_empty() {
-                        trace!(matches = false, "empty rule");
+                        trace!(matches = false, "empty clause");
                         continue;
                     }
                     // We need ALL of these to match. Within each type, ANY must match
@@ -141,25 +143,25 @@ impl Authorization {
                     );
 
                     if m {
-                        rule_match = true;
+                        clause_match = true;
                         break;
                     }
                 }
 
-                if rule.is_empty() {
-                    rule_match = true;
-                    trace!(matches = rule_match, "empty rule");
+                if clause.is_empty() {
+                    clause_match = true;
+                    trace!(matches = clause_match, "empty clause");
                 } else {
-                    trace!(matches = rule_match, "rule");
+                    trace!(matches = clause_match, "clause");
                 }
-                group_match &= rule_match;
-                if !group_match {
+                rule_match &= clause_match;
+                if !rule_match {
                     // Short circuit
                     break;
                 }
             }
-            trace!(matches = group_match, "group");
-            if group_match {
+            trace!(matches = rule_match, "rule");
+            if rule_match {
                 return true;
             }
         }
@@ -304,14 +306,14 @@ impl TryFrom<&XdsRbac> for Authorization {
 
     fn try_from(resource: &XdsRbac) -> Result<Self, Self::Error> {
         let resource: XdsRbac = resource.to_owned();
-        let groups = resource
-            .groups
+        let rules = resource
+            .rules
             .into_iter()
-            .map(|g| {
-                g.rules
+            .map(|r| {
+                r.clauses
                     .into_iter()
-                    .map(|r| {
-                        r.matches
+                    .map(|c| {
+                        c.matches
                             .into_iter()
                             .map(|m| TryInto::<RbacMatch>::try_into(&m))
                             .collect::<Result<Vec<_>, _>>()
@@ -324,7 +326,7 @@ impl TryFrom<&XdsRbac> for Authorization {
             namespace: resource.namespace,
             scope: RbacScope::try_from(xds::istio::security::Scope::from_i32(resource.scope))?,
             action: RbacAction::try_from(xds::istio::security::Action::from_i32(resource.action))?,
-            groups,
+            rules,
         })
     }
 }
@@ -426,13 +428,13 @@ mod tests {
         };
     }
 
-    fn allow_policy(name: String, group: Vec<Vec<Vec<RbacMatch>>>) -> Authorization {
+    fn allow_policy(name: String, rules: Vec<Vec<Vec<RbacMatch>>>) -> Authorization {
         Authorization {
             name,
             namespace: "namespace".to_string(),
             scope: RbacScope::Global,
             action: RbacAction::Allow,
-            groups: group,
+            rules,
         }
     }
 
