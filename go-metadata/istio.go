@@ -18,14 +18,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 )
 
 // ConnectionMetadata returns the metadata about a connection
 type ConnectionMetadata struct {
+	// Identity provides the identity of the peer.
+	// Example: spiffe://cluster.local/ns/a/sa/b.
 	Identity string `json:"identity"`
 }
 
@@ -43,8 +47,18 @@ type contextKey struct {
 
 func (k *contextKey) String() string { return "istio metadata context value" }
 
+const mdsHostEnv = "GCE_METADATA_HOST"
+
+// For now, we use a well-known IP which is intercepted.
+// TODO: consider creating a real service with node-affinity to drop redirection dependency.
+const defaultHost = "169.254.169.111"
+
 func metadataServerURL() *url.URL {
-	u, err := url.Parse("http://169.254.169.111")
+	host := os.Getenv(mdsHostEnv)
+	if host == "" {
+		host = defaultHost
+	}
+	u, err := url.Parse("http://" + host)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -52,26 +66,22 @@ func metadataServerURL() *url.URL {
 }
 
 func lookup(src, dst string) (*ConnectionMetadata, error) {
-	srcip, srcport, err := net.SplitHostPort(src)
-	if err != nil {
-		return nil, fmt.Errorf("invalid src: %v", err)
-	}
-	dstip, dstport, err := net.SplitHostPort(dst)
-	if err != nil {
-		return nil, fmt.Errorf("invalid dst: %v", err)
-	}
-
 	u := metadataServerURL()
 	params := url.Values{}
-	params.Add("srcip", srcip)
-	params.Add("srcport", srcport)
-	params.Add("dstip", dstip)
-	params.Add("dstport", dstport)
+	params.Add("src", src)
+	params.Add("dst", dst)
 	u.RawQuery = params.Encode()
+	u.Path = "/connection"
 
 	resp, err := metadataClient.Get(u.String())
 	if err != nil {
 		return nil, fmt.Errorf("metadata lookup failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bdy, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("metadata server returned %v: %v", resp.StatusCode, string(bdy))
 	}
 
 	mr := &ConnectionMetadata{}
@@ -86,7 +96,6 @@ func lookup(src, dst string) (*ConnectionMetadata, error) {
 func Handler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Value(metadataContextKey) != nil {
-			// We already have a value (connection re-use), skip
 			h.ServeHTTP(w, r)
 			return
 		}

@@ -16,7 +16,6 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -42,17 +41,21 @@ func main() {
 
 		rb, err := io.ReadAll(resp.Body)
 		fatal(err)
+		log.Println("Server response: ", string(rb))
 
 		si, err := istiometadata.FetchFromClientConnection(conn)
 		fatal(err)
 		log.Println("Connected to server with identity: ", si)
-		log.Println("Server response: ", string(rb))
 	case "server":
 		l, _ := net.Listen("tcp", "0.0.0.0:9090")
 		log.Println("listening")
 		handler := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			resp := fmt.Sprintf("Got request from %v", istiometadata.ExtractFromRequest(r).Identity)
-			rw.Write([]byte(resp))
+			id := istiometadata.ExtractFromRequest(r)
+			if id == nil {
+				rw.Write([]byte("client has unknown identity"))
+			} else {
+				rw.Write([]byte("client identity: " + id.Identity))
+			}
 		})
 		fatal(http.Serve(l, istiometadata.Handler(handler)))
 	default:

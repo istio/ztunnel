@@ -25,7 +25,6 @@ use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use serde::Serialize;
 use tokio::net::TcpStream;
-
 use tracing::{error, trace};
 
 use traffic::ConnectionOpen;
@@ -154,34 +153,25 @@ fn serve_request(
     remote: SocketAddr,
     req: hyper::Request<hyper::body::Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
+    // Currently only one path, so just check it
+    if req.uri().path() != "/connection" {
+        anyhow::bail!("invalid path")
+    }
+
     let query = req.uri().query().ok_or(anyhow!("missing query"))?;
 
     let params = url::form_urlencoded::parse(query.as_bytes())
         .into_owned()
         .collect::<HashMap<String, String>>();
-    let src = SocketAddr::new(
-        params
-            .get("srcip")
-            .ok_or(anyhow!("missing srcip"))?
-            .parse()?,
-        params
-            .get("srcport")
-            .ok_or(anyhow!("missing srcport"))?
-            .parse()?,
-    );
-    let dst = SocketAddr::new(
-        params
-            .get("dstip")
-            .ok_or(anyhow!("missing dstip"))?
-            .parse()?,
-        params
-            .get("dstport")
-            .ok_or(anyhow!("missing dstport"))?
-            .parse()?,
-    );
+    let src: SocketAddr = params.get("src").ok_or(anyhow!("missing src"))?.parse()?;
+    let dst: SocketAddr = params.get("dst").ok_or(anyhow!("missing dst"))?.parse()?;
+
+    // To restrict access to sensitive metadata, ensure the client is part of the requested connection.
+    // This can be error prone if the client has multiple NICs.
     if remote.ip() != dst.ip() && remote.ip() != src.ip() {
-        anyhow::bail!("metadata server request must come from the src or dst address")
+        anyhow::bail!("metadata server request must come from the src or dst address (remote {}, dst {}, src {})", remote.ip(), dst.ip(), src.ip())
     }
+
     let ctu = ConnectionTuple { src, dst };
     let Some(resp) = ct.fetch(&ctu) else {
         return Ok(crate::hyper_util::plaintext_response(StatusCode::NOT_FOUND, "".to_string()))
