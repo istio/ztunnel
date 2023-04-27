@@ -195,7 +195,10 @@ impl<'a> TestWorkloadBuilder<'a> {
     /// Set a waypoint to the workload
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
         self.w.workload.waypoint = Some(GatewayAddress {
-            address: gatewayaddress::Address::IP(waypoint),
+            address: gatewayaddress::Address::IP(NetworkAddress {
+                network: "defaultnw".to_string(),
+                address: waypoint,
+            }),
             port: 15008,
         });
         self

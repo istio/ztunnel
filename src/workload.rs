@@ -93,11 +93,12 @@ pub struct GatewayAddress {
 }
 
 pub mod gatewayaddress {
+    use super::{NamespacedHostname, NetworkAddress};
     #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
     #[serde(tag = "address", content = "content")]
     pub enum Address {
-        Hostname(String),
-        IP(std::net::IpAddr),
+        Hostname(NamespacedHostname),
+        IP(NetworkAddress),
     }
 }
 
@@ -170,9 +171,9 @@ impl Workload {
     }
     pub fn waypoint_svc_ip_address(&self) -> Option<IpAddr> {
         if let Some(gw_address) = self.waypoint.as_ref() {
-            match gw_address.address {
+            match &gw_address.address {
                 gatewayaddress::Address::Hostname(_) => return None, // TODO: support this
-                gatewayaddress::Address::IP(ip) => return Some(ip),
+                gatewayaddress::Address::IP(ip) => return Some(ip.address),
             }
         }
         None
@@ -245,16 +246,26 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
     type Error = WorkloadError;
 
     fn try_from(value: &xds::istio::workload::GatewayAddress) -> Result<Self, Self::Error> {
-        let gw_addr: GatewayAddress = match &value.address {
+        let gw_addr: GatewayAddress = match &value.destination {
             Some(a) => match a {
-                xds::istio::workload::gateway_address::Address::Ip(ip) => GatewayAddress {
-                    address: gatewayaddress::Address::IP(byte_to_ip(ip)?),
-                    port: value.port as u16,
-                },
-                xds::istio::workload::gateway_address::Address::Hostname(hn) => GatewayAddress {
-                    address: gatewayaddress::Address::Hostname(hn.clone()),
-                    port: value.port as u16,
-                },
+                xds::istio::workload::gateway_address::Destination::Address(addr) => {
+                    GatewayAddress {
+                        address: gatewayaddress::Address::IP(network_addr(
+                            &addr.network,
+                            byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
+                        )),
+                        port: value.port as u16,
+                    }
+                }
+                xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
+                    GatewayAddress {
+                        address: gatewayaddress::Address::Hostname(NamespacedHostname {
+                            namespace: hn.namespace.clone(),
+                            hostname: hn.hostname.clone(),
+                        }),
+                        port: value.port as u16,
+                    }
+                }
             },
             None => return Err(WorkloadError::MissingGatewayAddress),
         };
@@ -630,16 +641,16 @@ impl WorkloadInformation {
         if let Some(gw_address) = &wl.waypoint {
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-            let wp_ip_addr = match gw_address.address {
+            let wp_nw_addr = match &gw_address.address {
                 gatewayaddress::Address::IP(ip) => ip,
                 gatewayaddress::Address::Hostname(_) => {
                     info!(%wl.name, "waypoint hostname lookup not supported yet");
-                    return Ok(None); // TODO unsupported feature
+                    return Ok(None); // TODO: implement unsupported feature
                 }
             };
-            let wp_socket_addr = SocketAddr::new(wp_ip_addr, gw_address.port);
+            let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.port);
             match self
-                .find_upstream(&wl.network, wp_socket_addr, gw_address.port)
+                .find_upstream(&wp_nw_addr.network, wp_socket_addr, gw_address.port)
                 .await
             {
                 Some(upstream) => {
@@ -713,6 +724,13 @@ pub struct Service {
 #[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServicePrimaryKey {
+    pub namespace: String,
+    pub hostname: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NamespacedHostname {
     pub namespace: String,
     pub hostname: String,
 }

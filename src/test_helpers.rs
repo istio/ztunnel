@@ -165,7 +165,10 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
                 service_account: "default".to_string(),
                 node: "local".to_string(),
                 waypoint: Some(GatewayAddress {
-                    address: gatewayaddress::Address::IP(waypoint_ip),
+                    address: gatewayaddress::Address::IP(NetworkAddress {
+                        network: "defaultnw".to_string(),
+                        address: waypoint_ip,
+                    }),
                     port: 15008,
                 }),
                 ..test_default_workload()

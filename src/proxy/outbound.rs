@@ -498,6 +498,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::workload::WorkloadInformation;
+    use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::Protocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, workload, xds};
@@ -706,8 +707,11 @@ mod tests {
                 network: "defaultnw".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 waypoint: Some(xds::istio::workload::GatewayAddress {
-                    address: Some(xds::istio::workload::gateway_address::Address::Ip(
-                        Bytes::copy_from_slice(&[127, 0, 0, 10]),
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "defaultnw".to_string(),
+                            address: [127, 0, 0, 10].to_vec(),
+                        },
                     )),
                     port: 15008,
                 }),
@@ -732,8 +736,11 @@ mod tests {
                 network: "defaultnw".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 waypoint: Some(xds::istio::workload::GatewayAddress {
-                    address: Some(xds::istio::workload::gateway_address::Address::Ip(
-                        Bytes::copy_from_slice(&[127, 0, 0, 10]),
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "defaultnw".to_string(),
+                            address: [127, 0, 0, 10].to_vec(),
+                        },
                     )),
                     port: 15008,
                 }),

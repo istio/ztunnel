@@ -198,9 +198,10 @@ enum TunnelProtocol {
 // GatewayAddress represents the address of a gateway
 message GatewayAddress {
   // address can either be a hostname (ex: gateway.example.com) or an IP (ex: 1.2.3.4).
-  oneof address {
-    string hostname = 1;
-    bytes ip = 2;
+  oneof destination {
+    // TODO: add support for hostname lookup
+    NamespacedHostname hostname = 1;
+    NetworkAddress address = 2;
   }
   // port to reach the gateway at
   uint32 port = 3;
@@ -212,4 +213,12 @@ message NetworkAddress {
   bytes address = 1;
   // Network represents the network this address is on.
   string network = 2;
+}
+
+// NamespacedHostname represents a service bound to a specific namespace.
+message NamespacedHostname {
+  // The namespace the service is in.
+  string namespace = 1;
+  // hostname (ex: gateway.example.com)
+  string hostname = 2;
 }

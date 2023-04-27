@@ -373,18 +373,14 @@ impl Inbound {
         conn: &Connection,
     ) -> (bool, bool) {
         let has_waypoint = upstream.waypoint.is_some();
-        let waypoint_ip = match upstream.waypoint.as_ref() {
-            Some(addr) => match addr.address {
+        let waypoint_nw_addr = match upstream.waypoint.as_ref() {
+            Some(addr) => match &addr.address {
                 gatewayaddress::Address::IP(waypoint_ip) => waypoint_ip,
                 gatewayaddress::Address::Hostname(_) => return (has_waypoint, false), // TODO look this up from service
             },
             None => return (has_waypoint, false),
         };
-        let nw_addr = NetworkAddress {
-            network: upstream.network.clone(),
-            address: waypoint_ip,
-        };
-        let from_waypoint = match workloads.fetch_address(nw_addr).await {
+        let from_waypoint = match workloads.fetch_address(waypoint_nw_addr.clone()).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
                 let mut from_wp = false;
@@ -435,7 +431,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
             let wip = NetworkAddress {
-                network: "defaultnw".to_string(), // TODO(kdorosh) fixme
+                network: "defaultnw".to_string(), // TODO(kdorosh) implement me
                 address: orig_dst_addr.ip(),
             };
             self.workloads
