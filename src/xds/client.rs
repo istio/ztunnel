@@ -692,12 +692,10 @@ mod tests {
             .as_ref()
             .map(|expected_workload| Workload::try_from(expected_workload).unwrap()); // this is a borrow, Ok not to clone
         let mut matched = false;
-
         let ip_network_addr = NetworkAddress {
             network: "defaultnw".to_string(),
             address: ip,
         };
-
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
             sleep(POLL_RATE).await;
             let wl = source.fetch_workload(&ip_network_addr).await;

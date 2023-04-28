@@ -240,12 +240,10 @@ impl<'a> TestWorkloadBuilder<'a> {
                 network: "defaultnw".to_string(),
                 address: self.w.workload.workload_ip,
             };
-
             let ep = Endpoint {
                 address: ep_network_addr.clone(),
                 port: ports.to_owned(),
             };
-
             let svc = Service {
                 name: "svc".to_string(),
                 namespace: self.w.workload.namespace.clone(),
@@ -257,7 +255,6 @@ impl<'a> TestWorkloadBuilder<'a> {
                 ports: ports.to_owned(),
                 endpoints: HashMap::from([(ep_network_addr.clone(), ep.clone())]),
             };
-
             for network_address in &svc.addresses {
                 let vip = network_address.address;
                 let prev_svc = self.manager.services.get(&vip);

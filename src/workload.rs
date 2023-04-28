@@ -714,14 +714,6 @@ pub struct Service {
     pub ports: HashMap<u16, u16>,
     pub endpoints: HashMap<NetworkAddress, Endpoint>,
 }
-
-#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ServicePrimaryKey {
-    pub namespace: String,
-    pub hostname: String,
-}
-
 #[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NamespacedHostname {
@@ -822,7 +814,7 @@ impl WorkloadStore {
         match a.r#type {
             Some(XdsType::Workload(w)) => self.insert_xds_workload(w),
             Some(XdsType::Service(s)) => self.insert_xds_service(s),
-            _ => Ok(()),
+            _ => Err(anyhow::anyhow!("unknown address type")),
         }
     }
 
@@ -846,7 +838,6 @@ impl WorkloadStore {
         if status == HealthStatus::Healthy {
             for (vip, pl) in &w.virtual_ips {
                 let vip = vip.parse::<IpAddr>()?;
-
                 let ep = Endpoint {
                     address: wip.clone(),
                     port: pl.into(),
