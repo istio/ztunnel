@@ -85,6 +85,7 @@ impl Inbound {
         let acceptor = InboundCertProvider {
             workloads: self.workloads.clone(),
             cert_manager: self.cert_manager.clone(),
+            network: self.cfg.network.clone(),
         };
         let workloads = self.workloads;
         let drain_stream = self.drain.clone();
@@ -268,12 +269,10 @@ impl Inbound {
                 }
                 // Orig has 15008, swap with the real port
                 let conn = rbac::Connection { dst: addr, ..conn };
-
                 let network_addr = NetworkAddress {
-                    network: conn.dst_network.to_string(),
+                    network: conn.dst_network.to_string(), // inbound request dest must be on our network
                     address: addr.ip(),
                 };
-
                 let Some(upstream) = workloads.fetch_workload(&network_addr).await else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
@@ -313,7 +312,7 @@ impl Inbound {
                 let baggage =
                     parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
                 let src_network_addr = NetworkAddress {
-                    network: conn.dst_network.to_string(),
+                    network: conn.dst_network.to_string(), // inbound request source network must match dst network
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
@@ -374,9 +373,9 @@ impl Inbound {
     ) -> (bool, bool) {
         let has_waypoint = upstream.waypoint.is_some();
         let waypoint_nw_addr = match upstream.waypoint.as_ref() {
-            Some(addr) => match &addr.address {
-                gatewayaddress::Address::IP(waypoint_ip) => waypoint_ip,
-                gatewayaddress::Address::Hostname(_) => return (has_waypoint, false), // TODO look this up from service
+            Some(addr) => match &addr.destination {
+                gatewayaddress::Destination::Address(waypoint_ip) => waypoint_ip,
+                gatewayaddress::Destination::Hostname(_) => return (has_waypoint, false), // TODO look this up from service
             },
             None => return (has_waypoint, false),
         };
@@ -423,6 +422,7 @@ pub(super) enum InboundConnect {
 struct InboundCertProvider {
     cert_manager: Arc<SecretManager>,
     workloads: WorkloadInformation,
+    network: String,
 }
 
 #[async_trait::async_trait]
@@ -431,7 +431,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
             let wip = NetworkAddress {
-                network: "defaultnw".to_string(), // TODO(kdorosh) implement me
+                network: self.network.clone(), // inbound requests must be coming from our network
                 address: orig_dst_addr.ip(),
             };
             self.workloads

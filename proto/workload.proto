@@ -206,10 +206,10 @@ message GatewayAddress {
 
 // NetworkAddress represents an address bound to a specific network.
 message NetworkAddress {
-  // Address presents the IP (v4 or v6).
-  bytes address = 1;
   // Network represents the network this address is on.
-  string network = 2;
+  string network = 1;
+  // Address presents the IP (v4 or v6).
+  bytes address = 2;
 }
 
 // NamespacedHostname represents a service bound to a specific namespace.

@@ -88,7 +88,7 @@ impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GatewayAddress {
-    pub address: gatewayaddress::Address,
+    pub destination: gatewayaddress::Destination,
     pub port: u16,
 }
 
@@ -96,9 +96,9 @@ pub mod gatewayaddress {
     use super::{NamespacedHostname, NetworkAddress};
     #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
     #[serde(tag = "address", content = "content")]
-    pub enum Address {
+    pub enum Destination {
         Hostname(NamespacedHostname),
-        IP(NetworkAddress),
+        Address(NetworkAddress),
     }
 }
 
@@ -116,9 +116,7 @@ pub mod address {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
     pub workload_ip: IpAddr,
-
     pub waypoint: Option<GatewayAddress>,
-
     pub network_gateway: Option<GatewayAddress>,
     #[serde(default)]
     pub gateway_address: Option<SocketAddr>,
@@ -171,9 +169,9 @@ impl Workload {
     }
     pub fn waypoint_svc_ip_address(&self) -> Option<IpAddr> {
         if let Some(gw_address) = self.waypoint.as_ref() {
-            match &gw_address.address {
-                gatewayaddress::Address::Hostname(_) => return None, // TODO: support this
-                gatewayaddress::Address::IP(ip) => return Some(ip.address),
+            match &gw_address.destination {
+                gatewayaddress::Destination::Hostname(_) => return None, // TODO: support this
+                gatewayaddress::Destination::Address(ip) => return Some(ip.address),
             }
         }
         None
@@ -250,7 +248,7 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
             Some(a) => match a {
                 xds::istio::workload::gateway_address::Destination::Address(addr) => {
                     GatewayAddress {
-                        address: gatewayaddress::Address::IP(network_addr(
+                        destination: gatewayaddress::Destination::Address(network_addr(
                             &addr.network,
                             byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
                         )),
@@ -259,7 +257,7 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                 }
                 xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
                     GatewayAddress {
-                        address: gatewayaddress::Address::Hostname(NamespacedHostname {
+                        destination: gatewayaddress::Destination::Hostname(NamespacedHostname {
                             namespace: hn.namespace.clone(),
                             hostname: hn.hostname.clone(),
                         }),
@@ -511,7 +509,7 @@ impl LocalClient {
         let policies = r.policies.len();
         for wl in r.workloads {
             let wip = wl.workload.workload_ip;
-            info!(
+            debug!(
                 "inserting local workloads {wip} ({}/{})",
                 &wl.workload.namespace, &wl.workload.name
             );
@@ -628,11 +626,7 @@ impl WorkloadInformation {
         addr: SocketAddr,
         hbone_port: u16,
     ) -> Option<Upstream> {
-        self.fetch_address(NetworkAddress {
-            network: network.to_string(),
-            address: addr.ip(),
-        })
-        .await;
+        self.fetch_address(network_addr(network, addr.ip())).await;
         let wi = self.info.lock().unwrap();
         wi.find_upstream(network, addr, hbone_port)
     }
@@ -641,9 +635,9 @@ impl WorkloadInformation {
         if let Some(gw_address) = &wl.waypoint {
             // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
             // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-            let wp_nw_addr = match &gw_address.address {
-                gatewayaddress::Address::IP(ip) => ip,
-                gatewayaddress::Address::Hostname(_) => {
+            let wp_nw_addr = match &gw_address.destination {
+                gatewayaddress::Destination::Address(ip) => ip,
+                gatewayaddress::Destination::Hostname(_) => {
                     info!(%wl.name, "waypoint hostname lookup not supported yet");
                     return Ok(None); // TODO: implement unsupported feature
                 }
@@ -768,10 +762,10 @@ impl TryFrom<&XdsService> for Service {
     fn try_from(s: &XdsService) -> Result<Self, Self::Error> {
         let mut nw_addrs = Vec::new();
         for addr in &s.addresses {
-            let network_address = NetworkAddress {
-                network: addr.network.to_string(),
-                address: byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
-            };
+            let network_address = network_addr(
+                &addr.network,
+                byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
+            );
             nw_addrs.push(network_address);
         }
         let svc = Service {
@@ -1211,10 +1205,7 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0);
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
-        let ip1 = NetworkAddress {
-            network: "defaultnw".to_string(),
-            address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        };
+        let ip1 = network_addr("defaultnw", IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
         let xds_ip2 = Bytes::copy_from_slice(&[127, 0, 0, 2]);
 
         wi.insert_xds_workload(XdsWorkload {

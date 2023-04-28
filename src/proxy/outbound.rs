@@ -331,7 +331,6 @@ impl OutboundConnection {
             network: self.pi.cfg.network.clone(),
             address: downstream,
         };
-
         let source_workload = match self
             .pi
             .workloads

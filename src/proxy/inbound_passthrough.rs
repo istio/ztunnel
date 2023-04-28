@@ -90,12 +90,10 @@ impl InboundPassthrough {
             return Err(Error::SelfCall);
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
-
         let network_addr = NetworkAddress {
             network: pi.cfg.network.clone(), // inbound request must be on our network
             address: orig.ip(),
         };
-
         let Some(upstream) = pi.workloads.fetch_workload(&network_addr).await else {
             return Err(Error::UnknownDestination(orig.ip()))
         };
