@@ -24,7 +24,7 @@ workloads:
       80: 8080
 policies:
   - action: Allow
-    groups:
+    rules:
     - - - not_destination_ports:
           - 9999
     name: deny-9999

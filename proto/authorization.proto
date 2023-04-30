@@ -29,28 +29,30 @@ message Authorization {
   // The action to take if the request is matched with the rules.
   // Default is ALLOW if not specified.
   Action action = 4;
-  // Set of RBAC policy groups each containing its rules.
-  // If at least one of the groups is matched the policy action will
+  // Set of RBAC policy rules each containing its cluases (To, From, When).
+  // If at least one of the rules is matched the policy action will
   // take place.
-  // Groups are OR-ed.
-  repeated Group groups = 5;
+  // Rules are OR-ed.
+  repeated Rule rules = 5;
 }
 
-message Group {
-  // Rules are AND-ed
+message Rule {
+  // Clauses are AND-ed
   // This is a generic form of the authz policy's to, from and when
-  repeated Rules rules = 1;
+  repeated Clause clauses = 1;
 }
 
-message Rules {
+message Clause {
   // The logical behavior between the matches (if there are more than one)
   //  MatchBehavior match_behavior = 1;
+  // Matches are OR-ed
+  // Match is a generic form of the authz policy's expressions contained in To, From and When.
   repeated Match matches = 2;
 }
 
 message Match {
-  // Values of specific type are ORed
-  // If multiple types are set, they are ANDed
+  // Values of specific type are OR-ed
+  // If multiple types are set, they are AND-ed
 
   repeated StringMatch namespaces = 1;
   repeated StringMatch not_namespaces = 2;

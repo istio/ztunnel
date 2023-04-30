@@ -20,16 +20,16 @@ use std::net::{IpAddr, SocketAddr};
 use ipnet::IpNet;
 use tracing::{instrument, trace};
 
+use xds::istio::security::string_match::MatchType;
 use xds::istio::security::Address as XdsAddress;
 use xds::istio::security::Authorization as XdsRbac;
+use xds::istio::security::Match;
 use xds::istio::security::StringMatch as XdsStringMatch;
 
 use crate::identity::Identity;
 use crate::workload::WorkloadError;
 use crate::workload::WorkloadError::EnumParse;
 use crate::{workload, xds};
-use xds::istio::security::string_match::MatchType;
-use xds::istio::security::Match;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,7 +38,7 @@ pub struct Authorization {
     pub namespace: String,
     pub scope: RbacScope,
     pub action: RbacAction,
-    pub groups: Vec<Vec<Vec<RbacMatch>>>,
+    pub rules: Vec<Vec<Vec<RbacMatch>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,21 +91,24 @@ impl Authorization {
                 Identity::Spiffe { namespace, .. } => namespace.to_owned(), // may be more clear if we use to_owned() to denote change from borrowed to owned
             })
             .unwrap_or_default();
-        if self.groups.is_empty() {
-            trace!(matches = false, "empty groups");
+        if self.rules.is_empty() {
+            trace!(matches = false, "empty rules");
             return false;
         }
-        for rule in self.groups.iter() {
-            // If ANY rule matches, it is a match...
+        // An Authorization Policy can have multiple rules
+        // If ANY rule matches it's a match...
+        for rule in self.rules.iter() {
+            // Rule typically has 1-3 clauses (from,to,when)
+            // If ALL clauses match, it is a match...
             let mut rule_match = true;
-            for group in rule.iter() {
-                // We need ALL groups to match...
-                let mut group_match = true;
-                for mg in group.iter() {
+            for clause in rule.iter() {
+                // We can have multiple mg (RbacMatch) in a clause, for example "Match ns=A,SA=B or ns=C"
+                // So we need ANY mg to match...
+                let mut clause_match = false;
+                for mg in clause.iter() {
                     if mg.is_empty() {
-                        trace!(matches = false, "empty rule");
-                        group_match = false;
-                        break;
+                        trace!(matches = false, "empty clause");
+                        continue;
                     }
                     // We need ALL of these to match. Within each type, ANY must match
                     let mut m = true;
@@ -140,16 +143,25 @@ impl Authorization {
                         |p| p.matches(&ns),
                     );
 
-                    group_match &= m;
+                    if m {
+                        clause_match = true;
+                        break;
+                    }
                 }
 
-                if group.is_empty() {
-                    trace!(matches = true, "empty group");
+                if clause.is_empty() {
+                    clause_match = true;
+                    trace!(matches = clause_match, "empty clause");
                 } else {
-                    trace!(matches = group_match, "group");
+                    trace!(matches = clause_match, "clause");
                 }
-                rule_match &= group_match;
+                rule_match &= clause_match;
+                if !rule_match {
+                    // Short circuit
+                    break;
+                }
             }
+            trace!(matches = rule_match, "rule");
             if rule_match {
                 return true;
             }
@@ -295,14 +307,14 @@ impl TryFrom<&XdsRbac> for Authorization {
 
     fn try_from(resource: &XdsRbac) -> Result<Self, Self::Error> {
         let resource: XdsRbac = resource.to_owned();
-        let groups = resource
-            .groups
+        let rules = resource
+            .rules
             .into_iter()
-            .map(|g| {
-                g.rules
+            .map(|r| {
+                r.clauses
                     .into_iter()
-                    .map(|r| {
-                        r.matches
+                    .map(|c| {
+                        c.matches
                             .into_iter()
                             .map(|m| TryInto::<RbacMatch>::try_into(&m))
                             .collect::<Result<Vec<_>, _>>()
@@ -315,7 +327,7 @@ impl TryFrom<&XdsRbac> for Authorization {
             namespace: resource.namespace,
             scope: RbacScope::try_from(xds::istio::security::Scope::from_i32(resource.scope))?,
             action: RbacAction::try_from(xds::istio::security::Action::from_i32(resource.action))?,
-            groups,
+            rules,
         })
     }
 }
@@ -417,13 +429,13 @@ mod tests {
         };
     }
 
-    fn allow_policy(name: String, group: Vec<Vec<Vec<RbacMatch>>>) -> Authorization {
+    fn allow_policy(name: String, rules: Vec<Vec<Vec<RbacMatch>>>) -> Authorization {
         Authorization {
             name,
             namespace: "namespace".to_string(),
             scope: RbacScope::Global,
             action: RbacAction::Allow,
-            groups: group,
+            rules,
         }
     }
 
@@ -474,6 +486,121 @@ mod tests {
         assert!(allow_policy("empty".to_string(), vec![vec![vec![]]]).matches(&plaintext_conn()));
         assert!(allow_policy("empty".to_string(), vec![vec![]]).matches(&plaintext_conn()));
         assert!(!allow_policy("empty".to_string(), vec![]).matches(&plaintext_conn()));
+    }
+
+    #[test]
+    fn rbac_nesting() {
+        let pol = allow_policy(
+            "nested".to_string(),
+            vec![vec![
+                vec![
+                    RbacMatch {
+                        namespaces: vec![StringMatch::Exact("a".to_string())],
+                        ..Default::default()
+                    },
+                    RbacMatch {
+                        namespaces: vec![StringMatch::Exact("b".to_string())],
+                        ..Default::default()
+                    },
+                ],
+                vec![RbacMatch {
+                    destination_ports: vec![80],
+                    ..Default::default()
+                }],
+            ]],
+        );
+        // Can match either namespace...
+        assert!(pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "a".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        assert!(pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "b".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        // Wrong namespace
+        assert!(!pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "bad".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        // Wrong port
+        assert!(!pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "b".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
+            dst: "127.0.0.2:12345".parse().unwrap(),
+        }));
+    }
+
+    #[test]
+    fn rbac_multi_rule() {
+        let pol = allow_policy(
+            "nested".to_string(),
+            vec![
+                vec![vec![RbacMatch {
+                    namespaces: vec![StringMatch::Exact("a".to_string())],
+                    ..Default::default()
+                }]],
+                vec![vec![RbacMatch {
+                    namespaces: vec![StringMatch::Exact("b".to_string())],
+                    ..Default::default()
+                }]],
+            ],
+        );
+        // Can match either namespace...
+        assert!(pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "a".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        assert!(pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "b".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        // Wrong namespace
+        assert!(!pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "bad".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "defaultnw".to_string(),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
     }
 
     rbac_test!(namespaces, vec![StringMatch::Exact("namespace".to_string())],

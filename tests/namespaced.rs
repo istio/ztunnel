@@ -17,6 +17,7 @@ use futures::future::poll_fn;
 use http_body_util::Empty;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::time::Duration;
 
 use hyper::Method;
@@ -399,9 +400,12 @@ async fn test_waypoint_bypass() -> anyhow::Result<()> {
                 .unwrap();
 
             let id = &identity::Identity::default();
+            let dst_id =
+                identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                    .unwrap();
             let cert = app.cert_manager.fetch_certificate(id).await?;
             let mut connector = cert
-                .connector(None)
+                .connector(&dst_id)
                 .unwrap()
                 .configure()
                 .expect("configure");
@@ -454,9 +458,12 @@ async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
                 .unwrap();
 
             let id = &identity::Identity::default();
+            let dst_id =
+                identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                    .unwrap();
             let cert = app.cert_manager.fetch_certificate(id).await?;
             let mut connector = cert
-                .connector(None)
+                .connector(&dst_id)
                 .unwrap()
                 .configure()
                 .expect("configure");
