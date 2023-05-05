@@ -172,14 +172,18 @@ impl Workload {
             service_account: self.service_account.clone(),
         }
     }
-    pub fn waypoint_svc_ip_address(&self) -> Option<IpAddr> {
+    pub fn waypoint_svc_ip_address(&self) -> Result<Option<IpAddr>, WaypointError> {
         if let Some(gw_address) = self.waypoint.as_ref() {
             match &gw_address.destination {
-                gatewayaddress::Destination::Hostname(_) => return None, // TODO: support this
-                gatewayaddress::Destination::Address(ip) => return Some(ip.address),
+                gatewayaddress::Destination::Hostname(_) => {
+                    return Err(WaypointError::UnsupportedFeature(
+                        "hostname lookup not supported yet".to_string(),
+                    ))
+                }
+                gatewayaddress::Destination::Address(ip) => return Ok(Some(ip.address)),
             }
         }
-        None
+        Ok(None)
     }
 }
 
@@ -548,6 +552,8 @@ pub struct WorkloadInformation {
 pub enum WaypointError {
     #[error("failed to find waypoint for workload: {0}")]
     FindWaypointError(String),
+    #[error("unsupported feature: {0}")]
+    UnsupportedFeature(String),
 }
 
 impl WorkloadInformation {
@@ -643,8 +649,9 @@ impl WorkloadInformation {
             let wp_nw_addr = match &gw_address.destination {
                 gatewayaddress::Destination::Address(ip) => ip,
                 gatewayaddress::Destination::Hostname(_) => {
-                    info!(%wl.name, "waypoint hostname lookup not supported yet");
-                    return Ok(None); // TODO: implement unsupported feature
+                    return Err(WaypointError::UnsupportedFeature(
+                        "hostname lookup not supported yet".to_string(),
+                    ));
                 }
             };
             let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.port);
@@ -1118,6 +1125,7 @@ impl WorkloadStore {
                     let ip = us
                         .workload
                         .waypoint_svc_ip_address()
+                        .unwrap()
                         .unwrap_or(us.workload.workload_ip);
                     SocketAddr::from((ip, hbone_port))
                 }

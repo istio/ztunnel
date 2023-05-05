@@ -280,8 +280,10 @@ impl Inbound {
                         .body(Empty::new())
                         .unwrap());
                 };
-                let (has_waypoint, from_waypoint) =
-                    Self::check_waypoint(&workloads, &upstream, &conn).await;
+                let has_waypoint = upstream.waypoint.is_some();
+                let from_waypoint = Self::check_waypoint(&workloads, &upstream, &conn)
+                    .await
+                    .unwrap();
 
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
@@ -374,15 +376,17 @@ impl Inbound {
         workloads: &WorkloadInformation,
         upstream: &Workload,
         conn: &Connection,
-    ) -> (bool, bool) {
-        let has_waypoint = upstream.waypoint.is_some();
-        let waypoint_nw_addr = match upstream.waypoint.as_ref() {
+    ) -> Result<bool, Error> {
+        let waypoint_nw_addr_result = match upstream.waypoint.as_ref() {
             Some(addr) => match &addr.destination {
-                gatewayaddress::Destination::Address(waypoint_ip) => waypoint_ip,
-                gatewayaddress::Destination::Hostname(_) => return (has_waypoint, false), // TODO look this up from service
+                gatewayaddress::Destination::Address(waypoint_ip) => Ok(waypoint_ip),
+                gatewayaddress::Destination::Hostname(_) => Err(Error::UnsupportedFeature(
+                    "hostname lookup not supported yet".to_string(),
+                )),
             },
-            None => return (has_waypoint, false),
+            None => return Ok(false),
         };
+        let waypoint_nw_addr = waypoint_nw_addr_result?;
         let from_waypoint = match workloads.fetch_address(waypoint_nw_addr.clone()).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
@@ -398,7 +402,7 @@ impl Inbound {
             }
             None => false,
         };
-        (has_waypoint, from_waypoint)
+        Ok(from_waypoint)
     }
 }
 
