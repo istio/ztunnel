@@ -120,7 +120,10 @@ impl InboundPassthrough {
         let conn = rbac::Connection {
             src_identity: None,
             src_ip: source.ip(),
-            dst_network: pi.cfg.network.clone(), // inbound request must be on our network
+            // inbound request must be on our network since this is passthrough
+            // rather than HBONE, which can be tunneled across networks through gateways.
+            // by definition, without the gateway our source must be on our network.
+            dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
         if !pi.workloads.assert_rbac(&conn).await {
@@ -141,7 +144,10 @@ impl InboundPassthrough {
         // Find source info. We can lookup by XDS or from connection attributes
         let source_workload = if let Some(source_ip) = source_ip {
             let network_addr_srcip = NetworkAddress {
-                network: pi.cfg.network.clone(), // inbound request must be on our network
+                // inbound request must be on our network since this is passthrough
+                // rather than HBONE, which can be tunneled across networks through gateways.
+                // by definition, without the gateway our source must be on our network.
+                network: pi.cfg.network.clone(),
                 address: source_ip,
             };
             pi.workloads.fetch_workload(&network_addr_srcip).await

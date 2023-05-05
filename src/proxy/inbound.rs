@@ -312,7 +312,11 @@ impl Inbound {
                 let baggage =
                     parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
                 let src_network_addr = NetworkAddress {
-                    network: conn.dst_network.to_string(), // inbound request source network must match dst network
+                    // we assume source network is on our network, but this is NOT
+                    // always correct in a multi-network flow (e.g. client -> gateway -> dest).
+                    // multi-network support is still forthcoming and may require updates
+                    // to the baggage in HBONE protocol so we can get source network here
+                    network: conn.dst_network.to_string(), // see https://github.com/istio/ztunnel/issues/515
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
