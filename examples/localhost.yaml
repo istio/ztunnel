@@ -35,23 +35,16 @@ services:
   namespace: default
   hostname: example.com
   addresses:
-    - network: defaultnw
-      address: "127.10.0.1"
+    - defaultnw/127.10.0.1
   endpoints:
-    ? address: "127.0.0.1"
-      network: defaultnw
-    :
+    defaultnw/127.0.0.1:
       address:
-        network: defaultnw
-        address: "127.0.0.1"
+        defaultnw/127.0.0.1
       port:
         80: 8080
-    ? address: "127.0.0.2"
-      network: defaultnw
-    :
+    defaultnw/127.0.0.2:
       address:
-        network: defaultnw
-        address: "127.0.0.2"
+        defaultnw/127.0.0.2
       port:
         80: 8080
   ports:

@@ -127,7 +127,7 @@ impl Service {
                         config: state.config.clone(),
                         certificates: dump_certs(state.cert_manager.borrow()).await,
                     },
-                    req,
+                    // req, // bring this back if we start using it
                 )
                 .await),
                 "/logging" => Ok(handle_logging(req).await),
@@ -271,7 +271,7 @@ async fn handle_server_shutdown(
 
 async fn handle_config_dump(
     mut dump: ConfigDump,
-    _req: Request<Incoming>,
+    // _req: Request<Incoming>,
 ) -> Response<Full<Bytes>> {
     if let Some(cfg) = dump.config.local_xds_config.clone() {
         match cfg.read_to_string().await {
@@ -419,9 +419,22 @@ async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 mod tests {
     use std::time::Duration;
 
+    use http_body_util::BodyExt;
+
     use crate::identity;
 
+    use crate::admin::Arc;
+    use crate::config::construct_config;
+    use crate::config::ProxyConfig;
+    use crate::workload::WorkloadInformation;
+    use crate::workload::WorkloadStore;
+    use crate::xds::istio::workload::Workload as XdsWorkload;
+    use bytes::Bytes;
+    use std::sync::Mutex;
+
     use super::dump_certs;
+    use super::handle_config_dump;
+    use super::ConfigDump;
 
     fn diff_json<'a>(a: &'a serde_json::Value, b: &'a serde_json::Value) -> String {
         let mut ret = String::new();
@@ -605,5 +618,82 @@ mod tests {
             diff_json(&want, &got)
         );
         pending_fetch.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_dump_config() {
+        let manager = identity::mock::new_secret_manager_cfg(identity::mock::SecretManagerConfig {
+            cert_lifetime: Duration::from_secs(7 * 60 * 60),
+            fetch_latency: Duration::from_secs(1),
+            epoch: Some(
+                // Arbitrary point in time used to ensure deterministic certificate generation.
+                chrono::DateTime::parse_from_rfc3339("2023-03-11T05:57:26Z")
+                    .unwrap()
+                    .into(),
+            ),
+        });
+
+        let wl = XdsWorkload {
+            address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+            waypoint: None,
+            network_gateway: None,
+            tunnel_protocol: Default::default(),
+            name: "".to_string(),
+            namespace: "".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            network: "defaultnw".to_string(),
+            workload_name: "".to_string(),
+            canonical_name: "".to_string(),
+            canonical_revision: "".to_string(),
+            node: "".to_string(),
+            status: Default::default(),
+            cluster_id: "Kubernetes".to_string(),
+            authorization_policies: Vec::new(),
+            native_tunnel: false,
+            ..Default::default()
+        };
+
+        let workloads = WorkloadStore::test_store(vec![wl]).unwrap();
+
+        let default_config = construct_config(ProxyConfig::default())
+            .expect("could not build Config without ProxyConfig");
+
+        let workloads_arc: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(workloads));
+        let wli = WorkloadInformation {
+            info: workloads_arc,
+            demand: None,
+        };
+
+        let dump = ConfigDump {
+            workload_info: wli,
+            static_config: Default::default(),
+            version: Default::default(),
+            config: default_config,
+            certificates: dump_certs(&manager).await,
+        };
+
+        // if for some reason we can't serialize the config dump, this will fail.
+        //
+        // this could happen for a variety of reasons; for example some types
+        // may need custom serialize/deserialize to be keys in a map, like NetworkAddress
+        let resp = handle_config_dump(dump).await;
+
+        let resp_bytes = resp
+            .body()
+            .clone()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let resp_str = String::from(std::str::from_utf8(&resp_bytes).unwrap());
+
+        // quick sanity check that our workload is there and keyed properly.
+        // avoid stronger checks since serialization is not determinstic, and
+        // most of the value of this test is ensuring that we can serialize
+        // the config dump at all
+        assert!(resp_str.contains("defaultnw/127.0.0.2"));
     }
 }

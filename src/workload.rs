@@ -22,6 +22,11 @@ use std::sync::{Arc, Mutex};
 use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
+use serde::de::Visitor;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument, trace};
@@ -721,11 +726,56 @@ pub struct NamespacedHostname {
     pub hostname: String,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct NetworkAddress {
     pub network: String,
     pub address: IpAddr,
+}
+
+// we need custom serde serialization since NetworkAddress is keying maps
+impl Serialize for NetworkAddress {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&self)
+    }
+}
+
+// we need custom serde deserialization because we have custom serialization
+impl<'de> Deserialize<'de> for NetworkAddress {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NetworkAddressVisitor;
+
+        impl<'de> Visitor<'de> for NetworkAddressVisitor {
+            type Value = NetworkAddress;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("string for NetworkAddress with format network/IP")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<NetworkAddress, E>
+            where
+                E: serde::de::Error,
+            {
+                let Some((network, address)) = value.split_once('/') else {
+                    return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
+                };
+                use std::str::FromStr;
+                let Ok(ip_addr) = IpAddr::from_str(address) else {
+                    return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
+                };
+                Ok(NetworkAddress {
+                    network: network.to_string(),
+                    address: ip_addr,
+                })
+            }
+        }
+        deserializer.deserialize_str(NetworkAddressVisitor)
+    }
 }
 
 impl fmt::Display for NetworkAddress {
