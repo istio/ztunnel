@@ -269,15 +269,11 @@ impl Inbound {
                 }
                 // Orig has 15008, swap with the real port
                 let conn = rbac::Connection { dst: addr, ..conn };
-                // we assume source network is on our network, but this is NOT
-                // always correct in a multi-network flow (e.g. client -> gateway -> dest).
-                // multi-network support is still forthcoming and may require updates
-                // to the baggage in HBONE protocol so we can get source network here
-                let network_addr = NetworkAddress {
-                    network: conn.dst_network.to_string(), // see https://github.com/istio/ztunnel/issues/515
+                let dst_network_addr = NetworkAddress {
+                    network: conn.dst_network.to_string(), // dst must be on our network
                     address: addr.ip(),
                 };
-                let Some(upstream) = workloads.fetch_workload(&network_addr).await else {
+                let Some(upstream) = workloads.fetch_workload(&dst_network_addr).await else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
