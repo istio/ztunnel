@@ -387,7 +387,7 @@ impl Inbound {
             None => return Ok(false),
         };
         let waypoint_nw_addr = waypoint_nw_addr_result?;
-        let from_waypoint = match workloads.fetch_address(waypoint_nw_addr.clone()).await {
+        let from_waypoint = match workloads.fetch_address(waypoint_nw_addr).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
                 let mut from_wp = false;

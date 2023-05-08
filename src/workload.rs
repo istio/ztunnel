@@ -638,7 +638,7 @@ impl WorkloadInformation {
         addr: SocketAddr,
         hbone_port: u16,
     ) -> Option<Upstream> {
-        self.fetch_address(network_addr(network, addr.ip())).await;
+        self.fetch_address(&network_addr(network, addr.ip())).await;
         let wi = self.info.lock().unwrap();
         wi.find_upstream(network, addr, hbone_port)
     }
@@ -675,15 +675,15 @@ impl WorkloadInformation {
 
     // Support workload and VIP
     // It is to do on demand workload fetch if necessary, it handles both workload ip and services
-    pub async fn fetch_address(&self, network_addr: NetworkAddress) -> Option<Address> {
+    pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
         // use self.find_address() so we unlock before fetching on demand
-        if let Some(address) = self.find_address(network_addr.clone()) {
+        if let Some(address) = self.find_address(network_addr) {
             return Some(address);
         }
         // if both cache not found, start on demand fetch
-        self.fetch_on_demand(&network_addr).await;
+        self.fetch_on_demand(network_addr).await;
         self.find_address(network_addr)
     }
 
@@ -696,13 +696,13 @@ impl WorkloadInformation {
     }
 
     // keep private so that we can ensure that we always use fetch_address
-    fn find_address(&self, network_addr: NetworkAddress) -> Option<Address> {
+    fn find_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
         let wi = self.info.lock().unwrap(); // don't use self.find_workload() to avoid locking twice
-        match wi.find_workload(&network_addr).cloned() {
+        match wi.find_workload(network_addr).cloned() {
             None => {
                 // 2. handle service
-                if let Some(svc) = wi.vips.get(&network_addr).cloned() {
+                if let Some(svc) = wi.vips.get(network_addr).cloned() {
                     return Some(Address::Service(Box::new(svc)));
                 }
                 None
