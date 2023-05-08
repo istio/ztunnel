@@ -269,8 +269,12 @@ impl Inbound {
                 }
                 // Orig has 15008, swap with the real port
                 let conn = rbac::Connection { dst: addr, ..conn };
+                // we assume source network is on our network, but this is NOT
+                // always correct in a multi-network flow (e.g. client -> gateway -> dest).
+                // multi-network support is still forthcoming and may require updates
+                // to the baggage in HBONE protocol so we can get source network here
                 let network_addr = NetworkAddress {
-                    network: conn.dst_network.to_string(), // inbound request dest must be on our network
+                    network: conn.dst_network.to_string(), // see https://github.com/istio/ztunnel/issues/515
                     address: addr.ip(),
                 };
                 let Some(upstream) = workloads.fetch_workload(&network_addr).await else {
@@ -439,7 +443,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
             let wip = NetworkAddress {
-                network: self.network.clone(), // inbound requests must be coming from our network
+                network: self.network.clone(), // inbound cert provider gets cert for the dest, which must be on our network
                 address: orig_dst_addr.ip(),
             };
             self.workloads
