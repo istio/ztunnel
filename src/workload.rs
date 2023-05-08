@@ -1270,7 +1270,6 @@ mod tests {
         let xds_ip2 = Bytes::copy_from_slice(&[127, 0, 0, 2]);
 
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             ..Default::default()
@@ -1324,7 +1323,6 @@ mod tests {
         // Add two workloads into the VIP. Add out of order to further test
         assert_eq!((wi.staged_vips.len()), 0);
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1351,7 +1349,6 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0);
 
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip2.clone(),
             name: "some name2".to_string(),
             virtual_ips: vip.clone(),
@@ -1368,7 +1365,6 @@ mod tests {
 
         // Add 2 workload with VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1376,7 +1372,6 @@ mod tests {
         })
         .unwrap();
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip2.clone(),
             name: "some name2".to_string(),
             virtual_ips: vip.clone(),
@@ -1386,7 +1381,6 @@ mod tests {
         assert_vips(&wi, vec!["some name", "some name2"]);
         // now update it without the VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip1,
             name: "some name".to_string(),
             ..Default::default()
@@ -1396,7 +1390,6 @@ mod tests {
         assert_vips(&wi, vec!["some name2"]);
         // now update it with unhealthy
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip2,
             name: "some name2".to_string(),
             virtual_ips: vip,
@@ -1435,7 +1428,6 @@ mod tests {
 
         // Add 2 workload with VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1446,7 +1438,6 @@ mod tests {
 
         // now update it without the VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             ..Default::default()
@@ -1456,7 +1447,6 @@ mod tests {
 
         // Add 2 workload with VIP again
         wi.insert_xds_workload(XdsWorkload {
-            network: "".to_string(),
             address: xds_ip1,
             name: "some name".to_string(),
             virtual_ips: vip,

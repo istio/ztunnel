@@ -713,7 +713,6 @@ mod tests {
         let workloads = vec![XdsWorkload {
             name: "1.1.1.1".to_string(),
             namespace: "default".to_string(),
-            network: "".to_string(),
             address: ip.octets().to_vec().into(),
             tunnel_protocol: 0,
             trust_domain: "local".to_string(),
