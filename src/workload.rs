@@ -152,7 +152,7 @@ pub struct Workload {
     pub node: String,
 
     #[serde(default)]
-    pub native_hbone: bool,
+    pub native_tunnel: bool,
 
     #[serde(default)]
     pub authorization_policies: Vec<String>,
@@ -336,7 +336,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                 resource.status,
             ))?,
 
-            native_hbone: resource.native_tunnel,
+            native_tunnel: resource.native_tunnel,
             authorization_policies: resource.authorization_policies,
 
             cluster_id: {

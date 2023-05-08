@@ -151,7 +151,7 @@ impl OutboundConnection {
             && !req
                 .destination_workload
                 .as_ref()
-                .map(|w| w.native_hbone)
+                .map(|w| w.native_tunnel)
                 .unwrap_or(false);
         let connection_metrics = traffic::ConnectionOpen {
             reporter: Reporter::source,

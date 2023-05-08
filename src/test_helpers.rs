@@ -112,7 +112,7 @@ pub fn test_default_workload() -> Workload {
         cluster_id: "Kubernetes".to_string(),
 
         authorization_policies: Vec::new(),
-        native_hbone: false,
+        native_tunnel: false,
     }
 }
 
