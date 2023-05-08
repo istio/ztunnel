@@ -643,33 +643,33 @@ impl WorkloadInformation {
     }
 
     pub async fn find_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
-        if let Some(gw_address) = &wl.waypoint {
-            // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
-            // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-            let wp_nw_addr = match &gw_address.destination {
-                gatewayaddress::Destination::Address(ip) => ip,
-                gatewayaddress::Destination::Hostname(_) => {
-                    return Err(WaypointError::UnsupportedFeature(
-                        "hostname lookup not supported yet".to_string(),
-                    ));
-                }
-            };
-            let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.port);
-            match self
-                .find_upstream(&wp_nw_addr.network, wp_socket_addr, gw_address.port)
-                .await
-            {
-                Some(upstream) => {
-                    debug!(%wl.name, "found waypoint upstream");
-                    return Ok(Some(upstream));
-                }
-                None => {
-                    debug!(%wl.name, "waypoint upstream not found");
-                    return Err(WaypointError::FindWaypointError(wl.name));
-                }
-            };
+        let Some(gw_address) = &wl.waypoint else {
+            return Ok(None);
+        };
+        // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
+        // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
+        let wp_nw_addr = match &gw_address.destination {
+            gatewayaddress::Destination::Address(ip) => ip,
+            gatewayaddress::Destination::Hostname(_) => {
+                return Err(WaypointError::UnsupportedFeature(
+                    "hostname lookup not supported yet".to_string(),
+                ));
+            }
+        };
+        let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.port);
+        match self
+            .find_upstream(&wp_nw_addr.network, wp_socket_addr, gw_address.port)
+            .await
+        {
+            Some(upstream) => {
+                debug!(%wl.name, "found waypoint upstream");
+                Ok(Some(upstream))
+            }
+            None => {
+                debug!(%wl.name, "waypoint upstream not found");
+                Err(WaypointError::FindWaypointError(wl.name))
+            }
         }
-        Ok(None)
     }
 
     // Support workload and VIP
