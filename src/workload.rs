@@ -895,13 +895,23 @@ impl WorkloadStore {
         // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
         // include them in load balancing we do to Services.
         if status == HealthStatus::Healthy {
-            for (vip, pl) in &w.virtual_ips {
+            for (network_vip, pl) in &w.virtual_ips {
+                let parts = network_vip.split_once('/');
+                let vip = match parts.is_some() {
+                    true => parts.unwrap().1,
+                    false => network_vip,
+                };
+                let svc_network = match parts.is_some() {
+                    true => parts.unwrap().0,
+                    false => &workload.network,
+                };
+
                 let vip = vip.parse::<IpAddr>()?;
                 let ep = Endpoint {
                     address: wip.clone(),
                     port: pl.into(),
                 };
-                if let Some(svc) = self.vips.get_mut(&network_addr(&w.network, vip)) {
+                if let Some(svc) = self.vips.get_mut(&network_addr(svc_network, vip)) {
                     svc.endpoints.insert(ep.address.clone(), ep.clone());
                     self.workload_to_vip
                         .entry(wip.clone())
@@ -911,7 +921,7 @@ impl WorkloadStore {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
                     self.staged_vips
-                        .entry(network_addr(&workload.network, vip))
+                        .entry(network_addr(svc_network, vip))
                         .or_default()
                         .insert(wip.clone(), ep.clone());
                     self.workload_to_vip
@@ -1094,7 +1104,7 @@ impl WorkloadStore {
                 debug!("VIP {} has no healthy endpoints", addr);
                 return None
             };
-            let Some(wl) = self.workloads.get(&network_addr(network, ep.address.address)) else {
+            let Some(wl) = self.workloads.get(&network_addr(&ep.address.network, ep.address.address)) else {
                 debug!("failed to fetch workload for {}", ep.address);
                 return None
             };
@@ -1495,11 +1505,16 @@ mod tests {
         };
         local_client.run().await.expect("client should run");
         let store = workloads.lock().unwrap();
-        let wl = store.find_workload(&network_addr("defaultnw", "127.0.0.1".parse().unwrap()));
+        let wl = store.find_workload(&network_addr("", "127.0.0.1".parse().unwrap()));
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.unwrap().service_account, "default");
-        let us = store.find_upstream("defaultnw", "127.10.0.1:80".parse().unwrap(), 15008);
+        let us = store.find_upstream("", "127.10.0.1:80".parse().unwrap(), 15008);
+        // Make sure we get a valid VIP
+        assert!(us.is_some());
+        assert_eq!(us.unwrap().port, 8080);
+        // test that we can have a service in another network than workloads it selects
+        let us = store.find_upstream("remote", "127.10.0.2:80".parse().unwrap(), 15008);
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.unwrap().port, 8080);

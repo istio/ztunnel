@@ -142,7 +142,6 @@ message Workload {
   // Typically these represent Service ClusterIPs.
   // The key is a NetworkAddress string of the format network/IP, or just an IP if network
   // of the service desired matches the network of the workload.
-  // TODO: add support for network-prefixed IPs so services can select workloads in another network
   map<string, PortList> virtual_ips = 15;
 
   // A list of authorization policies applicable to this workload.
