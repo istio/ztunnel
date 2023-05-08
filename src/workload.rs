@@ -622,6 +622,7 @@ impl WorkloadInformation {
     pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload");
+        // use self.find_workload() so we unlock before fetching on demand
         match self.find_workload(addr) {
             None => {
                 self.fetch_on_demand(addr).await;
@@ -677,6 +678,7 @@ impl WorkloadInformation {
     pub async fn fetch_address(&self, network_addr: NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
+        // use self.find_address() so we unlock before fetching on demand
         if let Some(address) = self.find_address(network_addr.clone()) {
             return Some(address);
         }
@@ -696,10 +698,10 @@ impl WorkloadInformation {
     // keep private so that we can ensure that we always use fetch_address
     fn find_address(&self, network_addr: NetworkAddress) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
-        match self.find_workload(&network_addr) {
+        let wi = self.info.lock().unwrap(); // don't use self.find_workload() to avoid locking twice
+        match wi.find_workload(&network_addr).cloned() {
             None => {
                 // 2. handle service
-                let wi = self.info.lock().unwrap();
                 if let Some(svc) = wi.vips.get(&network_addr).cloned() {
                     return Some(Address::Service(Box::new(svc)));
                 }
