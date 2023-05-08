@@ -284,7 +284,13 @@ impl Inbound {
                 let from_waypoint = Self::check_waypoint(&workloads, &upstream, &conn)
                     .await
                     .unwrap();
+                let from_gateway = Self::check_gateway(&workloads, &upstream, &conn)
+                    .await
+                    .unwrap();
 
+                if from_gateway {
+                    debug!("request from gateway");
+                }
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
                 } else if !workloads.assert_rbac(&conn).await {
@@ -313,16 +319,20 @@ impl Inbound {
 
                 let baggage =
                     parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
-                let src_network_addr = NetworkAddress {
-                    // we assume source network is on our network, but this is NOT
-                    // always correct in a multi-network flow (e.g. client -> gateway -> dest).
-                    // multi-network support is still forthcoming and may require updates
-                    // to the baggage in HBONE protocol so we can get source network here
-                    network: conn.dst_network.to_string(), // see https://github.com/istio/ztunnel/issues/515
-                    address: source_ip,
+
+                let source = match from_gateway {
+                    true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
+                    false => {
+                        let src_network_addr = NetworkAddress {
+                            // we can assume source network is our network because we did not traverse a gateway
+                            network: conn.dst_network.to_string(),
+                            address: source_ip,
+                        };
+                        // Find source info. We can lookup by XDS or from connection attributes
+                        workloads.fetch_workload(&src_network_addr).await
+                    }
                 };
-                // Find source info. We can lookup by XDS or from connection attributes
-                let source = workloads.fetch_workload(&src_network_addr).await;
+
                 let derived_source = traffic::DerivedWorkload {
                     identity: conn.src_identity,
                     cluster_id: baggage.cluster_id,
@@ -390,19 +400,48 @@ impl Inbound {
         let from_waypoint = match workloads.fetch_address(waypoint_nw_addr).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
-                let mut from_wp = false;
                 for (ip, _ep) in svc.endpoints.iter() {
                     if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
                     {
-                        from_wp = true;
-                        break;
+                        return Ok(true);
                     }
                 }
-                from_wp
+                false
             }
             None => false,
         };
         Ok(from_waypoint)
+    }
+
+    async fn check_gateway(
+        workloads: &WorkloadInformation,
+        upstream: &Workload,
+        conn: &Connection,
+    ) -> Result<bool, Error> {
+        let gateway_nw_addr_result = match upstream.network_gateway.as_ref() {
+            Some(addr) => match &addr.destination {
+                gatewayaddress::Destination::Address(gateway_ip) => Ok(gateway_ip),
+                gatewayaddress::Destination::Hostname(_) => Err(Error::UnsupportedFeature(
+                    "hostname lookup not supported yet".to_string(),
+                )),
+            },
+            None => return Ok(false),
+        };
+        let gateway_nw_addr = gateway_nw_addr_result?;
+        let from_gateway = match workloads.fetch_address(gateway_nw_addr).await {
+            Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
+            Some(address::Address::Service(svc)) => {
+                for (ip, _ep) in svc.endpoints.iter() {
+                    if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
+                    {
+                        return Ok(true);
+                    }
+                }
+                false
+            }
+            None => false,
+        };
+        Ok(from_gateway)
     }
 }
 
