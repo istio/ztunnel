@@ -196,7 +196,7 @@ impl<'a> TestWorkloadBuilder<'a> {
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
         self.w.workload.waypoint = Some(GatewayAddress {
             destination: gatewayaddress::Destination::Address(NetworkAddress {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: waypoint,
             }),
             port: 15008,
@@ -237,7 +237,7 @@ impl<'a> TestWorkloadBuilder<'a> {
 
         for (vip, ports) in &self.w.vips {
             let ep_network_addr = NetworkAddress {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: self.w.workload.workload_ip,
             };
             let ep = Endpoint {
@@ -249,7 +249,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                 namespace: self.w.workload.namespace.clone(),
                 hostname: format!("{}.{}.svc.cluster.local", "svc", self.w.workload.namespace),
                 addresses: vec![NetworkAddress {
-                    network: "defaultnw".to_string(),
+                    network: "".to_string(),
                     address: vip.parse().unwrap(),
                 }],
                 ports: ports.to_owned(),

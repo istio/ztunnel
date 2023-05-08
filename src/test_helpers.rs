@@ -102,7 +102,7 @@ pub fn test_default_workload() -> Workload {
         namespace: "".to_string(),
         trust_domain: "cluster.local".to_string(),
         service_account: "default".to_string(),
-        network: "defaultnw".to_string(),
+        network: "".to_string(),
         workload_name: "".to_string(),
         workload_type: "deployment".to_string(),
         canonical_name: "".to_string(),
@@ -166,7 +166,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
                 node: "local".to_string(),
                 waypoint: Some(GatewayAddress {
                     destination: gatewayaddress::Destination::Address(NetworkAddress {
-                        network: "defaultnw".to_string(),
+                        network: "".to_string(),
                         address: waypoint_ip,
                     }),
                     port: 15008,
@@ -181,18 +181,18 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
         namespace: "default".to_string(),
         hostname: "local-vip.default.svc.cluster.local".to_string(),
         addresses: vec![NetworkAddress {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: TEST_VIP.parse()?,
         }],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: HashMap::from([(
             NetworkAddress {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: TEST_WORKLOAD_HBONE.parse()?,
             },
             Endpoint {
                 address: NetworkAddress {
-                    network: "defaultnw".to_string(),
+                    network: "".to_string(),
                     address: TEST_WORKLOAD_HBONE.parse()?,
                 },
                 port: HashMap::from([(80u16, echo_port)]),

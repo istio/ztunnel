@@ -693,7 +693,7 @@ mod tests {
             .map(|expected_workload| Workload::try_from(expected_workload).unwrap()); // this is a borrow, Ok not to clone
         let mut matched = false;
         let ip_network_addr = NetworkAddress {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: ip,
         };
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
@@ -713,7 +713,7 @@ mod tests {
         let workloads = vec![XdsWorkload {
             name: "1.1.1.1".to_string(),
             namespace: "default".to_string(),
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: ip.octets().to_vec().into(),
             tunnel_protocol: 0,
             trust_domain: "local".to_string(),

@@ -380,7 +380,7 @@ impl OutboundConnection {
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
         match self.pi.workloads.find_waypoint(us.workload.clone()).await {
-            Ok(None) => {} // do nothing
+            Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
                 let wp_socket_addr =
@@ -399,6 +399,7 @@ impl OutboundConnection {
                     request_type: RequestType::ToServerWaypoint,
                 });
             }
+            // we expected the workload to have a waypoint, but could not find one
             Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
         }
         if us.workload.gateway_address.is_none() {
@@ -531,7 +532,7 @@ mod tests {
             ..crate::config::parse_config().unwrap()
         };
         let source = XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),
             address: Bytes::copy_from_slice(&[127, 0, 0, 1]),
@@ -539,7 +540,7 @@ mod tests {
             ..Default::default()
         };
         let waypoint = XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             name: "waypoint-workload".to_string(),
             namespace: "ns".to_string(),
             address: Bytes::copy_from_slice(&[127, 0, 0, 10]),
@@ -589,7 +590,7 @@ mod tests {
             "127.0.0.1",
             "1.2.3.4:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 ..Default::default()
             },
@@ -609,7 +610,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -633,7 +634,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -657,7 +658,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -681,7 +682,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
@@ -705,7 +706,7 @@ mod tests {
             "1.2.3.4",
             "127.0.0.2:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 ..Default::default()
             },
@@ -720,12 +721,12 @@ mod tests {
             "127.0.0.2",
             "127.0.0.1:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
                         XdsNetworkAddress {
-                            network: "defaultnw".to_string(),
+                            network: "".to_string(),
                             address: [127, 0, 0, 10].to_vec(),
                         },
                     )),
@@ -749,12 +750,12 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
                         XdsNetworkAddress {
-                            network: "defaultnw".to_string(),
+                            network: "".to_string(),
                             address: [127, 0, 0, 10].to_vec(),
                         },
                     )),

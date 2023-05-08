@@ -280,7 +280,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
-        network: parse(NETWORK)?.unwrap_or_else(|| "defaultnw".to_string()),
+        network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
         proxy_mode: match parse::<String>(PROXY_MODE)? {
             Some(proxy_mode) => match proxy_mode.as_str() {

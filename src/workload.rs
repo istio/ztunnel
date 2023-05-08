@@ -1256,11 +1256,11 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0);
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
-        let ip1 = network_addr("defaultnw", IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        let ip1 = network_addr("", IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
         let xds_ip2 = Bytes::copy_from_slice(&[127, 0, 0, 2]);
 
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             ..Default::default()
@@ -1276,7 +1276,7 @@ mod tests {
             })
         );
 
-        wi.remove("defaultnw/invalid".to_string());
+        wi.remove("/invalid".to_string());
         assert_eq!(
             wi.find_workload(&ip1),
             Some(&Workload {
@@ -1286,7 +1286,7 @@ mod tests {
             })
         );
 
-        wi.remove("defaultnw/127.0.0.2".to_string());
+        wi.remove("/127.0.0.2".to_string());
         assert_eq!(
             wi.find_workload(&ip1),
             Some(&Workload {
@@ -1296,7 +1296,7 @@ mod tests {
             })
         );
 
-        wi.remove("defaultnw/127.0.0.1".to_string());
+        wi.remove("/127.0.0.1".to_string());
         assert_eq!(wi.find_workload(&ip1), None);
         assert_eq!(wi.workloads.len(), 0);
 
@@ -1314,7 +1314,7 @@ mod tests {
         // Add two workloads into the VIP. Add out of order to further test
         assert_eq!((wi.staged_vips.len()), 0);
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1327,7 +1327,7 @@ mod tests {
             namespace: "ns".to_string(),
             hostname: "svc1.ns.svc.cluster.local".to_string(),
             addresses: vec![XdsNetworkAddress {
-                network: "defaultnw".to_string(),
+                network: "".to_string(),
                 address: [127, 0, 1, 1].to_vec(),
             }],
             ports: vec![XdsPort {
@@ -1341,7 +1341,7 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0);
 
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip2.clone(),
             name: "some name2".to_string(),
             virtual_ips: vip.clone(),
@@ -1351,14 +1351,14 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0); // vip already in a service, should not be staged
 
         assert_vips(&wi, vec!["some name", "some name2"]);
-        wi.remove("defaultnw/127.0.0.2".to_string());
+        wi.remove("/127.0.0.2".to_string());
         assert_vips(&wi, vec!["some name"]);
-        wi.remove("defaultnw/127.0.0.1".to_string());
+        wi.remove("/127.0.0.1".to_string());
         assert_vips(&wi, vec![]);
 
         // Add 2 workload with VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1366,7 +1366,7 @@ mod tests {
         })
         .unwrap();
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip2.clone(),
             name: "some name2".to_string(),
             virtual_ips: vip.clone(),
@@ -1376,7 +1376,7 @@ mod tests {
         assert_vips(&wi, vec!["some name", "some name2"]);
         // now update it without the VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip1,
             name: "some name".to_string(),
             ..Default::default()
@@ -1386,7 +1386,7 @@ mod tests {
         assert_vips(&wi, vec!["some name2"]);
         // now update it with unhealthy
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip2,
             name: "some name2".to_string(),
             virtual_ips: vip,
@@ -1398,7 +1398,7 @@ mod tests {
         assert_vips(&wi, vec![]);
 
         // Remove the VIP entirely
-        wi.remove("defaultnw/127.0.1.1".to_string());
+        wi.remove("/127.0.1.1".to_string());
         assert_eq!(wi.vips.len(), 0);
     }
 
@@ -1425,7 +1425,7 @@ mod tests {
 
         // Add 2 workload with VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1436,7 +1436,7 @@ mod tests {
 
         // now update it without the VIP
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip1.clone(),
             name: "some name".to_string(),
             ..Default::default()
@@ -1446,7 +1446,7 @@ mod tests {
 
         // Add 2 workload with VIP again
         wi.insert_xds_workload(XdsWorkload {
-            network: "defaultnw".to_string(),
+            network: "".to_string(),
             address: xds_ip1,
             name: "some name".to_string(),
             virtual_ips: vip,
@@ -1455,7 +1455,7 @@ mod tests {
         .unwrap();
         assert_eq!((wi.staged_vips.len()), 1); // VIP should be staged again
 
-        wi.remove("defaultnw/127.0.0.1".to_string());
+        wi.remove("/127.0.0.1".to_string());
         assert_eq!((wi.staged_vips.len()), 0); // should remove the VIP if no longer needed
     }
 
@@ -1466,8 +1466,7 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            if let Some(us) = wi.find_upstream("defaultnw", "127.0.1.1:80".parse().unwrap(), 15008)
-            {
+            if let Some(us) = wi.find_upstream("", "127.0.1.1:80".parse().unwrap(), 15008) {
                 let n = &us.workload.name; // borrow name instead of cloning
                 found.insert(n.to_owned()); // insert an owned copy of the borrowed n
                 wants.remove(n); // remove using the borrow
