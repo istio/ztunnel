@@ -872,6 +872,24 @@ impl WorkloadStore {
         Ok(store)
     }
 
+    pub fn full_test_store(
+        workloads: Vec<XdsWorkload>,
+        services: Vec<XdsService>,
+        authorizations: Vec<XdsAuthorization>,
+    ) -> anyhow::Result<WorkloadStore> {
+        let mut store = WorkloadStore::default();
+        for w in workloads {
+            store.insert_xds_workload(w)?;
+        }
+        for s in services {
+            store.insert_xds_service(s)?;
+        }
+        for a in authorizations {
+            store.insert_xds_authorization(a)?;
+        }
+        Ok(store)
+    }
+
     fn insert_xds_address(&mut self, a: XdsAddress) -> anyhow::Result<()> {
         match a.r#type {
             Some(XdsType::Workload(w)) => self.insert_xds_workload(w),

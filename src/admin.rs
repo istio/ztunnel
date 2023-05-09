@@ -417,6 +417,7 @@ async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use http_body_util::BodyExt;
@@ -428,7 +429,22 @@ mod tests {
     use crate::config::ProxyConfig;
     use crate::workload::WorkloadInformation;
     use crate::workload::WorkloadStore;
+    use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
+    use crate::xds::istio::security::Address as XdsAddress;
+    use crate::xds::istio::security::Authorization as XdsAuthorization;
+    use crate::xds::istio::security::Clause as XdsClause;
+    use crate::xds::istio::security::Match as XdsMatch;
+    use crate::xds::istio::security::Rule as XdsRule;
+    use crate::xds::istio::security::StringMatch as XdsStringMatch;
+    use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
+    use crate::xds::istio::workload::GatewayAddress as XdsGatewayAddress;
+    use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
+    use crate::xds::istio::workload::Port as XdsPort;
+    use crate::xds::istio::workload::PortList as XdsPortList;
+    use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::xds::istio::workload::WorkloadType as XdsWorkloadType;
+
     use bytes::Bytes;
     use std::sync::Mutex;
 
@@ -635,26 +651,116 @@ mod tests {
 
         let wl = XdsWorkload {
             address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-            waypoint: None,
-            network_gateway: None,
+            waypoint: Some(XdsGatewayAddress {
+                destination: Some(XdsDestination::Address(XdsNetworkAddress {
+                    network: "defaultnw".to_string(),
+                    address: [127, 0, 0, 10].to_vec(),
+                })),
+                port: 15008,
+            }),
+            network_gateway: Some(XdsGatewayAddress {
+                destination: Some(XdsDestination::Address(XdsNetworkAddress {
+                    network: "defaultnw".to_string(),
+                    address: [127, 0, 0, 11].to_vec(),
+                })),
+                port: 15008,
+            }),
             tunnel_protocol: Default::default(),
-            name: "".to_string(),
-            namespace: "".to_string(),
+            uid: "uid".to_string(),
+            name: "name".to_string(),
+            namespace: "namespace".to_string(),
             trust_domain: "cluster.local".to_string(),
             service_account: "default".to_string(),
             network: "defaultnw".to_string(),
-            workload_name: "".to_string(),
-            canonical_name: "".to_string(),
-            canonical_revision: "".to_string(),
-            node: "".to_string(),
+            workload_name: "workload_name".to_string(),
+            canonical_name: "canonical_name".to_string(),
+            canonical_revision: "canonical_revision".to_string(),
+            node: "node".to_string(),
             status: Default::default(),
             cluster_id: "Kubernetes".to_string(),
             authorization_policies: Vec::new(),
             native_tunnel: false,
-            ..Default::default()
+            workload_type: XdsWorkloadType::Deployment.into(),
+            virtual_ips: HashMap::from([(
+                "127.0.1.1".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            )]),
+            // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
-        let workloads = WorkloadStore::test_store(vec![wl]).unwrap();
+        let svc = XdsService {
+            name: "svc1".to_string(),
+            namespace: "ns".to_string(),
+            hostname: "svc1.ns.svc.cluster.local".to_string(),
+            addresses: vec![XdsNetworkAddress {
+                network: "defaultnw".to_string(),
+                address: [127, 0, 1, 1].to_vec(),
+            }],
+            ports: vec![XdsPort {
+                service_port: 80,
+                target_port: 80,
+            }],
+            subject_alt_names: vec!["SAN1".to_string(), "SAN2".to_string()],
+            opaque_endpoint: Some(crate::xds::istio::workload::OpaqueEndpoint {
+                tunnel_protocol: Default::default(),
+            }),
+            // ..Default::default() // intentionally don't default. we want all fields populated
+        };
+
+        let auth = XdsAuthorization {
+            name: "svc1".to_string(),
+            namespace: "ns".to_string(),
+            scope: 0,
+            action: 0,
+            rules: vec![XdsRule {
+                clauses: vec![XdsClause {
+                    matches: vec![XdsMatch {
+                        destination_ports: vec![80],
+                        not_destination_ports: vec![8080],
+                        source_ips: vec![XdsAddress {
+                            address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                            length: 32,
+                        }],
+                        not_source_ips: vec![XdsAddress {
+                            address: Bytes::copy_from_slice(&[127, 0, 0, 1]),
+                            length: 32,
+                        }],
+                        destination_ips: vec![XdsAddress {
+                            address: Bytes::copy_from_slice(&[127, 0, 0, 3]),
+                            length: 32,
+                        }],
+                        not_destination_ips: vec![XdsAddress {
+                            address: Bytes::copy_from_slice(&[127, 0, 0, 4]),
+                            length: 32,
+                        }],
+                        namespaces: vec![XdsStringMatch {
+                            match_type: Some(XdsMatchType::Exact("ns".to_string())),
+                        }],
+                        not_namespaces: vec![XdsStringMatch {
+                            match_type: Some(XdsMatchType::Exact("not-ns".to_string())),
+                        }],
+                        principals: vec![XdsStringMatch {
+                            match_type: Some(XdsMatchType::Exact(
+                                "spiffe://cluster.local/ns/ns/sa/sa".to_string(),
+                            )),
+                        }],
+                        not_principals: vec![XdsStringMatch {
+                            match_type: Some(XdsMatchType::Exact(
+                                "spiffe://cluster.local/ns/ns/sa/not-sa".to_string(),
+                            )),
+                        }],
+                    }],
+                }],
+            }],
+            // ..Default::default() // intentionally don't default. we want all fields populated
+        };
+
+        let workloads = WorkloadStore::full_test_store(vec![wl], vec![svc], vec![auth]).unwrap();
 
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
@@ -693,7 +799,7 @@ mod tests {
         // quick sanity check that our workload is there and keyed properly.
         // avoid stronger checks since serialization is not determinstic, and
         // most of the value of this test is ensuring that we can serialize
-        // the config dump at all
+        // the config dump at all from our internal types
         assert!(resp_str.contains("defaultnw/127.0.0.2"));
     }
 }
