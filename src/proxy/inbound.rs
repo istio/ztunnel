@@ -38,7 +38,9 @@ use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER}
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::tls::TlsError;
-use crate::workload::{address, gatewayaddress, NetworkAddress, Workload, WorkloadInformation};
+use crate::workload::{
+    address, gatewayaddress, GatewayAddress, NetworkAddress, Workload, WorkloadInformation,
+};
 use crate::{proxy, rbac};
 
 use super::Error;
@@ -387,30 +389,7 @@ impl Inbound {
         upstream: &Workload,
         conn: &Connection,
     ) -> Result<bool, Error> {
-        let waypoint_nw_addr_result = match upstream.waypoint.as_ref() {
-            Some(addr) => match &addr.destination {
-                gatewayaddress::Destination::Address(waypoint_ip) => Ok(waypoint_ip),
-                gatewayaddress::Destination::Hostname(_) => Err(Error::UnsupportedFeature(
-                    "hostname lookup not supported yet".to_string(),
-                )),
-            },
-            None => return Ok(false),
-        };
-        let waypoint_nw_addr = waypoint_nw_addr_result?;
-        let from_waypoint = match workloads.fetch_address(waypoint_nw_addr).await {
-            Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
-            Some(address::Address::Service(svc)) => {
-                for (ip, _ep) in svc.endpoints.iter() {
-                    if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
-                    {
-                        return Ok(true);
-                    }
-                }
-                false
-            }
-            None => false,
-        };
-        Ok(from_waypoint)
+        Self::check_gateway_address(workloads, conn, upstream.waypoint.as_ref()).await
     }
 
     async fn check_gateway(
@@ -418,7 +397,15 @@ impl Inbound {
         upstream: &Workload,
         conn: &Connection,
     ) -> Result<bool, Error> {
-        let gateway_nw_addr_result = match upstream.network_gateway.as_ref() {
+        Self::check_gateway_address(workloads, conn, upstream.network_gateway.as_ref()).await
+    }
+
+    async fn check_gateway_address(
+        workloads: &WorkloadInformation,
+        conn: &Connection,
+        gateway_address: Option<&GatewayAddress>,
+    ) -> Result<bool, Error> {
+        let gateway_nw_addr = match gateway_address.as_ref() {
             Some(addr) => match &addr.destination {
                 gatewayaddress::Destination::Address(gateway_ip) => Ok(gateway_ip),
                 gatewayaddress::Destination::Hostname(_) => Err(Error::UnsupportedFeature(
@@ -426,8 +413,7 @@ impl Inbound {
                 )),
             },
             None => return Ok(false),
-        };
-        let gateway_nw_addr = gateway_nw_addr_result?;
+        }?;
         let from_gateway = match workloads.fetch_address(gateway_nw_addr).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
