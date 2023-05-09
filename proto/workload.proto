@@ -86,6 +86,8 @@ message OpaqueEndpoint {
 }
 
 message Workload {
+  // UID represents a globally unique opaque identifier for this workload.
+  string uid = 20;
   // Name represents the name for the workload.
   // For Kubernetes, this is the pod name.
   // This is just for debugging and may be elided as an optimization.

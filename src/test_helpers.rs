@@ -98,6 +98,7 @@ pub fn test_default_workload() -> Workload {
         network_gateway: None,
         gateway_address: None,
         protocol: Default::default(),
+        uid: "".to_string(),
         name: "".to_string(),
         namespace: "".to_string(),
         trust_domain: "cluster.local".to_string(),

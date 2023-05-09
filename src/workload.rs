@@ -129,6 +129,8 @@ pub struct Workload {
     pub protocol: Protocol,
 
     #[serde(default)]
+    pub uid: String,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub namespace: String,
@@ -307,6 +309,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                 resource.tunnel_protocol,
             ))?,
 
+            uid: resource.uid,
             name: resource.name,
             namespace: resource.namespace,
             trust_domain: {
