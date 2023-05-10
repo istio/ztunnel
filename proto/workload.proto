@@ -62,7 +62,8 @@ message Service {
   // TODO: support this field
   string hostname = 3;
   // Address represents the addresses the service can be reached at.
-  // There may be multiple addresses for a single service if it resides in multiple networks.
+  // There may be multiple addresses for a single service if it resides in multiple networks,
+  // multiple clusters, and/or if it's dual stack (TODO: support dual stack).
   repeated NetworkAddress addresses = 4;
   // Ports for the service.
   // The target_port may be overridden on a per-workload basis.
