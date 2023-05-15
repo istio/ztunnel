@@ -1364,7 +1364,6 @@ mod tests {
                 target_port: 80,
             }],
             subject_alt_names: vec![],
-            opaque_endpoint: None,
         })
         .unwrap();
         assert_eq!((wi.staged_vips.len()), 0);

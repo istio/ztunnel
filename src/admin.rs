@@ -651,6 +651,7 @@ mod tests {
 
         let wl = XdsWorkload {
             address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+            hostname: "".to_string(), // must be omitted since we have an address
             waypoint: Some(XdsGatewayAddress {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
                     network: "defaultnw".to_string(),
@@ -706,9 +707,6 @@ mod tests {
                 target_port: 80,
             }],
             subject_alt_names: vec!["SAN1".to_string(), "SAN2".to_string()],
-            opaque_endpoint: Some(crate::xds::istio::workload::OpaqueEndpoint {
-                tunnel_protocol: Default::default(),
-            }),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
