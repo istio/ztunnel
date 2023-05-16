@@ -731,11 +731,58 @@ pub struct Service {
     pub ports: HashMap<u16, u16>,
     pub endpoints: HashMap<NetworkAddress, Endpoint>,
 }
-#[derive(Debug, Eq, PartialEq, Hash, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct NamespacedHostname {
     pub namespace: String,
     pub hostname: String,
+}
+
+// we need custom serde serialization since NamespacedHostname is keying maps
+impl Serialize for NamespacedHostname {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&self)
+    }
+}
+
+// we need custom serde deserialization because we have custom serialization
+impl<'de> Deserialize<'de> for NamespacedHostname {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NamespacedHostnameVisitor;
+
+        impl<'de> Visitor<'de> for NamespacedHostnameVisitor {
+            type Value = NamespacedHostname;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("string for NamespacedHostname with format ns/hostname")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<NamespacedHostname, E>
+            where
+                E: serde::de::Error,
+            {
+                let Some((ns, hostname)) = value.split_once('/') else {
+                    return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
+                };
+                Ok(NamespacedHostname {
+                    namespace: ns.to_string(),
+                    hostname: hostname.to_string(),
+                })
+            }
+        }
+        deserializer.deserialize_str(NamespacedHostnameVisitor)
+    }
+}
+
+impl fmt::Display for NamespacedHostname {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.hostname)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
@@ -792,7 +839,7 @@ impl<'de> Deserialize<'de> for NetworkAddress {
 
 impl fmt::Display for NetworkAddress {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}", self.network, self.address,)
+        write!(f, "{}/{}", self.network, self.address)
     }
 }
 
@@ -843,9 +890,10 @@ pub struct WorkloadStore {
     workloads: HashMap<NetworkAddress, Workload>,
     /// workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
     workload_to_vip: HashMap<NetworkAddress, HashSet<IpAddr>>,
-    /// vips maintains a mapping of socket address with service port to workload ip and socket address
-    /// with target ports in hashset.
+    /// vips allows for lookup of services by network address, the service's xds secondary key
     vips: HashMap<NetworkAddress, Service>,
+    /// vips_by_hostname allows for lookup of services by namespaced hostname, the service's xds primary key
+    vips_by_hostname: HashMap<NamespacedHostname, Service>,
     /// staged_vips maintains a mapping of service IP -> (workload IP -> Endpoint)
     /// this is used to handle ordering issues if workloads with VIPs are received before services.
     staged_vips: HashMap<NetworkAddress, HashMap<NetworkAddress, Endpoint>>,
@@ -934,6 +982,15 @@ impl WorkloadStore {
                 };
                 if let Some(svc) = self.vips.get_mut(&network_addr(svc_network, vip)) {
                     svc.endpoints.insert(ep.address.clone(), ep.clone());
+                    // also update the copy of the service that was indexed by hostname
+                    self.vips_by_hostname
+                        .get_mut(&NamespacedHostname {
+                            namespace: svc.namespace.to_owned(),
+                            hostname: svc.hostname.to_owned(),
+                        })
+                        .unwrap()
+                        .endpoints
+                        .insert(ep.address.clone(), ep.clone());
                     self.workload_to_vip
                         .entry(wip.clone())
                         .or_default()
@@ -1035,6 +1092,15 @@ impl WorkloadStore {
             if let Some(prev) = self.vips.get_mut(network_addr) {
                 for (wip, ep) in &svc.endpoints {
                     prev.endpoints.insert(wip.clone(), ep.clone());
+                    // also update the copy of the service that was indexed by hostname
+                    self.vips_by_hostname
+                        .get_mut(&NamespacedHostname {
+                            namespace: svc.clone().namespace.to_string(),
+                            hostname: svc.clone().hostname.to_string(),
+                        })
+                        .unwrap()
+                        .endpoints
+                        .insert(ep.address.clone(), ep.clone());
                     self.workload_to_vip
                         .entry(wip.clone())
                         .or_default()
@@ -1043,6 +1109,13 @@ impl WorkloadStore {
             } else {
                 // svc is new, add it as is
                 self.vips.insert(network_addr.clone(), svc.clone());
+                self.vips_by_hostname.insert(
+                    NamespacedHostname {
+                        namespace: svc.clone().namespace.to_string(),
+                        hostname: svc.clone().hostname.to_string(),
+                    },
+                    svc.clone(),
+                );
             }
         }
     }
@@ -1053,26 +1126,35 @@ impl WorkloadStore {
             error!("received invalid resource removal {}, ignoring", xds_name);
             return;
         }
-        // we received either network/IP for workload/service or namespace/hostname for service
+
+        // we received either network/IP for workload or namespace/hostname for service
+        // TODO: update workload primary xds key to network/UID instead of network/IP
+        // once workload supports multiple addresses for dual stack
         let (network_or_namespace, ip_or_hostname) = parts.unwrap();
 
         // TODO: add support for namespace/hostname. For now we assume network/IP
         use std::str::FromStr;
-        let ip: IpAddr = match IpAddr::from_str(ip_or_hostname) {
+        let maybe_ip: Option<IpAddr> = match IpAddr::from_str(ip_or_hostname) {
             Err(e) => {
-                error!(
-                    "received invalid resource removal {}, ignoring: {}",
-                    ip_or_hostname, e
+                trace!(
+                    "cannot parse xds name suffix as an IP {}, treating as hostname: {}",
+                    ip_or_hostname,
+                    e
                 );
-                return;
+                None
             }
-            Ok(i) => i,
+            Ok(i) => Some(i),
         };
 
-        if let Some(prev) = self
-            .workloads
-            .remove(&network_addr(network_or_namespace, ip))
-        {
+        if let Some(ip) = maybe_ip {
+            self.remove_workload(network_or_namespace, ip);
+        } else {
+            self.remove_service(network_or_namespace, ip_or_hostname);
+        }
+    }
+
+    fn remove_workload(&mut self, network: &str, ip: IpAddr) {
+        if let Some(prev) = self.workloads.remove(&network_addr(network, ip)) {
             if let Some(vips) = self
                 .workload_to_vip
                 .remove(&network_addr(&prev.network, prev.workload_ip))
@@ -1088,12 +1170,29 @@ impl WorkloadStore {
                     if let Some(wls) = self.vips.get_mut(&network_addr(&prev.network, vip)) {
                         wls.endpoints
                             .remove(&network_addr(&prev.network, prev.workload_ip));
+                        // also update the copy of the service that was indexed by hostname
+                        self.vips_by_hostname
+                            .get_mut(&NamespacedHostname {
+                                namespace: wls.namespace.to_owned(),
+                                hostname: wls.hostname.to_owned(),
+                            })
+                            .unwrap()
+                            .endpoints
+                            .remove(&network_addr(&prev.network, prev.workload_ip));
                     }
                 }
             }
         }
+    }
 
-        if let Some(prev) = self.vips.remove(&network_addr(network_or_namespace, ip)) {
+    fn remove_service(&mut self, namespace: &str, hostname: &str) {
+        if let Some(prev) = self.vips_by_hostname.remove(&NamespacedHostname {
+            namespace: namespace.to_owned(),
+            hostname: hostname.to_owned(),
+        }) {
+            prev.addresses.iter().for_each(|addr| {
+                self.vips.remove(addr);
+            });
             for (ep_ip, _) in prev.endpoints {
                 self.workload_to_vip.remove(&ep_ip);
                 for network_addr in &prev.addresses {
@@ -1187,6 +1286,7 @@ pub enum WorkloadError {
 mod tests {
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::str::FromStr;
 
     use bytes::Bytes;
 
@@ -1284,6 +1384,7 @@ mod tests {
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
         assert_eq!((wi.vips.len()), 0);
+        assert_eq!((wi.vips_by_hostname.len()), 0);
         assert_eq!((wi.staged_vips.len()), 0);
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
@@ -1367,6 +1468,22 @@ mod tests {
         })
         .unwrap();
         assert_eq!((wi.staged_vips.len()), 0);
+        assert_eq!((wi.vips.len()), 1);
+        assert_eq!((wi.vips_by_hostname.len()), 1);
+        assert_eq!(
+            (wi.vips_by_hostname
+                .get(&NamespacedHostname {
+                    namespace: "ns".to_string(),
+                    hostname: "svc1.ns.svc.cluster.local".to_string()
+                })
+                .unwrap(),),
+            (wi.vips
+                .get(&NetworkAddress {
+                    network: "".to_string(),
+                    address: IpAddr::from_str("127.0.1.1").unwrap()
+                })
+                .unwrap(),),
+        );
 
         wi.insert_xds_workload(XdsWorkload {
             address: xds_ip2.clone(),
@@ -1421,8 +1538,9 @@ mod tests {
         assert_vips(&wi, vec![]);
 
         // Remove the VIP entirely
-        wi.remove("/127.0.1.1".to_string());
+        wi.remove("ns/svc1.ns.svc.cluster.local".to_string());
         assert_eq!(wi.vips.len(), 0);
+        assert_eq!((wi.vips_by_hostname.len()), 0);
     }
 
     #[test]
