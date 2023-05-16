@@ -44,7 +44,7 @@ use crate::metrics::Metrics;
 use crate::rbac::{Authorization, RbacScope};
 use crate::workload::address::Address;
 use crate::workload::WorkloadError::EnumParse;
-use crate::xds::istio::workload::PortList;
+use crate::xds::istio::workload::{Port, PortList};
 use crate::xds::{AdsClient, Demander, RejectedConfig, XdsUpdate};
 use crate::{config, rbac, readiness, xds};
 
@@ -248,6 +248,20 @@ impl From<&PortList> for HashMap<u16, u16> {
             .iter()
             .map(|p| (p.service_port as u16, p.target_port as u16))
             .collect()
+    }
+}
+
+impl From<HashMap<u16, u16>> for PortList {
+    fn from(value: HashMap<u16, u16>) -> Self {
+        PortList {
+            ports: value
+                .iter()
+                .map(|(k, v)| Port {
+                    service_port: *k as u32,
+                    target_port: *v as u32,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -525,7 +539,12 @@ impl LocalClient {
                 "inserting local workloads {wip} ({}/{})",
                 &wl.workload.namespace, &wl.workload.name
             );
-            wli.insert_workload(wl.workload);
+            let vips = wl
+                .vips
+                .into_iter()
+                .map(|(k, v)| (k, PortList::from(v)))
+                .collect();
+            wli.insert_workload(wl.workload, vips)?;
         }
         for rbac in r.policies {
             wli.insert_authorization(rbac);
@@ -729,6 +748,7 @@ pub struct Service {
     pub hostname: String,
     pub addresses: Vec<NetworkAddress>,
     pub ports: HashMap<u16, u16>,
+    #[serde(default)]
     pub endpoints: HashMap<NetworkAddress, Endpoint>,
 }
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
@@ -954,66 +974,11 @@ impl WorkloadStore {
 
     fn insert_xds_workload(&mut self, w: XdsWorkload) -> anyhow::Result<()> {
         let workload = Workload::try_from(&w)?;
-        let wip = network_addr(&workload.network, workload.workload_ip);
-        // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
-        // under a lock, so there is no race here.
-        self.remove(wip.to_string());
-        let widentity = workload.identity();
-        let status = workload.status;
-        self.insert_workload(workload.clone());
-        // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
-        // include them in load balancing we do to Services.
-        if status == HealthStatus::Healthy {
-            for (network_vip, pl) in &w.virtual_ips {
-                let parts = network_vip.split_once('/');
-                let vip = match parts.is_some() {
-                    true => parts.unwrap().1,
-                    false => network_vip,
-                };
-                let svc_network = match parts.is_some() {
-                    true => parts.unwrap().0,
-                    false => &workload.network,
-                };
-
-                let vip = vip.parse::<IpAddr>()?;
-                let network_vip = network_addr(svc_network, vip);
-                let ep = Endpoint {
-                    address: wip.clone(),
-                    port: pl.into(),
-                };
-                if let Some(svc) = self.vips.get_mut(&network_vip) {
-                    svc.endpoints.insert(ep.address.clone(), ep.clone());
-                    // also update the copy of the service that was indexed by hostname
-                    self.vips_by_hostname
-                        .get_mut(&NamespacedHostname {
-                            namespace: svc.namespace.to_owned(),
-                            hostname: svc.hostname.to_owned(),
-                        })
-                        .unwrap()
-                        .endpoints
-                        .insert(ep.address.clone(), ep.clone());
-                    self.workload_to_vip
-                        .entry(wip.clone())
-                        .or_default()
-                        .insert(network_vip);
-                } else {
-                    // Can happen due to ordering issues
-                    trace!("pod has VIP {vip}, but VIP not found");
-                    self.staged_vips
-                        .entry(network_vip.to_owned())
-                        .or_default()
-                        .insert(wip.clone(), ep.clone());
-                    self.workload_to_vip
-                        .entry(wip.clone())
-                        .or_default()
-                        .insert(network_vip);
-                }
-            }
-        }
+        self.insert_workload(workload.clone(), w.virtual_ips)?;
 
         if self.proxy_mode == ProxyMode::Shared && Some(&w.node) == self.local_node.as_ref() {
             if let Some(tx) = self.cert_tx.as_mut() {
-                if let Err(e) = tx.try_send(widentity) {
+                if let Err(e) = tx.try_send(workload.identity()) {
                     info!("couldn't prefetch: {:?}", e)
                 }
             }
@@ -1066,9 +1031,69 @@ impl WorkloadStore {
         }
     }
 
-    fn insert_workload(&mut self, w: Workload) {
+    fn insert_workload(
+        &mut self,
+        w: Workload,
+        vips: HashMap<String, PortList>,
+    ) -> anyhow::Result<()> {
+        let wip = network_addr(&w.network, w.workload_ip);
+        // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
+        // under a lock, so there is no race here.
+        self.remove(wip.to_string());
+        let status = w.status;
+        // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
+        // include them in load balancing we do to Services.
+        if status == HealthStatus::Healthy {
+            for (network_vip, pl) in &vips {
+                let parts = network_vip.split_once('/');
+                let vip = match parts.is_some() {
+                    true => parts.unwrap().1,
+                    false => network_vip,
+                };
+                let svc_network = match parts.is_some() {
+                    true => parts.unwrap().0,
+                    false => &w.network,
+                };
+
+                let vip = vip.parse::<IpAddr>()?;
+                let network_vip = network_addr(svc_network, vip);
+                let ep = Endpoint {
+                    address: wip.clone(),
+                    port: pl.into(),
+                };
+                if let Some(svc) = self.vips.get_mut(&network_vip) {
+                    svc.endpoints.insert(ep.address.clone(), ep.clone());
+                    // also update the copy of the service that was indexed by hostname
+                    self.vips_by_hostname
+                        .get_mut(&NamespacedHostname {
+                            namespace: svc.namespace.to_owned(),
+                            hostname: svc.hostname.to_owned(),
+                        })
+                        .unwrap()
+                        .endpoints
+                        .insert(ep.address.clone(), ep.clone());
+                    self.workload_to_vip
+                        .entry(wip.clone())
+                        .or_default()
+                        .insert(network_vip);
+                } else {
+                    // Can happen due to ordering issues
+                    trace!("pod has VIP {vip}, but VIP not found");
+                    self.staged_vips
+                        .entry(network_vip.to_owned())
+                        .or_default()
+                        .insert(wip.clone(), ep.clone());
+                    self.workload_to_vip
+                        .entry(wip.clone())
+                        .or_default()
+                        .insert(network_vip);
+                }
+            }
+        }
+
         self.workloads
             .insert(network_addr(&w.network, w.workload_ip), w);
+        Ok(())
     }
 
     fn insert_svc(&mut self, mut svc: Service) {
