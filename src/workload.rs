@@ -759,7 +759,7 @@ impl<'de> Deserialize<'de> for NamespacedHostname {
             type Value = NamespacedHostname;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("string for NamespacedHostname with format ns/hostname")
+                formatter.write_str("string for NamespacedHostname with format namespace/hostname")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<NamespacedHostname, E>
@@ -1085,40 +1085,25 @@ impl WorkloadStore {
                     svc.endpoints.insert(wip.clone(), ep);
                 }
             }
+            // if svc already exists, add old endpoints to new svc
+            if let Some(prev) = self.vips.get_mut(network_addr) {
+                for (wip, ep) in &prev.endpoints {
+                    svc.endpoints.insert(wip.clone(), ep.clone());
+                }
+            }
         }
 
         // now persist copies of the service to our persisted map, passing ownership to the map
         for network_addr in svc.addresses.as_slice() {
-            // if svc already exists, just add new endpoints to existing svc
-            if let Some(prev) = self.vips.get_mut(network_addr) {
-                for (wip, ep) in &svc.endpoints {
-                    prev.endpoints.insert(wip.clone(), ep.clone());
-                    // also update the copy of the service that was indexed by hostname
-                    self.vips_by_hostname
-                        .get_mut(&NamespacedHostname {
-                            namespace: svc.clone().namespace.to_string(),
-                            hostname: svc.clone().hostname.to_string(),
-                        })
-                        .unwrap()
-                        .endpoints
-                        .insert(ep.address.clone(), ep.clone());
-                    self.workload_to_vip
-                        .entry(wip.clone())
-                        .or_default()
-                        .insert(network_addr.clone());
-                }
-            } else {
-                // svc is new, add it as is
-                self.vips.insert(network_addr.clone(), svc.clone());
-                self.vips_by_hostname.insert(
-                    NamespacedHostname {
-                        namespace: svc.clone().namespace.to_string(),
-                        hostname: svc.clone().hostname.to_string(),
-                    },
-                    svc.clone(),
-                );
-            }
+            self.vips.insert(network_addr.clone(), svc.clone());
         }
+        self.vips_by_hostname.insert(
+            NamespacedHostname {
+                namespace: svc.clone().namespace,
+                hostname: svc.clone().hostname,
+            },
+            svc.clone(),
+        );
     }
 
     fn remove(&mut self, xds_name: String) {
@@ -1452,6 +1437,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!((wi.staged_vips.len()), 1);
+
         wi.insert_xds_service(XdsService {
             name: "svc1".to_string(),
             namespace: "ns".to_string(),
@@ -1470,6 +1456,33 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0);
         assert_eq!((wi.vips.len()), 1);
         assert_eq!((wi.vips_by_hostname.len()), 1);
+
+        // upsert the service to ensure the old endpoints (no longer staged) are carried over
+        wi.insert_xds_service(XdsService {
+            name: "svc1".to_string(),
+            namespace: "ns".to_string(),
+            hostname: "svc1.ns.svc.cluster.local".to_string(),
+            addresses: vec![
+                XdsNetworkAddress {
+                    network: "".to_string(),
+                    address: [127, 0, 1, 1].to_vec(), // old address should be carried over
+                },
+                XdsNetworkAddress {
+                    network: "".to_string(),
+                    address: [127, 0, 1, 2].to_vec(), // new address to test upsert
+                },
+            ],
+            ports: vec![XdsPort {
+                service_port: 80,
+                target_port: 80,
+            }],
+            subject_alt_names: vec![],
+        })
+        .unwrap();
+
+        // we need to ensure both copies of the service stored are the same.
+        // this is important because we mutate the endpoints on a service in place
+        // when we upsert a service (we grab any old endpoints and combine with staged ones)
         assert_eq!(
             (wi.vips_by_hostname
                 .get(&NamespacedHostname {
@@ -1494,8 +1507,45 @@ mod tests {
         .unwrap();
         assert_eq!((wi.staged_vips.len()), 0); // vip already in a service, should not be staged
 
+        // we need to ensure both copies of the service stored are the same.
+        // this is important because we mutate the service endpoints in place
+        // when workloads arrive later than the service
+        assert_eq!(
+            (wi.vips_by_hostname
+                .get(&NamespacedHostname {
+                    namespace: "ns".to_string(),
+                    hostname: "svc1.ns.svc.cluster.local".to_string()
+                })
+                .unwrap(),),
+            (wi.vips
+                .get(&NetworkAddress {
+                    network: "".to_string(),
+                    address: IpAddr::from_str("127.0.1.1").unwrap()
+                })
+                .unwrap(),),
+        );
+
         assert_vips(&wi, vec!["some name", "some name2"]);
         wi.remove("/127.0.0.2".to_string());
+
+        // we need to ensure both copies of the service stored are the same.
+        // this is important because we mutate the service endpoints in place
+        // when workloads it selects are removed
+        assert_eq!(
+            (wi.vips_by_hostname
+                .get(&NamespacedHostname {
+                    namespace: "ns".to_string(),
+                    hostname: "svc1.ns.svc.cluster.local".to_string()
+                })
+                .unwrap(),),
+            (wi.vips
+                .get(&NetworkAddress {
+                    network: "".to_string(),
+                    address: IpAddr::from_str("127.0.1.1").unwrap()
+                })
+                .unwrap(),),
+        );
+
         assert_vips(&wi, vec!["some name"]);
         wi.remove("/127.0.0.1".to_string());
         assert_vips(&wi, vec![]);
