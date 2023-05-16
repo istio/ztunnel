@@ -889,7 +889,7 @@ impl TryFrom<&XdsService> for Service {
 pub struct WorkloadStore {
     workloads: HashMap<NetworkAddress, Workload>,
     /// workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
-    workload_to_vip: HashMap<NetworkAddress, HashSet<IpAddr>>,
+    workload_to_vip: HashMap<NetworkAddress, HashSet<NetworkAddress>>,
     /// vips allows for lookup of services by network address, the service's xds secondary key
     vips: HashMap<NetworkAddress, Service>,
     /// vips_by_hostname allows for lookup of services by namespaced hostname, the service's xds primary key
@@ -976,11 +976,12 @@ impl WorkloadStore {
                 };
 
                 let vip = vip.parse::<IpAddr>()?;
+                let network_vip = network_addr(svc_network, vip);
                 let ep = Endpoint {
                     address: wip.clone(),
                     port: pl.into(),
                 };
-                if let Some(svc) = self.vips.get_mut(&network_addr(svc_network, vip)) {
+                if let Some(svc) = self.vips.get_mut(&network_vip) {
                     svc.endpoints.insert(ep.address.clone(), ep.clone());
                     // also update the copy of the service that was indexed by hostname
                     self.vips_by_hostname
@@ -994,18 +995,18 @@ impl WorkloadStore {
                     self.workload_to_vip
                         .entry(wip.clone())
                         .or_default()
-                        .insert(vip);
+                        .insert(network_vip);
                 } else {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
                     self.staged_vips
-                        .entry(network_addr(svc_network, vip))
+                        .entry(network_vip.to_owned())
                         .or_default()
                         .insert(wip.clone(), ep.clone());
                     self.workload_to_vip
                         .entry(wip.clone())
                         .or_default()
-                        .insert(vip);
+                        .insert(network_vip);
                 }
             }
         }
@@ -1080,7 +1081,7 @@ impl WorkloadStore {
                     self.workload_to_vip
                         .entry(wip.clone())
                         .or_default()
-                        .insert(network_addr.address);
+                        .insert(network_addr.clone());
                     svc.endpoints.insert(wip.clone(), ep);
                 }
             }
@@ -1104,7 +1105,7 @@ impl WorkloadStore {
                     self.workload_to_vip
                         .entry(wip.clone())
                         .or_default()
-                        .insert(network_addr.address);
+                        .insert(network_addr.clone());
                 }
             } else {
                 // svc is new, add it as is
@@ -1132,7 +1133,6 @@ impl WorkloadStore {
         // once workload supports multiple addresses for dual stack
         let (network_or_namespace, ip_or_hostname) = parts.unwrap();
 
-        // TODO: add support for namespace/hostname. For now we assume network/IP
         use std::str::FromStr;
         let maybe_ip: Option<IpAddr> = match IpAddr::from_str(ip_or_hostname) {
             Err(e) => {
@@ -1161,13 +1161,13 @@ impl WorkloadStore {
             {
                 for vip in vips {
                     self.staged_vips
-                        .entry(network_addr(&prev.network, vip))
+                        .entry(vip.to_owned())
                         .or_default()
                         .remove(&network_addr(&prev.network, prev.workload_ip));
-                    if self.staged_vips[&network_addr(&prev.network, vip)].is_empty() {
-                        self.staged_vips.remove(&network_addr(&prev.network, vip));
+                    if self.staged_vips[&vip].is_empty() {
+                        self.staged_vips.remove(&vip);
                     }
-                    if let Some(wls) = self.vips.get_mut(&network_addr(&prev.network, vip)) {
+                    if let Some(wls) = self.vips.get_mut(&vip) {
                         wls.endpoints
                             .remove(&network_addr(&prev.network, prev.workload_ip));
                         // also update the copy of the service that was indexed by hostname
