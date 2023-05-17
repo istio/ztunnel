@@ -908,8 +908,9 @@ impl TryFrom<&XdsService> for Service {
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
     workloads: HashMap<NetworkAddress, Workload>,
-    /// workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
-    workload_to_vip: HashMap<NetworkAddress, HashSet<NetworkAddress>>,
+    /// workload_to_vips maintains a mapping of workload IP to VIP. This is used only to handle removal of service
+    /// endpoints when a workload is removed.
+    workload_to_vips: HashMap<NetworkAddress, HashSet<NetworkAddress>>,
     /// vips allows for lookup of services by network address, the service's xds secondary key.
     /// this map stores the same services as `vips_by_hostname` so we can mutate the services in both maps
     /// at once when a service is updated or workload updates affect a service's endpoints.
@@ -1065,15 +1066,15 @@ impl WorkloadStore {
                     address: wip.clone(),
                     port: pl.into(),
                 };
+                self.workload_to_vips
+                    .entry(wip.clone())
+                    .or_default()
+                    .insert(network_vip.clone());
                 if let Some(svc) = self.vips.get_mut(&network_vip) {
                     svc.write()
                         .unwrap()
                         .endpoints
                         .insert(ep.address.clone(), ep.clone());
-                    self.workload_to_vip
-                        .entry(wip.clone())
-                        .or_default()
-                        .insert(network_vip);
                 } else {
                     // Can happen due to ordering issues
                     trace!("pod has VIP {vip}, but VIP not found");
@@ -1081,10 +1082,6 @@ impl WorkloadStore {
                         .entry(network_vip.to_owned())
                         .or_default()
                         .insert(wip.clone(), ep.clone());
-                    self.workload_to_vip
-                        .entry(wip.clone())
-                        .or_default()
-                        .insert(network_vip);
                 }
             }
         }
@@ -1101,10 +1098,6 @@ impl WorkloadStore {
             // we should add those workloads to the vips map now
             if let Some(wips_to_endpoints) = self.staged_vips.remove(network_addr) {
                 for (wip, ep) in wips_to_endpoints {
-                    self.workload_to_vip
-                        .entry(wip.clone())
-                        .or_default()
-                        .insert(network_addr.clone());
                     svc.endpoints.insert(wip.clone(), ep);
                 }
             }
@@ -1166,7 +1159,7 @@ impl WorkloadStore {
     fn remove_workload(&mut self, network: &str, ip: IpAddr) {
         if let Some(prev) = self.workloads.remove(&network_addr(network, ip)) {
             if let Some(vips) = self
-                .workload_to_vip
+                .workload_to_vips
                 .remove(&network_addr(&prev.network, prev.workload_ip))
             {
                 for vip in vips {
@@ -1198,7 +1191,7 @@ impl WorkloadStore {
                 self.vips.remove(addr);
             });
             for (ep_ip, _) in prev.endpoints.iter() {
-                self.workload_to_vip.remove(ep_ip);
+                self.workload_to_vips.remove(ep_ip);
                 for network_addr in &prev.addresses {
                     self.staged_vips
                         .entry(network_addr.clone())
