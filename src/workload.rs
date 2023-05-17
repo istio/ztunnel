@@ -18,7 +18,7 @@ use std::convert::Into;
 use std::default::Default;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::{fmt, net};
 
 use rand::prelude::IteratorRandom;
@@ -725,7 +725,7 @@ impl WorkloadInformation {
             None => {
                 // 2. handle service
                 if let Some(svc) = wi.vips.get(network_addr).cloned() {
-                    return Some(Address::Service(Box::new(svc)));
+                    return Some(Address::Service(Box::new(svc.read().unwrap().clone())));
                 }
                 None
             }
@@ -910,10 +910,14 @@ pub struct WorkloadStore {
     workloads: HashMap<NetworkAddress, Workload>,
     /// workload_to_vip maintains a mapping of workload IP to VIP. This is used only to handle removals.
     workload_to_vip: HashMap<NetworkAddress, HashSet<NetworkAddress>>,
-    /// vips allows for lookup of services by network address, the service's xds secondary key
-    vips: HashMap<NetworkAddress, Service>,
-    /// vips_by_hostname allows for lookup of services by namespaced hostname, the service's xds primary key
-    vips_by_hostname: HashMap<NamespacedHostname, Service>,
+    /// vips allows for lookup of services by network address, the service's xds secondary key.
+    /// this map stores the same services as `vips_by_hostname` so we can mutate the services in both maps
+    /// at once when a service is updated or workload updates affect a service's endpoints.
+    vips: HashMap<NetworkAddress, Arc<RwLock<Service>>>,
+    /// vips_by_hostname allows for lookup of services by namespaced hostname, the service's xds primary key.
+    /// this map stores the same services as `vips` so we can mutate the services in both maps
+    /// at once when a service is updated or workload updates affect a service's endpoints.
+    vips_by_hostname: HashMap<NamespacedHostname, Arc<RwLock<Service>>>,
     /// staged_vips maintains a mapping of service IP -> (workload IP -> Endpoint)
     /// this is used to handle ordering issues if workloads with VIPs are received before services.
     staged_vips: HashMap<NetworkAddress, HashMap<NetworkAddress, Endpoint>>,
@@ -1062,13 +1066,7 @@ impl WorkloadStore {
                     port: pl.into(),
                 };
                 if let Some(svc) = self.vips.get_mut(&network_vip) {
-                    svc.endpoints.insert(ep.address.clone(), ep.clone());
-                    // also update the copy of the service that was indexed by hostname
-                    self.vips_by_hostname
-                        .get_mut(&NamespacedHostname {
-                            namespace: svc.namespace.to_owned(),
-                            hostname: svc.hostname.to_owned(),
-                        })
+                    svc.write()
                         .unwrap()
                         .endpoints
                         .insert(ep.address.clone(), ep.clone());
@@ -1112,22 +1110,24 @@ impl WorkloadStore {
             }
             // if svc already exists, add old endpoints to new svc
             if let Some(prev) = self.vips.get_mut(network_addr) {
-                for (wip, ep) in &prev.endpoints {
+                let prev = prev.read().unwrap();
+                for (wip, ep) in prev.endpoints.iter() {
                     svc.endpoints.insert(wip.clone(), ep.clone());
                 }
             }
         }
 
-        // now persist copies of the service to our persisted map, passing ownership to the map
+        // persist the same service to both internal maps to key on network/IP and namespace/hostname
+        let svc_arc = Arc::new(RwLock::new(svc.clone()));
         for network_addr in svc.addresses.as_slice() {
-            self.vips.insert(network_addr.clone(), svc.clone());
+            self.vips.insert(network_addr.clone(), svc_arc.clone());
         }
         self.vips_by_hostname.insert(
             NamespacedHostname {
                 namespace: svc.clone().namespace,
                 hostname: svc.clone().hostname,
             },
-            svc.clone(),
+            svc_arc,
         );
     }
 
@@ -1178,14 +1178,7 @@ impl WorkloadStore {
                         self.staged_vips.remove(&vip);
                     }
                     if let Some(wls) = self.vips.get_mut(&vip) {
-                        wls.endpoints
-                            .remove(&network_addr(&prev.network, prev.workload_ip));
-                        // also update the copy of the service that was indexed by hostname
-                        self.vips_by_hostname
-                            .get_mut(&NamespacedHostname {
-                                namespace: wls.namespace.to_owned(),
-                                hostname: wls.hostname.to_owned(),
-                            })
+                        wls.write()
                             .unwrap()
                             .endpoints
                             .remove(&network_addr(&prev.network, prev.workload_ip));
@@ -1200,16 +1193,17 @@ impl WorkloadStore {
             namespace: namespace.to_owned(),
             hostname: hostname.to_owned(),
         }) {
+            let prev = prev.read().unwrap();
             prev.addresses.iter().for_each(|addr| {
                 self.vips.remove(addr);
             });
-            for (ep_ip, _) in prev.endpoints {
-                self.workload_to_vip.remove(&ep_ip);
+            for (ep_ip, _) in prev.endpoints.iter() {
+                self.workload_to_vip.remove(ep_ip);
                 for network_addr in &prev.addresses {
                     self.staged_vips
                         .entry(network_addr.clone())
                         .or_default()
-                        .remove(&ep_ip);
+                        .remove(ep_ip);
                     if self.staged_vips[network_addr].is_empty() {
                         self.staged_vips.remove(network_addr);
                     }
@@ -1224,6 +1218,7 @@ impl WorkloadStore {
 
     fn find_upstream(&self, network: &str, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
         if let Some(svc) = self.vips.get(&network_addr(network, addr.ip())) {
+            let svc = svc.read().unwrap().clone();
             let Some(target_port) = svc.ports.get(&addr.port()) else {
                 debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
                 return None
@@ -1514,13 +1509,19 @@ mod tests {
                     namespace: "ns".to_string(),
                     hostname: "svc1.ns.svc.cluster.local".to_string()
                 })
-                .unwrap(),),
+                .unwrap()
+                .read()
+                .unwrap()
+                .clone()),
             (wi.vips
                 .get(&NetworkAddress {
                     network: "".to_string(),
                     address: IpAddr::from_str("127.0.1.1").unwrap()
                 })
-                .unwrap(),),
+                .unwrap()
+                .read()
+                .unwrap()
+                .clone()),
         );
 
         wi.insert_xds_workload(XdsWorkload {
@@ -1541,13 +1542,19 @@ mod tests {
                     namespace: "ns".to_string(),
                     hostname: "svc1.ns.svc.cluster.local".to_string()
                 })
-                .unwrap(),),
+                .unwrap()
+                .read()
+                .unwrap()
+                .clone()),
             (wi.vips
                 .get(&NetworkAddress {
                     network: "".to_string(),
                     address: IpAddr::from_str("127.0.1.1").unwrap()
                 })
-                .unwrap(),),
+                .unwrap()
+                .read()
+                .unwrap()
+                .clone()),
         );
 
         assert_vips(&wi, vec!["some name", "some name2"]);
@@ -1562,13 +1569,19 @@ mod tests {
                     namespace: "ns".to_string(),
                     hostname: "svc1.ns.svc.cluster.local".to_string()
                 })
-                .unwrap(),),
+                .unwrap()
+                .read()
+                .unwrap()
+                .clone()),
             (wi.vips
                 .get(&NetworkAddress {
                     network: "".to_string(),
                     address: IpAddr::from_str("127.0.1.1").unwrap()
                 })
-                .unwrap(),),
+                .unwrap()
+                .read()
+                .unwrap()
+                .clone()),
         );
 
         assert_vips(&wi, vec!["some name"]);
