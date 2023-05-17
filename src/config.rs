@@ -37,7 +37,6 @@ const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
 const CA_ADDRESS: &str = "CA_ADDRESS";
-const TERMINATION_GRACE_PERIOD: &str = "TERMINATION_GRACE_PERIOD";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
@@ -47,7 +46,7 @@ const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
-const DEFAULT_DRAIN_DURATION: Duration = Duration::from_secs(5);
+const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
@@ -132,7 +131,9 @@ pub struct Config {
     pub fake_ca: bool,
     #[serde(skip_serializing)]
     pub auth: identity::AuthSource,
-    pub termination_grace_period: time::Duration,
+    // How long ztunnel should wait for in-flight requesthandlers to finish processing
+    // before giving up when ztunnel is self-terminating (when instructed via the Admin API)
+    pub self_termination_deadline: time::Duration,
 
     pub proxy_metadata: HashMap<String, String>,
 
@@ -252,10 +253,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
 
-        termination_grace_period: parse(TERMINATION_GRACE_PERIOD)?
-            .map(|gd: GoDuration| gd.0)
-            .or(pc.termination_drain_duration)
-            .unwrap_or(DEFAULT_DRAIN_DURATION),
+        self_termination_deadline: DEFAULT_SELFTERM_DEADLINE,
 
         // admin API should only be accessible over localhost
         // todo: bind to both v4 localhost and v6
