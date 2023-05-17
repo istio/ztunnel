@@ -91,7 +91,7 @@ message Workload {
   // Each workload must have at least either an address or hostname; not both.
   // TODO: support dual stack by making this repeated
   // TODO: when this is repeated, update xds primary key from network/IP to network/UID
-  bytes address = 3;
+  repeated bytes addresses = 3;
 
   // The hostname for the workload to be resolved by the ztunnel.
   // DNS queries are sent on-demand by default.

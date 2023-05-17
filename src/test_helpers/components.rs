@@ -233,12 +233,12 @@ impl<'a> TestWorkloadBuilder<'a> {
             .manager
             .namespaces
             .child(&self.w.workload.node, &self.w.workload.name)?;
-        self.w.workload.workload_ip = network_namespace.ip();
+        self.w.workload.workload_ips[0] = network_namespace.ip(); // TODO(kdorosh)
 
         for (vip, ports) in &self.w.vips {
             let ep_network_addr = NetworkAddress {
                 network: "".to_string(),
-                address: self.w.workload.workload_ip,
+                address: self.w.workload.workload_ips[0], // TODO(kdorosh)
             };
             let ep = Endpoint {
                 address: ep_network_addr.clone(),
@@ -272,7 +272,9 @@ impl<'a> TestWorkloadBuilder<'a> {
 
         info!(
             "registered {}/{} at {}",
-            self.w.workload.namespace, self.w.workload.name, self.w.workload.workload_ip
+            self.w.workload.namespace,
+            self.w.workload.name,
+            self.w.workload.workload_ips[0] // TODO(kdorosh)
         );
         self.manager.workloads.push(self.w);
         if self.captured {

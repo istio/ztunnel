@@ -384,7 +384,7 @@ impl OutboundConnection {
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
                 let wp_socket_addr =
-                    SocketAddr::new(waypoint_workload.workload_ip, waypoint_us.port);
+                    SocketAddr::new(choose_workload_ip(&waypoint_workload)?, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
@@ -419,7 +419,7 @@ impl OutboundConnection {
             return Ok(Request {
                 protocol: Protocol::HBONE,
                 source: source_workload,
-                destination: SocketAddr::from((us.workload.workload_ip, us.port)),
+                destination: SocketAddr::from((choose_workload_ip(&us.workload)?, us.port)),
                 destination_workload: Some(us.workload.clone()),
                 expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
@@ -439,7 +439,7 @@ impl OutboundConnection {
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
-            destination: SocketAddr::from((us.workload.workload_ip, us.port)),
+            destination: SocketAddr::from((choose_workload_ip(&us.workload)?, us.port)),
             destination_workload: Some(us.workload.clone()),
             expected_identity: Some(us.workload.identity()),
             gateway: us
@@ -460,6 +460,19 @@ fn baggage(r: &Request, cluster: String) -> String {
             name = r.source.canonical_name,
             version = r.source.canonical_revision,
     )
+}
+use rand::seq::SliceRandom;
+
+// TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
+// if/when we support that, this function may need to move to get access to the necessary metadata.
+fn choose_workload_ip(workload: &Workload) -> Result<IpAddr, Error> {
+    // Randomly pick an IP
+    // TODO: do this more efficiently, and not just randomly
+    let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
+        debug!("workload {} has no suitable workload IPs for routing", workload.name);
+        return Err(Error::NoValidDestination(Box::new(workload.to_owned())))
+    };
+    Ok(*ip)
 }
 
 #[derive(Debug)]
@@ -534,14 +547,14 @@ mod tests {
         let source = XdsWorkload {
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),
-            address: Bytes::copy_from_slice(&[127, 0, 0, 1]),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
             node: "local-node".to_string(),
             ..Default::default()
         };
         let waypoint = XdsWorkload {
             name: "waypoint-workload".to_string(),
             namespace: "ns".to_string(),
-            address: Bytes::copy_from_slice(&[127, 0, 0, 10]),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
             node: "local-node".to_string(),
             ..Default::default()
         };
@@ -588,7 +601,7 @@ mod tests {
             "127.0.0.1",
             "1.2.3.4:80",
             XdsWorkload {
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 ..Default::default()
             },
             Some(ExpectedRequest {
@@ -609,7 +622,7 @@ mod tests {
             XdsWorkload {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 tunnel_protocol: XdsProtocol::None as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
@@ -632,7 +645,7 @@ mod tests {
             XdsWorkload {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
@@ -655,7 +668,7 @@ mod tests {
             XdsWorkload {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 tunnel_protocol: XdsProtocol::None as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
@@ -678,7 +691,7 @@ mod tests {
             XdsWorkload {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
@@ -699,7 +712,7 @@ mod tests {
             "1.2.3.4",
             "127.0.0.2:80",
             XdsWorkload {
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 ..Default::default()
             },
             None,
@@ -713,7 +726,7 @@ mod tests {
             "127.0.0.2",
             "127.0.0.1:80",
             XdsWorkload {
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
                         XdsNetworkAddress {
@@ -741,7 +754,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
-                address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
                         XdsNetworkAddress {

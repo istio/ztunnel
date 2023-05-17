@@ -93,7 +93,7 @@ pub const TEST_VIP: &str = "127.10.0.1";
 
 pub fn test_default_workload() -> Workload {
     Workload {
-        workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        workload_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         waypoint: None,
         network_gateway: None,
         gateway_address: None,
@@ -121,7 +121,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
     let mut res: Vec<LocalWorkload> = vec![
         LocalWorkload {
             workload: Workload {
-                workload_ip: TEST_WORKLOAD_HBONE.parse()?,
+                workload_ips: vec![TEST_WORKLOAD_HBONE.parse()?],
                 protocol: HBONE,
                 name: "local-hbone".to_string(),
                 namespace: "default".to_string(),
@@ -133,7 +133,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
         },
         LocalWorkload {
             workload: Workload {
-                workload_ip: TEST_WORKLOAD_TCP.parse()?,
+                workload_ips: vec![TEST_WORKLOAD_TCP.parse()?],
                 protocol: TCP,
                 name: "local-tcp".to_string(),
                 namespace: "default".to_string(),
@@ -145,7 +145,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
         },
         LocalWorkload {
             workload: Workload {
-                workload_ip: TEST_WORKLOAD_SOURCE.parse()?,
+                workload_ips: vec![TEST_WORKLOAD_SOURCE.parse()?],
                 protocol: TCP,
                 name: "local-source".to_string(),
                 namespace: "default".to_string(),
@@ -159,7 +159,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
     if let Some(waypoint_ip) = waypoint_ip {
         res.push(LocalWorkload {
             workload: Workload {
-                workload_ip: TEST_WORKLOAD_WAYPOINT.parse()?,
+                workload_ips: vec![TEST_WORKLOAD_WAYPOINT.parse()?],
                 protocol: HBONE,
                 name: "local-waypoint".to_string(),
                 namespace: "default".to_string(),

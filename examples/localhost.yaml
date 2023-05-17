@@ -4,7 +4,7 @@ workloads:
 - name: local
   namespace: default
   serviceAccount: default
-  workloadIp: "127.0.0.1"
+  workloadIps: ["127.0.0.1"]
   protocol: HBONE
   node: local
   network: ""
@@ -17,7 +17,7 @@ workloads:
 - name: local-tcp
   namespace: default
   serviceAccount: default
-  workloadIp: "127.0.0.2"
+  workloadIps: ["127.0.0.2"]
   protocol: TCP
   node: local
   network: ""
