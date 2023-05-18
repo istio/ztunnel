@@ -1159,49 +1159,48 @@ impl WorkloadStore {
     }
 
     fn remove_workload(&mut self, network: &str, ip: IpAddr) {
-        if let Some(prev) = self.workloads.remove(&network_addr(network, ip)) {
-            if let Some(vips) = self
-                .workload_to_vips
-                .remove(&network_addr(&prev.network, prev.workload_ip))
-            {
-                for vip in vips {
-                    self.staged_vips
-                        .entry(vip.to_owned())
-                        .or_default()
-                        .remove(&network_addr(&prev.network, prev.workload_ip));
-                    if self.staged_vips[&vip].is_empty() {
-                        self.staged_vips.remove(&vip);
-                    }
-                    if let Some(wls) = self.services_by_ip.get_mut(&vip) {
-                        wls.write()
-                            .unwrap()
-                            .endpoints
-                            .remove(&network_addr(&prev.network, prev.workload_ip));
-                    }
-                }
+        let Some(prev) = self.workloads.remove(&network_addr(network, ip)) else {
+            return;
+        };
+        let prev_addr = &network_addr(&prev.network, prev.workload_ip);
+        let Some(prev_vips) = self.workload_to_vips.remove(prev_addr) else {
+            return;
+        };
+        for vip in prev_vips.iter() {
+            self.staged_vips
+                .entry(vip.to_owned())
+                .or_default()
+                .remove(prev_addr);
+            if self.staged_vips[vip].is_empty() {
+                self.staged_vips.remove(vip);
+            }
+            if let Some(wls) = self.services_by_ip.get_mut(vip) {
+                wls.write().unwrap().endpoints.remove(prev_addr);
             }
         }
     }
 
     fn remove_service(&mut self, namespace: &str, hostname: &str) {
-        if let Some(prev) = self.services_by_hostname.remove(&NamespacedHostname {
+        let namespaced_hostname = &NamespacedHostname {
             namespace: namespace.to_owned(),
             hostname: hostname.to_owned(),
-        }) {
-            let prev = prev.read().unwrap();
-            prev.addresses.iter().for_each(|addr| {
-                self.services_by_ip.remove(addr);
-            });
-            for (ep_ip, _) in prev.endpoints.iter() {
-                self.workload_to_vips.remove(ep_ip);
-                for network_addr in &prev.addresses {
-                    self.staged_vips
-                        .entry(network_addr.clone())
-                        .or_default()
-                        .remove(ep_ip);
-                    if self.staged_vips[network_addr].is_empty() {
-                        self.staged_vips.remove(network_addr);
-                    }
+        };
+        let Some(prev) = self.services_by_hostname.remove(namespaced_hostname) else {
+            return;
+        };
+        let prev = prev.read().unwrap();
+        prev.addresses.iter().for_each(|addr| {
+            self.services_by_ip.remove(addr);
+        });
+        for (ep_ip, _) in prev.endpoints.iter() {
+            self.workload_to_vips.remove(ep_ip);
+            for network_addr in prev.addresses.iter() {
+                self.staged_vips
+                    .entry(network_addr.clone())
+                    .or_default()
+                    .remove(ep_ip);
+                if self.staged_vips[network_addr].is_empty() {
+                    self.staged_vips.remove(network_addr);
                 }
             }
         }
