@@ -1111,19 +1111,26 @@ impl WorkloadStore {
             }
         }
 
+        // clean up any old indexes to this service
+        let namespaced_hostname = &NamespacedHostname {
+            namespace: svc.namespace.to_owned(),
+            hostname: svc.hostname.to_owned(),
+        };
+        if let Some(removed) = self.services_by_hostname.remove(namespaced_hostname) {
+            let removed = removed.read().unwrap();
+            for nw_addr in removed.addresses.iter() {
+                self.services_by_ip.remove(nw_addr);
+            }
+        };
+
         // persist the same service to both internal maps to key on network/IP and namespace/hostname
         let svc_arc = Arc::new(RwLock::new(svc.clone()));
         for network_addr in svc.addresses.as_slice() {
             self.services_by_ip
                 .insert(network_addr.clone(), svc_arc.clone());
         }
-        self.services_by_hostname.insert(
-            NamespacedHostname {
-                namespace: svc.clone().namespace,
-                hostname: svc.clone().hostname,
-            },
-            svc_arc,
-        );
+        self.services_by_hostname
+            .insert(namespaced_hostname.to_owned(), svc_arc);
     }
 
     fn remove(&mut self, xds_name: String) {
@@ -1479,11 +1486,11 @@ mod tests {
             addresses: vec![
                 XdsNetworkAddress {
                     network: "".to_string(),
-                    address: [127, 0, 1, 1].to_vec(), // old address should be carried over
+                    address: [127, 0, 1, 1].to_vec(), // old endpoints associated with this address should be carried over
                 },
                 XdsNetworkAddress {
                     network: "".to_string(),
-                    address: [127, 0, 1, 2].to_vec(), // new address to test upsert
+                    address: [127, 0, 1, 2].to_vec(), // new address just to test upsert
                 },
             ],
             ports: vec![XdsPort {
@@ -1493,6 +1500,9 @@ mod tests {
             subject_alt_names: vec![],
         })
         .unwrap();
+
+        assert_eq!((wi.services_by_ip.len()), 2); // there are now two addresses on the same service
+        assert_eq!((wi.services_by_hostname.len()), 1); // there is still only one service
 
         // we need to ensure both copies of the service stored are the same.
         // this is important because we mutate the endpoints on a service in place
@@ -1517,6 +1527,30 @@ mod tests {
                 .unwrap()
                 .clone()),
         );
+
+        // ensure we updated the old service, no duplication
+        assert_eq!((wi.services_by_ip.len()), 2); // there are now two addresses on the same service
+        assert_eq!((wi.services_by_hostname.len()), 1); // there is still only one service
+
+        // upsert the service to remove an address and ensure services_by_ip map is properly cleaned up
+        wi.insert_xds_service(XdsService {
+            name: "svc1".to_string(),
+            namespace: "ns".to_string(),
+            hostname: "svc1.ns.svc.cluster.local".to_string(),
+            addresses: vec![XdsNetworkAddress {
+                network: "".to_string(),
+                address: [127, 0, 1, 1].to_vec(),
+            }],
+            ports: vec![XdsPort {
+                service_port: 80,
+                target_port: 80,
+            }],
+            subject_alt_names: vec![],
+        })
+        .unwrap();
+
+        assert_eq!((wi.services_by_ip.len()), 1); // we removed an address in upsert
+        assert_eq!((wi.services_by_hostname.len()), 1);
 
         wi.insert_xds_workload(XdsWorkload {
             address: xds_ip2.clone(),
