@@ -917,7 +917,7 @@ pub struct WorkloadStore {
     /// workloads is a map of workload network addresses to workloads
     workloads: HashMap<NetworkAddress, Arc<RwLock<Workload>>>,
     /// workloads is a map of workload UIDs to workloads
-    workloads_by_uid: HashMap<String, Workload>,
+    workloads_by_uid: HashMap<String, Arc<RwLock<Workload>>>,
     /// workload_to_vips maintains a mapping of workload IP to VIP. This is used only to handle removal of service
     /// endpoints when a workload is removed.
     workload_to_vips: HashMap<NetworkAddress, HashSet<NetworkAddress>>,
@@ -1100,6 +1100,7 @@ impl WorkloadStore {
             self.workloads
                 .insert(network_addr(&w.network, *wip), wl_arc.clone());
         }
+        self.workloads_by_uid.insert(w.uid, wl_arc);
         Ok(())
     }
 
@@ -1181,6 +1182,7 @@ impl WorkloadStore {
             return;
         };
         let prev = prev.read().unwrap();
+        self.workloads_by_uid.remove(&prev.uid);
         let prev_addr = &network_addr(&prev.network, prev.workload_ips[0]); // TODO(kdorosh)
         let Some(prev_vips) = self.workload_to_vips.remove(prev_addr) else {
             return;
@@ -1405,6 +1407,7 @@ mod tests {
         initialize_telemetry();
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
+        assert_eq!((wi.workloads_by_uid.len()), 0);
         assert_eq!((wi.services_by_ip.len()), 0);
         assert_eq!((wi.services_by_hostname.len()), 0);
         assert_eq!((wi.staged_vips.len()), 0);
@@ -1420,6 +1423,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!((wi.workloads.len()), 1);
+        assert_eq!((wi.workloads_by_uid.len()), 1);
         assert_eq!(
             wi.find_workload(&ip1),
             Some(Workload {
@@ -1452,6 +1456,7 @@ mod tests {
         wi.remove("/127.0.0.1".to_string());
         assert_eq!(wi.find_workload(&ip1), None);
         assert_eq!(wi.workloads.len(), 0);
+        assert_eq!(wi.workloads_by_uid.len(), 0);
 
         let vip = HashMap::from([(
             "127.0.1.1".to_string(),
@@ -1680,7 +1685,9 @@ mod tests {
         initialize_telemetry();
         let mut wi = WorkloadStore::default();
         assert_eq!((wi.workloads.len()), 0);
+        assert_eq!((wi.workloads_by_uid.len()), 0);
         assert_eq!((wi.services_by_ip.len()), 0);
+        assert_eq!((wi.services_by_hostname.len()), 0);
         assert_eq!((wi.staged_vips.len()), 0);
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
