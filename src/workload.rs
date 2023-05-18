@@ -727,7 +727,7 @@ impl WorkloadInformation {
     fn find_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
         let wi = self.info.lock().unwrap(); // don't use self.find_workload() to avoid locking twice
-        match wi.find_workload(network_addr).cloned() {
+        match wi.find_workload(network_addr) {
             None => {
                 // 2. handle service
                 if let Some(svc) = wi.services_by_ip.get(network_addr).cloned() {
@@ -742,7 +742,7 @@ impl WorkloadInformation {
     // keep private so that we can ensure that we always use fetch_workload
     fn find_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
         let wi = self.info.lock().unwrap();
-        wi.find_workload(addr).cloned()
+        wi.find_workload(addr)
     }
 }
 
@@ -915,7 +915,7 @@ impl TryFrom<&XdsService> for Service {
 pub struct WorkloadStore {
     // TODO(kdorosh) play same trick with Arc RwLock as we do with services
     /// workloads is a map of workload network addresses to workloads
-    workloads: HashMap<NetworkAddress, Workload>,
+    workloads: HashMap<NetworkAddress, Arc<RwLock<Workload>>>,
     /// workloads is a map of workload UIDs to workloads
     workloads_by_uid: HashMap<String, Workload>,
     /// workload_to_vips maintains a mapping of workload IP to VIP. This is used only to handle removal of service
@@ -1095,13 +1095,11 @@ impl WorkloadStore {
                 }
             }
         }
+        let wl_arc = Arc::new(RwLock::new(w.clone()));
         for wip in &w.workload_ips {
             self.workloads
-                .insert(network_addr(&w.network, *wip), w.clone());
+                .insert(network_addr(&w.network, *wip), wl_arc.clone());
         }
-        // w.workload_ips.iter().for_each(|ip| self.workloads.insert(network_addr(&w.network, ip), w));
-        // self.workloads
-        // .insert(network_addr(&w.network, w.workload_ip), w);
         Ok(())
     }
 
@@ -1182,6 +1180,7 @@ impl WorkloadStore {
         let Some(prev) = self.workloads.remove(&network_addr(network, ip)) else {
             return;
         };
+        let prev = prev.read().unwrap();
         let prev_addr = &network_addr(&prev.network, prev.workload_ips[0]); // TODO(kdorosh)
         let Some(prev_vips) = self.workload_to_vips.remove(prev_addr) else {
             return;
@@ -1226,8 +1225,10 @@ impl WorkloadStore {
         }
     }
 
-    fn find_workload(&self, addr: &NetworkAddress) -> Option<&Workload> {
-        self.workloads.get(addr)
+    fn find_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
+        self.workloads
+            .get(addr)
+            .map(|wl| wl.read().unwrap().clone())
     }
 
     fn find_upstream(&self, network: &str, addr: SocketAddr, hbone_port: u16) -> Option<Upstream> {
@@ -1247,6 +1248,7 @@ impl WorkloadStore {
                 debug!("failed to fetch workload for {}", ep.address);
                 return None
             };
+            let wl = wl.read().unwrap();
             // If endpoint overrides the target port, use that instead
             let target_port = ep.port.get(&addr.port()).unwrap_or(target_port);
             let mut us = Upstream {
@@ -1258,6 +1260,7 @@ impl WorkloadStore {
             return Some(us);
         }
         if let Some(wl) = self.workloads.get(&network_addr(network, addr.ip())) {
+            let wl = wl.read().unwrap();
             let mut us = Upstream {
                 workload: wl.to_owned(),
                 port: addr.port(),
@@ -1419,7 +1422,7 @@ mod tests {
         assert_eq!((wi.workloads.len()), 1);
         assert_eq!(
             wi.find_workload(&ip1),
-            Some(&Workload {
+            Some(Workload {
                 workload_ips: vec![ip1.address],
                 name: "some name".to_string(),
                 ..test_helpers::test_default_workload()
@@ -1429,7 +1432,7 @@ mod tests {
         wi.remove("/invalid".to_string());
         assert_eq!(
             wi.find_workload(&ip1),
-            Some(&Workload {
+            Some(Workload {
                 workload_ips: vec![ip1.address],
                 name: "some name".to_string(),
                 ..test_helpers::test_default_workload()
@@ -1439,7 +1442,7 @@ mod tests {
         wi.remove("/127.0.0.2".to_string());
         assert_eq!(
             wi.find_workload(&ip1),
-            Some(&Workload {
+            Some(Workload {
                 workload_ips: vec![ip1.address],
                 name: "some name".to_string(),
                 ..test_helpers::test_default_workload()
