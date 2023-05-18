@@ -913,7 +913,6 @@ impl TryFrom<&XdsService> for Service {
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
-    // TODO(kdorosh) play same trick with Arc RwLock as we do with services
     /// workloads is a map of workload network addresses to workloads
     workloads: HashMap<NetworkAddress, Arc<RwLock<Workload>>>,
     /// workloads is a map of workload UIDs to workloads
