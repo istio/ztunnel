@@ -44,7 +44,7 @@ services:
     80: 8080
 - name: remote
   namespace: default
-  hostname: example.com
+  hostname: example2.com
   addresses:
     - remote/127.10.0.2
   ports:
