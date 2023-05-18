@@ -27,7 +27,7 @@ use tokio::time::timeout;
 use tracing::{error, info};
 
 use ztunnel::identity;
-
+use ztunnel::test_helpers::app::ParsedMetrics;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::components::WorkloadManager;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
@@ -94,6 +94,15 @@ async fn test_vip_request() -> anyhow::Result<()> {
     let client = manager
         .workload_builder("client", DEFAULT_NODE)
         .register()?;
+
+    let mut lb_clients = Vec::new();
+    for i in 0..15 {
+        let lb_client = manager
+            .workload_builder(format!("client_{}", i).as_str(), DEFAULT_NODE)
+            .register()?;
+        lb_clients.push(lb_client);
+    }
+
     let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
     let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
@@ -106,7 +115,40 @@ async fn test_vip_request() -> anyhow::Result<()> {
         (BYTES_RECV, REQ_SIZE),
         (BYTES_SENT, REQ_SIZE * 2),
     ];
-    verify_local_remote_metrics(remote, local, &metrics).await;
+
+    // stronger assertion to ensure we load balance to the two endpoints
+    // switches between 10.0.2.2 (TCP) and 10.0.2.3 (HBONE):
+    // Proxying to 10.0.2.3:8080 using HBONE via 10.0.2.3:15008 type Direct
+    // Proxying to 10.0.2.2:8080 using TCP via 10.0.2.2:8080 type Direct
+    let (_remote_metrics, local_metrics) =
+        verify_local_remote_metrics(remote, local.clone(), &metrics).await;
+
+    // ensure the service is load-balancing across endpoints
+    let local_metrics_dump = local_metrics.dump();
+    let lb_to_nodelocal =
+        local_metrics_dump.contains("\"connection_security_policy\": \"unknown\"");
+    let lb_to_remote =
+        local_metrics_dump.contains("\"connection_security_policy\": \"mutual_tls\"");
+    // ensure we hit one endpoint or the other, not both somehow
+    assert!(lb_to_nodelocal || lb_to_remote);
+    if lb_to_nodelocal {
+        assert!(!lb_to_remote);
+    }
+
+    // response needed is opposite of what we got before
+    let needed_response = match lb_to_nodelocal {
+        true => "\"connection_security_policy\": \"mutual_tls\"", // we got node local so need remote
+        false => "\"connection_security_policy\": \"unknown\"", // we got remote so need node local
+    };
+
+    // run 15 requests so chance of flake here is 1/2^15 = ~0.003%
+    for lb_client in lb_clients {
+        run_tcp_client(lb_client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
+    }
+
+    let updated_local_metrics = local.metrics().await.unwrap().dump();
+    assert!(updated_local_metrics.contains(needed_response));
+
     Ok(())
 }
 
@@ -204,7 +246,7 @@ async fn verify_metrics(
     ztunnel: TestApp,
     assertions: &[(&str, u64)],
     labels: &HashMap<String, String>,
-) {
+) -> ParsedMetrics {
     // Wait for metrics to populate...
     for _ in 0..10 {
         let m = ztunnel.metrics().await.unwrap();
@@ -220,6 +262,7 @@ async fn verify_metrics(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let metrics = ztunnel.metrics().await.unwrap();
+
     // Now run our assertions
     for (metric, expected) in assertions {
         assert_eq!(
@@ -231,11 +274,17 @@ async fn verify_metrics(
             metrics.dump()
         );
     }
+    metrics
 }
 
-async fn verify_local_remote_metrics(remote: TestApp, local: TestApp, metrics: &[(&str, u64)]) {
-    verify_metrics(remote, metrics, &destination_labels()).await;
-    verify_metrics(local, metrics, &source_labels()).await;
+async fn verify_local_remote_metrics(
+    remote: TestApp,
+    local: TestApp,
+    metrics: &[(&str, u64)],
+) -> (ParsedMetrics, ParsedMetrics) {
+    let remote_metrics = verify_metrics(remote, metrics, &destination_labels()).await;
+    let local_metrics = verify_metrics(local, metrics, &source_labels()).await;
+    (remote_metrics, local_metrics)
 }
 
 #[tokio::test]
@@ -498,7 +547,7 @@ fn run_tcp_to_hbone_client(
 fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
     server.run_ready(|ready| async move {
         let echo = tcp::TestServer::new(tcp::Mode::ReadDoubleWrite, SERVER_PORT).await;
-        info!("Running echo server");
+        info!("Running echo server at {}", echo.address());
         ready.set_ready();
         echo.run().await;
         Ok(())
@@ -510,7 +559,7 @@ fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
 fn run_hbone_server(server: Namespace) -> anyhow::Result<()> {
     server.run_ready(|ready| async move {
         let echo = tcp::HboneTestServer::new(tcp::Mode::ReadWrite).await;
-        info!("Running echo server");
+        info!("Running hbone echo server at {}", echo.address());
         ready.set_ready();
         echo.run().await;
         Ok(())

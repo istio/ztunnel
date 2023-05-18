@@ -26,7 +26,10 @@ use tracing::trace;
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::workload::Protocol::{HBONE, TCP};
-use crate::workload::{LocalConfig, LocalWorkload, Workload};
+use crate::workload::{
+    gatewayaddress, Endpoint, GatewayAddress, LocalConfig, LocalWorkload, NetworkAddress, Service,
+    Workload,
+};
 
 pub mod app;
 pub mod ca;
@@ -91,13 +94,16 @@ pub const TEST_VIP: &str = "127.10.0.1";
 pub fn test_default_workload() -> Workload {
     Workload {
         workload_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        waypoint_addresses: Vec::new(),
+        waypoint: None,
+        network_gateway: None,
         gateway_address: None,
         protocol: Default::default(),
+        uid: "".to_string(),
         name: "".to_string(),
         namespace: "".to_string(),
         trust_domain: "cluster.local".to_string(),
         service_account: "default".to_string(),
+        network: "".to_string(),
         workload_name: "".to_string(),
         workload_type: "deployment".to_string(),
         canonical_name: "".to_string(),
@@ -107,7 +113,7 @@ pub fn test_default_workload() -> Workload {
         cluster_id: "Kubernetes".to_string(),
 
         authorization_policies: Vec::new(),
-        native_hbone: false,
+        native_tunnel: false,
     }
 }
 
@@ -159,15 +165,45 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
                 node: "local".to_string(),
-                waypoint_addresses: vec![waypoint_ip],
+                waypoint: Some(GatewayAddress {
+                    destination: gatewayaddress::Destination::Address(NetworkAddress {
+                        network: "".to_string(),
+                        address: waypoint_ip,
+                    }),
+                    port: 15008,
+                }),
                 ..test_default_workload()
             },
             vips: Default::default(),
         })
     }
+    let svcs: Vec<Service> = vec![Service {
+        name: "local-vip".to_string(),
+        namespace: "default".to_string(),
+        hostname: "local-vip.default.svc.cluster.local".to_string(),
+        addresses: vec![NetworkAddress {
+            network: "".to_string(),
+            address: TEST_VIP.parse()?,
+        }],
+        ports: HashMap::from([(80u16, echo_port)]),
+        endpoints: HashMap::from([(
+            NetworkAddress {
+                network: "".to_string(),
+                address: TEST_WORKLOAD_HBONE.parse()?,
+            },
+            Endpoint {
+                address: NetworkAddress {
+                    network: "".to_string(),
+                    address: TEST_WORKLOAD_HBONE.parse()?,
+                },
+                port: HashMap::from([(80u16, echo_port)]),
+            },
+        )]),
+    }];
     let lc = LocalConfig {
         workloads: res,
         policies: vec![],
+        services: svcs,
     };
     let mut b = bytes::BytesMut::new().writer();
     serde_yaml::to_writer(&mut b, &lc)?;

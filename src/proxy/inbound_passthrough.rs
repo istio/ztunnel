@@ -24,6 +24,7 @@ use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, ProxyInputs};
 use crate::proxy::{Error, TraceParent};
 use crate::rbac;
+use crate::workload::NetworkAddress;
 use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
@@ -89,10 +90,14 @@ impl InboundPassthrough {
             return Err(Error::SelfCall);
         }
         info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
-        let Some(upstream) = pi.workloads.fetch_workload(&orig.ip()).await else {
+        let network_addr = NetworkAddress {
+            network: pi.cfg.network.clone(), // inbound request must be on our network
+            address: orig.ip(),
+        };
+        let Some(upstream) = pi.workloads.fetch_workload(&network_addr).await else {
             return Err(Error::UnknownDestination(orig.ip()))
         };
-        if !upstream.waypoint_addresses.is_empty() {
+        if upstream.waypoint.is_some() {
             // This is an inbound request not over HBONE, but we have a waypoint.
             // The request needs to go through the waypoint for policy enforcement.
             // This can happen from clients that are not part of the mesh; they won't know to send
@@ -115,6 +120,10 @@ impl InboundPassthrough {
         let conn = rbac::Connection {
             src_identity: None,
             src_ip: source.ip(),
+            // inbound request must be on our network since this is passthrough
+            // rather than HBONE, which can be tunneled across networks through gateways.
+            // by definition, without the gateway our source must be on our network.
+            dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
         if !pi.workloads.assert_rbac(&conn).await {
@@ -134,7 +143,14 @@ impl InboundPassthrough {
 
         // Find source info. We can lookup by XDS or from connection attributes
         let source_workload = if let Some(source_ip) = source_ip {
-            pi.workloads.fetch_workload(&source_ip).await
+            let network_addr_srcip = NetworkAddress {
+                // inbound request must be on our network since this is passthrough
+                // rather than HBONE, which can be tunneled across networks through gateways.
+                // by definition, without the gateway our source must be on our network.
+                network: pi.cfg.network.clone(),
+                address: source_ip,
+            };
+            pi.workloads.fetch_workload(&network_addr_srcip).await
         } else {
             None
         };

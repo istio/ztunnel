@@ -31,7 +31,7 @@ use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::pool;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::workload::{Protocol, Workload};
+use crate::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 
 pub struct Outbound {
@@ -151,7 +151,7 @@ impl OutboundConnection {
             && !req
                 .destination_workload
                 .as_ref()
-                .map(|w| w.native_hbone)
+                .map(|w| w.native_tunnel)
                 .unwrap_or(false);
         let connection_metrics = traffic::ConnectionOpen {
             reporter: Reporter::source,
@@ -182,6 +182,7 @@ impl OutboundConnection {
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
                 src_ip: remote_addr,
+                dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
             if !self.pi.workloads.assert_rbac(&conn).await {
@@ -342,7 +343,16 @@ impl OutboundConnection {
         downstream: IpAddr,
         target: SocketAddr,
     ) -> Result<Request, Error> {
-        let source_workload = match self.pi.workloads.fetch_workload(&downstream).await {
+        let downstream_network_addr = NetworkAddress {
+            network: self.pi.cfg.network.clone(),
+            address: downstream,
+        };
+        let source_workload = match self
+            .pi
+            .workloads
+            .fetch_workload(&downstream_network_addr)
+            .await
+        {
             Some(wl) => wl,
             None => return Err(Error::UnknownSource(downstream)),
         };
@@ -351,7 +361,7 @@ impl OutboundConnection {
         let us = self
             .pi
             .workloads
-            .find_upstream(target, self.pi.hbone_port)
+            .find_upstream(&source_workload.network, target, self.pi.hbone_port)
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
@@ -369,28 +379,28 @@ impl OutboundConnection {
 
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
-        if !us.workload.waypoint_addresses.is_empty() {
-            let waypoint_address = us.workload.choose_waypoint_address().unwrap();
-            // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
-            // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
-            let waypoint_workload = match self.pi.workloads.fetch_workload(&waypoint_address).await
-            {
-                Some(wl) => wl,
-                None => return Err(Error::UnknownWaypoint(waypoint_address, downstream)),
-            };
-            return Ok(Request {
-                // Always use HBONE here
-                protocol: Protocol::HBONE,
-                source: source_workload,
-                // Use the original VIP, not translated
-                destination: target,
-                destination_workload: Some(us.workload),
-                expected_identity: Some(waypoint_workload.identity()),
-                gateway: SocketAddr::from((waypoint_address, 15008)),
-                // Let the client remote know we are on the inbound path.
-                direction: Direction::Inbound,
-                request_type: RequestType::ToServerWaypoint,
-            });
+        match self.pi.workloads.find_waypoint(us.workload.clone()).await {
+            Ok(None) => {} // workload doesn't have a waypoint; this is fine
+            Ok(Some(waypoint_us)) => {
+                let waypoint_workload = waypoint_us.workload;
+                let wp_socket_addr =
+                    SocketAddr::new(waypoint_workload.workload_ip, waypoint_us.port);
+                return Ok(Request {
+                    // Always use HBONE here
+                    protocol: Protocol::HBONE,
+                    source: source_workload,
+                    // Use the original VIP, not translated
+                    destination: target,
+                    destination_workload: Some(us.workload),
+                    expected_identity: Some(waypoint_workload.identity()),
+                    gateway: wp_socket_addr,
+                    // Let the client remote know we are on the inbound path.
+                    direction: Direction::Inbound,
+                    request_type: RequestType::ToServerWaypoint,
+                });
+            }
+            // we expected the workload to have a waypoint, but could not find one
+            Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
         }
         if us.workload.gateway_address.is_none() {
             return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
@@ -504,9 +514,10 @@ mod tests {
 
     use crate::config::Config;
     use crate::workload::WorkloadInformation;
-    use crate::xds::istio::workload::Protocol as XdsProtocol;
+    use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
+    use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
-    use crate::{identity, workload};
+    use crate::{identity, workload, xds};
 
     use super::*;
 
@@ -599,7 +610,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Direct as i32,
+                tunnel_protocol: XdsProtocol::None as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
             },
@@ -622,7 +633,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Http as i32,
+                tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
             },
@@ -645,7 +656,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Direct as i32,
+                tunnel_protocol: XdsProtocol::None as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
             },
@@ -668,7 +679,7 @@ mod tests {
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                protocol: XdsProtocol::Http as i32,
+                tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
             },
@@ -703,7 +714,15 @@ mod tests {
             "127.0.0.1:80",
             XdsWorkload {
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                waypoint_addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: [127, 0, 0, 10].to_vec(),
+                        },
+                    )),
+                    port: 15008,
+                }),
                 ..Default::default()
             },
             // Even though source has a waypoint, we don't use it
@@ -723,7 +742,15 @@ mod tests {
             "127.0.0.2:80",
             XdsWorkload {
                 address: Bytes::copy_from_slice(&[127, 0, 0, 2]),
-                waypoint_addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: [127, 0, 0, 10].to_vec(),
+                        },
+                    )),
+                    port: 15008,
+                }),
                 ..Default::default()
             },
             // Should use the waypoint

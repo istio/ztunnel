@@ -162,8 +162,8 @@ pub enum Error {
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
 
-    #[error("unknown waypoint {0} for {0}")]
-    UnknownWaypoint(IpAddr, IpAddr),
+    #[error("unknown waypoint: {0}")]
+    UnknownWaypoint(String),
 
     #[error("unknown destination: {0}")]
     UnknownDestination(IpAddr),
@@ -173,6 +173,9 @@ pub enum Error {
 
     #[error("no gateway address: {0}")]
     NoGatewayAddress(Box<crate::workload::Workload>),
+
+    #[error("unsupported feature: {0}")]
+    UnsupportedFeature(String),
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.

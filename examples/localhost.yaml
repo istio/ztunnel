@@ -7,8 +7,11 @@ workloads:
   workloadIp: "127.0.0.1"
   protocol: HBONE
   node: local
+  network: ""
   vips:
     "127.10.0.1":
+      80: 8080
+    "remote/127.10.0.2":
       80: 8080
 # Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
 - name: local-tcp
@@ -17,8 +20,11 @@ workloads:
   workloadIp: "127.0.0.2"
   protocol: TCP
   node: local
+  network: ""
   vips:
     "127.10.0.1":
+      80: 8080
+    "remote/127.10.0.2":
       80: 8080
 policies:
   - action: Allow
@@ -28,3 +34,18 @@ policies:
     name: deny-9999
     namespace: default
     scope: Namespace
+services:
+- name: local
+  namespace: default
+  hostname: example.com
+  addresses:
+    - /127.10.0.1
+  ports:
+    80: 8080
+- name: remote
+  namespace: default
+  hostname: example2.com
+  addresses:
+    - remote/127.10.0.2
+  ports:
+    80: 8080

@@ -15,11 +15,11 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ztunnel::xds::istio::workload::Workload as XdsWorkload;
-use ztunnel::xds::istio::security::Authorization as XdsAuthorization;
 use prost::Message;
-use ztunnel::workload::Workload;
 use ztunnel::rbac::Authorization;
+use ztunnel::workload::Workload;
+use ztunnel::xds::istio::security::Authorization as XdsAuthorization;
+use ztunnel::xds::istio::workload::Workload as XdsWorkload;
 
 fuzz_target!(|data: &[u8]| {
     let _ = run_workload(data);

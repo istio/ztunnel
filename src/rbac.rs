@@ -45,6 +45,7 @@ pub struct Authorization {
 pub struct Connection {
     pub src_identity: Option<Identity>,
     pub src_ip: IpAddr,
+    pub dst_network: String,
     pub dst: SocketAddr,
 }
 
@@ -442,6 +443,7 @@ mod tests {
         Connection {
             src_identity: None,
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
     }
@@ -454,6 +456,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
     }
@@ -466,6 +469,7 @@ mod tests {
                 service_account: "sa=alt".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 3]),
+            dst_network: "".to_string(),
             dst: "127.0.0.4:9090".parse().unwrap(),
         }
     }
@@ -513,6 +517,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         assert!(pol.matches(&Connection {
@@ -522,6 +527,18 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
+            dst: "127.0.0.2:80".parse().unwrap(),
+        }));
+        // Policy is applied regardless of network
+        assert!(pol.matches(&Connection {
+            src_identity: Some(Identity::Spiffe {
+                trust_domain: "td".to_string(),
+                namespace: "b".to_string(),
+                service_account: "account".to_string(),
+            }),
+            src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "remote".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         // Wrong namespace
@@ -532,6 +549,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         // Wrong port
@@ -542,6 +560,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:12345".parse().unwrap(),
         }));
     }
@@ -569,6 +588,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         assert!(pol.matches(&Connection {
@@ -578,6 +598,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         // Wrong namespace
@@ -588,6 +609,7 @@ mod tests {
                 service_account: "account".to_string(),
             }),
             src_ip: IpAddr::from([127, 0, 0, 1]),
+            dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
     }

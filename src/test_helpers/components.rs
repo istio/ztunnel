@@ -23,7 +23,7 @@ use crate::config::ConfigSource;
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
-use crate::workload::{LocalConfig, LocalWorkload, Workload};
+use crate::workload::{gatewayaddress, LocalConfig, LocalWorkload, Service, Workload};
 use crate::{config, identity, proxy};
 
 /// WorkloadManager provides an interface to deploy "workloads" as part of a test. Each workload
@@ -34,6 +34,8 @@ pub struct WorkloadManager {
     namespaces: netns::NamespaceManager,
     /// workloads that we have constructed
     workloads: Vec<LocalWorkload>,
+    /// services that we have constructed. VIP -> SVC
+    services: HashMap<IpAddr, Service>,
     /// Node to IPs on the node that are captured
     captured_workloads: HashMap<String, Vec<IpAddr>>,
     waypoints: Vec<IpAddr>,
@@ -45,6 +47,7 @@ impl WorkloadManager {
         Ok(Self {
             namespaces: netns::NamespaceManager::new(name)?,
             workloads: vec![],
+            services: HashMap::new(),
             captured_workloads: Default::default(),
             waypoints: vec![],
         })
@@ -64,6 +67,7 @@ impl WorkloadManager {
         let lc = LocalConfig {
             workloads: self.workloads.clone(),
             policies: vec![],
+            services: self.services.values().cloned().collect_vec(),
         };
         let mut b = bytes::BytesMut::new().writer();
         serde_yaml::to_writer(&mut b, &lc)?;
@@ -188,9 +192,15 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    /// Append a waypoint to the workload
+    /// Set a waypoint to the workload
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
-        self.w.workload.waypoint_addresses.push(waypoint);
+        self.w.workload.waypoint = Some(GatewayAddress {
+            destination: gatewayaddress::Destination::Address(NetworkAddress {
+                network: "".to_string(),
+                address: waypoint,
+            }),
+            port: 15008,
+        });
         self
     }
 
@@ -224,6 +234,42 @@ impl<'a> TestWorkloadBuilder<'a> {
             .namespaces
             .child(&self.w.workload.node, &self.w.workload.name)?;
         self.w.workload.workload_ip = network_namespace.ip();
+
+        for (vip, ports) in &self.w.vips {
+            let ep_network_addr = NetworkAddress {
+                network: "".to_string(),
+                address: self.w.workload.workload_ip,
+            };
+            let ep = Endpoint {
+                address: ep_network_addr.clone(),
+                port: ports.to_owned(),
+            };
+            let svc = Service {
+                name: "svc".to_string(),
+                namespace: self.w.workload.namespace.clone(),
+                hostname: format!("{}.{}.svc.cluster.local", "svc", self.w.workload.namespace),
+                addresses: vec![NetworkAddress {
+                    network: "".to_string(),
+                    address: vip.parse().unwrap(),
+                }],
+                ports: ports.to_owned(),
+                endpoints: HashMap::from([(ep_network_addr.clone(), ep.clone())]),
+            };
+            for network_address in &svc.addresses {
+                let vip = network_address.address;
+                let prev_svc = self.manager.services.get(&vip);
+                if let Some(prev) = prev_svc {
+                    let mut updated = prev.clone();
+                    updated
+                        .endpoints
+                        .insert(ep_network_addr.clone(), ep.clone());
+                    self.manager.services.insert(vip, updated);
+                } else {
+                    self.manager.services.insert(vip, svc.clone());
+                }
+            }
+        }
+
         info!(
             "registered {}/{} at {}",
             self.w.workload.namespace, self.w.workload.name, self.w.workload.workload_ip

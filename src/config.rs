@@ -29,6 +29,7 @@ use tokio::time;
 use crate::identity;
 
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
+const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
 const INSTANCE_IP: &str = "INSTANCE_IP";
@@ -104,6 +105,8 @@ pub struct Config {
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
 
+    /// The network of the node this ztunnel is running on.
+    pub network: String,
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
     /// The proxy mode of ztunnel, Shared or Dedicated, default to Shared.
@@ -277,6 +280,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
 
+        network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
         proxy_mode: match parse::<String>(PROXY_MODE)? {
             Some(proxy_mode) => match proxy_mode.as_str() {
@@ -325,13 +329,13 @@ fn validate_uri(uri_str: Option<String>) -> Result<Option<String>, Error> {
     Ok(Some(uri_str))
 }
 
-#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[derive(serde::Deserialize, Default, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshConfig {
     pub default_config: Option<ProxyConfig>,
 }
 
-#[derive(serde::Deserialize, Default, Debug, Clone, PartialEq)]
+#[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyConfig {
     pub discovery_address: Option<String>,

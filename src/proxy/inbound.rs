@@ -38,7 +38,9 @@ use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER}
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::tls::TlsError;
-use crate::workload::{Workload, WorkloadInformation};
+use crate::workload::{
+    address, gatewayaddress, GatewayAddress, NetworkAddress, Workload, WorkloadInformation,
+};
 use crate::{proxy, rbac};
 
 use super::Error;
@@ -85,6 +87,7 @@ impl Inbound {
         let acceptor = InboundCertProvider {
             workloads: self.workloads.clone(),
             cert_manager: self.cert_manager.clone(),
+            network: self.cfg.network.clone(),
         };
         let workloads = self.workloads;
         let drain_stream = self.drain.clone();
@@ -94,6 +97,7 @@ impl Inbound {
             let workloads = workloads.clone();
             let metrics = self.metrics.clone();
             let drain = self.drain.clone();
+            let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
                 let conn = rbac::Connection {
@@ -102,6 +106,7 @@ impl Inbound {
                         .peer_certificate()
                         .and_then(|x| crate::tls::boring::extract_sans(&x).first().cloned()),
                     src_ip: to_canonical(socket.get_ref().peer_addr().unwrap()).ip(),
+                    dst_network: network, // inbound request must be on our network
                     dst,
                 };
                 debug!(%conn, "accepted connection");
@@ -266,16 +271,28 @@ impl Inbound {
                 }
                 // Orig has 15008, swap with the real port
                 let conn = rbac::Connection { dst: addr, ..conn };
-                let Some(upstream) = workloads.fetch_workload(&addr.ip()).await else {
+                let dst_network_addr = NetworkAddress {
+                    network: conn.dst_network.to_string(), // dst must be on our network
+                    address: addr.ip(),
+                };
+                let Some(upstream) = workloads.fetch_workload(&dst_network_addr).await else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
                         .body(Empty::new())
                         .unwrap());
                 };
-                let (has_waypoint, from_waypoint) =
-                    Self::check_waypoint(&workloads, &upstream, &conn).await;
+                let has_waypoint = upstream.waypoint.is_some();
+                let from_waypoint = Self::check_waypoint(&workloads, &upstream, &conn)
+                    .await
+                    .unwrap();
+                let from_gateway = Self::check_gateway(&workloads, &upstream, &conn)
+                    .await
+                    .unwrap();
 
+                if from_gateway {
+                    debug!("request from gateway");
+                }
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
                 } else if !workloads.assert_rbac(&conn).await {
@@ -304,8 +321,20 @@ impl Inbound {
 
                 let baggage =
                     parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
-                // Find source info. We can lookup by XDS or from connection attributes
-                let source = workloads.fetch_workload(&source_ip).await;
+
+                let source = match from_gateway {
+                    true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
+                    false => {
+                        let src_network_addr = NetworkAddress {
+                            // we can assume source network is our network because we did not traverse a gateway
+                            network: conn.dst_network.to_string(),
+                            address: source_ip,
+                        };
+                        // Find source info. We can lookup by XDS or from connection attributes
+                        workloads.fetch_workload(&src_network_addr).await
+                    }
+                };
+
                 let derived_source = traffic::DerivedWorkload {
                     identity: conn.src_identity,
                     cluster_id: baggage.cluster_id,
@@ -359,14 +388,46 @@ impl Inbound {
         workloads: &WorkloadInformation,
         upstream: &Workload,
         conn: &Connection,
-    ) -> (bool, bool) {
-        let has_waypoint = !upstream.waypoint_addresses.is_empty();
-        for i in upstream.waypoint_addresses.iter() {
-            if workloads.fetch_workload(i).await.map(|w| w.identity()) == conn.src_identity {
-                return (has_waypoint, true);
+    ) -> Result<bool, Error> {
+        Self::check_gateway_address(workloads, conn, upstream.waypoint.as_ref()).await
+    }
+
+    async fn check_gateway(
+        workloads: &WorkloadInformation,
+        upstream: &Workload,
+        conn: &Connection,
+    ) -> Result<bool, Error> {
+        Self::check_gateway_address(workloads, conn, upstream.network_gateway.as_ref()).await
+    }
+
+    async fn check_gateway_address(
+        workloads: &WorkloadInformation,
+        conn: &Connection,
+        gateway_address: Option<&GatewayAddress>,
+    ) -> Result<bool, Error> {
+        let gateway_nw_addr = match gateway_address.as_ref() {
+            Some(addr) => match &addr.destination {
+                gatewayaddress::Destination::Address(gateway_ip) => Ok(gateway_ip),
+                gatewayaddress::Destination::Hostname(_) => Err(Error::UnsupportedFeature(
+                    "hostname lookup not supported yet".to_string(),
+                )),
+            },
+            None => return Ok(false),
+        }?;
+        let from_gateway = match workloads.fetch_address(gateway_nw_addr).await {
+            Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
+            Some(address::Address::Service(svc)) => {
+                for (ip, _ep) in svc.endpoints.iter() {
+                    if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
+                    {
+                        return Ok(true);
+                    }
+                }
+                false
             }
-        }
-        (has_waypoint, false)
+            None => false,
+        };
+        Ok(from_gateway)
     }
 }
 
@@ -394,6 +455,7 @@ pub(super) enum InboundConnect {
 struct InboundCertProvider {
     cert_manager: Arc<SecretManager>,
     workloads: WorkloadInformation,
+    network: String,
 }
 
 #[async_trait::async_trait]
@@ -401,7 +463,10 @@ impl crate::tls::CertProvider for InboundCertProvider {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
-            let wip = orig_dst_addr.ip();
+            let wip = NetworkAddress {
+                network: self.network.clone(), // inbound cert provider gets cert for the dest, which must be on our network
+                address: orig_dst_addr.ip(),
+            };
             self.workloads
                 .fetch_workload(&wip)
                 .await
