@@ -103,10 +103,10 @@ pub struct GatewayAddress {
 pub mod gatewayaddress {
     use super::{NamespacedHostname, NetworkAddress};
     #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-    #[serde(tag = "address", content = "content")]
+    #[serde(untagged)]
     pub enum Destination {
-        Hostname(NamespacedHostname),
         Address(NetworkAddress),
+        Hostname(NamespacedHostname),
     }
 }
 
@@ -114,7 +114,7 @@ pub mod address {
     use crate::workload::{Service, Workload};
 
     #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-    #[serde(tag = "address", content = "content")]
+    #[serde(untagged)]
     pub enum Address {
         Workload(Box<Workload>),
         Service(Box<Service>),
@@ -124,42 +124,45 @@ pub mod address {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workload {
     pub workload_ips: Vec<IpAddr>,
+
+    #[serde(default, skip_serializing_if = "is_default")]
     pub waypoint: Option<GatewayAddress>,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub network_gateway: Option<GatewayAddress>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub gateway_address: Option<SocketAddr>,
+
     #[serde(default)]
     pub protocol: Protocol,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub uid: String,
     #[serde(default)]
     pub name: String,
-    #[serde(default)]
     pub namespace: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub trust_domain: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub service_account: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub network: String,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub workload_name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub workload_type: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub canonical_name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub canonical_revision: String,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub node: String,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub native_tunnel: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub authorization_policies: Vec<String>,
 
     #[serde(default)]
@@ -167,6 +170,10 @@ pub struct Workload {
 
     #[serde(default)]
     pub cluster_id: String,
+}
+
+fn is_default<T: Default + PartialEq>(t: &T) -> bool {
+    *t == Default::default()
 }
 
 impl Workload {
