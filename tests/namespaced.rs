@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
+use ztunnel::workload::NetworkAddress;
 
 use hyper::Method;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
@@ -78,6 +79,14 @@ const REMOTE_NODE: &str = "remote-node";
 #[tokio::test]
 async fn test_vip_request() -> anyhow::Result<()> {
     let mut manager = setup_netns_test!();
+    manager
+        .service_builder("server1")
+        .addresses(vec![NetworkAddress {
+            network: "".to_string(),
+            address: TEST_VIP.parse::<IpAddr>()?,
+        }])
+        .ports(HashMap::from([(80u16, 80u16)]))
+        .register()?;
     run_tcp_server(
         manager
             .workload_builder("server1", REMOTE_NODE)
@@ -669,6 +678,14 @@ async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
             }
         }
     };
+    manager
+        .service_builder("server1")
+        .addresses(vec![NetworkAddress {
+            network: "".to_string(),
+            address: TEST_VIP.parse::<IpAddr>()?,
+        }])
+        .ports(HashMap::from([(80u16, 80u16)]))
+        .register()?;
     run_tcp_server(
         manager
             .workload_builder("server", REMOTE_NODE)

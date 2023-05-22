@@ -102,8 +102,6 @@ message Workload {
   // This should be globally unique.
   // This should not have a port number.
   // Each workload must have at least either an address or hostname; not both.
-  // TODO: support dual stack by making this repeated
-  // TODO: when this is repeated, update xds primary key from network/IP to network/UID
   repeated bytes addresses = 3;
 
   // The hostname for the workload to be resolved by the ztunnel.
