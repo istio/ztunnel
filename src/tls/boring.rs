@@ -416,7 +416,10 @@ impl Verifier {
         cert.verify_san(identity)
     }
 
-    fn verifiy_san_trust_domain(identity: &Identity, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+    fn verifiy_san_trust_domain(
+        identity: &Identity,
+        ctx: &mut X509StoreContextRef,
+    ) -> Result<(), TlsError> {
         // internally, openssl tends to .expect the results of these methods.
         // TODO bubble up better error message
         let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
