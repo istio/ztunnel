@@ -11,7 +11,7 @@ Helpers are available to use a fake CA and local XDS config, to avoid reliance o
 
 For more advanced testing, see [Namespaced](#namespaced).
 
-## Namespaced
+## Namespaced (Linux only)
 
 Many scenarios in ztunnel are reliant on being deployed in an environment with redirection in place.
 In order to support these, the tests in `namespaced.rs` come with a framework to run components in different network namespaces.

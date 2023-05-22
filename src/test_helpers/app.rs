@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::anyhow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
@@ -32,7 +33,7 @@ use tokio::net::{TcpSocket, TcpStream};
 
 use crate::app::Bound;
 use crate::identity::SecretManager;
-use crate::test_helpers::TEST_WORKLOAD_SOURCE;
+use crate::test_helpers::{localhost_error_message, TEST_WORKLOAD_SOURCE};
 use crate::*;
 
 use super::helpers::*;
@@ -161,6 +162,7 @@ impl TestApp {
                 TEST_WORKLOAD_SOURCE.parse::<IpAddr>().unwrap(),
                 0,
             )))
+            .map_err(|e| anyhow!("{:?}. {}", e, localhost_error_message()))
             .unwrap();
 
         let stream = socket.connect(socks_addr).await.unwrap();
