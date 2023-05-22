@@ -233,7 +233,13 @@ impl<'a> TestWorkloadBuilder<'a> {
             .manager
             .namespaces
             .child(&self.w.workload.node, &self.w.workload.name)?;
-        self.w.workload.workload_ips[0] = network_namespace.ip(); // TODO(kdorosh)
+        self.w.workload.workload_ips = vec![network_namespace.ip()];
+        self.w.workload.uid = format!(
+            "cluster1//v1/Pod/{}/{}/{:?}",
+            self.w.workload.namespace,
+            self.w.workload.name,
+            network_namespace.ip()
+        );
 
         for (vip, ports) in &self.w.vips {
             let ep_network_addr = NetworkAddress {
@@ -270,12 +276,7 @@ impl<'a> TestWorkloadBuilder<'a> {
             }
         }
 
-        info!(
-            "registered {}/{} at {}",
-            self.w.workload.namespace,
-            self.w.workload.name,
-            self.w.workload.workload_ips[0] // TODO(kdorosh)
-        );
+        info!("registered {}", self.w.workload.uid);
         self.manager.workloads.push(self.w);
         if self.captured {
             self.manager

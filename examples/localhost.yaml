@@ -1,7 +1,8 @@
 # This shows an example local config for ztunnel that adds a workload for localhost.
 # This allows local testing by sending requests through the local ztunnel to other servers running on localhost.
 workloads:
-- name: local
+- uid: cluster1//v1/Pod/default/local/127.0.0.1
+  name: local
   namespace: default
   serviceAccount: default
   workloadIps: ["127.0.0.1"]
@@ -14,7 +15,8 @@ workloads:
     "remote/127.10.0.2":
       80: 8080
 # Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
-- name: local-tcp
+- uid: cluster1//v1/Pod/default/local-tcp/127.0.0.2
+  name: local-tcp
   namespace: default
   serviceAccount: default
   workloadIps: ["127.0.0.2"]

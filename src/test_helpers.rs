@@ -123,6 +123,10 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_HBONE.parse()?],
                 protocol: HBONE,
+                uid: format!(
+                    "cluster1//v1/Pod/default/local-hbone/{:?}",
+                    TEST_WORKLOAD_HBONE
+                ),
                 name: "local-hbone".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
@@ -135,6 +139,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_TCP.parse()?],
                 protocol: TCP,
+                uid: format!("cluster1//v1/Pod/default/local-tcp/{:?}", TEST_WORKLOAD_TCP),
                 name: "local-tcp".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
@@ -147,6 +152,10 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_SOURCE.parse()?],
                 protocol: TCP,
+                uid: format!(
+                    "cluster1//v1/Pod/default/local-source/{:?}",
+                    TEST_WORKLOAD_SOURCE
+                ),
                 name: "local-source".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
@@ -161,6 +170,10 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_WAYPOINT.parse()?],
                 protocol: HBONE,
+                uid: format!(
+                    "cluster1//v1/Pod/default/local-waypoint/{:?}",
+                    TEST_WORKLOAD_WAYPOINT
+                ),
                 name: "local-waypoint".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),

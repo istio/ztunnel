@@ -540,11 +540,7 @@ impl LocalClient {
         let workloads = r.workloads.len();
         let policies = r.policies.len();
         for wl in r.workloads {
-            let wip = wl.workload.workload_ips[0]; // TODO(kdorosh)
-            debug!(
-                "inserting local workloads {wip} ({}/{})",
-                &wl.workload.namespace, &wl.workload.name
-            );
+            debug!("inserting local workload {}", &wl.workload.uid);
             let vips = wl
                 .vips
                 .into_iter()
@@ -1050,10 +1046,9 @@ impl WorkloadStore {
         w: Workload,
         vips: HashMap<String, PortList>,
     ) -> anyhow::Result<()> {
-        let wip = network_addr(&w.network, w.workload_ips[0]); // TODO(kdorosh)
-                                                               // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
-                                                               // under a lock, so there is no race here.
-        self.remove(wip.to_string());
+        // First, remove the entry entirely to make sure things are cleaned up properly. Note this is
+        // under a lock, so there is no race here.
+        self.remove(w.uid.to_owned());
         let status = w.status;
         // Unhealthy workloads are always inserted, as we may get or recieve traffic to them. But we shouldn't
         // include them in load balancing we do to Services.
@@ -1071,26 +1066,30 @@ impl WorkloadStore {
 
                 let vip = vip.parse::<IpAddr>()?;
                 let network_vip = network_addr(svc_network, vip);
-                let ep = Endpoint {
-                    address: wip.clone(),
-                    port: pl.into(),
-                };
-                self.workload_to_vips
-                    .entry(wip.clone())
-                    .or_default()
-                    .insert(network_vip.clone());
-                if let Some(svc) = self.services_by_ip.get_mut(&network_vip) {
-                    svc.write()
-                        .unwrap()
-                        .endpoints
-                        .insert(ep.address.clone(), ep.clone());
-                } else {
-                    // Can happen due to ordering issues
-                    trace!("pod has VIP {vip}, but VIP not found");
-                    self.staged_vips
-                        .entry(network_vip.to_owned())
+
+                for wip in &w.workload_ips {
+                    let wip = network_addr(&w.network, *wip);
+                    let ep = Endpoint {
+                        address: wip.clone(),
+                        port: pl.into(),
+                    };
+                    self.workload_to_vips
+                        .entry(wip.clone())
                         .or_default()
-                        .insert(wip.clone(), ep.clone());
+                        .insert(network_vip.clone());
+                    if let Some(svc) = self.services_by_ip.get_mut(&network_vip) {
+                        svc.write()
+                            .unwrap()
+                            .endpoints
+                            .insert(ep.address.clone(), ep.clone());
+                    } else {
+                        // Can happen due to ordering issues
+                        trace!("pod has VIP {vip}, but VIP not found");
+                        self.staged_vips
+                            .entry(network_vip.to_owned())
+                            .or_default()
+                            .insert(wip.clone(), ep.clone());
+                    }
                 }
             }
         }
@@ -1145,57 +1144,40 @@ impl WorkloadStore {
     }
 
     fn remove(&mut self, xds_name: String) {
+        self.remove_workload(&xds_name); // remove workload by UID
         let parts = xds_name.split_once('/');
         if parts.is_none() {
-            error!("received invalid resource removal {}, ignoring", xds_name);
+            // we don't have ns/hostname or network/IP xds primary key for service
             return;
         }
-
-        // we received either network/IP for workload or namespace/hostname for service
-        // TODO: update workload primary xds key to network/UID instead of network/IP
-        // once workload supports multiple addresses for dual stack
-        let (network_or_namespace, ip_or_hostname) = parts.unwrap();
-
-        use std::str::FromStr;
-        let maybe_ip: Option<IpAddr> = match IpAddr::from_str(ip_or_hostname) {
-            Err(e) => {
-                trace!(
-                    "cannot parse xds name suffix as an IP {}, treating as hostname: {}",
-                    ip_or_hostname,
-                    e
-                );
-                None
-            }
-            Ok(i) => Some(i),
-        };
-
-        if let Some(ip) = maybe_ip {
-            self.remove_workload(network_or_namespace, ip);
-        } else {
-            self.remove_service(network_or_namespace, ip_or_hostname);
-        }
+        // we have the format for service TODO(kdorosh) handle UIDs with single forward slash
+        let (network, hostname) = parts.unwrap();
+        self.remove_service(network, hostname);
     }
 
-    fn remove_workload(&mut self, network: &str, ip: IpAddr) {
-        let Some(prev) = self.workloads.remove(&network_addr(network, ip)) else {
+    fn remove_workload(&mut self, uid: &str) {
+        let Some(prev) = self.workloads_by_uid.remove(uid) else {
             return;
         };
         let prev = prev.read().unwrap();
-        self.workloads_by_uid.remove(&prev.uid);
-        let prev_addr = &network_addr(&prev.network, prev.workload_ips[0]); // TODO(kdorosh)
-        let Some(prev_vips) = self.workload_to_vips.remove(prev_addr) else {
-            return;
-        };
-        for vip in prev_vips.iter() {
-            self.staged_vips
-                .entry(vip.to_owned())
-                .or_default()
-                .remove(prev_addr);
-            if self.staged_vips[vip].is_empty() {
-                self.staged_vips.remove(vip);
-            }
-            if let Some(wls) = self.services_by_ip.get_mut(vip) {
-                wls.write().unwrap().endpoints.remove(prev_addr);
+        for wip in prev.workload_ips.iter() {
+            self.workloads.remove(&network_addr(&prev.network, *wip));
+
+            let prev_addr = &network_addr(&prev.network, *wip);
+            let Some(prev_vips) = self.workload_to_vips.remove(prev_addr) else {
+                continue;
+            };
+            for vip in prev_vips.iter() {
+                self.staged_vips
+                    .entry(vip.to_owned())
+                    .or_default()
+                    .remove(prev_addr);
+                if self.staged_vips[vip].is_empty() {
+                    self.staged_vips.remove(vip);
+                }
+                if let Some(wls) = self.services_by_ip.get_mut(vip) {
+                    wls.write().unwrap().endpoints.remove(prev_addr);
+                }
             }
         }
     }
@@ -1412,10 +1394,15 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0);
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
-        let ip1 = network_addr("", IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let nw_addr1 = network_addr("", ip1);
+        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip1);
         let xds_ip2 = Bytes::copy_from_slice(&[127, 0, 0, 2]);
+        let ip2 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+        let uid2 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip2);
 
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid1.to_owned(),
             addresses: vec![xds_ip1.clone()],
             name: "some name".to_string(),
             ..Default::default()
@@ -1424,9 +1411,10 @@ mod tests {
         assert_eq!((wi.workloads.len()), 1);
         assert_eq!((wi.workloads_by_uid.len()), 1);
         assert_eq!(
-            wi.find_workload(&ip1),
+            wi.find_workload(&nw_addr1),
             Some(Workload {
-                workload_ips: vec![ip1.address],
+                uid: uid1.to_owned(),
+                workload_ips: vec![nw_addr1.address],
                 name: "some name".to_string(),
                 ..test_helpers::test_default_workload()
             })
@@ -1434,26 +1422,28 @@ mod tests {
 
         wi.remove("/invalid".to_string());
         assert_eq!(
-            wi.find_workload(&ip1),
+            wi.find_workload(&nw_addr1),
             Some(Workload {
-                workload_ips: vec![ip1.address],
+                uid: uid1.to_owned(),
+                workload_ips: vec![nw_addr1.address],
                 name: "some name".to_string(),
                 ..test_helpers::test_default_workload()
             })
         );
 
-        wi.remove("/127.0.0.2".to_string());
+        wi.remove(uid2.to_owned());
         assert_eq!(
-            wi.find_workload(&ip1),
+            wi.find_workload(&nw_addr1),
             Some(Workload {
-                workload_ips: vec![ip1.address],
+                uid: uid1.to_owned(),
+                workload_ips: vec![nw_addr1.address],
                 name: "some name".to_string(),
                 ..test_helpers::test_default_workload()
             })
         );
 
-        wi.remove("/127.0.0.1".to_string());
-        assert_eq!(wi.find_workload(&ip1), None);
+        wi.remove(uid1.to_owned());
+        assert_eq!(wi.find_workload(&nw_addr1), None);
         assert_eq!(wi.workloads.len(), 0);
         assert_eq!(wi.workloads_by_uid.len(), 0);
 
@@ -1471,6 +1461,7 @@ mod tests {
         // Add two workloads into the VIP. Add out of order to further test
         assert_eq!((wi.staged_vips.len()), 0);
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid1.to_owned(),
             addresses: vec![xds_ip1.clone()],
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1573,6 +1564,7 @@ mod tests {
         assert_eq!((wi.services_by_hostname.len()), 1);
 
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid2.to_owned(),
             addresses: vec![xds_ip2.clone()],
             name: "some name2".to_string(),
             virtual_ips: vip.clone(),
@@ -1606,7 +1598,7 @@ mod tests {
         );
 
         assert_vips(&wi, vec!["some name", "some name2"]);
-        wi.remove("/127.0.0.2".to_string());
+        wi.remove(uid2.to_owned());
 
         // we need to ensure both copies of the service stored are the same.
         // this is important because we mutate the service endpoints in place
@@ -1633,11 +1625,12 @@ mod tests {
         );
 
         assert_vips(&wi, vec!["some name"]);
-        wi.remove("/127.0.0.1".to_string());
+        wi.remove(uid1.to_owned());
         assert_vips(&wi, vec![]);
 
         // Add 2 workload with VIP
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid1.to_owned(),
             addresses: vec![xds_ip1.clone()],
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1645,6 +1638,7 @@ mod tests {
         })
         .unwrap();
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid2.to_owned(),
             addresses: vec![xds_ip2.clone()],
             name: "some name2".to_string(),
             virtual_ips: vip.clone(),
@@ -1654,6 +1648,7 @@ mod tests {
         assert_vips(&wi, vec!["some name", "some name2"]);
         // now update it without the VIP
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid1,
             addresses: vec![xds_ip1],
             name: "some name".to_string(),
             ..Default::default()
@@ -1663,6 +1658,7 @@ mod tests {
         assert_vips(&wi, vec!["some name2"]);
         // now update it with unhealthy
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid2,
             addresses: vec![xds_ip2],
             name: "some name2".to_string(),
             virtual_ips: vip,
@@ -1690,6 +1686,8 @@ mod tests {
         assert_eq!((wi.staged_vips.len()), 0);
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
+        let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip1);
 
         let vip = HashMap::from([(
             "127.0.1.1".to_string(),
@@ -1704,6 +1702,7 @@ mod tests {
 
         // Add 2 workload with VIP
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid1.to_owned(),
             addresses: vec![xds_ip1.clone()],
             name: "some name".to_string(),
             virtual_ips: vip.clone(),
@@ -1714,6 +1713,7 @@ mod tests {
 
         // now update it without the VIP
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid1.to_owned(),
             addresses: vec![xds_ip1.clone()],
             name: "some name".to_string(),
             ..Default::default()
@@ -1723,6 +1723,7 @@ mod tests {
 
         // Add 2 workload with VIP again
         wi.insert_xds_workload(XdsWorkload {
+            uid: uid1.to_owned(),
             addresses: vec![xds_ip1],
             name: "some name".to_string(),
             virtual_ips: vip,
@@ -1731,7 +1732,7 @@ mod tests {
         .unwrap();
         assert_eq!((wi.staged_vips.len()), 1); // VIP should be staged again
 
-        wi.remove("/127.0.0.1".to_string());
+        wi.remove(uid1);
         assert_eq!((wi.staged_vips.len()), 0); // should remove the VIP if no longer needed
     }
 

@@ -520,6 +520,7 @@ pub async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -545,6 +546,10 @@ mod tests {
             ..crate::config::parse_config().unwrap()
         };
         let source = XdsWorkload {
+            uid: format!(
+                "cluster1//v1/Pod/default/my-pod/{:?}",
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+            ),
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),
             addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
@@ -601,6 +606,10 @@ mod tests {
             "127.0.0.1",
             "1.2.3.4:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/ns/test-tcp/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 ..Default::default()
             },
@@ -620,6 +629,10 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/ns/test-tcp/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
@@ -643,6 +656,10 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/ns/test-tcp/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
@@ -666,6 +683,10 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/ns/test-tcp/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
@@ -689,6 +710,10 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/ns/test-tcp/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
@@ -712,6 +737,10 @@ mod tests {
             "1.2.3.4",
             "127.0.0.2:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/default/my-pod/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 ..Default::default()
             },
@@ -726,6 +755,10 @@ mod tests {
             "127.0.0.2",
             "127.0.0.1:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/default/my-pod/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
@@ -754,6 +787,10 @@ mod tests {
             "127.0.0.1",
             "127.0.0.2:80",
             XdsWorkload {
+                uid: format!(
+                    "cluster1//v1/Pod/default/my-pod/{:?}",
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+                ),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 waypoint: Some(xds::istio::workload::GatewayAddress {
                     destination: Some(xds::istio::workload::gateway_address::Destination::Address(
