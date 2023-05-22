@@ -14,6 +14,7 @@
 
 use bytes::Bytes;
 use itertools::Itertools;
+use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
@@ -42,6 +43,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 use crate::config::{ConfigSource, ProxyMode};
 use crate::identity::{Identity, SecretManager};
 use crate::metrics::Metrics;
+use crate::proxy::Error;
 use crate::rbac::{Authorization, RbacScope};
 use crate::workload::address::Address;
 use crate::workload::WorkloadError::EnumParse;
@@ -667,6 +669,10 @@ impl WorkloadInformation {
         wi.find_upstream(network, addr, hbone_port)
     }
 
+    pub fn choose_workload_ip(&self, workload: &Workload) -> Result<IpAddr, Error> {
+        self.info.lock().unwrap().choose_workload_ip(workload)
+    }
+
     pub async fn find_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
         let Some(gw_address) = &wl.waypoint else {
             return Ok(None);
@@ -1238,9 +1244,16 @@ impl WorkloadStore {
                 workload: wl.to_owned(),
                 port: *target_port,
             };
-            Self::set_gateway_address(&mut us, hbone_port);
-            debug!("found upstream {} from VIP {}", us, addr.ip());
-            return Some(us);
+            match self.set_gateway_address(&mut us, hbone_port) {
+                Ok(_) => {
+                    debug!("found upstream {} from VIP {}", us, addr.ip());
+                    return Some(us);
+                }
+                Err(e) => {
+                    debug!("failed to set gateway address for upstream: {}", e);
+                    return None;
+                }
+            };
         }
         if let Some(wl) = self.workloads.get(&network_addr(network, addr.ip())) {
             let wl = wl.read().unwrap();
@@ -1248,27 +1261,48 @@ impl WorkloadStore {
                 workload: wl.to_owned(),
                 port: addr.port(),
             };
-            Self::set_gateway_address(&mut us, hbone_port);
-            debug!("found upstream: {}", us);
-            return Some(us);
+            match self.set_gateway_address(&mut us, hbone_port) {
+                Ok(_) => {
+                    debug!("found upstream {}", us);
+                    return Some(us);
+                }
+                Err(e) => {
+                    debug!("failed to set gateway address for upstream: {}", e);
+                    return None;
+                }
+            };
         }
         None
     }
 
-    fn set_gateway_address(us: &mut Upstream, hbone_port: u16) {
+    fn set_gateway_address(&self, us: &mut Upstream, hbone_port: u16) -> anyhow::Result<()> {
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
                 Protocol::HBONE => {
                     let ip = us
                         .workload
-                        .waypoint_svc_ip_address()
-                        .unwrap()
-                        .unwrap_or(us.workload.workload_ips[0]); // TODO(kdorosh)
+                        .waypoint_svc_ip_address()?
+                        .unwrap_or(self.choose_workload_ip(&us.workload)?);
                     SocketAddr::from((ip, hbone_port))
                 }
-                Protocol::TCP => SocketAddr::from((us.workload.workload_ips[0], us.port)), // TODO(kdorosh)
+                Protocol::TCP => {
+                    SocketAddr::from((self.choose_workload_ip(&us.workload)?, us.port))
+                }
             });
         }
+        Ok(())
+    }
+
+    // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
+    // if/when we support that, this function may need to move to get access to the necessary metadata.
+    pub fn choose_workload_ip(&self, workload: &Workload) -> Result<IpAddr, Error> {
+        // Randomly pick an IP
+        // TODO: do this more efficiently, and not just randomly
+        let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
+            debug!("workload {} has no suitable workload IPs for routing", workload.name);
+            return Err(Error::NoValidDestination(Box::new(workload.to_owned())))
+        };
+        Ok(*ip)
     }
 }
 

@@ -383,8 +383,10 @@ impl OutboundConnection {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
-                let wp_socket_addr =
-                    SocketAddr::new(choose_workload_ip(&waypoint_workload)?, waypoint_us.port);
+                let wp_socket_addr = SocketAddr::new(
+                    self.pi.workloads.choose_workload_ip(&waypoint_workload)?,
+                    waypoint_us.port,
+                );
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
@@ -419,7 +421,10 @@ impl OutboundConnection {
             return Ok(Request {
                 protocol: Protocol::HBONE,
                 source: source_workload,
-                destination: SocketAddr::from((choose_workload_ip(&us.workload)?, us.port)),
+                destination: SocketAddr::from((
+                    self.pi.workloads.choose_workload_ip(&us.workload)?,
+                    us.port,
+                )),
                 destination_workload: Some(us.workload.clone()),
                 expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
@@ -439,7 +444,10 @@ impl OutboundConnection {
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
-            destination: SocketAddr::from((choose_workload_ip(&us.workload)?, us.port)),
+            destination: SocketAddr::from((
+                self.pi.workloads.choose_workload_ip(&us.workload)?,
+                us.port,
+            )),
             destination_workload: Some(us.workload.clone()),
             expected_identity: Some(us.workload.identity()),
             gateway: us
@@ -460,19 +468,6 @@ fn baggage(r: &Request, cluster: String) -> String {
             name = r.source.canonical_name,
             version = r.source.canonical_revision,
     )
-}
-use rand::seq::SliceRandom;
-
-// TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-// if/when we support that, this function may need to move to get access to the necessary metadata.
-fn choose_workload_ip(workload: &Workload) -> Result<IpAddr, Error> {
-    // Randomly pick an IP
-    // TODO: do this more efficiently, and not just randomly
-    let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
-        debug!("workload {} has no suitable workload IPs for routing", workload.name);
-        return Err(Error::NoValidDestination(Box::new(workload.to_owned())))
-    };
-    Ok(*ip)
 }
 
 #[derive(Debug)]
