@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use bytes::Bytes;
-use itertools::Itertools;
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
@@ -31,7 +30,7 @@ use serde::Serialize;
 use serde::Serializer;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use xds::istio::security::Authorization as XdsAuthorization;
 use xds::istio::workload::address::Type as XdsType;
@@ -314,12 +313,12 @@ impl TryFrom<&XdsWorkload> for Workload {
             None => None,
         };
 
-        // TODO(kdorosh) don't unwrap, propagate error up
         let addresses = resource
             .addresses
             .iter()
-            .map(|a| byte_to_ip(a).unwrap())
-            .collect_vec();
+            .map(byte_to_ip)
+            .collect::<Result<Vec<_>, _>>()?;
+
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
         Ok(Workload {
             workload_ips: addresses,
@@ -1150,19 +1149,19 @@ impl WorkloadStore {
     }
 
     fn remove(&mut self, xds_name: String) {
-        self.remove_workload(&xds_name); // remove workload by UID
+        self.remove_workload(&xds_name); // remove workload by UID; if xds_name is a service then this will no-op
         let parts = xds_name.split_once('/');
         if parts.is_none() {
             // we don't have ns/hostname or network/IP xds primary key for service
             return;
         }
-        // we have the format for service TODO(kdorosh) handle UIDs with single forward slash
         let (network, hostname) = parts.unwrap();
         self.remove_service(network, hostname);
     }
 
     fn remove_workload(&mut self, uid: &str) {
         let Some(prev) = self.workloads_by_uid.remove(uid) else {
+            trace!("tried to remove workload keyed by {} but it was not found; presumably it was a service", uid);
             return;
         };
         let prev = prev.read().unwrap();
@@ -1194,6 +1193,7 @@ impl WorkloadStore {
             hostname: hostname.to_owned(),
         };
         let Some(prev) = self.services_by_hostname.remove(namespaced_hostname) else {
+            warn!("tried to remove service keyed by {} but it was not found", namespaced_hostname);
             return;
         };
         let prev = prev.read().unwrap();
