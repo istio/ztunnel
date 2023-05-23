@@ -81,9 +81,10 @@ message Workload {
   // UID represents a globally unique opaque identifier for this workload.
   // For k8s resources, it is recommended to use the more readable format:
   //
-  // cluster/group/version/kind/namespace/name/id
+  // cluster/group/version/kind/namespace/name/optional-index
   //
-  // As an example, a ServiceEntry with two WorkloadEntries inlined would become:
+  // As an example, a ServiceEntry with two WorkloadEntries inlined could become
+  // two Workloads with the following UIDs:
   // - cluster1/networking.istio.io/v1alpha3/ServiceEntry/default/external-svc/endpoint1
   // - cluster1/networking.istio.io/v1alpha3/ServiceEntry/default/external-svc/endpoint2
   //

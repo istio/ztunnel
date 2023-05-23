@@ -283,10 +283,8 @@ impl<'a> TestWorkloadBuilder<'a> {
             .child(&self.w.workload.node, &self.w.workload.name)?;
         self.w.workload.workload_ips = vec![network_namespace.ip()];
         self.w.workload.uid = format!(
-            "cluster1//v1/Pod/{}/{}/{:?}",
-            self.w.workload.namespace,
-            self.w.workload.name,
-            network_namespace.ip()
+            "cluster1//v1/Pod/{}/{}",
+            self.w.workload.namespace, self.w.workload.name,
         );
 
         // update the endpoints for the service, if workload has any vips

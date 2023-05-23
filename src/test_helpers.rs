@@ -142,10 +142,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_HBONE.parse()?],
                 protocol: HBONE,
-                uid: format!(
-                    "cluster1//v1/Pod/default/local-hbone/{:?}",
-                    TEST_WORKLOAD_HBONE
-                ),
+                uid: "cluster1//v1/Pod/default/local-hbone".to_string(),
                 name: "local-hbone".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
@@ -158,7 +155,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_TCP.parse()?],
                 protocol: TCP,
-                uid: format!("cluster1//v1/Pod/default/local-tcp/{:?}", TEST_WORKLOAD_TCP),
+                uid: "cluster1//v1/Pod/default/local-tcp".to_string(),
                 name: "local-tcp".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
@@ -171,10 +168,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_SOURCE.parse()?],
                 protocol: TCP,
-                uid: format!(
-                    "cluster1//v1/Pod/default/local-source/{:?}",
-                    TEST_WORKLOAD_SOURCE
-                ),
+                uid: "cluster1//v1/Pod/default/local-source".to_string(),
                 name: "local-source".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
@@ -189,10 +183,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_WAYPOINT.parse()?],
                 protocol: HBONE,
-                uid: format!(
-                    "cluster1//v1/Pod/default/local-waypoint/{:?}",
-                    TEST_WORKLOAD_WAYPOINT
-                ),
+                uid: "cluster1//v1/Pod/default/local-waypoint".to_string(),
                 name: "local-waypoint".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
