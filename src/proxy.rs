@@ -34,7 +34,7 @@ use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
-use crate::workload::WorkloadInformation;
+use crate::workload::{Workload, WorkloadInformation};
 use crate::{config, identity, socket, tls};
 
 mod inbound;
@@ -167,6 +167,9 @@ pub enum Error {
 
     #[error("unknown destination: {0}")]
     UnknownDestination(IpAddr),
+
+    #[error("no valid routing destination for workload: {0}")]
+    NoValidDestination(Box<Workload>),
 
     #[error("attempted recursive call to ourselves")]
     SelfCall,

@@ -35,6 +35,7 @@ mod namespaced {
     use ztunnel::test_helpers::linux::WorkloadManager;
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
+    use ztunnel::workload::NetworkAddress;
 
     macro_rules! function {
         () => {{
@@ -80,6 +81,14 @@ mod namespaced {
     #[tokio::test]
     async fn test_vip_request() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!();
+        manager
+            .service_builder("server1")
+            .addresses(vec![NetworkAddress {
+                network: "".to_string(),
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, 80u16)]))
+            .register()?;
         run_tcp_server(
             manager
                 .workload_builder("server1", REMOTE_NODE)
@@ -672,6 +681,14 @@ mod namespaced {
                 }
             }
         };
+        manager
+            .service_builder("server1")
+            .addresses(vec![NetworkAddress {
+                network: "".to_string(),
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, 80u16)]))
+            .register()?;
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
