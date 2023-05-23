@@ -33,11 +33,14 @@ use crate::workload::{
 
 pub mod app;
 pub mod ca;
-pub mod components;
 pub mod helpers;
-pub mod netns;
 pub mod tcp;
 pub mod xds;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod netns;
 
 pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {
     config::Config {
@@ -90,6 +93,22 @@ pub const TEST_WORKLOAD_HBONE: &str = "127.0.0.3";
 pub const TEST_WORKLOAD_TCP: &str = "127.0.0.4";
 pub const TEST_WORKLOAD_WAYPOINT: &str = "127.0.0.4";
 pub const TEST_VIP: &str = "127.10.0.1";
+
+pub fn localhost_error_message() -> String {
+    let addrs = &[
+        TEST_WORKLOAD_SOURCE,
+        TEST_WORKLOAD_HBONE,
+        TEST_WORKLOAD_TCP,
+        TEST_WORKLOAD_WAYPOINT,
+        TEST_VIP,
+    ];
+    format!(
+        "These tests use the following loopback addresses: {:?}. \
+    Your OS may require an explicit alias for each. If so, you'll need to manually \
+    configure your system for each IP (e.g. `sudo ifconfig lo0 alias 127.0.0.2 up`).",
+        addrs
+    )
+}
 
 pub fn test_default_workload() -> Workload {
     Workload {

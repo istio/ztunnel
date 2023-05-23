@@ -34,7 +34,8 @@ use pprof::protos::Message;
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
-use tracing::error;
+use tokio::time;
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
@@ -116,9 +117,12 @@ impl Service {
                 "/debug/pprof/profile" => Ok(handle_pprof(req).await),
                 "/debug/gprof/profile" => Ok(handle_gprof(req).await),
                 "/debug/gprof/heap" => Ok(handle_gprof_heap(req).await),
-                "/quitquitquit" => {
-                    Ok(handle_server_shutdown(state.shutdown_trigger.clone(), req).await)
-                }
+                "/quitquitquit" => Ok(handle_server_shutdown(
+                    state.shutdown_trigger.clone(),
+                    req,
+                    state.config.self_termination_deadline,
+                )
+                .await),
                 "/config_dump" => Ok(handle_config_dump(
                     ConfigDump {
                         workload_info: state.workload_info.clone(),
@@ -259,10 +263,17 @@ async fn handle_pprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 async fn handle_server_shutdown(
     shutdown_trigger: signal::ShutdownTrigger,
     _req: Request<Incoming>,
+    self_term_wait: time::Duration,
 ) -> Response<Full<Bytes>> {
     match *_req.method() {
         hyper::Method::POST => {
-            shutdown_trigger.shutdown_now().await;
+            match time::timeout(self_term_wait, shutdown_trigger.shutdown_now()).await {
+                Ok(()) => info!("Shutdown completed gracefully"),
+                Err(_) => warn!(
+                    "Graceful shutdown did not complete in {:?}, terminating now",
+                    self_term_wait
+                ),
+            }
             plaintext_response(hyper::StatusCode::OK, "shutdown now\n".into())
         }
         _ => empty_response(hyper::StatusCode::METHOD_NOT_ALLOWED),

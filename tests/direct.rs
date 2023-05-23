@@ -126,8 +126,7 @@ async fn test_shutdown_drain() {
 async fn test_shutdown_forced_drain() {
     helpers::initialize_telemetry();
 
-    let mut cfg = test_config();
-    cfg.termination_grace_period = Duration::from_millis(10);
+    let cfg = test_config();
 
     let cert_manager = new_secret_manager(Duration::from_secs(10));
     let app = ztunnel::app::build_with_cert(cfg, cert_manager.clone())

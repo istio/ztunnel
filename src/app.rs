@@ -20,8 +20,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use prometheus_client::registry::Registry;
-use tokio::time;
-use tracing::{info, warn, Instrument};
+use tracing::Instrument;
 
 use crate::identity::SecretManager;
 use crate::metrics::Metrics;
@@ -110,7 +109,6 @@ pub async fn build_with_cert(
 
     Ok(Bound {
         drain_tx,
-        config,
         shutdown,
         readiness_address,
         admin_address,
@@ -135,7 +133,6 @@ pub struct Bound {
     pub stats_address: SocketAddr,
 
     pub shutdown: signal::Shutdown,
-    config: config::Config,
     drain_tx: drain::Signal,
 }
 
@@ -144,16 +141,10 @@ impl Bound {
         // Wait for a signal to shutdown from explicit admin shutdown or signal
         self.shutdown.wait().await;
 
-        // Start a drain; this will wait for all drain_rx handles to be dropped before completing,
-        // allowing components to terminate.
-        // If they take too long, terminate anyways.
-        match time::timeout(self.config.termination_grace_period, self.drain_tx.drain()).await {
-            Ok(()) => info!("Shutdown completed gracefully"),
-            Err(_) => warn!(
-                "Graceful shutdown did not complete in {:?}, terminating now",
-                self.config.termination_grace_period
-            ),
-        }
+        // Start a drain; this will attempt to end all connections
+        // or itself be interrupted by a stronger TERM signal, whichever comes first.
+        self.drain_tx.drain().await;
+
         Ok(())
     }
 }

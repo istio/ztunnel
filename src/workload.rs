@@ -40,6 +40,7 @@ use xds::istio::workload::Service as XdsService;
 use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::config::{ConfigSource, ProxyMode};
+use crate::identity::Priority::Warmup;
 use crate::identity::{Identity, SecretManager};
 use crate::metrics::Metrics;
 use crate::proxy::Error;
@@ -442,10 +443,12 @@ impl WorkloadManager {
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<WorkloadManager> {
         let (tx, mut rx) = mpsc::channel::<Identity>(256);
-        // todo ratelimit prefetching to a reasonable limit
         tokio::spawn(async move {
             while let Some(workload_identity) = rx.recv().await {
-                match cert_manager.fetch_certificate(&workload_identity).await {
+                match cert_manager
+                    .fetch_certificate_pri(&workload_identity, Warmup)
+                    .await
+                {
                     Ok(_) => debug!("prefetched cert for {:?}", workload_identity.to_string()),
                     Err(e) => error!(
                         "unable to prefetch cert for {:?}, skipping, {:?}",
@@ -991,7 +994,7 @@ impl WorkloadStore {
         let workload = Workload::try_from(&w)?;
         self.insert_workload(workload.clone(), w.virtual_ips)?;
 
-        if self.proxy_mode == ProxyMode::Shared && Some(&w.node) == self.local_node.as_ref() {
+        if self.should_prefetch_certificate(&workload) {
             if let Some(tx) = self.cert_tx.as_mut() {
                 if let Err(e) = tx.try_send(workload.identity()) {
                     info!("couldn't prefetch: {:?}", e)
@@ -999,6 +1002,17 @@ impl WorkloadStore {
             }
         }
         Ok(())
+    }
+
+    // Determine if we should prefetch a certificate for this workload. Being "wrong" is not too bad;
+    // a missing cert will be fetched on-demand when we get a request, so will just result in some extra latency.
+    fn should_prefetch_certificate(&self, w: &Workload) -> bool {
+        // Only shared mode fetches other workloads's certs
+        self.proxy_mode == ProxyMode::Shared &&
+            // We only get certs for our own node
+            Some(&w.node) == self.local_node.as_ref() &&
+            // If it doesn't support HBONE it *probably* doesn't need a cert.
+            (w.native_tunnel || w.protocol == Protocol::HBONE)
     }
 
     fn insert_xds_authorization(&mut self, r: XdsAuthorization) -> anyhow::Result<()> {
