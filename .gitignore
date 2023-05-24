@@ -1,4 +1,7 @@
-out/
+**/out/
 var/
-.idea/
-.vscode/
+Cargo.lock
+
+.idea
+.DS_Store
+.vscode

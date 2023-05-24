@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 // This build script is used to generate the rust source files that
 // we need for XDS GRPC communication.
 fn main() -> Result<(), anyhow::Error> {
+    let workspace_dir = workspace_dir();
+
     let proto_files = vec![
         "proto/xds.proto",
         "proto/workload.proto",
@@ -24,11 +27,11 @@ fn main() -> Result<(), anyhow::Error> {
         "proto/citadel.proto",
     ]
     .iter()
-    .map(|name| std::env::current_dir().unwrap().join(name))
+    .map(|name| workspace_dir.join(name))
     .collect::<Vec<_>>();
     let include_dirs = vec!["proto/"]
         .iter()
-        .map(|i| std::env::current_dir().unwrap().join(i))
+        .map(|i| workspace_dir.join(i))
         .collect::<Vec<_>>();
     let config = {
         let mut c = prost_build::Config::new();
@@ -62,7 +65,8 @@ fn main() -> Result<(), anyhow::Error> {
         println!("cargo:rerun-if-changed={}", path.to_str().unwrap());
     }
 
-    match Command::new("common/scripts/report_build_info.sh").output() {
+    let build_info_script = workspace_dir.join("common/scripts/report_build_info.sh");
+    match Command::new(build_info_script).output() {
         Ok(output) => {
             for line in String::from_utf8(output.stdout).unwrap().lines() {
                 // Each line looks like `istio.io/pkg/version.buildGitRevision=abc`
@@ -83,4 +87,15 @@ fn main() -> Result<(), anyhow::Error> {
         rustc_version::version().unwrap()
     );
     Ok(())
+}
+
+/// Gets the workspace directory for the project.
+fn workspace_dir() -> PathBuf {
+    // Current directory will be workspace/crates/crate.
+    let mut dir = std::env::current_dir().unwrap();
+
+    // Pop up to the workspace directory.
+    assert!(dir.pop());
+    assert!(dir.pop());
+    dir
 }

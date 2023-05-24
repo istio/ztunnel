@@ -15,6 +15,7 @@
 use crate::telemetry;
 use once_cell::sync::Lazy;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 use tracing::debug;
@@ -28,6 +29,30 @@ pub fn initialize_telemetry() {
 
 pub fn with_ip(s: SocketAddr, ip: IpAddr) -> SocketAddr {
     SocketAddr::new(ip, s.port())
+}
+
+/// Gets the workspace directory for the project.
+pub fn workspace_dir() -> PathBuf {
+    // Current directory will be workspace/crates/crate.
+    let mut dir = std::env::current_dir().unwrap();
+
+    // Pop up to the workspace directory.
+    assert!(dir.pop());
+    assert!(dir.pop());
+    dir
+}
+
+/// Converts the given relative path into an absolute path under the workspace directory.
+pub fn to_workspace_path(relative: &str) -> String {
+    let workspace_dir = workspace_dir();
+    let path = workspace_dir.join(relative);
+    assert!(
+        path.exists(),
+        "relative path {} does not exist under workspace dir {}",
+        relative,
+        workspace_dir.to_str().unwrap()
+    );
+    path.to_str().unwrap().to_string()
 }
 
 pub fn run_command(cmd: &str) -> anyhow::Result<()> {

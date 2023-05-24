@@ -84,7 +84,8 @@ impl WorkloadManager {
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         ns.run_ready(move |ready| async move {
-            helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip} {waypoints}"))?;
+            let redirect_script = helpers::to_workspace_path("scripts/ztunnel-redirect.sh");
+            helpers::run_command(&format!("{redirect_script} {ip} {waypoints}"))?;
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(cfg, cert_manager.clone()).await?;
 
@@ -116,7 +117,8 @@ impl WorkloadManager {
             .map(|i| i.to_string())
             .join(" ");
         self.namespaces.run_in_node(node, || {
-            helpers::run_command(&format!("scripts/node-redirect.sh {ip} {veth} {captured}"))
+            let redirect_script = helpers::to_workspace_path("scripts/node-redirect.sh");
+            helpers::run_command(&format!("{redirect_script} {ip} {veth} {captured}"))
         })?;
         Ok(rx.recv()?)
     }
