@@ -967,7 +967,7 @@ dependencies = [
 [[package]]
 name = "hyper-util"
 version = "0.0.0"
-source = "git+https://github.com/howardjohn/hyper-util?branch=client/h2-timer#5f15fb087d2b2b64e2019a06990b07a055f479f5"
+source = "git+https://github.com/howardjohn/hyper-util?branch=client/h2-timer#ae2d344e696677492ce8bcbddd0640652a64f569"
 dependencies = [
  "futures-channel",
  "futures-util",
