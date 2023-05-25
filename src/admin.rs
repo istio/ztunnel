@@ -810,5 +810,9 @@ mod tests {
         // most of the value of this test is ensuring that we can serialize
         // the config dump at all from our internal types
         assert!(resp_str.contains("defaultnw/127.0.0.2"));
+        // Check a waypoint
+        assert!(
+            resp_str.contains(r#"waypoint":{"destination":"defaultnw/127.0.0.10","port":15008}"#)
+        );
     }
 }
