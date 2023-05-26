@@ -1190,7 +1190,7 @@ impl WorkloadStore {
         }
 
         let parts = xds_name.split_once('/');
-        if parts.is_none() || xds_name.matches('/').count() != 1 {
+        if parts.is_none() {
             // we don't have namespace/hostname xds primary key for service
             warn!(
                 "tried to remove service keyed by {} but it did not have the expected namespace/hostname format",
