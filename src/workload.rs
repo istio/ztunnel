@@ -1176,7 +1176,9 @@ impl WorkloadStore {
             return;
         }
         let parts = xds_name.split_once('/');
-        if parts.is_none() {
+        // check count != 1 to avoid trying to delete obvious workload UIDs as a service,
+        // which can result in noisy logs when new workloads are added (we remove -> add)
+        if parts.is_none() || xds_name.matches('/').count() != 1 {
             // we don't have ns/hostname xds primary key for service
             warn!(
                 "tried to remove service keyed by {} but it did not have the expected ns/hostname format",
