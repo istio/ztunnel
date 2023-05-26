@@ -1175,13 +1175,25 @@ impl WorkloadStore {
             // we removed a workload, no reason to attempt to remove a service with the same name
             return;
         }
+
+        if xds_name.matches('/').count() != 1 {
+            // avoid trying to delete obvious workload UIDs as a service,
+            // which can result in noisy logs when new workloads are added
+            // (we remove then add workloads on initial update)
+            //
+            // we can make this assumption because namespaces and hostnames cannot have `/` in them
+            trace!(
+                "xds_name {} is obviously not a service, not attempting to delete as such",
+                xds_name
+            );
+            return;
+        }
+
         let parts = xds_name.split_once('/');
-        // check count != 1 to avoid trying to delete obvious workload UIDs as a service,
-        // which can result in noisy logs when new workloads are added (we remove -> add)
         if parts.is_none() || xds_name.matches('/').count() != 1 {
-            // we don't have ns/hostname xds primary key for service
+            // we don't have namespace/hostname xds primary key for service
             warn!(
-                "tried to remove service keyed by {} but it did not have the expected ns/hostname format",
+                "tried to remove service keyed by {} but it did not have the expected namespace/hostname format",
                 xds_name
             );
             return;
