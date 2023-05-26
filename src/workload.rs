@@ -1170,20 +1170,28 @@ impl WorkloadStore {
     }
 
     fn remove(&mut self, xds_name: String) {
-        self.remove_workload(&xds_name); // remove workload by UID; if xds_name is a service then this will no-op
+        // remove workload by UID; if xds_name is a service then this will no-op
+        if self.remove_workload(&xds_name) {
+            // we removed a workload, no reason to attempt to remove a service with the same name
+            return;
+        }
         let parts = xds_name.split_once('/');
         if parts.is_none() {
-            // we don't have ns/hostname or network/IP xds primary key for service
+            // we don't have ns/hostname xds primary key for service
+            trace!(
+                "tried to remove service keyed by {} but it did not have the expected ns/hostname format",
+                xds_name
+            );
             return;
         }
         let (network, hostname) = parts.unwrap();
         self.remove_service(network, hostname);
     }
 
-    fn remove_workload(&mut self, uid: &str) {
+    fn remove_workload(&mut self, uid: &str) -> bool {
         let Some(prev) = self.workloads_by_uid.remove(uid) else {
             trace!("tried to remove workload keyed by {} but it was not found; presumably it was a service", uid);
-            return;
+            return false;
         };
         let prev = prev.read().unwrap();
         for wip in prev.workload_ips.iter() {
@@ -1206,6 +1214,7 @@ impl WorkloadStore {
                 }
             }
         }
+        true
     }
 
     fn remove_service(&mut self, namespace: &str, hostname: &str) {
