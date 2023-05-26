@@ -1170,20 +1170,40 @@ impl WorkloadStore {
     }
 
     fn remove(&mut self, xds_name: String) {
-        self.remove_workload(&xds_name); // remove workload by UID; if xds_name is a service then this will no-op
+        // remove workload by UID; if xds_name is a service then this will no-op
+        if self.remove_workload(&xds_name) {
+            // we removed a workload, no reason to attempt to remove a service with the same name
+            return;
+        }
         let parts = xds_name.split_once('/');
         if parts.is_none() {
-            // we don't have ns/hostname or network/IP xds primary key for service
+            // we don't have namespace/hostname xds primary key for service
+            warn!(
+                "tried to remove service keyed by {} but it did not have the expected namespace/hostname format",
+                xds_name
+            );
             return;
         }
         let (network, hostname) = parts.unwrap();
+        if hostname.split_once('/').is_some() {
+            // avoid trying to delete obvious workload UIDs as a service,
+            // which can result in noisy logs when new workloads are added
+            // (we remove then add workloads on initial update)
+            //
+            // we can make this assumption because namespaces and hostnames cannot have `/` in them
+            trace!(
+                "xds_name {} is obviously not a service, not attempting to delete as such",
+                xds_name
+            );
+            return;
+        }
         self.remove_service(network, hostname);
     }
 
-    fn remove_workload(&mut self, uid: &str) {
+    fn remove_workload(&mut self, uid: &str) -> bool {
         let Some(prev) = self.workloads_by_uid.remove(uid) else {
             trace!("tried to remove workload keyed by {} but it was not found; presumably it was a service", uid);
-            return;
+            return false;
         };
         let prev = prev.read().unwrap();
         for wip in prev.workload_ips.iter() {
@@ -1206,6 +1226,7 @@ impl WorkloadStore {
                 }
             }
         }
+        true
     }
 
     fn remove_service(&mut self, namespace: &str, hostname: &str) {
