@@ -1178,7 +1178,7 @@ impl WorkloadStore {
         let parts = xds_name.split_once('/');
         if parts.is_none() {
             // we don't have ns/hostname xds primary key for service
-            trace!(
+            warn!(
                 "tried to remove service keyed by {} but it did not have the expected ns/hostname format",
                 xds_name
             );
