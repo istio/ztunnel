@@ -12,13 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::IpAddr;
-use std::time::Duration;
-
-use bytes::BufMut;
-use itertools::Itertools;
-use tracing::info;
-
 use crate::config::ConfigSource;
 use crate::state::service::{Endpoint, Service};
 use crate::state::workload::{gatewayaddress, Workload};
@@ -27,6 +20,11 @@ use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
 use crate::xds::{LocalConfig, LocalWorkload};
 use crate::{config, identity, proxy};
+use bytes::BufMut;
+use itertools::Itertools;
+use std::net::IpAddr;
+use std::time::Duration;
+use tracing::info;
 
 /// WorkloadManager provides an interface to deploy "workloads" as part of a test. Each workload
 /// runs in its own isolated network namespace, simulating a real environment. Redirection in the "host network"
@@ -98,6 +96,10 @@ impl WorkloadManager {
                     outbound: helpers::with_ip(app.proxy_addresses.outbound, ip),
                     inbound: helpers::with_ip(app.proxy_addresses.inbound, ip),
                     socks5: helpers::with_ip(app.proxy_addresses.socks5, ip),
+                    dns_proxy: app
+                        .proxy_addresses
+                        .dns_proxy
+                        .map(|dns_proxy| helpers::with_ip(dns_proxy, ip)),
                 },
                 readiness_address: helpers::with_ip(app.readiness_address, ip),
                 cert_manager,

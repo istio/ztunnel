@@ -17,6 +17,7 @@ pub mod app;
 pub mod baggage;
 pub mod cert_fetcher;
 pub mod config;
+pub mod hyper_util;
 pub mod identity;
 pub mod metrics;
 pub mod proxy;
@@ -32,5 +33,5 @@ pub mod tls;
 pub mod version;
 pub mod xds;
 
-pub mod hyper_util;
+#[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;

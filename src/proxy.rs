@@ -34,6 +34,12 @@ use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tracing::{error, trace, warn, Instrument};
 
+// Only public for testing. Needed by test_util.
+#[cfg(any(test, feature = "testing"))]
+pub mod dns;
+#[cfg(not(any(test, feature = "testing")))]
+mod dns;
+
 mod inbound;
 mod inbound_passthrough;
 mod outbound;
@@ -46,6 +52,7 @@ pub struct Proxy {
     inbound_passthrough: InboundPassthrough,
     outbound: Outbound,
     socks5: Socks5,
+    dns_proxy: Option<dns::DnsProxy>,
 }
 
 #[derive(Clone)]
@@ -67,7 +74,7 @@ impl Proxy {
         drain: Watch,
     ) -> Result<Proxy, Error> {
         let mut pi = ProxyInputs {
-            cfg,
+            cfg: cfg.clone(),
             state,
             cert_manager,
             metrics,
@@ -81,21 +88,28 @@ impl Proxy {
         let inbound_passthrough = InboundPassthrough::new(pi.clone()).await?;
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
         let socks5 = Socks5::new(pi.clone(), drain).await?;
+        let dns_proxy = new_dns_proxy(pi.clone()).await?;
+
         Ok(Proxy {
             inbound,
             inbound_passthrough,
             outbound,
             socks5,
+            dns_proxy,
         })
     }
 
     pub async fn run(self) {
-        let tasks = vec![
+        let mut tasks = vec![
             tokio::spawn(self.inbound_passthrough.run().in_current_span()),
             tokio::spawn(self.inbound.run().in_current_span()),
             tokio::spawn(self.outbound.run().in_current_span()),
             tokio::spawn(self.socks5.run().in_current_span()),
         ];
+
+        if let Some(dns_proxy) = self.dns_proxy {
+            tasks.push(tokio::spawn(dns_proxy.run().in_current_span()));
+        }
 
         futures::future::join_all(tasks).await;
     }
@@ -105,7 +119,31 @@ impl Proxy {
             outbound: self.outbound.address(),
             inbound: self.inbound.address(),
             socks5: self.socks5.address(),
+            dns_proxy: self.dns_proxy.as_ref().map(|dns_proxy| dns_proxy.address()),
         }
+    }
+}
+
+async fn new_dns_proxy(pi: ProxyInputs) -> Result<Option<dns::DnsProxy>, Error> {
+    // Determine whether we should enable DNS from proxy metadata.
+    const DNS_CAPTURE_METADATA: &str = "ISTIO_META_DNS_CAPTURE";
+    let dns_enabled = pi
+        .cfg
+        .proxy_metadata
+        .get(DNS_CAPTURE_METADATA)
+        .map_or(false, |val| val.trim().to_lowercase() == "true");
+    if dns_enabled {
+        Ok(Some(
+            dns::DnsProxy::new(
+                pi.cfg.dns_proxy_addr,
+                pi.cfg.network,
+                pi.state.state, // TODO(nmittler): this is ugly.
+                dns::forwarder_for_mode(pi.cfg.proxy_mode)?,
+            )
+            .await?,
+        ))
+    } else {
+        Ok(None)
     }
 }
 
@@ -114,6 +152,7 @@ pub struct Addresses {
     pub outbound: SocketAddr,
     pub inbound: SocketAddr,
     pub socks5: SocketAddr,
+    pub dns_proxy: Option<SocketAddr>,
 }
 
 #[derive(thiserror::Error, Debug)]

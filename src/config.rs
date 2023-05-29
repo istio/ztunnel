@@ -47,6 +47,7 @@ const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
+const DEFAULT_DNS_PORT: u16 = 15053;
 const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 
@@ -103,6 +104,9 @@ pub struct Config {
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
+    /// The socket address for the DNS proxy.
+    /// Only applies if `ISTIO_META_DNS_CAPTURE` is enabled.
+    pub dns_proxy_addr: SocketAddr,
 
     /// The network of the node this ztunnel is running on.
     pub network: String,
@@ -277,6 +281,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
+        dns_proxy_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
 
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,

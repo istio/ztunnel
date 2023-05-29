@@ -760,7 +760,7 @@ mod tests {
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
-        let proxy_state = new_proxy_state(vec![wl], vec![svc], vec![auth]).unwrap();
+        let proxy_state = new_proxy_state(&[wl], &[svc], &[auth]);
 
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
