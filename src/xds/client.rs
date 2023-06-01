@@ -666,9 +666,9 @@ mod tests {
 
     use crate::{workload::NetworkAddress, xds::ADDRESS_TYPE};
     use workload::Workload;
-    use xds::istio::workload::Workload as XdsWorkload;
-    use xds::istio::workload::Address as XdsAddress;
     use xds::istio::workload::address::Type as XdsType;
+    use xds::istio::workload::Address as XdsAddress;
+    use xds::istio::workload::Workload as XdsWorkload;
 
     use crate::{
         test_helpers::{
@@ -676,7 +676,7 @@ mod tests {
             xds::AdsServer,
         },
         workload,
-        xds::{istio::workload::WorkloadType},
+        xds::istio::workload::WorkloadType,
     };
 
     use super::*;
@@ -691,15 +691,11 @@ mod tests {
     ) {
         let start_time = SystemTime::now();
         let converted = match expected_address {
-            Some( a) => {
-                match a.r#type {
-                    Some(XdsType::Workload(w)) => {
-                                Some(Workload::try_from(&w).unwrap())
-                            }
-                    Some(XdsType::Service(_s)) => None,
-                    _ => None,
-                }
-            }
+            Some(a) => match a.r#type {
+                Some(XdsType::Workload(w)) => Some(Workload::try_from(&w).unwrap()),
+                Some(XdsType::Service(_s)) => None,
+                _ => None,
+            },
             _ => None,
         };
         // this is a borrow, Ok not to clone
@@ -723,19 +719,19 @@ mod tests {
         let ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
         let mut resources = vec![];
         let addresses = vec![XdsAddress {
-            r#type: Some(XdsType::Workload(XdsWorkload{
-            name: "1.1.1.1".to_string(),
-            namespace: "default".to_string(),
-            addresses: vec![ip.octets().to_vec().into()],
-            tunnel_protocol: 0,
-            trust_domain: "local".to_string(),
-            service_account: "default".to_string(),
-            node: "default".to_string(),
-            workload_type: WorkloadType::Deployment.into(),
-            workload_name: "".to_string(),
-            native_tunnel: true,
-            ..Default::default()
-        })),
+            r#type: Some(XdsType::Workload(XdsWorkload {
+                name: "1.1.1.1".to_string(),
+                namespace: "default".to_string(),
+                addresses: vec![ip.octets().to_vec().into()],
+                tunnel_protocol: 0,
+                trust_domain: "local".to_string(),
+                service_account: "default".to_string(),
+                node: "default".to_string(),
+                workload_type: WorkloadType::Deployment.into(),
+                workload_name: "".to_string(),
+                native_tunnel: true,
+                ..Default::default()
+            })),
         }];
         for addr in addresses.clone().iter() {
             match &addr.r#type {
