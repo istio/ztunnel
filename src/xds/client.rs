@@ -231,7 +231,7 @@ impl Demander {
                 tx,
                 ResourceKey {
                     name,
-                    type_url: xds::WORKLOAD_TYPE.to_string(),
+                    type_url: xds::ADDRESS_TYPE.to_string(),
                 },
             ))
             .await
@@ -664,9 +664,11 @@ mod tests {
     use textnonce::TextNonce;
     use tokio::time::sleep;
 
-    use crate::workload::NetworkAddress;
+    use crate::{workload::NetworkAddress, xds::ADDRESS_TYPE};
     use workload::Workload;
     use xds::istio::workload::Workload as XdsWorkload;
+    use xds::istio::workload::Address as XdsAddress;
+    use xds::istio::workload::address::Type as XdsType;
 
     use crate::{
         test_helpers::{
@@ -674,7 +676,7 @@ mod tests {
             xds::AdsServer,
         },
         workload,
-        xds::{istio::workload::WorkloadType, WORKLOAD_TYPE},
+        xds::{istio::workload::WorkloadType},
     };
 
     use super::*;
@@ -682,15 +684,25 @@ mod tests {
     const POLL_RATE: Duration = Duration::from_millis(2);
     const TEST_TIMEOUT: Duration = Duration::from_millis(100);
 
-    async fn verify_workload(
+    async fn verify_address(
         ip: IpAddr,
-        expected_workload: Option<XdsWorkload>,
+        expected_address: Option<XdsAddress>,
         source: &crate::workload::WorkloadInformation,
     ) {
         let start_time = SystemTime::now();
-        let converted: Option<Workload> = expected_workload
-            .as_ref()
-            .map(|expected_workload| Workload::try_from(expected_workload).unwrap()); // this is a borrow, Ok not to clone
+        let converted = match expected_address {
+            Some( a) => {
+                match a.r#type {
+                    Some(XdsType::Workload(w)) => {
+                                Some(Workload::try_from(&w).unwrap())
+                            }
+                    Some(XdsType::Service(_s)) => None,
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        // this is a borrow, Ok not to clone
         let mut matched = false;
         let ip_network_addr = NetworkAddress {
             network: "".to_string(),
@@ -710,7 +722,8 @@ mod tests {
         // TODO: Load this from a file?
         let ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
         let mut resources = vec![];
-        let workloads = vec![XdsWorkload {
+        let addresses = vec![XdsAddress {
+            r#type: Some(XdsType::Workload(XdsWorkload{
             name: "1.1.1.1".to_string(),
             namespace: "default".to_string(),
             addresses: vec![ip.octets().to_vec().into()],
@@ -722,26 +735,31 @@ mod tests {
             workload_name: "".to_string(),
             native_tunnel: true,
             ..Default::default()
+        })),
         }];
-        for wl in workloads.clone() {
-            resources.push(ProtoResource {
-                name: wl.name.clone(),
-                aliases: vec![],
-                version: "0.0.1".to_string(),
-                resource: Some(Any {
-                    type_url: WORKLOAD_TYPE.to_string(),
-                    value: wl.encode_to_vec(),
+        for addr in addresses.clone().iter() {
+            match &addr.r#type {
+                Some(XdsType::Workload(w)) => resources.push(ProtoResource {
+                    name: w.name.clone(),
+                    aliases: vec![],
+                    version: "0.0.1".to_string(),
+                    resource: Some(Any {
+                        type_url: ADDRESS_TYPE.to_string(),
+                        value: addr.encode_to_vec(),
+                    }),
+                    ttl: None,
+                    cache_control: None,
                 }),
-                ttl: None,
-                cache_control: None,
-            });
+                Some(XdsType::Service(_s)) => (),
+                _ => (),
+            }
         }
 
         let initial_response = Ok(DeltaDiscoveryResponse {
             resources,
             nonce: TextNonce::new().to_string(),
             system_version_info: "1.0.0".to_string(),
-            type_url: WORKLOAD_TYPE.to_string(),
+            type_url: ADDRESS_TYPE.to_string(),
             removed_resources: vec![],
         });
 
@@ -752,7 +770,7 @@ mod tests {
                 resources: vec![],
                 nonce: TextNonce::new().to_string(),
                 system_version_info: "1.0.0".to_string(),
-                type_url: WORKLOAD_TYPE.to_string(),
+                type_url: ADDRESS_TYPE.to_string(),
                 removed_resources: vec!["127.0.0.1".into()],
             });
 
@@ -767,23 +785,23 @@ mod tests {
 
         tx.send(initial_response)
             .expect("failed to send server response");
-        verify_workload(
+        verify_address(
             std::net::IpAddr::V4(ip),
-            Some(workloads[0].clone()),
+            Some(addresses[0].clone()),
             &workload_store,
         )
         .await;
         tx.send(abort_response)
             .expect("failed to send server response");
         sleep(Duration::from_millis(50)).await;
-        verify_workload(
+        verify_address(
             std::net::IpAddr::V4(ip),
-            Some(workloads[0].clone()),
+            Some(addresses[0].clone()),
             &workload_store,
         )
         .await;
         tx.send(removed_resource_response)
             .expect("failed to send server response");
-        verify_workload(std::net::IpAddr::V4(ip), None, &workload_store).await;
+        verify_address(std::net::IpAddr::V4(ip), None, &workload_store).await;
     }
 }
