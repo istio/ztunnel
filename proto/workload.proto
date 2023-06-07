@@ -81,7 +81,7 @@ message Workload {
   // UID represents a globally unique opaque identifier for this workload.
   // For k8s resources, it is recommended to use the more readable format:
   //
-  // cluster/group/kind/namespace/name/section-name
+  // cluster/group/version/kind/namespace/name/section-name
   //
   // As an example, a ServiceEntry with two WorkloadEntries inlined could become
   // two Workloads with the following UIDs:
