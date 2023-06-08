@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod proxy;
 pub mod rbac;
 pub mod readiness;
+pub mod service;
 pub mod signal;
 pub mod socket;
 pub mod stats;
