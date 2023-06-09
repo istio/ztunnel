@@ -17,7 +17,7 @@
 use libfuzzer_sys::fuzz_target;
 use prost::Message;
 use ztunnel::rbac::Authorization;
-use ztunnel::workload::Workload;
+use ztunnel::state::workload::Workload;
 use ztunnel::xds::istio::security::Authorization as XdsAuthorization;
 use ztunnel::xds::istio::workload::Workload as XdsWorkload;
 

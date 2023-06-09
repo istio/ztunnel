@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::identity::SecretManager;
+use crate::metrics::Metrics;
+use crate::state::ProxyStateManager;
+use crate::{admin, config, identity, proxy, readiness, signal, stats};
+use anyhow::Context;
+use prometheus_client::registry::Registry;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
-use anyhow::Context;
-use prometheus_client::registry::Registry;
 use tracing::Instrument;
-
-use crate::identity::SecretManager;
-use crate::metrics::Metrics;
-use crate::{admin, config, identity, proxy, readiness, signal, stats, workload};
 
 pub async fn build_with_cert(
     config: config::Config,
@@ -42,7 +41,7 @@ pub async fn build_with_cert(
 
     let ready = readiness::Ready::new();
     let proxy_task = ready.register_task("proxy listeners");
-    let workload_manager = workload::WorkloadManager::new(
+    let state_mgr = ProxyStateManager::new(
         config.clone(),
         metrics.clone(),
         ready.register_task("workload manager"),
@@ -52,7 +51,7 @@ pub async fn build_with_cert(
 
     let admin_server = admin::Service::new(
         config.clone(),
-        workload_manager.workloads(),
+        state_mgr.state.clone(),
         shutdown.trigger(),
         drain_rx.clone(),
         cert_manager.clone(),
@@ -71,7 +70,7 @@ pub async fn build_with_cert(
 
     let proxy = proxy::Proxy::new(
         config.clone(),
-        workload_manager.workloads(),
+        state_mgr.state.clone(),
         cert_manager.clone(),
         metrics.clone(),
         drain_rx.clone(),
@@ -82,7 +81,7 @@ pub async fn build_with_cert(
     // spawn all tasks that should run in the main thread
     admin_server.spawn();
     stats_server.spawn();
-    tokio::spawn(workload_manager.run());
+    tokio::spawn(state_mgr.run());
 
     let proxy_addresses = proxy.addresses();
     let span = tracing::span::Span::current();
@@ -121,7 +120,7 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
         identity::mock::new_secret_manager(Duration::from_secs(86400))
     } else {
-        Arc::new(identity::SecretManager::new(config.clone())?)
+        Arc::new(SecretManager::new(config.clone())?)
     };
     build_with_cert(config, cert_manager).await
 }

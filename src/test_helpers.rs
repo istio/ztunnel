@@ -12,24 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::config::ConfigSource;
+use crate::config::{self, RootCert};
+use crate::state::service::{Endpoint, Service};
+use crate::state::workload::Protocol::{HBONE, TCP};
+use crate::state::workload::{gatewayaddress, GatewayAddress, NetworkAddress, Workload};
+use crate::state::{DemandProxyState, ProxyState};
+use crate::xds::istio::security::Authorization as XdsAuthorization;
+use crate::xds::istio::workload::Service as XdsService;
+use crate::xds::istio::workload::Workload as XdsWorkload;
+use crate::xds::{LocalConfig, LocalWorkload, ProxyStateUpdater};
+use bytes::{BufMut, Bytes};
 use std::collections::HashMap;
 use std::default::Default;
 use std::fmt::Debug;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Add;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
-
-use bytes::{BufMut, Bytes};
 use tracing::trace;
-
-use crate::config::ConfigSource;
-use crate::config::{self, RootCert};
-use crate::workload::Protocol::{HBONE, TCP};
-use crate::workload::{
-    gatewayaddress, Endpoint, GatewayAddress, LocalConfig, LocalWorkload, NetworkAddress, Service,
-    Workload,
-};
 
 pub mod app;
 pub mod ca;
@@ -204,7 +206,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
         name: "local-vip".to_string(),
         namespace: "default".to_string(),
         hostname: "local-vip.default.svc.cluster.local".to_string(),
-        addresses: vec![NetworkAddress {
+        vips: vec![NetworkAddress {
             network: "".to_string(),
             address: TEST_VIP.parse()?,
         }],
@@ -215,6 +217,10 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
                 address: TEST_WORKLOAD_HBONE.parse()?,
             },
             Endpoint {
+                vip: NetworkAddress {
+                    network: "".to_string(),
+                    address: TEST_VIP.parse()?,
+                },
                 address: NetworkAddress {
                     network: "".to_string(),
                     address: TEST_WORKLOAD_HBONE.parse()?,
@@ -256,4 +262,24 @@ where
         tokio::time::sleep(delay).await;
         delay *= 2;
     }
+}
+
+pub fn new_proxy_state(
+    xds_workloads: Vec<XdsWorkload>,
+    xds_services: Vec<XdsService>,
+    xds_authorizations: Vec<XdsAuthorization>,
+) -> anyhow::Result<DemandProxyState> {
+    let state = Arc::new(RwLock::new(ProxyState::default()));
+    let updater = ProxyStateUpdater::new_no_fetch(state.clone());
+
+    for w in xds_workloads {
+        updater.insert_workload(w)?;
+    }
+    for s in xds_services {
+        updater.insert_service(s)?;
+    }
+    for a in xds_authorizations {
+        updater.insert_authorization(a)?;
+    }
+    Ok(DemandProxyState::new(state, None))
 }

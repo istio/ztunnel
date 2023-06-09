@@ -40,14 +40,14 @@ services:
 - name: local
   namespace: default
   hostname: example.com
-  addresses:
+  vips:
     - /127.10.0.1
   ports:
     80: 8080
 - name: remote
   namespace: default
   hostname: example2.com
-  addresses:
+  vips:
     - remote/127.10.0.2
   ports:
     80: 8080
