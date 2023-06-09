@@ -289,7 +289,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             None => ProxyMode::Shared,
         },
         local_ip: parse(INSTANCE_IP)?,
-        cluster_id,
+        cluster_id: cluster_id.clone(),
 
         xds_address,
         xds_root_cert,
@@ -300,7 +300,10 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         proxy_metadata: pc.proxy_metadata,
 
         fake_ca,
-        auth: identity::AuthSource::Token(PathBuf::from(r"./var/run/secrets/tokens/istio-token")),
+        auth: identity::AuthSource::Token(
+            PathBuf::from(r"./var/run/secrets/tokens/istio-token"),
+            cluster_id,
+        ),
 
         num_worker_threads: parse_default(
             ZTUNNEL_WORKER_THREADS,
