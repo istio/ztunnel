@@ -21,13 +21,14 @@ use tonic::{Code, Request, Status};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthSource {
-    Token(PathBuf),
+    // JWT authentication source which contains the token file path and the cluster id.
+    Token(PathBuf, String),
 }
 
 impl AuthSource {
     pub fn load(&self) -> io::Result<Vec<u8>> {
         match self {
-            AuthSource::Token(path) => {
+            AuthSource::Token(path, _) => {
                 let t = std::fs::read(path)?;
 
                 if t.is_empty() {
@@ -58,6 +59,16 @@ impl Interceptor for AuthSource {
             })?;
 
         request.metadata_mut().insert("authorization", token);
+
+        match self {
+            AuthSource::Token(_, cluster_id) => {
+                if !cluster_id.is_empty() {
+                    let id = AsciiMetadataValue::try_from(cluster_id.as_bytes().to_vec())
+                        .map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))?;
+                    request.metadata_mut().insert("clusterid", id);
+                }
+            }
+        }
         Ok(request)
     }
 }

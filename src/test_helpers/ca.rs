@@ -76,7 +76,10 @@ impl CaServer {
         let client = CaClient::new(
             "https://".to_string() + &server_addr.to_string(),
             root_cert,
-            AuthSource::Token(PathBuf::from(r"src/test_helpers/fake-jwt")),
+            AuthSource::Token(
+                PathBuf::from(r"src/test_helpers/fake-jwt"),
+                "Kubernetes".to_string(),
+            ),
             true,
         )
         .unwrap();
