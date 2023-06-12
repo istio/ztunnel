@@ -29,13 +29,13 @@ mod namespaced {
     use tracing::{error, info};
 
     use ztunnel::identity;
+    use ztunnel::state::workload::NetworkAddress;
     use ztunnel::test_helpers::app::ParsedMetrics;
     use ztunnel::test_helpers::app::TestApp;
     use ztunnel::test_helpers::helpers::initialize_telemetry;
     use ztunnel::test_helpers::linux::WorkloadManager;
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
-    use ztunnel::workload::NetworkAddress;
 
     macro_rules! function {
         () => {{

@@ -12,39 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use async_trait::async_trait;
-use futures::Stream;
-use futures::StreamExt;
-
-use hyper::server::conn::http2;
-
-use log::info;
-use prometheus_client::registry::Registry;
-use tokio::sync::{mpsc, watch};
-use tokio_stream::wrappers::ReceiverStream;
-
-use tonic::{Response, Status, Streaming};
-use tracing::{error, warn};
-
+use super::test_config_with_port_xds_addr_and_root_cert;
 use crate::config::RootCert;
 use crate::hyper_util::TokioExecutor;
 use crate::metrics::Metrics;
 use crate::readiness::Ready;
+use crate::state::{DemandProxyState, ProxyState};
 use crate::tls;
-use crate::workload::{WorkloadInformation, WorkloadStore};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_server::{
     AggregatedDiscoveryService, AggregatedDiscoveryServiceServer,
 };
 use crate::xds::service::discovery::v3::{
     DeltaDiscoveryRequest, DeltaDiscoveryResponse, DiscoveryRequest, DiscoveryResponse,
 };
-use crate::xds::{self, AdsClient};
-
-use super::test_config_with_port_xds_addr_and_root_cert;
+use crate::xds::{self, AdsClient, ProxyStateUpdater};
+use async_trait::async_trait;
+use futures::Stream;
+use futures::StreamExt;
+use hyper::server::conn::http2;
+use log::info;
+use prometheus_client::registry::Registry;
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::sync::{mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Response, Status, Streaming};
+use tracing::{error, warn};
 
 pub struct AdsServer {
     rx: watch::Receiver<Result<DeltaDiscoveryResponse, tonic::Status>>,
@@ -54,7 +48,7 @@ impl AdsServer {
     pub async fn spawn() -> (
         watch::Sender<Result<DeltaDiscoveryResponse, tonic::Status>>,
         AdsClient,
-        WorkloadInformation,
+        DemandProxyState,
     ) {
         let (tx, rx) = watch::channel(Err(tonic::Status::unavailable("No response set yet.")));
 
@@ -95,23 +89,18 @@ impl AdsServer {
             Some(root_cert),
         );
 
-        let workloads: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(WorkloadStore::default()));
-        let xds_workloads = workloads.clone();
-        let xds_rbac = workloads.clone();
+        let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
+        let dstate = DemandProxyState::new(state.clone(), None);
+        let store_updater = ProxyStateUpdater::new_no_fetch(state);
 
         let xds_client = xds::Config::new(cfg)
-            .with_address_handler(xds_workloads)
-            .with_authorization_handler(xds_rbac)
+            .with_address_handler(store_updater.clone())
+            .with_authorization_handler(store_updater)
             .watch(xds::ADDRESS_TYPE.into())
             .watch(xds::AUTHORIZATION_TYPE.into())
             .build(metrics, ready.register_task("ads client"));
 
-        let wi = WorkloadInformation {
-            info: workloads,
-            demand: None,
-        };
-
-        (tx, xds_client, wi)
+        (tx, xds_client, dstate)
     }
 }
 

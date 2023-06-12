@@ -71,8 +71,8 @@ impl RejectedConfig {
     }
 }
 
-impl fmt::Display for RejectedConfig {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl Display for RejectedConfig {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}: {}", self.name, self.reason)
     }
 }
@@ -654,32 +654,27 @@ pub enum AdsError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::state::workload::NetworkAddress;
+    use crate::state::{workload, DemandProxyState};
+    use crate::test_helpers::{
+        helpers::{self},
+        xds::AdsServer,
+    };
+    use prost::Message;
+    use prost_types::Any;
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::SystemTime,
     };
-
-    use prost::Message;
-    use prost_types::Any;
     use textnonce::TextNonce;
     use tokio::time::sleep;
-
-    use crate::{workload::NetworkAddress, xds::ADDRESS_TYPE};
     use workload::Workload;
     use xds::istio::workload::address::Type as XdsType;
     use xds::istio::workload::Address as XdsAddress;
     use xds::istio::workload::Workload as XdsWorkload;
-
-    use crate::{
-        test_helpers::{
-            helpers::{self},
-            xds::AdsServer,
-        },
-        workload,
-        xds::istio::workload::WorkloadType,
-    };
-
-    use super::*;
+    use xds::istio::workload::WorkloadType;
+    use xds::ADDRESS_TYPE;
 
     const POLL_RATE: Duration = Duration::from_millis(2);
     const TEST_TIMEOUT: Duration = Duration::from_millis(100);
@@ -687,7 +682,7 @@ mod tests {
     async fn verify_address(
         ip: IpAddr,
         expected_address: Option<XdsAddress>,
-        source: &crate::workload::WorkloadInformation,
+        source: &DemandProxyState,
     ) {
         let start_time = SystemTime::now();
         let converted = match expected_address {
@@ -771,7 +766,7 @@ mod tests {
             });
 
         // Setup fake xds server
-        let (tx, client, workload_store) = AdsServer::spawn().await;
+        let (tx, client, state) = AdsServer::spawn().await;
 
         tokio::spawn(async move {
             if let Err(e) = client.run().await {
@@ -781,23 +776,13 @@ mod tests {
 
         tx.send(initial_response)
             .expect("failed to send server response");
-        verify_address(
-            std::net::IpAddr::V4(ip),
-            Some(addresses[0].clone()),
-            &workload_store,
-        )
-        .await;
+        verify_address(IpAddr::V4(ip), Some(addresses[0].clone()), &state).await;
         tx.send(abort_response)
             .expect("failed to send server response");
         sleep(Duration::from_millis(50)).await;
-        verify_address(
-            std::net::IpAddr::V4(ip),
-            Some(addresses[0].clone()),
-            &workload_store,
-        )
-        .await;
+        verify_address(IpAddr::V4(ip), Some(addresses[0].clone()), &state).await;
         tx.send(removed_resource_response)
             .expect("failed to send server response");
-        verify_address(std::net::IpAddr::V4(ip), None, &workload_store).await;
+        verify_address(IpAddr::V4(ip), None, &state).await;
     }
 }

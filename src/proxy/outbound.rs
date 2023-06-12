@@ -31,7 +31,7 @@ use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::pool;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::workload::{NetworkAddress, Protocol, Workload};
+use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 
 pub struct Outbound {
@@ -185,7 +185,7 @@ impl OutboundConnection {
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
-            if !self.pi.workloads.assert_rbac(&conn).await {
+            if !self.pi.state.assert_rbac(&conn).await {
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
@@ -347,12 +347,7 @@ impl OutboundConnection {
             network: self.pi.cfg.network.clone(),
             address: downstream,
         };
-        let source_workload = match self
-            .pi
-            .workloads
-            .fetch_workload(&downstream_network_addr)
-            .await
-        {
+        let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await {
             Some(wl) => wl,
             None => return Err(Error::UnknownSource(downstream)),
         };
@@ -360,8 +355,8 @@ impl OutboundConnection {
         // TODO: we want a single lock for source and upstream probably...?
         let us = self
             .pi
-            .workloads
-            .find_upstream(&source_workload.network, target, self.pi.hbone_port)
+            .state
+            .fetch_upstream(&source_workload.network, target, self.pi.hbone_port)
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
@@ -379,12 +374,12 @@ impl OutboundConnection {
 
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
-        match self.pi.workloads.find_waypoint(us.workload.clone()).await {
+        match self.pi.state.find_waypoint(us.workload.clone()).await {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
                 let wp_socket_addr = SocketAddr::new(
-                    self.pi.workloads.choose_workload_ip(&waypoint_workload)?,
+                    self.pi.state.choose_workload_ip(&waypoint_workload)?,
                     waypoint_us.port,
                 );
                 return Ok(Request {
@@ -422,7 +417,7 @@ impl OutboundConnection {
                 protocol: Protocol::HBONE,
                 source: source_workload,
                 destination: SocketAddr::from((
-                    self.pi.workloads.choose_workload_ip(&us.workload)?,
+                    self.pi.state.choose_workload_ip(&us.workload)?,
                     us.port,
                 )),
                 destination_workload: Some(us.workload.clone()),
@@ -445,7 +440,7 @@ impl OutboundConnection {
             protocol: us.workload.protocol,
             source: source_workload,
             destination: SocketAddr::from((
-                self.pi.workloads.choose_workload_ip(&us.workload)?,
+                self.pi.state.choose_workload_ip(&us.workload)?,
                 us.port,
             )),
             destination_workload: Some(us.workload.clone()),
@@ -515,19 +510,16 @@ pub async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    use bytes::Bytes;
-
+    use super::*;
     use crate::config::Config;
-    use crate::workload::WorkloadInformation;
+    use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
-    use crate::{identity, workload, xds};
-
-    use super::*;
+    use crate::{identity, xds};
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     async fn run_build_request(
         from: &str,
@@ -555,16 +547,11 @@ mod tests {
             node: "local-node".to_string(),
             ..Default::default()
         };
-        let wl = workload::WorkloadStore::test_store(vec![source, waypoint, xds]).unwrap();
-
-        let wi = WorkloadInformation {
-            info: Arc::new(Mutex::new(wl)),
-            demand: None,
-        };
+        let state = new_proxy_state(vec![source, waypoint, xds], vec![], vec![]).unwrap();
         let outbound = OutboundConnection {
             pi: ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
-                workloads: wi,
+                state,
                 hbone_port: 15008,
                 cfg,
                 metrics: Arc::new(Default::default()),

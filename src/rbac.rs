@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ipnet::IpNet;
 use std::convert::Into;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
-
-use ipnet::IpNet;
 use tracing::{instrument, trace};
-
 use xds::istio::security::string_match::MatchType;
 use xds::istio::security::Address as XdsAddress;
 use xds::istio::security::Authorization as XdsRbac;
@@ -27,9 +25,9 @@ use xds::istio::security::Match;
 use xds::istio::security::StringMatch as XdsStringMatch;
 
 use crate::identity::Identity;
-use crate::workload::WorkloadError;
-use crate::workload::WorkloadError::EnumParse;
-use crate::{workload, xds};
+use crate::state::workload::WorkloadError::EnumParse;
+use crate::state::workload::{byte_to_ip, WorkloadError};
+use crate::xds;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -387,7 +385,7 @@ impl TryFrom<&XdsAddress> for IpNet {
     type Error = WorkloadError;
     fn try_from(resource: &XdsAddress) -> Result<Self, Self::Error> {
         Ok(IpNet::new(
-            workload::byte_to_ip(&resource.address)?,
+            byte_to_ip(&resource.address)?,
             resource.length as u8,
         )?)
     }

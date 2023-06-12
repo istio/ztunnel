@@ -12,30 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
-use std::{fmt, io};
-
-use boring::error::ErrorStack;
-use drain::Watch;
-
-use hyper::{header, Request};
-use rand::Rng;
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::time::timeout;
-use tracing::{error, trace, warn, Instrument};
-
-use inbound::Inbound;
-
 use crate::identity::SecretManager;
 use crate::metrics::{traffic, Metrics, Recorder};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
-use crate::workload::{Workload, WorkloadInformation};
+use crate::state::workload::Workload;
+use crate::state::DemandProxyState;
 use crate::{config, identity, socket, tls};
+use boring::error::ErrorStack;
+use drain::Watch;
+use hyper::{header, Request};
+use inbound::Inbound;
+use rand::Rng;
+use std::fmt::Debug;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+use std::{fmt, io};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::time::timeout;
+use tracing::{error, trace, warn, Instrument};
 
 mod inbound;
 mod inbound_passthrough;
@@ -56,7 +53,7 @@ pub(super) struct ProxyInputs {
     cfg: config::Config,
     cert_manager: Arc<SecretManager>,
     hbone_port: u16,
-    workloads: WorkloadInformation,
+    pub state: DemandProxyState,
     metrics: Arc<Metrics>,
     pool: pool::Pool,
 }
@@ -64,14 +61,14 @@ pub(super) struct ProxyInputs {
 impl Proxy {
     pub async fn new(
         cfg: config::Config,
-        workloads: WorkloadInformation,
+        state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
         metrics: Arc<Metrics>,
         drain: Watch,
     ) -> Result<Proxy, Error> {
         let mut pi = ProxyInputs {
             cfg,
-            workloads,
+            state,
             cert_manager,
             metrics,
             pool: pool::Pool::new(),
@@ -175,7 +172,7 @@ pub enum Error {
     SelfCall,
 
     #[error("no gateway address: {0}")]
-    NoGatewayAddress(Box<crate::workload::Workload>),
+    NoGatewayAddress(Box<Workload>),
 
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),

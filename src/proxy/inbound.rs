@@ -12,12 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Instant;
-
+use super::Error;
+use crate::baggage::parse_baggage_header;
+use crate::config::Config;
+use crate::identity::SecretManager;
+use crate::metrics::traffic::{ConnectionOpen, Reporter};
+use crate::metrics::{traffic, Metrics, Recorder};
+use crate::proxy;
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::rbac::Connection;
+use crate::socket::to_canonical;
+use crate::state::workload::{address, gatewayaddress, GatewayAddress, NetworkAddress, Workload};
+use crate::state::DemandProxyState;
+use crate::tls::TlsError;
 use bytes::Bytes;
 use drain::Watch;
 use futures::stream::StreamExt;
@@ -25,31 +33,19 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use std::fmt;
+use std::fmt::{Display, Formatter};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
-
-use crate::baggage::parse_baggage_header;
-use crate::config::Config;
-use crate::identity::SecretManager;
-use crate::metrics::traffic::{ConnectionOpen, Reporter};
-use crate::metrics::{traffic, Metrics, Recorder};
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
-use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::rbac::Connection;
-use crate::socket::to_canonical;
-use crate::tls::TlsError;
-use crate::workload::{
-    address, gatewayaddress, GatewayAddress, NetworkAddress, Workload, WorkloadInformation,
-};
-use crate::{proxy, rbac};
-
-use super::Error;
 
 pub(super) struct Inbound {
     cfg: Config,
     listener: TcpListener,
     cert_manager: Arc<SecretManager>,
-    workloads: WorkloadInformation,
+    state: DemandProxyState,
     drain: Watch,
     metrics: Arc<Metrics>,
 }
@@ -70,7 +66,7 @@ impl Inbound {
         );
         Ok(Inbound {
             cfg: pi.cfg,
-            workloads: pi.workloads,
+            state: pi.state,
             listener,
             cert_manager: pi.cert_manager,
             metrics: pi.metrics,
@@ -85,22 +81,21 @@ impl Inbound {
     pub(super) async fn run(self) {
         // let (tx, rx) = oneshot::channel();
         let acceptor = InboundCertProvider {
-            workloads: self.workloads.clone(),
+            state: self.state.clone(),
             cert_manager: self.cert_manager.clone(),
             network: self.cfg.network.clone(),
         };
-        let workloads = self.workloads;
         let drain_stream = self.drain.clone();
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mut stream = stream.take_until(Box::pin(drain_stream.signaled()));
         while let Some(socket) = stream.next().await {
-            let workloads = workloads.clone();
+            let state = self.state.clone();
             let metrics = self.metrics.clone();
             let drain = self.drain.clone();
             let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
-                let conn = rbac::Connection {
+                let conn = Connection {
                     src_identity: socket
                         .ssl()
                         .peer_certificate()
@@ -119,7 +114,7 @@ impl Inbound {
                         socket,
                         service_fn(move |req| {
                             Self::serve_connect(
-                                workloads.clone(),
+                                state.clone(),
                                 conn.clone(),
                                 enable_original_source.unwrap_or_default(),
                                 req,
@@ -242,8 +237,8 @@ impl Inbound {
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
-        workloads: WorkloadInformation,
-        conn: rbac::Connection,
+        state: DemandProxyState,
+        conn: Connection,
         enable_original_source: bool,
         req: Request<Incoming>,
         metrics: Arc<Metrics>,
@@ -270,12 +265,12 @@ impl Inbound {
                         .unwrap());
                 }
                 // Orig has 15008, swap with the real port
-                let conn = rbac::Connection { dst: addr, ..conn };
+                let conn = Connection { dst: addr, ..conn };
                 let dst_network_addr = NetworkAddress {
                     network: conn.dst_network.to_string(), // dst must be on our network
                     address: addr.ip(),
                 };
-                let Some(upstream) = workloads.fetch_workload(&dst_network_addr).await else {
+                let Some(upstream) = state.fetch_workload(&dst_network_addr).await else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
@@ -283,10 +278,10 @@ impl Inbound {
                         .unwrap());
                 };
                 let has_waypoint = upstream.waypoint.is_some();
-                let from_waypoint = Self::check_waypoint(&workloads, &upstream, &conn)
+                let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn)
                     .await
                     .unwrap();
-                let from_gateway = Self::check_gateway(&workloads, &upstream, &conn)
+                let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn)
                     .await
                     .unwrap();
 
@@ -295,7 +290,7 @@ impl Inbound {
                 }
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
-                } else if !workloads.assert_rbac(&conn).await {
+                } else if !state.assert_rbac(&conn).await {
                     info!(%conn, "RBAC rejected");
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
@@ -331,7 +326,7 @@ impl Inbound {
                             address: source_ip,
                         };
                         // Find source info. We can lookup by XDS or from connection attributes
-                        workloads.fetch_workload(&src_network_addr).await
+                        state.fetch_workload(&src_network_addr).await
                     }
                 };
 
@@ -343,7 +338,7 @@ impl Inbound {
                     revision: baggage.revision,
                     ..Default::default()
                 };
-                let connection_metrics = traffic::ConnectionOpen {
+                let connection_metrics = ConnectionOpen {
                     reporter: Reporter::destination,
                     source,
                     derived_source: Some(derived_source),
@@ -385,23 +380,23 @@ impl Inbound {
     }
 
     async fn check_waypoint(
-        workloads: &WorkloadInformation,
+        state: DemandProxyState,
         upstream: &Workload,
         conn: &Connection,
     ) -> Result<bool, Error> {
-        Self::check_gateway_address(workloads, conn, upstream.waypoint.as_ref()).await
+        Self::check_gateway_address(state, conn, upstream.waypoint.as_ref()).await
     }
 
     async fn check_gateway(
-        workloads: &WorkloadInformation,
+        state: DemandProxyState,
         upstream: &Workload,
         conn: &Connection,
     ) -> Result<bool, Error> {
-        Self::check_gateway_address(workloads, conn, upstream.network_gateway.as_ref()).await
+        Self::check_gateway_address(state, conn, upstream.network_gateway.as_ref()).await
     }
 
     async fn check_gateway_address(
-        workloads: &WorkloadInformation,
+        state: DemandProxyState,
         conn: &Connection,
         gateway_address: Option<&GatewayAddress>,
     ) -> Result<bool, Error> {
@@ -414,12 +409,11 @@ impl Inbound {
             },
             None => return Ok(false),
         }?;
-        let from_gateway = match workloads.fetch_address(gateway_nw_addr).await {
+        let from_gateway = match state.fetch_address(gateway_nw_addr).await {
             Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
             Some(address::Address::Service(svc)) => {
                 for (ip, _ep) in svc.endpoints.iter() {
-                    if workloads.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
-                    {
+                    if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity {
                         return Ok(true);
                     }
                 }
@@ -454,7 +448,7 @@ pub(super) enum InboundConnect {
 #[derive(Clone)]
 struct InboundCertProvider {
     cert_manager: Arc<SecretManager>,
-    workloads: WorkloadInformation,
+    state: DemandProxyState,
     network: String,
 }
 
@@ -467,7 +461,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
                 network: self.network.clone(), // inbound cert provider gets cert for the dest, which must be on our network
                 address: orig_dst_addr.ip(),
             };
-            self.workloads
+            self.state
                 .fetch_workload(&wip)
                 .await
                 .ok_or(TlsError::CertificateLookup(wip))?

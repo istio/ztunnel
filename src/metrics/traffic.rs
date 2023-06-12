@@ -14,15 +14,14 @@
 
 use std::fmt::Write;
 
+use crate::identity::Identity;
+use crate::metrics::traffic::Reporter::source;
+use crate::metrics::Recorder;
+use crate::state::workload::Workload;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
-
-use crate::identity::Identity;
-use crate::metrics::traffic::Reporter::source;
-use crate::metrics::Recorder;
-use crate::workload::Workload;
 
 pub(super) struct Metrics {
     pub(super) connection_opens: Family<CommonTrafficLabels, Counter>,

@@ -12,11 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::SocketAddr;
-
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, trace, warn, Instrument};
-
 use crate::config::ProxyMode;
 use crate::metrics::traffic;
 use crate::metrics::traffic::Reporter;
@@ -24,8 +19,11 @@ use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, ProxyInputs};
 use crate::proxy::{Error, TraceParent};
 use crate::rbac;
-use crate::workload::NetworkAddress;
+use crate::state::workload::NetworkAddress;
 use crate::{proxy, socket};
+use std::net::SocketAddr;
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{error, info, trace, warn, Instrument};
 
 pub(super) struct InboundPassthrough {
     listener: TcpListener,
@@ -94,7 +92,7 @@ impl InboundPassthrough {
             network: pi.cfg.network.clone(), // inbound request must be on our network
             address: orig.ip(),
         };
-        let Some(upstream) = pi.workloads.fetch_workload(&network_addr).await else {
+        let Some(upstream) = pi.state.fetch_workload(&network_addr).await else {
             return Err(Error::UnknownDestination(orig.ip()))
         };
         if upstream.waypoint.is_some() {
@@ -126,7 +124,7 @@ impl InboundPassthrough {
             dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
-        if !pi.workloads.assert_rbac(&conn).await {
+        if !pi.state.assert_rbac(&conn).await {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }
@@ -150,7 +148,7 @@ impl InboundPassthrough {
                 network: pi.cfg.network.clone(),
                 address: source_ip,
             };
-            pi.workloads.fetch_workload(&network_addr_srcip).await
+            pi.state.fetch_workload(&network_addr_srcip).await
         } else {
             None
         };

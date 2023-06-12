@@ -20,10 +20,12 @@ use itertools::Itertools;
 use tracing::info;
 
 use crate::config::ConfigSource;
+use crate::state::service::{Endpoint, Service};
+use crate::state::workload::{gatewayaddress, Workload};
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
-use crate::workload::{gatewayaddress, LocalConfig, LocalWorkload, Service, Workload};
+use crate::xds::{LocalConfig, LocalWorkload};
 use crate::{config, identity, proxy};
 
 /// WorkloadManager provides an interface to deploy "workloads" as part of a test. Each workload
@@ -164,7 +166,7 @@ impl<'a> TestServiceBuilder<'a> {
                 name: name.to_string(),
                 namespace: "default".to_string(),
                 hostname: format!("default.{}-svc.svc.cluster.local", name),
-                addresses: vec![],
+                vips: vec![],
                 ports: Default::default(),
                 endpoints: Default::default(), // populated later when workloads are added
             },
@@ -174,7 +176,7 @@ impl<'a> TestServiceBuilder<'a> {
 
     /// Set the service addresses
     pub fn addresses(mut self, addrs: Vec<NetworkAddress>) -> Self {
-        self.s.addresses = addrs;
+        self.s.vips = addrs;
         self
     }
 
@@ -186,7 +188,7 @@ impl<'a> TestServiceBuilder<'a> {
 
     /// Finish building the service.
     pub fn register(self) -> anyhow::Result<()> {
-        for network_address in &self.s.addresses {
+        for network_address in &self.s.vips {
             self.manager
                 .services
                 .insert(network_address.address, self.s.clone());
@@ -289,20 +291,26 @@ impl<'a> TestWorkloadBuilder<'a> {
 
         // update the endpoints for the service, if workload has any vips
         for (vip, ports) in &self.w.vips {
+            let parsed_vip = vip.parse::<IpAddr>()?;
+            let vip = NetworkAddress {
+                network: "".to_string(),
+                address: parsed_vip,
+            };
             for wip in self.w.workload.workload_ips.iter() {
                 let ep_network_addr = NetworkAddress {
                     network: "".to_string(),
                     address: *wip,
                 };
+
                 let ep = Endpoint {
+                    vip: vip.clone(),
                     address: ep_network_addr.clone(),
                     port: ports.to_owned(),
                 };
-                let parsed_vip = vip.parse::<IpAddr>()?;
                 let mut svc = self.manager.services.get(&parsed_vip).unwrap().clone();
                 svc.endpoints.insert(ep_network_addr.clone(), ep.clone());
                 // update all other copies of the service in our index
-                for network_address in &svc.addresses {
+                for network_address in &svc.vips {
                     self.manager
                         .services
                         .insert(network_address.address, svc.clone());

@@ -15,10 +15,10 @@ use std::pin::Pin;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use std::str::FromStr;
-use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
+use super::Error;
+use crate::config::RootCert;
+use crate::identity::{self, Identity};
+use crate::state::workload::NetworkAddress;
 use boring::asn1::{Asn1Time, Asn1TimeRef};
 use boring::bn::BigNum;
 use boring::ec::{EcGroup, EcKey};
@@ -38,16 +38,13 @@ use http_body_1::{Body, Frame};
 use hyper::body::Incoming;
 use hyper::{Request, Response, Uri};
 use rand::RngCore;
+use std::str::FromStr;
+use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tonic::body::BoxBody;
 use tower_hyper_http_body_compat::{HttpBody04ToHttpBody1, HttpBody1ToHttpBody04};
 use tracing::{error, info};
-
-use crate::config::RootCert;
-use crate::identity::{self, Identity};
-use crate::workload::NetworkAddress;
-
-use super::Error;
 
 pub fn asn1_time_to_system_time(time: &Asn1TimeRef) -> SystemTime {
     let unix_time = Asn1Time::from_unix(0).unwrap().diff(time).unwrap();

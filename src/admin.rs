@@ -12,42 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::Bytes;
-use std::borrow::Borrow;
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use std::{net::SocketAddr, time::Duration};
-
+use crate::config::Config;
+use crate::hyper_util::{empty_response, plaintext_response, Server};
+use crate::identity::SecretManager;
+use crate::state::DemandProxyState;
+use crate::tls::asn1_time_to_system_time;
+use crate::version::BuildInfo;
+use crate::xds::LocalConfig;
+use crate::{signal, telemetry};
 use boring::asn1::Asn1TimeRef;
 use boring::x509::X509;
+use bytes::Bytes;
 use drain::Watch;
-#[cfg(feature = "gperftools")]
-use gperftools::heap_profiler::HEAP_PROFILER;
-#[cfg(feature = "gperftools")]
-use gperftools::profiler::PROFILER;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
 use pprof::protos::Message;
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::{net::SocketAddr, time::Duration};
+use tokio::time;
+use tracing::{error, info, warn};
+
+#[cfg(feature = "gperftools")]
+use gperftools::heap_profiler::HEAP_PROFILER;
+#[cfg(feature = "gperftools")]
+use gperftools::profiler::PROFILER;
 #[cfg(feature = "gperftools")]
 use tokio::fs::File;
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
-use tokio::time;
-use tracing::{error, info, warn};
-
-use crate::config::Config;
-use crate::hyper_util::{empty_response, plaintext_response, Server};
-use crate::identity::SecretManager;
-use crate::tls::asn1_time_to_system_time;
-use crate::version::BuildInfo;
-use crate::workload::LocalConfig;
-use crate::workload::WorkloadInformation;
-use crate::{signal, telemetry};
 
 struct State {
-    workload_info: WorkloadInformation,
+    proxy_state: DemandProxyState,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
     cert_manager: Arc<SecretManager>,
@@ -60,7 +58,7 @@ pub struct Service {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct ConfigDump {
     #[serde(flatten)]
-    workload_info: WorkloadInformation,
+    proxy_state: DemandProxyState,
     static_config: LocalConfig,
     version: BuildInfo,
     config: Config,
@@ -87,7 +85,7 @@ pub struct CertsDump {
 impl Service {
     pub async fn new(
         config: Config,
-        workload_info: WorkloadInformation,
+        proxy_state: DemandProxyState,
         shutdown_trigger: signal::ShutdownTrigger,
         drain_rx: Watch,
         cert_manager: Arc<SecretManager>,
@@ -98,7 +96,7 @@ impl Service {
             drain_rx,
             State {
                 config,
-                workload_info,
+                proxy_state,
                 shutdown_trigger,
                 cert_manager,
             },
@@ -125,7 +123,7 @@ impl Service {
                 .await),
                 "/config_dump" => Ok(handle_config_dump(
                     ConfigDump {
-                        workload_info: state.workload_info.clone(),
+                        proxy_state: state.proxy_state.clone(),
                         static_config: Default::default(),
                         version: BuildInfo::new(),
                         config: state.config.clone(),
@@ -263,7 +261,7 @@ async fn handle_pprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 async fn handle_server_shutdown(
     shutdown_trigger: signal::ShutdownTrigger,
     _req: Request<Incoming>,
-    self_term_wait: time::Duration,
+    self_term_wait: Duration,
 ) -> Response<Full<Bytes>> {
     match *_req.method() {
         hyper::Method::POST => {
@@ -428,18 +426,13 @@ async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::time::Duration;
-
-    use http_body_util::BodyExt;
-
-    use crate::identity;
-
-    use crate::admin::Arc;
+    use super::dump_certs;
+    use super::handle_config_dump;
+    use super::ConfigDump;
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
-    use crate::workload::WorkloadInformation;
-    use crate::workload::WorkloadStore;
+    use crate::identity;
+    use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
@@ -455,13 +448,10 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType as XdsWorkloadType;
-
     use bytes::Bytes;
-    use std::sync::Mutex;
-
-    use super::dump_certs;
-    use super::handle_config_dump;
-    use super::ConfigDump;
+    use http_body_util::BodyExt;
+    use std::collections::HashMap;
+    use std::time::Duration;
 
     fn diff_json<'a>(a: &'a serde_json::Value, b: &'a serde_json::Value) -> String {
         let mut ret = String::new();
@@ -639,8 +629,9 @@ mod tests {
             "state": "Available"
           }
         ]);
-        assert!(
-            got == want,
+        assert_eq!(
+            got,
+            want,
             "Certificate lists do not match (-want, +got):\n{}",
             diff_json(&want, &got)
         );
@@ -769,19 +760,13 @@ mod tests {
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
-        let workloads = WorkloadStore::full_test_store(vec![wl], vec![svc], vec![auth]).unwrap();
+        let proxy_state = new_proxy_state(vec![wl], vec![svc], vec![auth]).unwrap();
 
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
 
-        let workloads_arc: Arc<Mutex<WorkloadStore>> = Arc::new(Mutex::new(workloads));
-        let wli = WorkloadInformation {
-            info: workloads_arc,
-            demand: None,
-        };
-
         let dump = ConfigDump {
-            workload_info: wli,
+            proxy_state,
             static_config: Default::default(),
             version: Default::default(),
             config: default_config,
