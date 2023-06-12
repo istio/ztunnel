@@ -23,7 +23,7 @@ use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
-use crate::state::workload::{address, gatewayaddress, GatewayAddress, NetworkAddress, Workload};
+use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::tls::TlsError;
 use bytes::Bytes;
@@ -400,28 +400,23 @@ impl Inbound {
         conn: &Connection,
         gateway_address: Option<&GatewayAddress>,
     ) -> Result<bool, Error> {
-        let gateway_nw_addr = match gateway_address.as_ref() {
-            Some(addr) => match &addr.destination {
-                gatewayaddress::Destination::Address(gateway_ip) => Ok(gateway_ip),
-                gatewayaddress::Destination::Hostname(_) => Err(Error::UnsupportedFeature(
-                    "hostname lookup not supported yet".to_string(),
-                )),
-            },
-            None => return Ok(false),
-        }?;
-        let from_gateway = match state.fetch_address(gateway_nw_addr).await {
-            Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
-            Some(address::Address::Service(svc)) => {
-                for (ip, _ep) in svc.endpoints.iter() {
-                    if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity {
-                        return Ok(true);
+        if let Some(gateway_address) = gateway_address {
+            let from_gateway = match state.lookup_address(&gateway_address.destination).await {
+                Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
+                Some(address::Address::Service(svc)) => {
+                    for (ip, _ep) in svc.endpoints.iter() {
+                        if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
+                        {
+                            return Ok(true);
+                        }
                     }
+                    false
                 }
-                false
-            }
-            None => false,
-        };
-        Ok(from_gateway)
+                None => false,
+            };
+            return Ok(from_gateway);
+        }
+        Ok(false) // this occurs if gateway_address was None
     }
 }
 

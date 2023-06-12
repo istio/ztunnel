@@ -16,9 +16,9 @@ use crate::identity::SecretManager;
 use crate::metrics::Metrics;
 use crate::proxy::Error;
 use crate::state::service::ServiceStore;
-use crate::state::workload::address::Address;
 use crate::state::workload::{
-    gatewayaddress, network_addr, NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
+    address::Address, gatewayaddress, gatewayaddress::Destination, network_addr,
+    NamespacedHostname, NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
@@ -333,10 +333,32 @@ impl DemandProxyState {
         }
     }
 
+    // keep private to prefer use of lookup_address which handles the full enum rather than individual variants
+    fn find_service(&self, name: &NamespacedHostname) -> Option<Address> {
+        debug!(%name.namespace, %name.hostname, "find service");
+        let wi = self
+            .state
+            .read()
+            .expect("find_service's lock would only error if another thread already panicked");
+        if let Some(service) = wi.services.get_by_namespaced_host(name) {
+            return Some(Address::Service(Box::new(service))); // service is cloned by get_by_namespaced_host
+        }
+        None
+    }
+
     // keep private so that we can ensure that we always use fetch_workload
     fn find_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
         let state = self.state.read().unwrap();
         state.workloads.find_workload(addr)
+    }
+
+    // lookup_address provides a pub function for looking up the Address from a gatewayaddress::Destination ref
+    // It may perform an on demand workload fetch if necessary and handles workload ip and services
+    pub async fn lookup_address(&self, dst: &Destination) -> Option<Address> {
+        match dst {
+            Destination::Address(address) => self.fetch_address(address).await,
+            Destination::Hostname(hostname) => self.find_service(hostname),
+        }
     }
 }
 
