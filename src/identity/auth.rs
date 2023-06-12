@@ -21,6 +21,7 @@ use tonic::{Code, Request, Status};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthSource {
+    // JWT authentication source which contains the token file path and the cluster id.
     Token(PathBuf, String),
 }
 
