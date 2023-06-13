@@ -427,3 +427,75 @@ impl ProxyStateManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{net::Ipv4Addr, time::Duration};
+
+    use super::*;
+    use crate::test_helpers;
+
+    #[tokio::test]
+    async fn lookup_address() {
+        let mut state = ProxyState::default();
+        state
+            .workloads
+            .insert_workload(test_helpers::test_default_workload())
+            .unwrap();
+        state.services.insert(test_helpers::mock_default_service());
+
+        let mock_proxy_state = DemandProxyState::new(Arc::new(RwLock::new(state)), None);
+
+        // Some from Address
+        let dst = Destination::Address(NetworkAddress {
+            network: "".to_string(),
+            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        });
+        test_helpers::assert_eventually(
+            Duration::from_secs(5),
+            || mock_proxy_state.lookup_address(&dst),
+            Some(Address::Workload(Box::new(
+                test_helpers::test_default_workload(),
+            ))),
+        )
+        .await;
+
+        // Some from Hostname
+        let dst = Destination::Hostname(NamespacedHostname {
+            namespace: "default".to_string(),
+            hostname: "defaulthost".to_string(),
+        });
+        test_helpers::assert_eventually(
+            Duration::from_secs(5),
+            || mock_proxy_state.lookup_address(&dst),
+            Some(Address::Service(Box::new(
+                test_helpers::mock_default_service(),
+            ))),
+        )
+        .await;
+
+        // None from Address
+        let dst = Destination::Address(NetworkAddress {
+            network: "".to_string(),
+            address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+        });
+        test_helpers::assert_eventually(
+            Duration::from_secs(5),
+            || mock_proxy_state.lookup_address(&dst),
+            None,
+        )
+        .await;
+
+        // None from Hostname
+        let dst = Destination::Hostname(NamespacedHostname {
+            namespace: "default".to_string(),
+            hostname: "nothost".to_string(),
+        });
+        test_helpers::assert_eventually(
+            Duration::from_secs(5),
+            || mock_proxy_state.lookup_address(&dst),
+            None,
+        )
+        .await;
+    }
+}

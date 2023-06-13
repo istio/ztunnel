@@ -112,6 +112,25 @@ pub fn localhost_error_message() -> String {
     )
 }
 
+pub fn mock_default_service() -> Service {
+    let vip1 = NetworkAddress {
+        address: IpAddr::V4(Ipv4Addr::new(127, 0, 10, 1)),
+        network: "".to_string(),
+    };
+    let vips = vec![vip1];
+    let mut ports = HashMap::new();
+    ports.insert(8080, 80);
+    let endpoints = HashMap::new();
+    Service {
+        name: "".to_string(),
+        namespace: "default".to_string(),
+        hostname: "defaulthost".to_string(),
+        vips,
+        ports,
+        endpoints,
+    }
+}
+
 pub fn test_default_workload() -> Workload {
     Workload {
         workload_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
