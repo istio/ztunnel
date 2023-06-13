@@ -536,7 +536,7 @@ mod test {
             workload_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
             waypoint: None,
             network_gateway: gw,
-            gateway_address: None, // Some(SocketAddr::V4(SocketAddrV4::new(mock_default_gateway_ipaddr(), 15006))),
+            gateway_address: None,
             protocol: Default::default(),
             uid: "".to_string(),
             name: "app".to_string(),
