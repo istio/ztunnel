@@ -279,11 +279,9 @@ impl Inbound {
                 };
                 let has_waypoint = upstream.waypoint.is_some();
                 let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn)
-                    .await
-                    .unwrap();
+                    .await;
                 let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn)
-                    .await
-                    .unwrap();
+                    .await;
 
                 if from_gateway {
                     debug!("request from gateway");
@@ -383,7 +381,7 @@ impl Inbound {
         state: DemandProxyState,
         upstream: &Workload,
         conn: &Connection,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         Self::check_gateway_address(state, conn, upstream.waypoint.as_ref()).await
     }
 
@@ -391,7 +389,7 @@ impl Inbound {
         state: DemandProxyState,
         upstream: &Workload,
         conn: &Connection,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         Self::check_gateway_address(state, conn, upstream.network_gateway.as_ref()).await
     }
 
@@ -399,7 +397,7 @@ impl Inbound {
         state: DemandProxyState,
         conn: &Connection,
         gateway_address: Option<&GatewayAddress>,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         if let Some(gateway_address) = gateway_address {
             let from_gateway = match state.lookup_address(&gateway_address.destination).await {
                 Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
@@ -407,16 +405,16 @@ impl Inbound {
                     for (ip, _ep) in svc.endpoints.iter() {
                         if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
                         {
-                            return Ok(true);
+                            return true;
                         }
                     }
                     false
                 }
                 None => false,
             };
-            return Ok(from_gateway);
+            return from_gateway;
         }
-        Ok(false) // this occurs if gateway_address was None
+        false // this occurs if gateway_address was None
     }
 }
 
@@ -503,7 +501,7 @@ mod test {
 
         let gateawy_id = Identity::Spiffe {
             trust_domain: "cluster.local".to_string(),
-            namespace: "".to_string(),
+            namespace: "gatewayns".to_string(),
             service_account: "default".to_string(),
         };
         let from_gw_conn = Connection {
@@ -521,28 +519,20 @@ mod test {
 
         let upstream_with_address = mock_wokload_with_gateway(Some(mock_default_gateway_address()));
         assert!(
-            Inbound::check_gateway(state.clone(), &upstream_with_address, &from_gw_conn)
-                .await
-                .unwrap()
+            Inbound::check_gateway(state.clone(), &upstream_with_address, &from_gw_conn).await
         );
         assert!(
-            !Inbound::check_gateway(state.clone(), &upstream_with_address, &not_from_gw_conn)
-                .await
-                .unwrap()
+            !Inbound::check_gateway(state.clone(), &upstream_with_address, &not_from_gw_conn).await
         );
 
         // using hostname (will check the service variant of address::Address)
         let upstream_with_hostname =
             mock_wokload_with_gateway(Some(mock_default_gateway_hostname()));
         assert!(
-            Inbound::check_gateway(state.clone(), &upstream_with_hostname, &from_gw_conn)
-                .await
-                .unwrap()
+            Inbound::check_gateway(state.clone(), &upstream_with_hostname, &from_gw_conn).await
         );
         assert!(
-            !Inbound::check_gateway(state, &upstream_with_hostname, &not_from_gw_conn)
-                .await
-                .unwrap()
+            !Inbound::check_gateway(state, &upstream_with_hostname, &not_from_gw_conn).await
         );
     }
 
@@ -555,14 +545,14 @@ mod test {
             gateway_address: None, // Some(SocketAddr::V4(SocketAddrV4::new(mock_default_gateway_ipaddr(), 15006))),
             protocol: Default::default(),
             uid: "".to_string(),
-            name: "".to_string(),
-            namespace: "".to_string(),
+            name: "app".to_string(),
+            namespace: "appns".to_string(),
             trust_domain: "cluster.local".to_string(),
             service_account: "default".to_string(),
             network: "".to_string(),
-            workload_name: "".to_string(),
+            workload_name: "app".to_string(),
             workload_type: "deployment".to_string(),
-            canonical_name: "".to_string(),
+            canonical_name: "app".to_string(),
             canonical_revision: "".to_string(),
             node: "".to_string(),
             status: Default::default(),
@@ -581,8 +571,8 @@ mod test {
             gateway_address: None,
             protocol: Default::default(),
             uid: "".to_string(),
-            name: "".to_string(),
-            namespace: "".to_string(),
+            name: "gateway".to_string(),
+            namespace: "gatewayns".to_string(),
             trust_domain: "cluster.local".to_string(),
             service_account: "default".to_string(),
             network: "".to_string(),
@@ -626,8 +616,8 @@ mod test {
             },
         );
         Service {
-            name: "".to_string(),
-            namespace: "default".to_string(),
+            name: "gateway".to_string(),
+            namespace: "gatewayns".to_string(),
             hostname: "gateway".to_string(),
             vips,
             ports,
@@ -648,7 +638,7 @@ mod test {
     fn mock_default_gateway_hostname() -> GatewayAddress {
         GatewayAddress {
             destination: Destination::Hostname(state::workload::NamespacedHostname {
-                namespace: "default".to_string(),
+                namespace: "gatewayns".to_string(),
                 hostname: "gateway".to_string(),
             }),
             port: 15006,
