@@ -31,6 +31,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, trace};
 
+use self::service::Service;
+
 pub mod service;
 pub mod workload;
 
@@ -334,16 +336,13 @@ impl DemandProxyState {
     }
 
     // keep private to prefer use of lookup_address which handles the full enum rather than individual variants
-    fn find_service(&self, name: &NamespacedHostname) -> Option<Address> {
+    fn find_service(&self, name: &NamespacedHostname) -> Option<Service> {
         debug!(%name.namespace, %name.hostname, "find service");
         let wi = self
             .state
             .read()
             .expect("find_service's lock would only error if another thread already panicked");
-        if let Some(service) = wi.services.get_by_namespaced_host(name) {
-            return Some(Address::Service(Box::new(service))); // service is cloned by get_by_namespaced_host
-        }
-        None
+        wi.services.get_by_namespaced_host(name)
     }
 
     // keep private so that we can ensure that we always use fetch_workload
@@ -357,7 +356,9 @@ impl DemandProxyState {
     pub async fn lookup_address(&self, dst: &Destination) -> Option<Address> {
         match dst {
             Destination::Address(address) => self.fetch_address(address).await,
-            Destination::Hostname(hostname) => self.find_service(hostname),
+            Destination::Hostname(hostname) => self
+                .find_service(hostname)
+                .map(|s| Address::Service(Box::new(s))),
         }
     }
 }

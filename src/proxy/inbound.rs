@@ -278,10 +278,8 @@ impl Inbound {
                         .unwrap());
                 };
                 let has_waypoint = upstream.waypoint.is_some();
-                let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn)
-                    .await;
-                let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn)
-                    .await;
+                let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn).await;
+                let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn).await;
 
                 if from_gateway {
                     debug!("request from gateway");
@@ -518,9 +516,7 @@ mod test {
         };
 
         let upstream_with_address = mock_wokload_with_gateway(Some(mock_default_gateway_address()));
-        assert!(
-            Inbound::check_gateway(state.clone(), &upstream_with_address, &from_gw_conn).await
-        );
+        assert!(Inbound::check_gateway(state.clone(), &upstream_with_address, &from_gw_conn).await);
         assert!(
             !Inbound::check_gateway(state.clone(), &upstream_with_address, &not_from_gw_conn).await
         );
@@ -531,9 +527,7 @@ mod test {
         assert!(
             Inbound::check_gateway(state.clone(), &upstream_with_hostname, &from_gw_conn).await
         );
-        assert!(
-            !Inbound::check_gateway(state, &upstream_with_hostname, &not_from_gw_conn).await
-        );
+        assert!(!Inbound::check_gateway(state, &upstream_with_hostname, &not_from_gw_conn).await);
     }
 
     // private helpers
