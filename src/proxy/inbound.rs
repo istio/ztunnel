@@ -23,7 +23,7 @@ use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
-use crate::state::workload::{address, gatewayaddress, GatewayAddress, NetworkAddress, Workload};
+use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::tls::TlsError;
 use bytes::Bytes;
@@ -278,12 +278,8 @@ impl Inbound {
                         .unwrap());
                 };
                 let has_waypoint = upstream.waypoint.is_some();
-                let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn)
-                    .await
-                    .unwrap();
-                let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn)
-                    .await
-                    .unwrap();
+                let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn).await;
+                let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn).await;
 
                 if from_gateway {
                     debug!("request from gateway");
@@ -383,7 +379,7 @@ impl Inbound {
         state: DemandProxyState,
         upstream: &Workload,
         conn: &Connection,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         Self::check_gateway_address(state, conn, upstream.waypoint.as_ref()).await
     }
 
@@ -391,7 +387,7 @@ impl Inbound {
         state: DemandProxyState,
         upstream: &Workload,
         conn: &Connection,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         Self::check_gateway_address(state, conn, upstream.network_gateway.as_ref()).await
     }
 
@@ -399,29 +395,24 @@ impl Inbound {
         state: DemandProxyState,
         conn: &Connection,
         gateway_address: Option<&GatewayAddress>,
-    ) -> Result<bool, Error> {
-        let gateway_nw_addr = match gateway_address.as_ref() {
-            Some(addr) => match &addr.destination {
-                gatewayaddress::Destination::Address(gateway_ip) => Ok(gateway_ip),
-                gatewayaddress::Destination::Hostname(_) => Err(Error::UnsupportedFeature(
-                    "hostname lookup not supported yet".to_string(),
-                )),
-            },
-            None => return Ok(false),
-        }?;
-        let from_gateway = match state.fetch_address(gateway_nw_addr).await {
-            Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
-            Some(address::Address::Service(svc)) => {
-                for (ip, _ep) in svc.endpoints.iter() {
-                    if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity {
-                        return Ok(true);
+    ) -> bool {
+        if let Some(gateway_address) = gateway_address {
+            let from_gateway = match state.lookup_address(&gateway_address.destination).await {
+                Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
+                Some(address::Address::Service(svc)) => {
+                    for (ip, _ep) in svc.endpoints.iter() {
+                        if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
+                        {
+                            return true;
+                        }
                     }
+                    false
                 }
-                false
-            }
-            None => false,
-        };
-        Ok(from_gateway)
+                None => false,
+            };
+            return from_gateway;
+        }
+        false // this occurs if gateway_address was None
     }
 }
 
@@ -475,5 +466,180 @@ impl crate::tls::CertProvider for InboundCertProvider {
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
         let acc = cert.mtls_acceptor(Some(&identity))?;
         Ok(acc)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{
+        identity::Identity,
+        state::{
+            self,
+            service::{Endpoint, Service},
+            workload::gatewayaddress::Destination,
+        },
+    };
+    use std::{
+        collections::HashMap,
+        net::{Ipv4Addr, SocketAddrV4},
+        sync::RwLock,
+    };
+
+    #[tokio::test]
+    async fn check_gateway() {
+        let w = mock_default_gateway_workload();
+        let s = mock_default_gateway_service();
+        let mut state = state::ProxyState::default();
+        if let Err(err) = state.workloads.insert_workload(w) {
+            panic!("received error inserting workload: {}", err);
+        }
+        state.services.insert(s);
+        let state = state::DemandProxyState::new(Arc::new(RwLock::new(state)), None);
+
+        let gateawy_id = Identity::Spiffe {
+            trust_domain: "cluster.local".to_string(),
+            namespace: "gatewayns".to_string(),
+            service_account: "default".to_string(),
+        };
+        let from_gw_conn = Connection {
+            src_identity: Some(gateawy_id),
+            src_ip: IpAddr::V4(mock_default_gateway_ipaddr()),
+            dst_network: "default".to_string(),
+            dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 10), 80)),
+        };
+        let not_from_gw_conn = Connection {
+            src_identity: Some(Identity::default()),
+            src_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            dst_network: "default".to_string(),
+            dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 10), 80)),
+        };
+
+        let upstream_with_address = mock_wokload_with_gateway(Some(mock_default_gateway_address()));
+        assert!(Inbound::check_gateway(state.clone(), &upstream_with_address, &from_gw_conn).await);
+        assert!(
+            !Inbound::check_gateway(state.clone(), &upstream_with_address, &not_from_gw_conn).await
+        );
+
+        // using hostname (will check the service variant of address::Address)
+        let upstream_with_hostname =
+            mock_wokload_with_gateway(Some(mock_default_gateway_hostname()));
+        assert!(
+            Inbound::check_gateway(state.clone(), &upstream_with_hostname, &from_gw_conn).await
+        );
+        assert!(!Inbound::check_gateway(state, &upstream_with_hostname, &not_from_gw_conn).await);
+    }
+
+    // private helpers
+    fn mock_wokload_with_gateway(gw: Option<GatewayAddress>) -> Workload {
+        Workload {
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            waypoint: None,
+            network_gateway: gw,
+            gateway_address: None,
+            protocol: Default::default(),
+            uid: "".to_string(),
+            name: "app".to_string(),
+            namespace: "appns".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            network: "".to_string(),
+            workload_name: "app".to_string(),
+            workload_type: "deployment".to_string(),
+            canonical_name: "app".to_string(),
+            canonical_revision: "".to_string(),
+            node: "".to_string(),
+            status: Default::default(),
+            cluster_id: "Kubernetes".to_string(),
+
+            authorization_policies: Vec::new(),
+            native_tunnel: false,
+        }
+    }
+
+    fn mock_default_gateway_workload() -> Workload {
+        Workload {
+            workload_ips: vec![IpAddr::V4(mock_default_gateway_ipaddr())],
+            waypoint: None,
+            network_gateway: None,
+            gateway_address: None,
+            protocol: Default::default(),
+            uid: "".to_string(),
+            name: "gateway".to_string(),
+            namespace: "gatewayns".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            network: "".to_string(),
+            workload_name: "gateway".to_string(),
+            workload_type: "deployment".to_string(),
+            canonical_name: "".to_string(),
+            canonical_revision: "".to_string(),
+            node: "".to_string(),
+            status: Default::default(),
+            cluster_id: "Kubernetes".to_string(),
+
+            authorization_policies: Vec::new(),
+            native_tunnel: false,
+        }
+    }
+
+    fn mock_default_gateway_service() -> Service {
+        let vip1 = NetworkAddress {
+            address: IpAddr::V4(Ipv4Addr::new(127, 0, 10, 1)),
+            network: "".to_string(),
+        };
+        let vips = vec![vip1];
+        let mut ports = HashMap::new();
+        ports.insert(8080, 80);
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            NetworkAddress {
+                network: "".to_string(),
+                address: IpAddr::V4(mock_default_gateway_ipaddr()),
+            },
+            Endpoint {
+                vip: NetworkAddress {
+                    network: "".to_string(),
+                    address: IpAddr::V4(mock_default_gateway_ipaddr()),
+                },
+                address: NetworkAddress {
+                    network: "".to_string(),
+                    address: IpAddr::V4(mock_default_gateway_ipaddr()),
+                },
+                port: ports.clone(),
+            },
+        );
+        Service {
+            name: "gateway".to_string(),
+            namespace: "gatewayns".to_string(),
+            hostname: "gateway".to_string(),
+            vips,
+            ports,
+            endpoints,
+        }
+    }
+
+    fn mock_default_gateway_address() -> GatewayAddress {
+        GatewayAddress {
+            destination: Destination::Address(NetworkAddress {
+                network: "".to_string(),
+                address: IpAddr::V4(mock_default_gateway_ipaddr()),
+            }),
+            port: 15006,
+        }
+    }
+
+    fn mock_default_gateway_hostname() -> GatewayAddress {
+        GatewayAddress {
+            destination: Destination::Hostname(state::workload::NamespacedHostname {
+                namespace: "gatewayns".to_string(),
+                hostname: "gateway".to_string(),
+            }),
+            port: 15006,
+        }
+    }
+
+    fn mock_default_gateway_ipaddr() -> Ipv4Addr {
+        Ipv4Addr::new(127, 0, 0, 100)
     }
 }
