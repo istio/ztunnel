@@ -33,8 +33,10 @@ fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         None | Some("proxy") => (),
         Some("version") => return version(),
+        Some("help") => return help(),
         Some(unknown) => {
             eprintln!("unknown command: {unknown}");
+            help().unwrap();
             std::process::exit(1)
         }
     };
@@ -44,6 +46,20 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap()
         .block_on(async move { proxy(config).await })
+}
+
+fn help() -> anyhow::Result<()> {
+    let version = version::BuildInfo::new();
+    println!(
+        "
+Istio Ztunnel ({version})
+
+Commands:
+proxy (default) - Start the ztunnel proxy
+version         - Print the version of ztunnel
+help            - Print commands and version of ztunnel"
+    );
+    Ok(())
 }
 
 fn version() -> anyhow::Result<()> {
