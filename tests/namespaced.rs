@@ -417,7 +417,7 @@ mod namespaced {
                         .unwrap();
                 let cert = app.cert_manager.fetch_certificate(id).await?;
                 let mut connector = cert
-                    .connector(&dst_id)
+                    .connector(vec![dst_id])
                     .unwrap()
                     .configure()
                     .expect("configure");
@@ -475,7 +475,7 @@ mod namespaced {
                         .unwrap();
                 let cert = app.cert_manager.fetch_certificate(id).await?;
                 let mut connector = cert
-                    .connector(&dst_id)
+                    .connector(vec![dst_id])
                     .unwrap()
                     .configure()
                     .expect("configure");

@@ -616,6 +616,7 @@ mod test {
             vips,
             ports,
             endpoints,
+            subject_alt_names: vec![],
         }
     }
 

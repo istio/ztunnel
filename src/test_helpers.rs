@@ -128,6 +128,7 @@ pub fn mock_default_service() -> Service {
         vips,
         ports,
         endpoints,
+        subject_alt_names: vec![],
     }
 }
 
@@ -247,6 +248,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
                 port: HashMap::from([(80u16, echo_port)]),
             },
         )]),
+        subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".to_string()],
     }];
     let lc = LocalConfig {
         workloads: res,

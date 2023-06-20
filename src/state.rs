@@ -40,6 +40,7 @@ pub mod workload;
 pub struct Upstream {
     pub workload: Workload,
     pub port: u16,
+    pub sans: Vec<String>,
 }
 
 impl fmt::Display for Upstream {
@@ -205,6 +206,7 @@ impl DemandProxyState {
             let mut us = Upstream {
                 workload: wl,
                 port: *target_port,
+                sans: svc.subject_alt_names.clone()
             };
             return match self.set_gateway_address(&mut us, hbone_port) {
                 Ok(_) => {
@@ -224,6 +226,7 @@ impl DemandProxyState {
             let mut us = Upstream {
                 workload: wl,
                 port: addr.port(),
+                sans: Vec::new(),
             };
             return match self.set_gateway_address(&mut us, hbone_port) {
                 Ok(_) => {

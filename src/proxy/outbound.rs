@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -230,10 +231,20 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
 
-                let dst_identity = req
-                    .expected_identity
-                    .as_ref()
-                    .expect("hbone requires destination workload");
+                let mut allowed_sans:Vec<Identity> = Vec::new();
+                for san in req.upstream_sans.iter() {
+                    match Identity::from_str(san) {
+                        Ok(ident) => {
+                            allowed_sans.push(ident.clone())
+                        }
+                        Err(err) => {
+                            warn!("error parsing SAN {}: {}", san, err)
+                        }
+                    }
+                }
+
+                allowed_sans.push(req.expected_identity.clone().unwrap());
+                let dst_identity = allowed_sans;
 
                 let pool_key = pool::Key {
                     src_id: req.source.identity(),
@@ -369,6 +380,7 @@ impl OutboundConnection {
                 gateway: target,
                 direction: Direction::Outbound,
                 request_type: RequestType::Passthrough,
+                upstream_sans: vec![],
             });
         }
 
@@ -394,6 +406,7 @@ impl OutboundConnection {
                     // Let the client remote know we are on the inbound path.
                     direction: Direction::Inbound,
                     request_type: RequestType::ToServerWaypoint,
+                    upstream_sans: us.sans.clone(),
                 });
             }
             // we expected the workload to have a waypoint, but could not find one
@@ -433,6 +446,7 @@ impl OutboundConnection {
                 // Sending to a node on the same node (ourselves).
                 // In the future this could be optimized to avoid a full network traversal.
                 request_type: RequestType::DirectLocal,
+                upstream_sans: us.sans.clone(),
             });
         }
         // For case no waypoint for both side and direct to remote node proxy
@@ -451,6 +465,7 @@ impl OutboundConnection {
                 .expect("gateway address confirmed"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
+            upstream_sans: us.sans.clone(),
         })
     }
 }
@@ -479,6 +494,8 @@ struct Request {
     expected_identity: Option<Identity>,
     gateway: SocketAddr,
     request_type: RequestType,
+
+    upstream_sans: Vec<String>
 }
 
 #[derive(Debug)]

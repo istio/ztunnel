@@ -83,7 +83,7 @@ impl Poolable for Client {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct Key {
     pub src_id: Identity,
-    pub dst_id: Identity,
+    pub dst_id: Vec<Identity>,
     // In theory we can just use src,dst,node. However, the dst has a check that
     // the L3 destination IP matches the HBONE IP. This could be loosened to just assert they are the same identity maybe.
     pub dst: SocketAddr,
@@ -197,7 +197,7 @@ mod test {
         let pool = Pool::new();
         let key = Key {
             src_id: Identity::default(),
-            dst_id: Identity::default(),
+            dst_id: vec![Identity::default()],
             dst: addr,
         };
         let connect = || async {
