@@ -365,7 +365,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
             match telemetry::set_level(reset, level) {
                 Ok(_) => list_loggers(),
                 Err(e) => plaintext_response(
-                    hyper::StatusCode::METHOD_NOT_ALLOWED,
+                    hyper::StatusCode::BAD_REQUEST,
                     format!("Failed to set new level: {}\n{}", e, HELP_STRING),
                 ),
             }
