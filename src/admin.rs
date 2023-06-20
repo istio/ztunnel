@@ -369,7 +369,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
                     format!("Failed to set new level: {}\n{}", e, HELP_STRING),
                 ),
             }
-        },
+        }
         Err(_) => {
             // Invalid level provided
             plaintext_response(
