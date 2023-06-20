@@ -30,6 +30,7 @@ use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
 use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{net::SocketAddr, time::Duration};
 use tokio::time;
@@ -357,12 +358,25 @@ fn list_loggers() -> Response<Full<Bytes>> {
 }
 
 fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
-    match telemetry::set_level(reset, level) {
-        Ok(_) => list_loggers(),
-        Err(e) => plaintext_response(
-            hyper::StatusCode::METHOD_NOT_ALLOWED,
-            format!("failed to set new level: {e}\n{HELP_STRING}",),
-        ),
+    match tracing::level_filters::LevelFilter::from_str(level) {
+        Ok(level_filter) => {
+            // Valid level, continue processing
+            tracing::info!("Parsed level: {:?}", level_filter);
+            match telemetry::set_level(reset, level) {
+                Ok(_) => list_loggers(),
+                Err(e) => plaintext_response(
+                    hyper::StatusCode::METHOD_NOT_ALLOWED,
+                    format!("Failed to set new level: {}\n{}", e, HELP_STRING),
+                ),
+            }
+        }
+        Err(_) => {
+            // Invalid level provided
+            plaintext_response(
+                hyper::StatusCode::BAD_REQUEST,
+                format!("Invalid level provided: {}\n{}", level, HELP_STRING),
+            )
+        }
     }
 }
 
