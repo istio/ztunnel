@@ -51,7 +51,7 @@ pub mod netns;
 pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {
     config::Config {
         local_xds_config: Some(ConfigSource::Static(
-            local_xds_config(80, Some(addr)).unwrap(),
+            local_xds_config(80, Some(addr), vec![]).unwrap(),
         )),
         ..test_config()
     }
@@ -61,6 +61,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     port: u16,
     xds_addr: Option<String>,
     xds_root_cert: Option<RootCert>,
+    xds_config: Option<ConfigSource>,
 ) -> config::Config {
     config::Config {
         xds_address: xds_addr,
@@ -70,7 +71,12 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
             Some(cert) => cert,
             None => RootCert::File("./var/run/secrets/istio/root-cert.pem".parse().unwrap()),
         },
-        local_xds_config: Some(ConfigSource::Static(local_xds_config(port, None).unwrap())),
+        local_xds_config: match xds_config {
+            Some(c) => Some(c),
+            None => Some(ConfigSource::Static(
+                local_xds_config(port, None, vec![]).unwrap(),
+            )),
+        },
         // Switch all addressed to localhost (so we don't make a bunch of ports expose on public internet when someone runs a test),
         // and port 0 (to avoid port conflicts)
         // inbound_addr cannot do localhost since we abuse that its listening on all of 127.0.0.0/8 range.
@@ -86,7 +92,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
 }
 
 pub fn test_config_with_port(port: u16) -> config::Config {
-    test_config_with_port_xds_addr_and_root_cert(port, None, None)
+    test_config_with_port_xds_addr_and_root_cert(port, None, None, None)
 }
 
 pub fn test_config() -> config::Config {
@@ -192,7 +198,11 @@ fn test_custom_workload(
     }
 }
 
-fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Result<Bytes> {
+pub fn local_xds_config(
+    echo_port: u16,
+    waypoint_ip: Option<IpAddr>,
+    policies: Vec<crate::rbac::Authorization>,
+) -> anyhow::Result<Bytes> {
     let mut res: Vec<LocalWorkload> = vec![
         test_custom_workload(TEST_WORKLOAD_SOURCE, "local-source", TCP, echo_port, true)?,
         test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone", HBONE, echo_port, true)?,
@@ -249,7 +259,7 @@ fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Resu
     }];
     let lc = LocalConfig {
         workloads: res,
-        policies: vec![],
+        policies,
         services: svcs,
     };
     let mut b = bytes::BytesMut::new().writer();
