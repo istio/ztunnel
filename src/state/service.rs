@@ -84,7 +84,7 @@ impl TryFrom<&XdsService> for Service {
             })
                 .into(),
             endpoints: Default::default(), // Will be populated once inserted into the store.
-            subject_alt_names: s.subject_alt_names.clone()
+            subject_alt_names: s.subject_alt_names.clone(),
         };
         Ok(svc)
     }

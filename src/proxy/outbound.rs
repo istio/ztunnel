@@ -231,12 +231,10 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
 
-                let mut allowed_sans:Vec<Identity> = Vec::new();
+                let mut allowed_sans: Vec<Identity> = Vec::new();
                 for san in req.upstream_sans.iter() {
                     match Identity::from_str(san) {
-                        Ok(ident) => {
-                            allowed_sans.push(ident.clone())
-                        }
+                        Ok(ident) => allowed_sans.push(ident.clone()),
                         Err(err) => {
                             warn!("error parsing SAN {}: {}", san, err)
                         }
@@ -495,7 +493,7 @@ struct Request {
     gateway: SocketAddr,
     request_type: RequestType,
 
-    upstream_sans: Vec<String>
+    upstream_sans: Vec<String>,
 }
 
 #[derive(Debug)]

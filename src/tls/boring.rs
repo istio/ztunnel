@@ -346,10 +346,7 @@ impl Certs {
         self.setup_ctx(&mut conn)?;
 
         // client verifies SAN
-        conn.set_verify_callback(
-            Self::verify_mode(),
-            Verifier::San(dest_id.clone()).callback(),
-        );
+        conn.set_verify_callback(Self::verify_mode(), Verifier::San(dest_id).callback());
 
         Ok(conn.build())
     }
@@ -400,7 +397,7 @@ impl Verifier {
         Ok(())
     }
 
-    fn verifiy_san(identities: &Vec<Identity>, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+    fn verifiy_san(identities: &[Identity], ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         // internally, openssl tends to .expect the results of these methods.
         // TODO bubble up better error message
         let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
@@ -452,12 +449,12 @@ impl Verifier {
 }
 
 pub trait SanChecker {
-    fn verify_san(&self, identities: &Vec<Identity>) -> Result<(), TlsError>;
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError>;
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError>;
 }
 
 impl SanChecker for Certs {
-    fn verify_san(&self, identities: &Vec<Identity>) -> Result<(), TlsError> {
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError> {
         self.cert.x509.verify_san(identities)
     }
 
@@ -477,14 +474,14 @@ pub fn extract_sans(cert: &x509::X509) -> Vec<Identity> {
 }
 
 impl SanChecker for x509::X509 {
-    fn verify_san(&self, identities: &Vec<Identity>) -> Result<(), TlsError> {
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError> {
         let sans = extract_sans(self);
         for ident in identities.iter() {
             if let Some(_i) = sans.iter().find(|id| id == &ident) {
                 return Ok(());
             }
         }
-        Err(TlsError::SanError(identities.clone(), sans.clone()))
+        Err(TlsError::SanError(identities.to_vec(), sans))
     }
 
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {

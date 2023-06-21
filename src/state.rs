@@ -206,7 +206,7 @@ impl DemandProxyState {
             let mut us = Upstream {
                 workload: wl,
                 port: *target_port,
-                sans: svc.subject_alt_names.clone()
+                sans: svc.subject_alt_names.clone(),
             };
             return match self.set_gateway_address(&mut us, hbone_port) {
                 Ok(_) => {
