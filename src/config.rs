@@ -220,7 +220,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .or_else(|| Some(default_istiod_address.clone())),
     ))?;
 
-    let cluster_id = parse_default(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?;
+    let istio_meta_cluster_id = ISTIO_META_PREFIX.to_owned() + CLUSTER_ID;
+    let cluster_id: String = match parse::<String>(&istio_meta_cluster_id)? {
+        Some(id) => id,
+        None => parse_default::<String>(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?,
+    };
 
     let fake_ca = parse_default(FAKE_CA, false)?;
     let ca_address = validate_uri(empty_to_none(if fake_ca {
@@ -445,6 +449,7 @@ pub mod tests {
         assert_eq!(cfg.admin_addr.port(), 15099);
         // TODO remove prefix
         assert_eq!(cfg.proxy_metadata["FOO"], "foo");
+        assert_eq!(cfg.cluster_id, "Kubernetes");
 
         // env only
         let pc_env = Some(
@@ -461,6 +466,7 @@ pub mod tests {
 
         env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
         env::set_var("NOT_INCLUDE", "not-include");
+        env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
 
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
@@ -474,6 +480,7 @@ pub mod tests {
         );
         assert_eq!(cfg.proxy_metadata["BAR"], "bar");
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
+        assert_eq!(cfg.cluster_id, "test-cluster");
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
