@@ -448,7 +448,7 @@ mod tests {
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
     use crate::identity;
-    use crate::test_helpers::{new_proxy_state, helpers};
+    use crate::test_helpers::{helpers, new_proxy_state};
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
