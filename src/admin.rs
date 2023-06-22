@@ -361,7 +361,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
     match tracing::level_filters::LevelFilter::from_str(level) {
         Ok(level_filter) => {
             // Valid level, continue processing
-            tracing::debug!("Parsed level: {:?}", level_filter);
+            tracing::info!("Parsed level: {:?}", level_filter);
             match telemetry::set_level(reset, level) {
                 Ok(_) => list_loggers(),
                 Err(e) => plaintext_response(
