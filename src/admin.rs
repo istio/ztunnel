@@ -820,7 +820,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_empty() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"");
+        let resp = change_log_level(true, "");
         let resp_bytes = resp
             .body()
             .clone()
@@ -837,7 +837,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_invalid_log_level() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"invalid_level");
+        let resp = change_log_level(true, "invalid_level");
         let resp_bytes = resp
             .body()
             .clone()
@@ -854,7 +854,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_debug() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"debug");
+        let resp = change_log_level(true, "debug");
         let resp_bytes = resp
             .body()
             .clone()
@@ -871,7 +871,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_warn() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"warn");
+        let resp = change_log_level(true, "warn");
         let resp_bytes = resp
             .body()
             .clone()
@@ -888,7 +888,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_error() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"error");
+        let resp = change_log_level(true, "error");
         let resp_bytes = resp
             .body()
             .clone()
@@ -905,7 +905,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_trace() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"trace");
+        let resp = change_log_level(true, "trace");
         let resp_bytes = resp
             .body()
             .clone()
@@ -922,7 +922,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_info() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"info");
+        let resp = change_log_level(true, "info");
         let resp_bytes = resp
             .body()
             .clone()
@@ -939,7 +939,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level_off() {
         helpers::initialize_telemetry();
-        let resp = change_log_level(true, &"off");
+        let resp = change_log_level(true, "off");
         let resp_bytes = resp
             .body()
             .clone()
