@@ -177,98 +177,179 @@ fn initialize_environment(
 }
 
 pub fn latency(c: &mut Criterion) {
-    for policies in [vec![], create_test_policies()] {
-        let (env, rt) = initialize_environment(Mode::ReadWrite, policies);
-        let mut c = c.benchmark_group("latency");
-        for size in [1usize, KB] {
-            c.bench_with_input(BenchmarkId::new("direct", size), &size, |b, size| {
-                b.to_async(&rt).iter(|| async {
-                    tcp::run_client(&mut env.lock().await.direct, *size, Mode::ReadWrite).await
-                })
-            });
-            c.bench_with_input(BenchmarkId::new("tcp", size), &size, |b, size| {
-                b.to_async(&rt).iter(|| async {
-                    tcp::run_client(&mut env.lock().await.tcp, *size, Mode::ReadWrite).await
-                })
-            });
-            c.bench_with_input(BenchmarkId::new("hbone", size), &size, |b, size| {
-                b.to_async(&rt).iter(|| async {
-                    tcp::run_client(&mut env.lock().await.hbone, *size, Mode::ReadWrite).await
-                })
-            });
-        }
+    let (env, rt) = initialize_environment(Mode::ReadWrite, vec![]);
+    let mut c = c.benchmark_group("latency");
+    for size in [1usize, KB] {
+        c.bench_with_input(BenchmarkId::new("direct", size), &size, |b, size| {
+            b.to_async(&rt).iter(|| async {
+                tcp::run_client(&mut env.lock().await.direct, *size, Mode::ReadWrite).await
+            })
+        });
+        c.bench_with_input(BenchmarkId::new("tcp", size), &size, |b, size| {
+            b.to_async(&rt).iter(|| async {
+                tcp::run_client(&mut env.lock().await.tcp, *size, Mode::ReadWrite).await
+            })
+        });
+        c.bench_with_input(BenchmarkId::new("hbone", size), &size, |b, size| {
+            b.to_async(&rt).iter(|| async {
+                tcp::run_client(&mut env.lock().await.hbone, *size, Mode::ReadWrite).await
+            })
+        });
+    }
+}
+
+pub fn rbac_latency(c: &mut Criterion) {
+    let (env, rt) = initialize_environment(Mode::ReadWrite, create_test_policies());
+    let mut c = c.benchmark_group("rbac-latency");
+    for size in [1usize, KB] {
+        c.bench_with_input(BenchmarkId::new("direct", size), &size, |b, size| {
+            b.to_async(&rt).iter(|| async {
+                tcp::run_client(&mut env.lock().await.direct, *size, Mode::ReadWrite).await
+            })
+        });
+        c.bench_with_input(BenchmarkId::new("tcp", size), &size, |b, size| {
+            b.to_async(&rt).iter(|| async {
+                tcp::run_client(&mut env.lock().await.tcp, *size, Mode::ReadWrite).await
+            })
+        });
+        c.bench_with_input(BenchmarkId::new("hbone", size), &size, |b, size| {
+            b.to_async(&rt).iter(|| async {
+                tcp::run_client(&mut env.lock().await.hbone, *size, Mode::ReadWrite).await
+            })
+        });
     }
 }
 
 pub fn throughput(c: &mut Criterion) {
-    for policies in [vec![], create_test_policies()] {
-        let (env, rt) = initialize_environment(Mode::Read, policies);
-        let mut c = c.benchmark_group("throughput");
+    let (env, rt) = initialize_environment(Mode::Read, vec![]);
+    let mut c = c.benchmark_group("throughput");
 
-        let size: usize = 10 * MB;
-        c.throughput(Throughput::Bytes(size as u64));
+    let size: usize = 10 * MB;
+    c.throughput(Throughput::Bytes(size as u64));
 
-        // Test takes a while, so reduce how many iterations we run
-        c.sample_size(10);
-        c.sampling_mode(SamplingMode::Flat);
-        c.measurement_time(Duration::from_secs(5));
-        c.bench_with_input("direct", &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.direct, *size, Mode::Write).await
-            })
-        });
-        c.bench_with_input("tcp", &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.tcp, *size, Mode::Write).await
-            })
-        });
-        c.bench_with_input("hbone", &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.hbone, *size, Mode::Write).await
-            })
-        });
-    }
+    // Test takes a while, so reduce how many iterations we run
+    c.sample_size(10);
+    c.sampling_mode(SamplingMode::Flat);
+    c.measurement_time(Duration::from_secs(5));
+    c.bench_with_input("direct", &size, |b, size| {
+        b.to_async(&rt).iter(|| async {
+            tcp::run_client(&mut env.lock().await.direct, *size, Mode::Write).await
+        })
+    });
+    c.bench_with_input("tcp", &size, |b, size| {
+        b.to_async(&rt)
+            .iter(|| async { tcp::run_client(&mut env.lock().await.tcp, *size, Mode::Write).await })
+    });
+    c.bench_with_input("hbone", &size, |b, size| {
+        b.to_async(&rt).iter(|| async {
+            tcp::run_client(&mut env.lock().await.hbone, *size, Mode::Write).await
+        })
+    });
+}
+
+pub fn rbac_throughput(c: &mut Criterion) {
+    let (env, rt) = initialize_environment(Mode::Read, create_test_policies());
+    let mut c = c.benchmark_group("rbac-throughput");
+
+    let size: usize = 10 * MB;
+    c.throughput(Throughput::Bytes(size as u64));
+
+    // Test takes a while, so reduce how many iterations we run
+    c.sample_size(10);
+    c.sampling_mode(SamplingMode::Flat);
+    c.measurement_time(Duration::from_secs(5));
+    c.bench_with_input("direct", &size, |b, size| {
+        b.to_async(&rt).iter(|| async {
+            tcp::run_client(&mut env.lock().await.direct, *size, Mode::Write).await
+        })
+    });
+    c.bench_with_input("tcp", &size, |b, size| {
+        b.to_async(&rt)
+            .iter(|| async { tcp::run_client(&mut env.lock().await.tcp, *size, Mode::Write).await })
+    });
+    c.bench_with_input("hbone", &size, |b, size| {
+        b.to_async(&rt).iter(|| async {
+            tcp::run_client(&mut env.lock().await.hbone, *size, Mode::Write).await
+        })
+    });
 }
 
 pub fn connections(c: &mut Criterion) {
-    for policies in [vec![], create_test_policies()] {
-        let (env, rt) = initialize_environment(Mode::ReadWrite, policies);
-        let mut c = c.benchmark_group("connections");
-        c.bench_function("direct", |b| {
-            b.to_async(&rt).iter(|| async {
-                let e = env.lock().await;
-                let mut s = TcpStream::connect(e.echo_addr).await.unwrap();
-                s.set_nodelay(true).unwrap();
-                tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-            })
-        });
-        c.bench_function("tcp", |b| {
-            b.to_async(&rt).iter(|| async {
-                let e = env.lock().await;
-                let mut s =
-                    e.ta.socks5_connect(helpers::with_ip(
-                        e.echo_addr,
-                        TEST_WORKLOAD_TCP.parse().unwrap(),
-                    ))
-                    .await;
-                tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-            })
-        });
-        // TODO(https://github.com/istio/ztunnel/issues/15): when we have pooling, split this into "new hbone connection"
-        // and "new connection on existing HBONE connection"
-        c.bench_function("hbone", |b| {
-            b.to_async(&rt).iter(|| async {
-                let e = env.lock().await;
-                let mut s =
-                    e.ta.socks5_connect(helpers::with_ip(
-                        e.echo_addr,
-                        TEST_WORKLOAD_HBONE.parse().unwrap(),
-                    ))
-                    .await;
-                tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-            })
-        });
-    }
+    let (env, rt) = initialize_environment(Mode::ReadWrite, vec![]);
+    let mut c = c.benchmark_group("connections");
+    c.bench_function("direct", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s = TcpStream::connect(e.echo_addr).await.unwrap();
+            s.set_nodelay(true).unwrap();
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    c.bench_function("tcp", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(
+                    e.echo_addr,
+                    TEST_WORKLOAD_TCP.parse().unwrap(),
+                ))
+                .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    // TODO(https://github.com/istio/ztunnel/issues/15): when we have pooling, split this into "new hbone connection"
+    // and "new connection on existing HBONE connection"
+    c.bench_function("hbone", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(
+                    e.echo_addr,
+                    TEST_WORKLOAD_HBONE.parse().unwrap(),
+                ))
+                .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+}
+
+pub fn rbac_connections(c: &mut Criterion) {
+    let (env, rt) = initialize_environment(Mode::ReadWrite, create_test_policies());
+    let mut c = c.benchmark_group("rbac-connections");
+    c.bench_function("direct", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s = TcpStream::connect(e.echo_addr).await.unwrap();
+            s.set_nodelay(true).unwrap();
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    c.bench_function("tcp", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(
+                    e.echo_addr,
+                    TEST_WORKLOAD_TCP.parse().unwrap(),
+                ))
+                .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
+    // TODO(https://github.com/istio/ztunnel/issues/15): when we have pooling, split this into "new hbone connection"
+    // and "new connection on existing HBONE connection"
+    c.bench_function("hbone", |b| {
+        b.to_async(&rt).iter(|| async {
+            let e = env.lock().await;
+            let mut s =
+                e.ta.socks5_connect(helpers::with_ip(
+                    e.echo_addr,
+                    TEST_WORKLOAD_HBONE.parse().unwrap(),
+                ))
+                .await;
+            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+        })
+    });
 }
 
 pub fn metrics(c: &mut Criterion) {
@@ -303,6 +384,7 @@ criterion_group! {
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = latency, throughput, connections, metrics
+    targets = latency, throughput, connections, rbac_latency, rbac_throughput, rbac_connections,
 }
+
 criterion_main!(benches);
