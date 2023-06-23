@@ -365,7 +365,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
             match telemetry::set_level(reset, level) {
                 Ok(_) => list_loggers(),
                 Err(e) => plaintext_response(
-                    hyper::StatusCode::METHOD_NOT_ALLOWED,
+                    hyper::StatusCode::BAD_REQUEST,
                     format!("Failed to set new level: {}\n{}", e, HELP_STRING),
                 ),
             }
@@ -440,13 +440,15 @@ async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
+    use super::change_log_level;
     use super::dump_certs;
     use super::handle_config_dump;
     use super::ConfigDump;
+    use crate::admin::HELP_STRING;
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
     use crate::identity;
-    use crate::test_helpers::new_proxy_state;
+    use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
@@ -813,5 +815,48 @@ mod tests {
         assert!(
             resp_str.contains(r#"waypoint":{"destination":"defaultnw/127.0.0.10","port":15008}"#)
         );
+    }
+
+    // each of these tests assert that we can change the log level and the
+    // appropriate response string is returned.
+    //
+    // Note: tests need to be combined into one test function to be sure that
+    // individual tests don't affect each other by asynchronously changing
+    // the log level before the matching assert is called.
+    #[tokio::test(start_paused = true)]
+    async fn test_change_log_level() {
+        helpers::initialize_telemetry();
+
+        let resp = change_log_level(true, "");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is info\n");
+
+        let resp = change_log_level(true, "invalid_level");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains(HELP_STRING));
+
+        let resp = change_log_level(true, "debug");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is debug\n");
+
+        let resp = change_log_level(true, "warn");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is warn\n");
+
+        let resp = change_log_level(true, "error");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is error\n");
+
+        let resp = change_log_level(true, "trace");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is trace\n"));
+
+        let resp = change_log_level(true, "info");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is info\n"));
+
+        let resp = change_log_level(true, "off");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is off\n"));
     }
 }
