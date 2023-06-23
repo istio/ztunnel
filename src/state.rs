@@ -74,7 +74,7 @@ pub struct ProxyState {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct DemandProxyState {
     #[serde(flatten)]
-    state: Arc<RwLock<ProxyState>>,
+    pub state: Arc<RwLock<ProxyState>>,
 
     /// If present, used to request on-demand updates for workloads.
     #[serde(skip_serializing)]

@@ -35,6 +35,7 @@ use tracing::trace;
 
 pub mod app;
 pub mod ca;
+pub mod dns;
 pub mod helpers;
 pub mod tcp;
 pub mod xds;
@@ -284,21 +285,21 @@ where
 }
 
 pub fn new_proxy_state(
-    xds_workloads: Vec<XdsWorkload>,
-    xds_services: Vec<XdsService>,
-    xds_authorizations: Vec<XdsAuthorization>,
-) -> anyhow::Result<DemandProxyState> {
+    xds_workloads: &[XdsWorkload],
+    xds_services: &[XdsService],
+    xds_authorizations: &[XdsAuthorization],
+) -> DemandProxyState {
     let state = Arc::new(RwLock::new(ProxyState::default()));
     let updater = ProxyStateUpdater::new_no_fetch(state.clone());
 
     for w in xds_workloads {
-        updater.insert_workload(w)?;
+        updater.insert_workload(w.clone()).unwrap();
     }
     for s in xds_services {
-        updater.insert_service(s)?;
+        updater.insert_service(s.clone()).unwrap();
     }
     for a in xds_authorizations {
-        updater.insert_authorization(a)?;
+        updater.insert_authorization(a.clone()).unwrap();
     }
-    Ok(DemandProxyState::new(state, None))
+    DemandProxyState::new(state, None)
 }

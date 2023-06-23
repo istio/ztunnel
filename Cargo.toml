@@ -9,6 +9,7 @@ default = ["fips"]
 gperftools = ["dep:gperftools"]
 console = ["dep:console-subscriber"]
 fips = ["boring/fips", "hyper-boring/fips", "tokio-boring/fips"]
+testing = [] # Enables utilites supporting tests.
 
 [lib]
 path = "src/lib.rs"
@@ -78,6 +79,12 @@ tower-hyper-http-body-compat = { version = "0", features = ["server", "http2"] }
 futures-util = "0.3.26"
 chrono = "0.4.23"
 
+# DNS
+trust-dns-client = "0.22.0"
+trust-dns-proto = "0.22.0"
+trust-dns-resolver = "0.22.0"
+trust-dns-server = { version = "0.22.1", features = [ "trust-dns-resolver" ] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1.0"
 
@@ -100,8 +107,12 @@ lto = false
 incremental = true
 
 [dev-dependencies]
+# Enable testing utils on this crate.
+ztunnel = { version = "0.0.0", path = ".", features = [ "testing" ] }
+
 criterion = { version = "0.4.0", features = ["async_tokio", "html_reports"] }
 diff = "0.1.13"
+local-ip-address = "0.5.3"
 matches = "0.1.9"
 test-case = "3.0.0"
 #debug = true

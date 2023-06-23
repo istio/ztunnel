@@ -547,7 +547,7 @@ mod tests {
             node: "local-node".to_string(),
             ..Default::default()
         };
-        let state = new_proxy_state(vec![source, waypoint, xds], vec![], vec![]).unwrap();
+        let state = new_proxy_state(&[source, waypoint, xds], &[], &[]);
         let outbound = OutboundConnection {
             pi: ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
