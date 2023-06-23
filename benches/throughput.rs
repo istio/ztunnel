@@ -95,7 +95,7 @@ fn create_test_policies() -> Vec<Authorization> {
         });
     }
 
-    return policies;
+    policies
 }
 
 fn initialize_environment(
@@ -200,7 +200,7 @@ pub fn latency(c: &mut Criterion) {
 
 pub fn rbac_latency(c: &mut Criterion) {
     let (env, rt) = initialize_environment(Mode::ReadWrite, create_test_policies());
-    let mut c = c.benchmark_group("rbac-latency");
+    let mut c = c.benchmark_group("rbac_latency");
     for size in [1usize, KB] {
         c.bench_with_input(BenchmarkId::new("direct", size), &size, |b, size| {
             b.to_async(&rt).iter(|| async {
@@ -249,7 +249,7 @@ pub fn throughput(c: &mut Criterion) {
 
 pub fn rbac_throughput(c: &mut Criterion) {
     let (env, rt) = initialize_environment(Mode::Read, create_test_policies());
-    let mut c = c.benchmark_group("rbac-throughput");
+    let mut c = c.benchmark_group("rbac_throughput");
 
     let size: usize = 10 * MB;
     c.throughput(Throughput::Bytes(size as u64));
@@ -315,7 +315,7 @@ pub fn connections(c: &mut Criterion) {
 
 pub fn rbac_connections(c: &mut Criterion) {
     let (env, rt) = initialize_environment(Mode::ReadWrite, create_test_policies());
-    let mut c = c.benchmark_group("rbac-connections");
+    let mut c = c.benchmark_group("rbac_connections");
     c.bench_function("direct", |b| {
         b.to_async(&rt).iter(|| async {
             let e = env.lock().await;
