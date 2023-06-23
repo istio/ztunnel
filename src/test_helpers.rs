@@ -23,6 +23,8 @@ use crate::xds::istio::workload::Service as XdsService;
 use crate::xds::istio::workload::Workload as XdsWorkload;
 use crate::xds::{LocalConfig, LocalWorkload, ProxyStateUpdater};
 use bytes::{BufMut, Bytes};
+use http_body_util::{BodyExt, Full};
+use hyper::Response;
 use std::collections::HashMap;
 use std::default::Default;
 use std::fmt::Debug;
@@ -302,4 +304,17 @@ pub fn new_proxy_state(
         updater.insert_authorization(a.clone()).unwrap();
     }
     DemandProxyState::new(state, None)
+}
+
+pub async fn get_response_str(resp: Response<Full<Bytes>>) -> String {
+    let resp_bytes = resp
+        .body()
+        .clone()
+        .frame()
+        .await
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    String::from(std::str::from_utf8(&resp_bytes).unwrap())
 }
