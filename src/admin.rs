@@ -849,14 +849,14 @@ mod tests {
 
         let resp = change_log_level(true, "trace");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str.contains("current log level is trace"));
+        assert!(resp_str.contains("current log level is trace\n"));
 
         let resp = change_log_level(true, "info");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str.contains("current log level is info"));
+        assert!(resp_str.contains("current log level is info\n"));
 
         let resp = change_log_level(true, "off");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str.contains("current log level is off"));
+        assert!(resp_str.contains("current log level is off\n"));
     }
 }
