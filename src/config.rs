@@ -362,6 +362,11 @@ impl ProxyConfig {
 }
 
 fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result<ProxyConfig> {
+    // set cluster id to proxy metadata so that it can be used in the node metadata
+    let cluster_id = parse_default(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?;
+    let var_name = format!("{}{}", ISTIO_META_PREFIX, CLUSTER_ID);
+    env::set_var(var_name, &cluster_id);
+
     let mesh_config = match fs::File::open(mc_path) {
         Ok(f) => serde_yaml::from_reader(f)
             .map(|v: MeshConfig| v.default_config)
@@ -445,6 +450,7 @@ pub mod tests {
         assert_eq!(cfg.admin_addr.port(), 15099);
         // TODO remove prefix
         assert_eq!(cfg.proxy_metadata["FOO"], "foo");
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "Kubernetes");
 
         // env only
         let pc_env = Some(
