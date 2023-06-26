@@ -17,7 +17,9 @@ use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, Service};
 use crate::state::workload::Protocol;
 use crate::state::workload::Protocol::{HBONE, TCP};
-use crate::state::workload::{gatewayaddress, GatewayAddress, NetworkAddress, Workload};
+use crate::state::workload::{
+    gatewayaddress, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
+};
 use crate::state::{DemandProxyState, ProxyState};
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Service as XdsService;
@@ -105,6 +107,9 @@ pub const TEST_WORKLOAD_HBONE: &str = "127.0.0.3";
 pub const TEST_WORKLOAD_TCP: &str = "127.0.0.4";
 pub const TEST_WORKLOAD_WAYPOINT: &str = "127.0.0.4";
 pub const TEST_VIP: &str = "127.10.0.1";
+pub const TEST_SERVICE_NAMESPACE: &str = "default";
+pub const TEST_SERVICE_NAME: &str = "local-vip";
+pub const TEST_SERVICE_HOST: &str = "local-vip.default.svc.cluster.local";
 
 pub fn localhost_error_message() -> String {
     let addrs = &[
@@ -172,7 +177,7 @@ fn test_custom_workload(
     name: &str,
     protocol: Protocol,
     echo_port: u16,
-    not_default_vip: bool,
+    include_service: bool,
 ) -> anyhow::Result<LocalWorkload> {
     let ip = ip_str.parse()?;
     let workload = Workload {
@@ -185,17 +190,12 @@ fn test_custom_workload(
         node: "local".to_string(),
         ..test_default_workload()
     };
-    match not_default_vip {
-        true => {
-            let mut vips = HashMap::new();
-            vips.insert(TEST_VIP.to_string(), HashMap::from([(80u16, echo_port)]));
-            Ok(LocalWorkload { workload, vips })
-        }
-        false => Ok(LocalWorkload {
-            workload,
-            vips: HashMap::new(),
-        }),
+    let mut services = HashMap::new();
+    if include_service {
+        let key = format!("{}/{}", TEST_SERVICE_NAMESPACE, TEST_SERVICE_HOST);
+        services.insert(key, HashMap::from([(80u16, echo_port)]));
     }
+    Ok(LocalWorkload { workload, services })
 }
 
 pub fn local_xds_config(
@@ -227,13 +227,13 @@ pub fn local_xds_config(
                 }),
                 ..test_default_workload()
             },
-            vips: Default::default(),
+            services: Default::default(),
         })
     }
     let svcs: Vec<Service> = vec![Service {
-        name: "local-vip".to_string(),
-        namespace: "default".to_string(),
-        hostname: "local-vip.default.svc.cluster.local".to_string(),
+        name: TEST_SERVICE_NAME.to_string(),
+        namespace: TEST_SERVICE_NAMESPACE.to_string(),
+        hostname: TEST_SERVICE_HOST.to_string(),
         vips: vec![NetworkAddress {
             network: "".to_string(),
             address: TEST_VIP.parse()?,
@@ -245,10 +245,11 @@ pub fn local_xds_config(
                 address: TEST_WORKLOAD_HBONE.parse()?,
             },
             Endpoint {
-                vip: NetworkAddress {
-                    network: "".to_string(),
-                    address: TEST_VIP.parse()?,
+                service: NamespacedHostname {
+                    namespace: TEST_SERVICE_NAMESPACE.to_string(),
+                    hostname: TEST_SERVICE_HOST.to_string(),
                 },
+                vip: None,
                 address: NetworkAddress {
                     network: "".to_string(),
                     address: TEST_WORKLOAD_HBONE.parse()?,

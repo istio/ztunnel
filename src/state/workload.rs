@@ -28,6 +28,7 @@ use std::convert::Into;
 use std::default::Default;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
@@ -359,6 +360,20 @@ pub struct NamespacedHostname {
     pub hostname: String,
 }
 
+impl FromStr for NamespacedHostname {
+    type Err = WorkloadError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let Some((namespace, hostname)) = value.split_once('/') else {
+            return Err(WorkloadError::NamespacedHostnameParse(value.to_string()));
+        };
+        Ok(Self {
+            namespace: namespace.to_string(),
+            hostname: hostname.to_string(),
+        })
+    }
+}
+
 // we need custom serde serialization since NamespacedHostname is keying maps
 impl Serialize for NamespacedHostname {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -388,12 +403,8 @@ impl<'de> Deserialize<'de> for NamespacedHostname {
             where
                 E: serde::de::Error,
             {
-                let Some((ns, hostname)) = value.split_once('/') else {
-                    return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
-                };
-                Ok(NamespacedHostname {
-                    namespace: ns.to_string(),
-                    hostname: hostname.to_string(),
+                NamespacedHostname::from_str(value).map_err(|_| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self)
                 })
             }
         }
@@ -445,7 +456,6 @@ impl<'de> Deserialize<'de> for NetworkAddress {
                 let Some((network, address)) = value.split_once('/') else {
                     return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
                 };
-                use std::str::FromStr;
                 let Ok(ip_addr) = IpAddr::from_str(address) else {
                     return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
                 };
@@ -560,6 +570,8 @@ impl WorkloadStore {
 #[allow(clippy::enum_variant_names)]
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum WorkloadError {
+    #[error("failed to parse namespaced hostname: {0}")]
+    NamespacedHostnameParse(String),
     #[error("failed to parse address: {0}")]
     AddressParse(#[from] net::AddrParseError),
     #[error("failed to parse address, had {0} bytes")]

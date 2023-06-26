@@ -472,6 +472,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::state::workload::NamespacedHostname;
     use crate::{
         identity::Identity,
         state::{
@@ -598,10 +599,11 @@ mod test {
                 address: IpAddr::V4(mock_default_gateway_ipaddr()),
             },
             Endpoint {
-                vip: NetworkAddress {
-                    network: "".to_string(),
-                    address: IpAddr::V4(mock_default_gateway_ipaddr()),
+                service: NamespacedHostname {
+                    namespace: "gatewayns".to_string(),
+                    hostname: "gateway".to_string(),
                 },
+                vip: None,
                 address: NetworkAddress {
                     network: "".to_string(),
                     address: IpAddr::V4(mock_default_gateway_ipaddr()),

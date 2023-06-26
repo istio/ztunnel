@@ -700,8 +700,8 @@ mod tests {
             authorization_policies: Vec::new(),
             native_tunnel: false,
             workload_type: XdsWorkloadType::Deployment.into(),
-            virtual_ips: HashMap::from([(
-                "127.0.1.1".to_string(),
+            services: HashMap::from([(
+                "ns/svc1.ns.svc.cluster.local".to_string(),
                 XdsPortList {
                     ports: vec![XdsPort {
                         service_port: 80,
@@ -709,6 +709,7 @@ mod tests {
                     }],
                 },
             )]),
+            virtual_ips: Default::default(),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 

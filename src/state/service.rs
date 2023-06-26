@@ -33,7 +33,7 @@ pub struct Service {
     pub vips: Vec<NetworkAddress>,
     pub ports: HashMap<u16, u16>,
 
-    /// Maps workload endpoint addresses to [Endpoint]s.
+    /// Maps workload addresses to service [Endpoint]s.
     #[serde(default)]
     pub endpoints: HashMap<NetworkAddress, Endpoint>,
 }
@@ -50,8 +50,12 @@ impl Service {
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
+    /// The service for this endpoint.
+    pub service: NamespacedHostname,
+
     /// The service VIP for this endpoint.
-    pub vip: NetworkAddress,
+    // TODO(nmittler): Remove this once VIPs are no longer used as keys.
+    pub vip: Option<NetworkAddress>,
 
     /// The workload address.
     pub address: NetworkAddress,
@@ -92,11 +96,21 @@ impl TryFrom<&XdsService> for Service {
 pub struct ServiceStore {
     /// Maintains a mapping of service IP -> (workload IP -> workload endpoint)
     /// this is used to handle ordering issues if workloads with VIPs are received before services.
+    // TODO(nmittler): Remove this once VIPs are no longer used as keys.
     staged_vips: HashMap<NetworkAddress, HashMap<NetworkAddress, Endpoint>>,
+
+    /// Maintains a mapping of service key -> (workload IP -> workload endpoint)
+    /// this is used to handle ordering issues if workloads are received before services.
+    staged_services: HashMap<NamespacedHostname, HashMap<NetworkAddress, Endpoint>>,
 
     /// Maintains a mapping of workload IP to VIP. This is used only to handle removal of service
     /// endpoints when a workload is removed.
+    // TODO(nmittler): Remove this once VIPs are no longer used as keys.
     workload_to_vips: HashMap<NetworkAddress, HashSet<NetworkAddress>>,
+
+    /// Maintains a mapping of workload IP to service. This is used only to handle removal of
+    /// service endpoints when a workload is removed.
+    workload_to_services: HashMap<NetworkAddress, HashSet<NamespacedHostname>>,
 
     /// Allows for lookup of services by network address, the service's xds secondary key.
     by_vip: HashMap<NetworkAddress, Arc<Service>>,
@@ -154,11 +168,20 @@ impl ServiceStore {
         }
     }
 
+    fn service_for_endpoint(&self, ep: &Endpoint) -> Option<Service> {
+        if let Some(svc) = self.get_by_namespaced_host(&ep.service) {
+            Some(svc)
+        } else if let Some(vip) = &ep.vip {
+            self.by_vip.get(vip).map(|svc| svc.deref().clone())
+        } else {
+            None
+        }
+    }
+
     /// Adds an endpoint for the service VIP.
     pub fn insert_endpoint(&mut self, ep: Endpoint) {
-        if let Some(svc) = self.by_vip.get(&ep.vip) {
+        if let Some(mut svc) = self.service_for_endpoint(&ep) {
             // Clone the service and add the endpoint.
-            let mut svc = svc.deref().clone();
             svc.endpoints.insert(ep.address.clone(), ep);
 
             // Update the service.
@@ -166,57 +189,104 @@ impl ServiceStore {
         } else {
             // We received workload endpoints, but don't have the Service yet.
             // This can happen due to ordering issues.
-            trace!("pod has VIP {}, but VIP not found", ep.vip);
+            trace!(
+                "pod has service {} (vip={:?}), but service not found",
+                ep.service,
+                ep.vip
+            );
 
-            // Add a staged entry. This will be added to the service once we receive it.
-            self.staged_vips
-                .entry(ep.vip.clone())
-                .or_default()
-                .insert(ep.address.clone(), ep.clone());
+            if !ep.service.hostname.is_empty() {
+                // Add a staged entry. This will be added to the service once we receive it.
+                self.staged_services
+                    .entry(ep.service.clone())
+                    .or_default()
+                    .insert(ep.address.clone(), ep.clone());
 
-            // Insert a mapping from the workload address to the VIP.
-            self.workload_to_vips
-                .entry(ep.address.clone())
-                .or_default()
-                .insert(ep.vip.clone());
+                // Insert a reverse-mapping from the workload address to the service.
+                self.workload_to_services
+                    .entry(ep.address.clone())
+                    .or_default()
+                    .insert(ep.service.clone());
+            }
+
+            // TODO(nmittler): Remove this once VIPs are no longer used as keys.
+            if let Some(vip) = &ep.vip {
+                // Add a staged entry. This will be added to the service once we receive it.
+                self.staged_vips
+                    .entry(vip.clone())
+                    .or_default()
+                    .insert(ep.address.clone(), ep.clone());
+
+                // Insert a reverse-mapping from the workload address to the VIP.
+                self.workload_to_vips
+                    .entry(ep.address.clone())
+                    .or_default()
+                    .insert(vip.clone());
+            }
         }
     }
 
     /// Removes entries for the given endpoint address.
     pub fn remove_endpoint(&mut self, addr: &NetworkAddress) {
-        // Remove the endpoint from the VIP map.
-        let Some(prev_vips) = self.workload_to_vips.remove(addr) else {
-            return;
-        };
+        let mut services_to_update = HashSet::new();
+        if let Some(prev_services) = self.workload_to_services.remove(addr) {
+            for svc in prev_services.iter() {
+                // Remove the endpoint from the staged services.
+                self.staged_services
+                    .entry(svc.clone())
+                    .or_default()
+                    .remove(addr);
+                if self.staged_services[svc].is_empty() {
+                    self.staged_services.remove(svc);
+                }
 
-        for vip in prev_vips.iter() {
-            // Remove the endpoint from the staged VIPs map.
-            self.staged_vips
-                .entry(vip.to_owned())
-                .or_default()
-                .remove(addr);
-            if self.staged_vips[vip].is_empty() {
-                self.staged_vips.remove(vip);
+                services_to_update.insert(svc.clone());
             }
+        }
 
-            // Remove the endpoint from the service.
-            if let Some(service) = self.by_vip.get(vip) {
-                // Clone the service and remove the endpoint.
-                let mut service = service.deref().clone();
-                service.endpoints.remove(addr);
+        // TODO(nmittler): Remove this once VIPs are no longer used as keys.
+        // Remove the endpoint from the VIP map.
+        if let Some(prev_vips) = self.workload_to_vips.remove(addr) {
+            for vip in prev_vips.iter() {
+                // Remove the endpoint from the staged VIPs map.
+                self.staged_vips
+                    .entry(vip.to_owned())
+                    .or_default()
+                    .remove(addr);
+                if self.staged_vips[vip].is_empty() {
+                    self.staged_vips.remove(vip);
+                }
+
+                // Remove the endpoint from the service.
+                if let Some(service) = self.by_vip.get(vip) {
+                    services_to_update.insert(service.namespaced_hostname());
+                }
+            }
+        }
+
+        // Now remove the endpoint from all Services.
+        for svc in &services_to_update {
+            if let Some(mut svc) = self.get_by_namespaced_host(svc) {
+                svc.endpoints.remove(addr);
 
                 // Update the service.
-                self.insert(service);
+                self.insert(svc);
             }
         }
     }
 
     /// Adds the given service.
     pub fn insert(&mut self, mut service: Service) {
-        // First mutate the service and add all missing endpoints
+        // First add any staged service endpoints. Due to ordering issues, we may have received
+        // the workloads before their associated services.
+        let namespaced_hostname = service.namespaced_hostname();
+        if let Some(endpoints) = self.staged_services.remove(&namespaced_hostname) {
+            for (wip, ep) in endpoints {
+                service.endpoints.insert(wip.clone(), ep);
+            }
+        }
+        // TODO(nmittler): Remove this once VIPs are no longer used as keys.
         for vip in &service.vips {
-            // Due to ordering issues, we may have gotten workloads with VIPs before we got the service
-            // we should add those workloads to the vips map now
             if let Some(endpoints) = self.staged_vips.remove(vip) {
                 for (wip, ep) in endpoints {
                     service.endpoints.insert(wip.clone(), ep);
@@ -225,7 +295,7 @@ impl ServiceStore {
         }
 
         // If we're replacing an existing service, remove the old one from all data structures.
-        let _ = self.remove(&service.namespaced_hostname());
+        let _ = self.remove(&namespaced_hostname);
 
         // Save values used for the indexes.
         let vips = service.vips.clone();
@@ -249,12 +319,23 @@ impl ServiceStore {
             }
         }
 
-        // Map the workload address to the endpoint.
+        // Map the workload address to the service.
         for (_, ep) in service.endpoints.iter() {
-            self.workload_to_vips
+            self.workload_to_services
                 .entry(ep.address.clone())
                 .or_default()
-                .insert(ep.vip.clone());
+                .insert(namespaced_hostname.clone());
+        }
+
+        // TODO(nmittler): Remove this once VIPs are no longer used as keys.
+        // Map the workload address to the endpoint.
+        for (_, ep) in service.endpoints.iter() {
+            if let Some(vip) = &ep.vip {
+                self.workload_to_vips
+                    .entry(ep.address.clone())
+                    .or_default()
+                    .insert(vip.clone());
+            }
         }
     }
 
@@ -301,7 +382,26 @@ impl ServiceStore {
 
                 // Remove mapping from workload to the VIPs for this service.
                 for (ep_ip, _) in prev.endpoints.iter() {
-                    self.workload_to_vips.remove(ep_ip);
+                    // Remove the staged service.
+                    // TODO(nmittler): no endpoints for this service should be staged at this point.
+                    self.staged_services
+                        .entry(namespaced_host.clone())
+                        .or_default()
+                        .remove(ep_ip);
+                    if self.staged_services[namespaced_host].is_empty() {
+                        self.staged_services.remove(namespaced_host);
+                    }
+
+                    // Remove the workload IP mapping for this service.
+                    self.workload_to_services
+                        .entry(ep_ip.clone())
+                        .or_default()
+                        .remove(namespaced_host);
+                    if self.workload_to_services[ep_ip].is_empty() {
+                        self.workload_to_services.remove(ep_ip);
+                    }
+
+                    // TODO(nmittler): Remove this once VIPs are no longer used as keys.
                     for network_addr in prev.vips.iter() {
                         self.staged_vips
                             .entry(network_addr.clone())
@@ -309,6 +409,14 @@ impl ServiceStore {
                             .remove(ep_ip);
                         if self.staged_vips[network_addr].is_empty() {
                             self.staged_vips.remove(network_addr);
+                        }
+
+                        self.workload_to_vips
+                            .entry(ep_ip.clone())
+                            .or_default()
+                            .remove(network_addr);
+                        if self.workload_to_vips[ep_ip].is_empty() {
+                            self.workload_to_vips.remove(ep_ip);
                         }
                     }
                 }

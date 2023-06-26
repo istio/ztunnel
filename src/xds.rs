@@ -26,6 +26,7 @@ use crate::state::ProxyState;
 use crate::xds;
 pub use client::*;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, trace, warn};
@@ -81,7 +82,7 @@ impl ProxyStateUpdater {
         // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
         // But we shouldn't include them in load balancing we do to Services.
         let mut endpoints = if workload.status == HealthStatus::Healthy {
-            service_endpoints(&workload, &w.virtual_ips)?
+            service_endpoints(&workload, &w.services, &w.virtual_ips)?
         } else {
             Vec::new()
         };
@@ -115,7 +116,7 @@ impl ProxyStateUpdater {
             return;
         }
 
-        let Some((namespace, hostname)) = xds_name.split_once('/') else {
+        let Ok(name) = NamespacedHostname::from_str(xds_name) else {
             // we don't have namespace/hostname xds primary key for service
             warn!(
                 "tried to remove service keyed by {} but it did not have the expected namespace/hostname format",
@@ -124,7 +125,7 @@ impl ProxyStateUpdater {
             return;
         };
 
-        if hostname.split_once('/').is_some() {
+        if name.hostname.contains('/') {
             // avoid trying to delete obvious workload UIDs as a service,
             // which can result in noisy logs when new workloads are added
             // (we remove then add workloads on initial update)
@@ -136,10 +137,6 @@ impl ProxyStateUpdater {
             );
             return;
         }
-        let name = NamespacedHostname {
-            namespace: namespace.to_string(),
-            hostname: hostname.to_string(),
-        };
         if state.services.remove(&name).is_none() {
             warn!("tried to remove service keyed by {name}, but it was not found");
         }
@@ -159,12 +156,13 @@ impl ProxyStateUpdater {
         // Lock the store.
         let mut state = self.state.write().unwrap();
 
-        // If the service already exists, add old endpoints into the new service.
-        for vip in &service.vips {
-            if let Some(prev) = state.services.get_by_vip(vip) {
-                for (wip, ep) in prev.endpoints.iter() {
-                    service.endpoints.insert(wip.clone(), ep.clone());
-                }
+        // If the service already exists, add existing endpoints into the new service.
+        if let Some(prev) = state
+            .services
+            .get_by_namespaced_host(&service.namespaced_hostname())
+        {
+            for (wip, ep) in prev.endpoints.iter() {
+                service.endpoints.insert(wip.clone(), ep.clone());
             }
         }
 
@@ -217,27 +215,60 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
 
 fn service_endpoints(
     workload: &Workload,
+    services: &HashMap<String, PortList>,
     virtual_ips: &HashMap<String, PortList>,
 ) -> anyhow::Result<Vec<Endpoint>> {
     let mut out = Vec::new();
-    for (vip, ports) in virtual_ips {
-        let parts = vip.split_once('/');
-        let vip = match parts.is_some() {
-            true => parts.unwrap().1.to_string(),
-            false => vip.clone(),
-        };
-        let svc_network = match parts.is_some() {
-            true => parts.unwrap().0,
-            false => &workload.network,
-        };
+    if !services.is_empty() {
+        for (namespaced_host, ports) in services {
+            // Parse the namespaced hostname for the service.
+            let namespaced_host = match namespaced_host.split_once('/') {
+                Some((namespace, hostname)) => NamespacedHostname {
+                    namespace: namespace.to_string(),
+                    hostname: hostname.to_string(),
+                },
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "failed parsing service name: {namespaced_host}"
+                    ));
+                }
+            };
 
-        let vip = network_addr(svc_network, vip.parse()?);
-        for wip in &workload.workload_ips {
-            out.push(Endpoint {
-                vip: vip.clone(),
-                address: network_addr(&workload.network, *wip),
-                port: ports.into(),
-            })
+            // Create service endpoints for all the workload IPs.
+            for wip in &workload.workload_ips {
+                out.push(Endpoint {
+                    service: namespaced_host.clone(),
+                    vip: None,
+                    address: network_addr(&workload.network, *wip),
+                    port: ports.into(),
+                })
+            }
+        }
+    } else {
+        // TODO(nmittler): Remove this once VIPs are no longer used as keys.
+        for (vip, ports) in virtual_ips {
+            let parts = vip.split_once('/');
+            let vip = match parts.is_some() {
+                true => parts.unwrap().1.to_string(),
+                false => vip.clone(),
+            };
+            let svc_network = match parts.is_some() {
+                true => parts.unwrap().0,
+                false => &workload.network,
+            };
+
+            let vip = network_addr(svc_network, vip.parse()?);
+            for wip in &workload.workload_ips {
+                out.push(Endpoint {
+                    service: NamespacedHostname {
+                        namespace: "".to_string(),
+                        hostname: "".to_string(),
+                    },
+                    vip: Some(vip.clone()),
+                    address: network_addr(&workload.network, *wip),
+                    port: ports.into(),
+                })
+            }
         }
     }
     Ok(out)
@@ -268,7 +299,7 @@ pub struct LocalClient {
 pub struct LocalWorkload {
     #[serde(flatten)]
     pub workload: Workload,
-    pub vips: HashMap<String, HashMap<u16, u16>>,
+    pub services: HashMap<String, HashMap<u16, u16>>,
 }
 
 #[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -297,13 +328,13 @@ impl LocalClient {
             state.workloads.insert_workload(wl.workload.clone())?;
             self.cert_fetcher.prefetch_cert(&wl.workload);
 
-            let vips: HashMap<String, PortList> = wl
-                .vips
+            let services: HashMap<String, PortList> = wl
+                .services
                 .into_iter()
                 .map(|(k, v)| (k, PortList::from(v)))
                 .collect();
 
-            let mut endpoints = service_endpoints(&wl.workload, &vips)?;
+            let mut endpoints = service_endpoints(&wl.workload, &services, &HashMap::new())?;
             while let Some(ep) = endpoints.pop() {
                 state.services.insert_endpoint(ep)
             }
