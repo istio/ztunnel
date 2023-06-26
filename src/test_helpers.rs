@@ -15,6 +15,7 @@
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, Service};
+use crate::state::workload::Protocol;
 use crate::state::workload::Protocol::{HBONE, TCP};
 use crate::state::workload::{gatewayaddress, GatewayAddress, NetworkAddress, Workload};
 use crate::state::{DemandProxyState, ProxyState};
@@ -160,47 +161,42 @@ pub fn test_default_workload() -> Workload {
     }
 }
 
+fn test_custom_workload(
+    ip_str: &str,
+    name: &str,
+    protocol: Protocol,
+    echo_port: u16,
+    not_default_vip: bool,
+) -> anyhow::Result<LocalWorkload> {
+    let ip = ip_str.parse()?;
+    let workload = Workload {
+        workload_ips: vec![ip],
+        protocol,
+        uid: format!("cluster1//v1/Pod/default/{}", name),
+        name: name.to_string(),
+        namespace: "default".to_string(),
+        service_account: "default".to_string(),
+        node: "local".to_string(),
+        ..test_default_workload()
+    };
+    match not_default_vip {
+        true => {
+            let mut vips = HashMap::new();
+            vips.insert(TEST_VIP.to_string(), HashMap::from([(80u16, echo_port)]));
+            Ok(LocalWorkload { workload, vips })
+        }
+        false => Ok(LocalWorkload {
+            workload,
+            vips: HashMap::new(),
+        }),
+    }
+}
+
 fn local_xds_config(echo_port: u16, waypoint_ip: Option<IpAddr>) -> anyhow::Result<Bytes> {
     let mut res: Vec<LocalWorkload> = vec![
-        LocalWorkload {
-            workload: Workload {
-                workload_ips: vec![TEST_WORKLOAD_HBONE.parse()?],
-                protocol: HBONE,
-                uid: "cluster1//v1/Pod/default/local-hbone".to_string(),
-                name: "local-hbone".to_string(),
-                namespace: "default".to_string(),
-                service_account: "default".to_string(),
-                node: "local".to_string(),
-                ..test_default_workload()
-            },
-            vips: HashMap::from([(TEST_VIP.to_string(), HashMap::from([(80u16, echo_port)]))]),
-        },
-        LocalWorkload {
-            workload: Workload {
-                workload_ips: vec![TEST_WORKLOAD_TCP.parse()?],
-                protocol: TCP,
-                uid: "cluster1//v1/Pod/default/local-tcp".to_string(),
-                name: "local-tcp".to_string(),
-                namespace: "default".to_string(),
-                service_account: "default".to_string(),
-                node: "local".to_string(),
-                ..test_default_workload()
-            },
-            vips: HashMap::from([(TEST_VIP.to_string(), HashMap::from([(80u16, echo_port)]))]),
-        },
-        LocalWorkload {
-            workload: Workload {
-                workload_ips: vec![TEST_WORKLOAD_SOURCE.parse()?],
-                protocol: TCP,
-                uid: "cluster1//v1/Pod/default/local-source".to_string(),
-                name: "local-source".to_string(),
-                namespace: "default".to_string(),
-                service_account: "default".to_string(),
-                node: "local".to_string(),
-                ..test_default_workload()
-            },
-            vips: Default::default(),
-        },
+        test_custom_workload(TEST_WORKLOAD_SOURCE, "local-source", TCP, echo_port, true)?,
+        test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone", HBONE, echo_port, true)?,
+        test_custom_workload(TEST_WORKLOAD_TCP, "local-tcp", TCP, echo_port, false)?,
     ];
     if let Some(waypoint_ip) = waypoint_ip {
         res.push(LocalWorkload {
