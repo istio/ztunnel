@@ -125,14 +125,7 @@ impl Proxy {
 }
 
 async fn new_dns_proxy(pi: ProxyInputs) -> Result<Option<dns::DnsProxy>, Error> {
-    // Determine whether we should enable DNS from proxy metadata.
-    const DNS_CAPTURE_METADATA: &str = "ISTIO_META_DNS_CAPTURE";
-    let dns_enabled = pi
-        .cfg
-        .proxy_metadata
-        .get(DNS_CAPTURE_METADATA)
-        .map_or(false, |val| val.trim().to_lowercase() == "true");
-    if dns_enabled {
+    if pi.cfg.dns_proxy {
         Ok(Some(
             dns::DnsProxy::new(
                 pi.cfg.dns_proxy_addr,
