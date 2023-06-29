@@ -9,10 +9,10 @@ workloads:
   protocol: HBONE
   node: local
   network: ""
-  vips:
-    "127.10.0.1":
+  services:
+    "default/example.com":
       80: 8080
-    "remote/127.10.0.2":
+    "default/example2.com":
       80: 8080
 # Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
 - uid: cluster1//v1/Pod/default/local-tcp
@@ -23,10 +23,10 @@ workloads:
   protocol: TCP
   node: local
   network: ""
-  vips:
-    "127.10.0.1":
+  services:
+    "default/example.com":
       80: 8080
-    "remote/127.10.0.2":
+    "default/example2.com":
       80: 8080
 policies:
   - action: Allow

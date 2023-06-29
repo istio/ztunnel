@@ -35,7 +35,7 @@ pub struct WorkloadManager {
     /// workloads that we have constructed
     workloads: Vec<LocalWorkload>,
     /// services that we have constructed. VIP -> SVC
-    services: HashMap<IpAddr, Service>,
+    services: HashMap<NamespacedHostname, Service>,
     /// Node to IPs on the node that are captured
     captured_workloads: HashMap<String, Vec<IpAddr>>,
     waypoints: Vec<IpAddr>,
@@ -190,11 +190,9 @@ impl<'a> TestServiceBuilder<'a> {
 
     /// Finish building the service.
     pub fn register(self) -> anyhow::Result<()> {
-        for network_address in &self.s.vips {
-            self.manager
-                .services
-                .insert(network_address.address, self.s.clone());
-        }
+        self.manager
+            .services
+            .insert(self.s.namespaced_hostname(), self.s);
         Ok(())
     }
 }
@@ -217,7 +215,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                     node: "not-local".to_string(),
                     ..test_default_workload()
                 },
-                vips: Default::default(),
+                services: Default::default(),
             },
             manager,
         }
@@ -256,11 +254,11 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    /// Append a VIP to the workload
-    pub fn vip(mut self, ip: &str, server_port: u16, target_port: u16) -> Self {
+    /// Append a service to the workload
+    pub fn service(mut self, service: &str, server_port: u16, target_port: u16) -> Self {
         self.w
-            .vips
-            .entry(ip.to_string())
+            .services
+            .entry(service.to_string())
             .or_default()
             .insert(server_port, target_port);
         self
@@ -291,13 +289,10 @@ impl<'a> TestWorkloadBuilder<'a> {
             self.w.workload.namespace, self.w.workload.name,
         );
 
-        // update the endpoints for the service, if workload has any vips
-        for (vip, ports) in &self.w.vips {
-            let parsed_vip = vip.parse::<IpAddr>()?;
-            let vip = NetworkAddress {
-                network: "".to_string(),
-                address: parsed_vip,
-            };
+        // update the endpoints for the service.
+        for (service, ports) in &self.w.services {
+            let service_name = service.parse::<NamespacedHostname>()?;
+
             for wip in self.w.workload.workload_ips.iter() {
                 let ep_network_addr = NetworkAddress {
                     network: "".to_string(),
@@ -305,18 +300,13 @@ impl<'a> TestWorkloadBuilder<'a> {
                 };
 
                 let ep = Endpoint {
-                    vip: vip.clone(),
+                    service: service_name.clone(),
+                    vip: None,
                     address: ep_network_addr.clone(),
                     port: ports.to_owned(),
                 };
-                let mut svc = self.manager.services.get(&parsed_vip).unwrap().clone();
+                let mut svc = self.manager.services.get(&service_name).unwrap().clone();
                 svc.endpoints.insert(ep_network_addr.clone(), ep.clone());
-                // update all other copies of the service in our index
-                for network_address in &svc.vips {
-                    self.manager
-                        .services
-                        .insert(network_address.address, svc.clone());
-                }
             }
         }
 

@@ -92,14 +92,22 @@ mod namespaced {
         run_tcp_server(
             manager
                 .workload_builder("server1", REMOTE_NODE)
-                .vip(TEST_VIP, 80, SERVER_PORT)
+                .service(
+                    "default/default.server1-svc.svc.cluster.local",
+                    80,
+                    SERVER_PORT,
+                )
                 .register()?,
         )?;
         run_tcp_server(
             manager
                 .workload_builder("server2", REMOTE_NODE)
                 .hbone()
-                .vip(TEST_VIP, 80, SERVER_PORT)
+                .service(
+                    "default/default.server1-svc.svc.cluster.local",
+                    80,
+                    SERVER_PORT,
+                )
                 .register()?,
         )?;
         let client = manager
@@ -692,7 +700,11 @@ mod namespaced {
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
-                .vip(TEST_VIP, 80, SERVER_PORT)
+                .service(
+                    "default/default.server1-svc.svc.cluster.local",
+                    80,
+                    SERVER_PORT,
+                )
                 .hbone()
                 .register()?,
         )?;
