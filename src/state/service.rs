@@ -341,57 +341,41 @@ impl ServiceStore {
 
     /// Removes the service for the given host and namespace.
     pub fn remove(&mut self, namespaced_host: &NamespacedHostname) -> Option<Service> {
-        // Remove the previous service from the by_host map.
-        let mut remove_hostname = false;
-        let prev = {
-            match self.by_host.get_mut(&namespaced_host.hostname) {
-                None => None,
-                Some(services) => {
-                    // Iterate over the services in the list. Typically there will be only one.
-                    let mut found = None;
+        match self.by_host.get_mut(&namespaced_host.hostname) {
+            None => None,
+            Some(services) => {
+                // Remove the previous service from the by_host map.
+                let Some(prev) = ({
+                    let mut prev = None;
+                    for i in 0..services.len() {
+                        if services[i].namespace == namespaced_host.namespace {
+                            // Remove this service from the list.
+                            prev = Some(services.remove(i));
 
-                    let mut i = 0;
-                    while i < services.len() {
-                        if services[i].namespace.as_str() == namespaced_host.namespace {
-                            found = Some(services.remove(i));
-
-                            // If the array is empty, also remove the Vec.
-                            remove_hostname = services.is_empty();
+                            // If the the services list is empty, remove the entire entry.
+                            if services.is_empty() {
+                                self.by_host.remove(&namespaced_host.hostname);
+                            }
                             break;
                         }
-                        i += 1
                     }
+                    prev
+                }) else {
+                    // Not found.
+                    return None;
+                };
 
-                    found
-                }
-            }
-        };
-
-        match prev {
-            None => None,
-            Some(prev) => {
-                // If the Vec for the hostname is empty now, remove it.
-                if remove_hostname {
-                    self.by_host.remove(&prev.hostname);
-                }
-
-                // Remove the entries for the previous service IPs.
+                // Remove the entries for the previous service VIPs.
                 prev.vips.iter().for_each(|addr| {
                     self.by_vip.remove(addr);
                 });
 
+                // Remove the staged service.
+                // TODO(nmittler): no endpoints for this service should be staged at this point.
+                self.staged_services.remove(namespaced_host);
+
                 // Remove mapping from workload to the VIPs for this service.
                 for (ep_ip, _) in prev.endpoints.iter() {
-                    // Remove the staged service.
-                    // TODO(nmittler): no endpoints for this service should be staged at this point.
-                    self.staged_services
-                        .entry(namespaced_host.clone())
-                        .or_default()
-                        .remove(ep_ip);
-                    if self.staged_services[namespaced_host].is_empty() {
-                        self.staged_services.remove(namespaced_host);
-                    }
-
                     // Remove the workload IP mapping for this service.
                     self.workload_to_services
                         .entry(ep_ip.clone())
@@ -402,19 +386,15 @@ impl ServiceStore {
                     }
 
                     // TODO(nmittler): Remove this once VIPs are no longer used as keys.
-                    for network_addr in prev.vips.iter() {
-                        self.staged_vips
-                            .entry(network_addr.clone())
-                            .or_default()
-                            .remove(ep_ip);
-                        if self.staged_vips[network_addr].is_empty() {
-                            self.staged_vips.remove(network_addr);
-                        }
+                    for vip in prev.vips.iter() {
+                        // Remove the staged vip.
+                        self.staged_vips.remove(vip);
 
+                        // Remove the workload IP mapping for this VIP.
                         self.workload_to_vips
                             .entry(ep_ip.clone())
                             .or_default()
-                            .remove(network_addr);
+                            .remove(vip);
                         if self.workload_to_vips[ep_ip].is_empty() {
                             self.workload_to_vips.remove(ep_ip);
                         }
