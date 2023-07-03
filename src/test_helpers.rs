@@ -249,7 +249,6 @@ pub fn local_xds_config(
                     namespace: TEST_SERVICE_NAMESPACE.to_string(),
                     hostname: TEST_SERVICE_HOST.to_string(),
                 },
-                vip: None,
                 address: NetworkAddress {
                     network: "".to_string(),
                     address: TEST_WORKLOAD_HBONE.parse()?,

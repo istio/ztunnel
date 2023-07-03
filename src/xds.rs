@@ -82,7 +82,7 @@ impl ProxyStateUpdater {
         // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
         // But we shouldn't include them in load balancing we do to Services.
         let mut endpoints = if workload.status == HealthStatus::Healthy {
-            service_endpoints(&workload, &w.services, &w.virtual_ips)?
+            service_endpoints(&workload, &w.services)?
         } else {
             Vec::new()
         };
@@ -216,59 +216,29 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
 fn service_endpoints(
     workload: &Workload,
     services: &HashMap<String, PortList>,
-    virtual_ips: &HashMap<String, PortList>,
 ) -> anyhow::Result<Vec<Endpoint>> {
     let mut out = Vec::new();
-    if !services.is_empty() {
-        for (namespaced_host, ports) in services {
-            // Parse the namespaced hostname for the service.
-            let namespaced_host = match namespaced_host.split_once('/') {
-                Some((namespace, hostname)) => NamespacedHostname {
-                    namespace: namespace.to_string(),
-                    hostname: hostname.to_string(),
-                },
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "failed parsing service name: {namespaced_host}"
-                    ));
-                }
-            };
-
-            // Create service endpoints for all the workload IPs.
-            for wip in &workload.workload_ips {
-                out.push(Endpoint {
-                    service: namespaced_host.clone(),
-                    vip: None,
-                    address: network_addr(&workload.network, *wip),
-                    port: ports.into(),
-                })
+    for (namespaced_host, ports) in services {
+        // Parse the namespaced hostname for the service.
+        let namespaced_host = match namespaced_host.split_once('/') {
+            Some((namespace, hostname)) => NamespacedHostname {
+                namespace: namespace.to_string(),
+                hostname: hostname.to_string(),
+            },
+            None => {
+                return Err(anyhow::anyhow!(
+                    "failed parsing service name: {namespaced_host}"
+                ));
             }
-        }
-    } else {
-        // TODO(nmittler): Remove this once VIPs are no longer used as keys.
-        for (vip, ports) in virtual_ips {
-            let parts = vip.split_once('/');
-            let vip = match parts.is_some() {
-                true => parts.unwrap().1.to_string(),
-                false => vip.clone(),
-            };
-            let svc_network = match parts.is_some() {
-                true => parts.unwrap().0,
-                false => &workload.network,
-            };
+        };
 
-            let vip = network_addr(svc_network, vip.parse()?);
-            for wip in &workload.workload_ips {
-                out.push(Endpoint {
-                    service: NamespacedHostname {
-                        namespace: "".to_string(),
-                        hostname: "".to_string(),
-                    },
-                    vip: Some(vip.clone()),
-                    address: network_addr(&workload.network, *wip),
-                    port: ports.into(),
-                })
-            }
+        // Create service endpoints for all the workload IPs.
+        for wip in &workload.workload_ips {
+            out.push(Endpoint {
+                service: namespaced_host.clone(),
+                address: network_addr(&workload.network, *wip),
+                port: ports.into(),
+            })
         }
     }
     Ok(out)
@@ -334,7 +304,7 @@ impl LocalClient {
                 .map(|(k, v)| (k, PortList::from(v)))
                 .collect();
 
-            let mut endpoints = service_endpoints(&wl.workload, &services, &HashMap::new())?;
+            let mut endpoints = service_endpoints(&wl.workload, &services)?;
             while let Some(ep) = endpoints.pop() {
                 state.services.insert_endpoint(ep)
             }

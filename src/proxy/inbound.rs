@@ -603,7 +603,6 @@ mod test {
                     namespace: "gatewayns".to_string(),
                     hostname: "gateway".to_string(),
                 },
-                vip: None,
                 address: NetworkAddress {
                     network: "".to_string(),
                     address: IpAddr::V4(mock_default_gateway_ipaddr()),
