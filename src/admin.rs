@@ -709,7 +709,6 @@ mod tests {
                     }],
                 },
             )]),
-            virtual_ips: Default::default(),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 

@@ -301,7 +301,6 @@ impl<'a> TestWorkloadBuilder<'a> {
 
                 let ep = Endpoint {
                     service: service_name.clone(),
-                    vip: None,
                     address: ep_network_addr.clone(),
                     port: ports.to_owned(),
                 };

@@ -157,9 +157,6 @@ message Workload {
   // * Requests *to* this workload, via the tunnel_protocol, do not need to be de-tunneled.
   bool native_tunnel = 14;
 
-  // Deprecated. Use `services` to map this workload to service resources.
-  map<string, PortList> virtual_ips = 15 [deprecated = true];
-
   // The services for which this workload is an endpoint.
   // The key is the NamespacedHostname string of the format namespace/hostname.
   map<string, PortList> services = 22;
@@ -174,6 +171,9 @@ message Workload {
 
   // The cluster ID that the workload instance belongs to
   string cluster_id = 18;
+
+  // Reservations for deleted fields.
+  reserved 15;
 }
 
 enum WorkloadStatus {
