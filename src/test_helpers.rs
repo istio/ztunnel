@@ -163,6 +163,7 @@ pub fn test_default_workload() -> Workload {
         workload_type: "deployment".to_string(),
         canonical_name: "".to_string(),
         canonical_revision: "".to_string(),
+        hostname: "".to_string(),
         node: "".to_string(),
         status: Default::default(),
         cluster_id: "Kubernetes".to_string(),

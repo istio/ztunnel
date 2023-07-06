@@ -126,7 +126,7 @@ impl DnsStore {
     /// Find the workload for the client address.
     fn find_client(&self, client_addr: SocketAddr) -> Option<Workload> {
         let state = self.state.read().unwrap();
-        state.workloads.find_workload(&NetworkAddress {
+        state.workloads.find_address(&NetworkAddress {
             network: self.network.clone(),
             address: client_addr.ip(),
         })
