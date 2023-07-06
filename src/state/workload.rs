@@ -13,17 +13,18 @@
 // limitations under the License.
 
 use crate::identity::Identity;
-use crate::rbac::{Authorization, RbacScope};
+use crate::proxy::Error;
 use crate::state::workload::WorkloadError::EnumParse;
 use crate::xds;
 use crate::xds::istio::workload::{Port, PortList};
 use bytes::Bytes;
+use rand::seq::SliceRandom;
 use serde::de::Visitor;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Into;
 use std::default::Default;
 use std::net::{IpAddr, SocketAddr};
@@ -32,7 +33,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
-use tracing::{error, trace};
+use tracing::{debug, error, trace};
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
 
@@ -144,6 +145,9 @@ pub struct Workload {
     pub canonical_revision: String,
 
     #[serde(default, skip_serializing_if = "is_default")]
+    pub hostname: String,
+
+    #[serde(default, skip_serializing_if = "is_default")]
     pub node: String,
 
     #[serde(default, skip_serializing_if = "is_default")]
@@ -181,6 +185,18 @@ impl Workload {
             };
         }
         Ok(None)
+    }
+
+    // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
+    // if/when we support that, this function may need to move to get access to the necessary metadata.
+    pub fn choose_ip(&self) -> Result<IpAddr, Error> {
+        // Randomly pick an IP
+        // TODO: do this more efficiently, and not just randomly
+        let Some(ip) = self.workload_ips.choose(&mut rand::thread_rng()) else {
+            debug!("workload {} has no suitable workload IPs for routing", self.name);
+            return Err(Error::NoValidDestination(Box::new(self.clone())))
+        };
+        Ok(*ip)
     }
 }
 
@@ -320,6 +336,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                 }
             },
             node: resource.node,
+            hostname: resource.hostname,
             network: resource.network,
             workload_name: resource.workload_name,
             workload_type,
@@ -485,85 +502,57 @@ pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
 pub struct WorkloadStore {
-    /// workloads is a map of workload network addresses to workloads
-    workloads: HashMap<NetworkAddress, Arc<Workload>>,
-    /// workloads is a map of workload UIDs to workloads
-    workloads_by_uid: HashMap<String, Arc<Workload>>,
-    /// policies maintains a mapping of ns/name to policy.
-    pub(super) policies: HashMap<String, Authorization>,
-    // policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
-    pub(super) policies_by_namespace: HashMap<String, HashSet<String>>,
+    /// byAddress maps workload network addresses to workloads
+    by_addr: HashMap<NetworkAddress, Arc<Workload>>,
+    /// byUid maps workload UIDs to workloads
+    by_uid: HashMap<String, Arc<Workload>>,
+    /// byHostname maps workload hostname to workloads.
+    by_hostname: HashMap<String, Arc<Workload>>,
 }
 
 impl WorkloadStore {
-    pub fn insert_authorization(&mut self, rbac: Authorization) {
-        let key = rbac.to_key();
-        match rbac.scope {
-            RbacScope::Global => {
-                self.policies_by_namespace
-                    .entry("".to_string())
-                    .or_default()
-                    .insert(key.clone());
-            }
-            RbacScope::Namespace => {
-                self.policies_by_namespace
-                    .entry(rbac.namespace.clone())
-                    .or_default()
-                    .insert(key.clone());
-            }
-            RbacScope::WorkloadSelector => {}
-        }
-        self.policies.insert(key, rbac);
-    }
-
-    pub fn remove_rbac(&mut self, name: String) {
-        let Some(rbac) = self.policies.remove(&name) else {
-            return;
-        };
-        if let Some(key) = match rbac.scope {
-            RbacScope::Global => Some("".to_string()),
-            RbacScope::Namespace => Some(rbac.namespace),
-            RbacScope::WorkloadSelector => None,
-        } {
-            if let Some(pl) = self.policies_by_namespace.get_mut(&key) {
-                pl.remove(&name);
-                if pl.is_empty() {
-                    self.policies_by_namespace.remove(&key);
-                }
-            }
-        }
-    }
-
-    pub fn insert_workload(&mut self, w: Workload) -> anyhow::Result<()> {
+    pub fn insert(&mut self, w: Workload) -> anyhow::Result<()> {
         // First, remove the entry entirely to make sure things are cleaned up properly.
-        self.remove_workload(w.uid.as_str());
+        self.remove(w.uid.as_str());
 
         let w = Arc::new(w);
         for ip in &w.workload_ips {
-            self.workloads
+            self.by_addr
                 .insert(network_addr(&w.network, *ip), w.clone());
         }
-        self.workloads_by_uid.insert(w.uid.clone(), w.clone());
+        if !w.hostname.is_empty() {
+            self.by_hostname.insert(w.hostname.clone(), w.clone());
+        }
+        self.by_uid.insert(w.uid.clone(), w.clone());
         Ok(())
     }
 
-    pub fn remove_workload(&mut self, uid: &str) -> Option<Workload> {
-        match self.workloads_by_uid.remove(uid) {
+    pub fn remove(&mut self, uid: &str) -> Option<Workload> {
+        match self.by_uid.remove(uid) {
             None => {
                 trace!("tried to remove workload keyed by {} but it was not found; presumably it was a service", uid);
                 None
             }
             Some(prev) => {
                 for wip in prev.workload_ips.iter() {
-                    self.workloads.remove(&network_addr(&prev.network, *wip));
+                    self.by_addr.remove(&network_addr(&prev.network, *wip));
                 }
+                self.by_hostname.remove(prev.hostname.as_str());
                 Some(prev.deref().clone())
             }
         }
     }
 
-    pub fn find_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
-        self.workloads.get(addr).map(|wl| wl.deref().clone())
+    /// Finds the workload by address.
+    pub fn find_address(&self, addr: &NetworkAddress) -> Option<Workload> {
+        self.by_addr.get(addr).map(|wl| wl.deref().clone())
+    }
+
+    /// Finds the workload by hostname.
+    pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Workload> {
+        self.by_hostname
+            .get(hostname.as_ref())
+            .map(|wl| wl.deref().clone())
     }
 }
 
@@ -597,6 +586,7 @@ mod tests {
     use crate::xds::{LocalClient, ProxyStateUpdater};
     use crate::{cert_fetcher, test_helpers};
     use bytes::Bytes;
+    use std::collections::HashSet;
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::RwLock;
@@ -719,10 +709,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(state.read().unwrap().workloads.workloads.len(), 1);
-        assert_eq!(state.read().unwrap().workloads.workloads_by_uid.len(), 1);
+        assert_eq!(state.read().unwrap().workloads.by_addr.len(), 1);
+        assert_eq!(state.read().unwrap().workloads.by_uid.len(), 1);
         assert_eq!(
-            state.read().unwrap().workloads.find_workload(&nw_addr1),
+            state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
                 uid: uid1.to_owned(),
                 workload_ips: vec![nw_addr1.address],
@@ -736,7 +726,7 @@ mod tests {
 
         updater.remove(&"/invalid".to_string());
         assert_eq!(
-            state.read().unwrap().workloads.find_workload(&nw_addr1),
+            state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
                 uid: uid1.to_owned(),
                 workload_ips: vec![nw_addr1.address],
@@ -747,7 +737,7 @@ mod tests {
 
         updater.remove(&uid2);
         assert_eq!(
-            state.read().unwrap().workloads.find_workload(&nw_addr1),
+            state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
                 uid: uid1.to_owned(),
                 workload_ips: vec![nw_addr1.address],
@@ -758,11 +748,11 @@ mod tests {
 
         updater.remove(&uid1);
         assert_eq!(
-            state.read().unwrap().workloads.find_workload(&nw_addr1),
+            state.read().unwrap().workloads.find_address(&nw_addr1),
             None
         );
-        assert_eq!(state.read().unwrap().workloads.workloads.len(), 0);
-        assert_eq!(state.read().unwrap().workloads.workloads_by_uid.len(), 0);
+        assert_eq!(state.read().unwrap().workloads.by_addr.len(), 0);
+        assert_eq!(state.read().unwrap().workloads.by_uid.len(), 0);
 
         // Add two workloads into the VIP. Add out of order to further test
         updater
@@ -1001,8 +991,8 @@ mod tests {
         let state = Arc::new(RwLock::new(ProxyState::default()));
         let demand = DemandProxyState::new(state.clone(), None);
         let updater = ProxyStateUpdater::new_no_fetch(state.clone());
-        assert_eq!((state.read().unwrap().workloads.workloads.len()), 0);
-        assert_eq!((state.read().unwrap().workloads.workloads_by_uid.len()), 0);
+        assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
+        assert_eq!((state.read().unwrap().workloads.by_uid.len()), 0);
         assert_eq!((state.read().unwrap().services.num_vips()), 0);
         assert_eq!((state.read().unwrap().services.num_services()), 0);
         assert_eq!((state.read().unwrap().services.num_staged_services()), 0);
@@ -1068,7 +1058,11 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            if let Some(us) = state.find_upstream("", "127.0.1.1:80".parse().unwrap(), 15008) {
+            if let Some(us) = state.state.read().unwrap().find_upstream(
+                "",
+                "127.0.1.1:80".parse().unwrap(),
+                15008,
+            ) {
                 let n = &us.workload.name; // borrow name instead of cloning
                 found.insert(n.to_owned()); // insert an owned copy of the borrowed n
                 wants.remove(n); // remove using the borrow
@@ -1097,16 +1091,30 @@ mod tests {
             cert_fetcher: Arc::new(cert_fetcher::NoCertFetcher()),
         };
         local_client.run().await.expect("client should run");
-        let wl = demand.find_workload(&network_addr("", "127.0.0.1".parse().unwrap()));
+        let wl = demand
+            .state
+            .read()
+            .unwrap()
+            .workloads
+            .find_address(&network_addr("", "127.0.0.1".parse().unwrap()));
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.unwrap().service_account, "default");
-        let us = demand.find_upstream("", "127.10.0.1:80".parse().unwrap(), 15008);
+        let us =
+            demand
+                .state
+                .read()
+                .unwrap()
+                .find_upstream("", "127.10.0.1:80".parse().unwrap(), 15008);
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.unwrap().port, 8080);
         // test that we can have a service in another network than workloads it selects
-        let us = demand.find_upstream("remote", "127.10.0.2:80".parse().unwrap(), 15008);
+        let us = demand.state.read().unwrap().find_upstream(
+            "remote",
+            "127.10.0.2:80".parse().unwrap(),
+            15008,
+        );
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.unwrap().port, 8080);

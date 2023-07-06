@@ -92,7 +92,7 @@ impl ProxyStateUpdater {
 
         // Lock and upstate the stores.
         let mut state = self.state.write().unwrap();
-        state.workloads.insert_workload(workload)?;
+        state.workloads.insert(workload)?;
         while let Some(endpoint) = endpoints.pop() {
             state.services.insert_endpoint(endpoint);
         }
@@ -105,7 +105,7 @@ impl ProxyStateUpdater {
         let mut state = self.state.write().unwrap();
 
         // remove workload by UID; if xds_name is a service then this will no-op
-        if let Some(prev) = state.workloads.remove_workload(xds_name) {
+        if let Some(prev) = state.workloads.remove(xds_name) {
             // Also remove service endpoints for the workload.
             for wip in prev.workload_ips.iter() {
                 let prev_addr = &network_addr(&prev.network, *wip);
@@ -176,14 +176,14 @@ impl ProxyStateUpdater {
         let rbac = rbac::Authorization::try_from(&r)?;
         trace!("insert policy {}", serde_json::to_string(&rbac)?);
         let mut state = self.state.write().unwrap();
-        state.workloads.insert_authorization(rbac);
+        state.policies.insert(rbac);
         Ok(())
     }
 
     pub fn remove_authorization(&self, name: String) {
         info!("handling RBAC delete {}", name);
         let mut state = self.state.write().unwrap();
-        state.workloads.remove_rbac(name);
+        state.policies.remove(name);
     }
 }
 
@@ -295,7 +295,7 @@ impl LocalClient {
         let num_policies = r.policies.len();
         for wl in r.workloads {
             debug!("inserting local workload {}", &wl.workload.uid);
-            state.workloads.insert_workload(wl.workload.clone())?;
+            state.workloads.insert(wl.workload.clone())?;
             self.cert_fetcher.prefetch_cert(&wl.workload);
 
             let services: HashMap<String, PortList> = wl
@@ -310,7 +310,7 @@ impl LocalClient {
             }
         }
         for rbac in r.policies {
-            state.workloads.insert_authorization(rbac);
+            state.policies.insert(rbac);
         }
         for svc in r.services {
             state.services.insert(svc);

@@ -374,14 +374,12 @@ impl OutboundConnection {
 
         let us = us.unwrap();
         // For case upstream server has enabled waypoint
-        match self.pi.state.find_waypoint(us.workload.clone()).await {
+        match self.pi.state.fetch_waypoint(us.workload.clone()).await {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
-                let wp_socket_addr = SocketAddr::new(
-                    self.pi.state.choose_workload_ip(&waypoint_workload)?,
-                    waypoint_us.port,
-                );
+                let wp_socket_addr =
+                    SocketAddr::new(waypoint_workload.choose_ip()?, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
@@ -416,10 +414,7 @@ impl OutboundConnection {
             return Ok(Request {
                 protocol: Protocol::HBONE,
                 source: source_workload,
-                destination: SocketAddr::from((
-                    self.pi.state.choose_workload_ip(&us.workload)?,
-                    us.port,
-                )),
+                destination: SocketAddr::from((us.workload.choose_ip()?, us.port)),
                 destination_workload: Some(us.workload.clone()),
                 expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
@@ -439,10 +434,7 @@ impl OutboundConnection {
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
-            destination: SocketAddr::from((
-                self.pi.state.choose_workload_ip(&us.workload)?,
-                us.port,
-            )),
+            destination: SocketAddr::from((us.workload.choose_ip()?, us.port)),
             destination_workload: Some(us.workload.clone()),
             expected_identity: Some(us.workload.identity()),
             gateway: us

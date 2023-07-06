@@ -397,7 +397,7 @@ impl Inbound {
         gateway_address: Option<&GatewayAddress>,
     ) -> bool {
         if let Some(gateway_address) = gateway_address {
-            let from_gateway = match state.lookup_address(&gateway_address.destination).await {
+            let from_gateway = match state.fetch_destination(&gateway_address.destination).await {
                 Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
                 Some(address::Address::Service(svc)) => {
                     for (ip, _ep) in svc.endpoints.iter() {
@@ -492,7 +492,7 @@ mod test {
         let w = mock_default_gateway_workload();
         let s = mock_default_gateway_service();
         let mut state = state::ProxyState::default();
-        if let Err(err) = state.workloads.insert_workload(w) {
+        if let Err(err) = state.workloads.insert(w) {
             panic!("received error inserting workload: {}", err);
         }
         state.services.insert(s);
@@ -549,6 +549,7 @@ mod test {
             workload_type: "deployment".to_string(),
             canonical_name: "app".to_string(),
             canonical_revision: "".to_string(),
+            hostname: "".to_string(),
             node: "".to_string(),
             status: Default::default(),
             cluster_id: "Kubernetes".to_string(),
@@ -575,6 +576,7 @@ mod test {
             workload_type: "deployment".to_string(),
             canonical_name: "".to_string(),
             canonical_revision: "".to_string(),
+            hostname: "".to_string(),
             node: "".to_string(),
             status: Default::default(),
             cluster_id: "Kubernetes".to_string(),
