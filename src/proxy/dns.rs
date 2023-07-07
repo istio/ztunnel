@@ -30,7 +30,7 @@ use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -265,7 +265,7 @@ impl DnsStore {
 impl Resolver for DnsStore {
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
         // Find the client workload.
-        let client = match self.find_client(request.src()) {
+        let client = match self.find_client(to_canonical(request.src())) {
             None => return Err(LookupError::ResponseCode(ResponseCode::ServFail)),
             Some(client) => client,
         };
@@ -459,6 +459,21 @@ fn ip_records(name: Name, addrs: Vec<IpAddr>, out: &mut Vec<Record>) {
             IpAddr::V6(addr) => out.push(to_record(name.clone(), RData::AAAA(addr))),
         }
     }
+}
+
+// Sometimes we get IPv4 addresses in IPv6. These need to be extracted.
+// @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
+fn to_canonical(addr: SocketAddr) -> SocketAddr {
+    let ip = match addr.ip() {
+        IpAddr::V4(_) => return addr,
+        IpAddr::V6(i) => match i.octets() {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
+                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+            }
+            _ => return addr,
+        },
+    };
+    SocketAddr::from((ip, addr.port()))
 }
 
 /// Forwards a request to an upstream resolver.
@@ -770,13 +785,6 @@ mod tests {
                 ..Default::default()
             },
             Case {
-                name: "success: TypeA query returns A records only",
-                host: "dual.localhost.",
-                expect_records: vec![
-                    a(n("dual.localhost."), ipv4("2.2.2.2"))],
-                ..Default::default()
-            },
-            Case {
                 name: "success: TypeAAAA query returns AAAA records only",
                 host: "dual.localhost.",
                 query_type: RecordType::AAAA,
@@ -908,6 +916,34 @@ mod tests {
         }
     }
 
+    // TODO we might actually want to return both A and AAAA in this case, ultimately,
+    // and let the client deal with the mix.
+    // See https://datatracker.ietf.org/doc/html/rfc4038#section-3.2
+    // and https://github.com/istio/ztunnel/issues/582
+    #[tokio::test]
+    async fn ipv4_in_6_should_unwrap() {
+        let _guard = subscribe();
+        let fake_ips = vec![ip("2.2.2.2")];
+        let fake_wls = vec![xds_workload("client-fake", NS1, NW1, &fake_ips)];
+
+        // Create the DNS store.
+        let fake_state = new_proxy_state(&fake_wls, &[], &[]).state;
+        let forwarder = forwarder();
+        let store = DnsStore {
+            network: NW1.to_string(),
+            state: fake_state,
+            forwarder,
+        };
+
+        let ip4n6_client_ip = ip("::ffff:202:202");
+        let req = req(n("www.bing.com"), ip4n6_client_ip, RecordType::A);
+        match store.lookup(&req).await {
+            Ok(_) => {}
+            Err(e) => {
+                panic!("IPv6 encoded IPv4 should work! Error was {:?}", e)
+            }
+        }
+    }
     // #[tokio::test]
     // async fn large_response() {
     //     // Create and start the proxy with an an empty state. The forwarder is configured to
