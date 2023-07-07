@@ -18,10 +18,10 @@ pub mod proxy;
 pub mod resolver;
 
 use crate::config::ProxyMode;
-use crate::proxy::dns::name_util::trim_domain;
+use crate::proxy::dns::name_util::{has_domain, trim_domain};
 use crate::proxy::dns::resolver::{Answer, Resolver};
 use crate::proxy::Error;
-use crate::state::service::Service;
+use crate::state::workload::address::Address;
 use crate::state::workload::{NetworkAddress, Workload};
 use crate::state::ProxyState;
 use itertools::Itertools;
@@ -47,8 +47,7 @@ use trust_dns_server::ServerFuture;
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
 const DEFAULT_TTL_SECONDS: u32 = 30;
 
-static SVC_CLUSTER_LOCAL: Lazy<Name> = Lazy::new(|| Name::from_str("svc.cluster.local").unwrap());
-static CLUSTER_LOCAL: Lazy<Name> = Lazy::new(|| Name::from_str("cluster.local").unwrap());
+static SVC: Lazy<Name> = Lazy::new(|| as_name("svc"));
 
 /// A proxy that serves known hostnames from ztunnel data structures. Unknown hosts are
 /// forwarded to an upstream resolver.
@@ -72,12 +71,16 @@ impl DnsProxy {
         state: Arc<RwLock<ProxyState>>,
         forwarder: Arc<dyn Forwarder>,
     ) -> Result<Self, Error> {
+        // TODO(nmittler): Get this from config (https://github.com/istio/ztunnel/issues/587)
+        let domain = "cluster.local".to_string();
+
         // Create the DNS server, backed by ztunnel data structures.
-        let handler = proxy::Proxy::new(Arc::new(DnsStore {
+        let handler = proxy::Proxy::new(Arc::new(DnsStore::new(
+            domain,
+            network.as_ref().to_string(),
             state,
-            network: network.as_ref().to_string(),
             forwarder,
-        }));
+        )));
         let mut server = ServerFuture::new(handler);
 
         // Bind and register the UDP socket.
@@ -120,9 +123,29 @@ struct DnsStore {
     network: String,
     state: Arc<RwLock<ProxyState>>,
     forwarder: Arc<dyn Forwarder>,
+    domain: Name,
+    svc_domain: Name,
 }
 
 impl DnsStore {
+    fn new(
+        domain: String,
+        network: String,
+        state: Arc<RwLock<ProxyState>>,
+        forwarder: Arc<dyn Forwarder>,
+    ) -> Self {
+        let domain = as_name(domain);
+        let svc_domain = append_name(as_name("svc"), &domain);
+
+        Self {
+            network,
+            state,
+            forwarder,
+            domain,
+            svc_domain,
+        }
+    }
+
     /// Find the workload for the client address.
     fn find_client(&self, client_addr: SocketAddr) -> Option<Workload> {
         let state = self.state.read().unwrap();
@@ -150,8 +173,10 @@ impl DnsStore {
             stripped: None,
         });
 
+        let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
+
         // If the name can be expanded to a k8s FQDN, add that as well.
-        if let Some(kube_fqdn) = to_kube_fqdn(client, name) {
+        for kube_fqdn in self.to_kube_fqdns(name, &namespaced_domain) {
             add_alias(Alias {
                 name: kube_fqdn,
                 stripped: None,
@@ -171,7 +196,7 @@ impl DnsStore {
                 });
 
                 // If the name can be expanded to a k8s FQDN, add that as well.
-                if let Some(kube_fqdn) = to_kube_fqdn(client, &stripped_name) {
+                for kube_fqdn in self.to_kube_fqdns(&stripped_name, &namespaced_domain) {
                     add_alias(Alias {
                         name: kube_fqdn,
                         stripped: Some(Stripped {
@@ -186,7 +211,66 @@ impl DnsStore {
         out
     }
 
-    fn find_service(&self, client: &Workload, requested_name: &Name) -> Option<ServiceMatch> {
+    /// Attempts to expand the requested hostname into one or more possible
+    /// Kubernetes FQDNs.
+    ///
+    /// The k8s FQDN forms supported by Ambient:
+    ///
+    /// - Standard service:
+    ///   <service-name>.<namespace>.svc.<cluster-domain>
+    /// - Pod host when sub-domain is set (e.g. when part of a statefulset):
+    ///   <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>
+    ///
+    /// Everything else will not be handled directly by Ambient and will instead
+    /// just be forwarded to k8s.
+    fn to_kube_fqdns(&self, name: &Name, namespaced_domain: &Name) -> Vec<Name> {
+        let mut out = Vec::new();
+
+        // Rather than just blindly adding every possible extension, only add the extensions
+        // possible given the requested hostname.
+        let iter = name.iter();
+        match iter.len() {
+            1 => {
+                // Only one label in the name. Assume the client is calling a service by name
+                // within the same namespace. Append "<ns>.svc.cluster.local".
+                out.push(append_name(name.clone(), namespaced_domain));
+            }
+            2 => {
+                // Expand <service-name>.<namespace> to
+                // <service-name>.<namespace>.svc.<cluster-domain>.
+                out.push(append_name(name.clone(), &self.svc_domain));
+                // Expand <pod-hostname>.<pod-sub-domain> to
+                // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
+                out.push(append_name(name.clone(), namespaced_domain));
+            }
+            3 => {
+                if has_domain(name, SVC.deref()) {
+                    // Expand <service-name>.<namespace>.svc to
+                    // <service-name>.<namespace>.svc.<cluster-domain>.
+                    out.push(append_name(name.clone(), &self.domain));
+                }
+
+                // Expand <pod-hostname>.<pod-sub-domain>.<namespace> to
+                // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
+                out.push(append_name(name.clone(), &self.svc_domain));
+            }
+            4 => {
+                if has_domain(name, SVC.deref()) {
+                    // Expand <pod-hostname>.<pod-sub-domain>.<namespace>.svc to
+                    // <pod-hostname>.<pod-sub-domain>.<namespace>.svc.<cluster-domain>.
+                    out.push(append_name(name.clone(), &self.domain));
+                }
+            }
+            _ => {
+                // Everything else is either already an FQDN or not a supported
+                // kubernetes hostname.
+            }
+        }
+
+        out
+    }
+
+    fn find_server(&self, client: &Workload, requested_name: &Name) -> Option<ServerMatch> {
         // Lock the workload store for the duration of this function, since we're calling it
         // in a loop.
         let state = self.state.read().unwrap();
@@ -208,6 +292,7 @@ impl DnsStore {
                 let search_name_str = search_name.to_string();
                 search_name.set_fqdn(true);
 
+                // First, lookup the host as a service.
                 if let Some(services) = state.services.get_by_host(&search_name_str) {
                     // We found a match. We always return `Some` result, even if there
                     // are zero records returned.
@@ -221,11 +306,20 @@ impl DnsStore {
                         // Should never be empty, since we delete the Vec when it's empty.
                         .unwrap();
 
-                    return Some(ServiceMatch {
-                        service,
+                    return Some(ServerMatch {
+                        server: Address::Service(Box::new(service)),
                         name: search_name,
                         alias,
                     });
+                } else {
+                    // Didn't find a service, try a workload.
+                    if let Some(wl) = state.workloads.find_hostname(&search_name_str) {
+                        return Some(ServerMatch {
+                            server: Address::Workload(Box::new(wl)),
+                            name: search_name,
+                            alias,
+                        });
+                    }
                 }
             }
         }
@@ -233,26 +327,58 @@ impl DnsStore {
         None
     }
 
-    /// Gets the list of addresses of the requested record type from the service.
+    /// Gets the list of addresses of the requested record type from the server.
     fn get_addresses(
         &self,
         client: &Workload,
-        service: &Service,
+        server: &Address,
         record_type: RecordType,
     ) -> Vec<IpAddr> {
-        let mut addrs = Vec::new();
-
-        // TODO(https://github.com/istio/ztunnel/issues/554): Add support for headless services.
-        if !service.vips.is_empty() {
-            // Add service VIPs that are callable from the client.
-            for network_addr in &service.vips {
-                if is_record_type(&network_addr.address, record_type)
-                    && client.network == network_addr.network
-                {
-                    addrs.push(network_addr.address)
+        let mut addrs: Vec<IpAddr> = match server {
+            Address::Workload(wl) => wl
+                .workload_ips
+                .iter()
+                .filter_map(|addr| {
+                    if is_record_type(addr, record_type) {
+                        Some(*addr)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Address::Service(service) => {
+                if service.vips.is_empty() {
+                    // Headless service. Use the endpoint IPs.
+                    service
+                        .endpoints
+                        .iter()
+                        .filter_map(|(addr, _)| {
+                            if is_record_type(&addr.address, record_type) {
+                                Some(addr.address)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    // "Normal" service with VIPs.
+                    // Add service VIPs that are callable from the client.
+                    service
+                        .vips
+                        .iter()
+                        .filter_map(|vip| {
+                            if is_record_type(&vip.address, record_type)
+                                && client.network == vip.network
+                            {
+                                Some(vip.address)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
                 }
             }
-        }
+        };
 
         // Randomize the order of the returned addresses.
         addrs.shuffle(&mut thread_rng());
@@ -278,13 +404,13 @@ impl Resolver for DnsStore {
 
         // Find the service for the requested host.
         let requested_name = Name::from(request.query().name().clone());
-        let Some(service_match) = self.find_service(&client, &requested_name) else {
+        let Some(service_match) = self.find_server(&client, &requested_name) else {
             // Unknown host. Forward to the upstream resolver.
             return self.forwarder.forward(&client, request).await;
         };
 
         // Get the addresses for the service.
-        let addresses = self.get_addresses(&client, &service_match.service, record_type);
+        let addresses = self.get_addresses(&client, &service_match.server, record_type);
 
         // From this point on, we are the authority for the response.
         let is_authoritative = true;
@@ -356,8 +482,8 @@ struct Stripped {
     search_domain: Name,
 }
 
-/// Returned when a service was successfully found for the requested hostname.
-struct ServiceMatch {
+/// Returned when a server was successfully found for the requested hostname.
+struct ServerMatch {
     /// The hostname that was used to find the service. This is identical to the
     /// service hostname, except that it is an FQDN [Name].
     name: Name,
@@ -365,52 +491,16 @@ struct ServiceMatch {
     /// The alias that produced the `match_name`.
     alias: Alias,
 
-    /// The service that was found.
-    service: Service,
+    /// The server (workload or service) that was found.
+    server: Address,
 }
 
-/// Converts the requested hostname into a Kubernetes FQDN of the form
-/// `name.ns.svc.cluster.local`. Returns `None` if no conversion was possible.
-fn to_kube_fqdn(client: &Workload, name: &Name) -> Option<Name> {
-    // TODO(nmittler): Do we need to support user-defined cluster domains?
-    let iter = name.iter();
-    match iter.len() {
-        1 => {
-            // Only one label in the name. Assume the client is calling a service by name
-            // within the same namespace. Append "<ns>.svc.cluster.local".
-            Some(
-                name.clone()
-                    .append_label(client.namespace.as_bytes())
-                    .unwrap()
-                    .append_domain(SVC_CLUSTER_LOCAL.deref())
-                    .unwrap(),
-            )
-        }
-        2 => {
-            // Assume the client is calling the service by "name.ns".
-            // Append "svc.cluster.local".
-            Some(
-                name.clone()
-                    .append_domain(SVC_CLUSTER_LOCAL.deref())
-                    .unwrap(),
-            )
-        }
-        3 => {
-            // Assume the client is calling "name.ns.svc". Check to make sure the last
-            // label is "svc".
-            let svc = iter.rev().next().unwrap();
-            if svc == b"svc" {
-                // Append "cluster.local".
-                Some(name.clone().append_domain(CLUSTER_LOCAL.deref()).unwrap())
-            } else {
-                None
-            }
-        }
-        _ => {
-            // Everything else is either already an FQDN or not a valid kubernetes hostname.
-            None
-        }
-    }
+fn as_name<T: AsRef<str>>(name: T) -> Name {
+    Name::from_str(name.as_ref()).unwrap()
+}
+
+fn append_name(name1: Name, name2: &Name) -> Name {
+    name1.append_domain(name2).unwrap()
 }
 
 /// Creates the list of wildcard searches to try for the given hostname. The list
@@ -548,6 +638,7 @@ mod tests {
     use crate::test_helpers::{new_proxy_state, test_default_workload};
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::Port as XdsPort;
+    use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use bytes::Bytes;
@@ -562,11 +653,11 @@ mod tests {
     const NW2: &str = "nw2";
 
     #[test]
-    fn test_to_kube_fqdn() {
+    fn test_to_kube_fqdns() {
         struct Case {
             host: &'static str,
             client_namespace: &'static str,
-            expected: Option<Name>,
+            expected: Vec<Name>,
         }
 
         let cases: &[Case] = &[
@@ -574,40 +665,80 @@ mod tests {
                 // Expand single label values to namespace of the client.
                 host: "name",
                 client_namespace: "ns1",
-                expected: Some(n("name.ns1.svc.cluster.local.")),
+                expected: vec![
+                    // Generated based on form: <service-name>
+                    n("name.ns1.svc.cluster.local."),
+                ],
             },
             Case {
                 host: "name.",
                 client_namespace: "ns1",
-                expected: Some(n("name.ns1.svc.cluster.local.")),
+                expected: vec![
+                    // Generated based on form: <service-name>
+                    n("name.ns1.svc.cluster.local."),
+                ],
             },
             Case {
                 host: "name.ns2",
                 client_namespace: "ns1",
-                expected: Some(n("name.ns2.svc.cluster.local.")),
+                expected: vec![
+                    // Generated based on form: <service-name>.<namespace>
+                    n("name.ns2.svc.cluster.local."),
+                    // Generated based on form: <pod-hostname>.<pod-sub-domain>
+                    n("name.ns2.ns1.svc.cluster.local."),
+                ],
             },
             Case {
                 host: "name.ns2.svc.",
                 client_namespace: "ns1",
-                expected: Some(n("name.ns2.svc.cluster.local.")),
+                expected: vec![
+                    // Generated based on form: <service-name>.<namespace>.svc
+                    n("name.ns2.svc.cluster.local."),
+                    // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>
+                    n("name.ns2.svc.svc.cluster.local."),
+                ],
+            },
+            Case {
+                host: "name.ns2.not-svc.",
+                client_namespace: "ns1",
+                expected: vec![
+                    // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>
+                    n("name.ns2.not-svc.svc.cluster.local."),
+                ],
+            },
+            Case {
+                host: "pod.sub-domain.ns.svc",
+                client_namespace: "ns1",
+                expected: vec![
+                    // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>.svc
+                    n("pod.sub-domain.ns.svc.cluster.local."),
+                ],
+            },
+            Case {
+                host: "pod.sub-domain.ns.not-svc",
+                client_namespace: "ns1",
+                expected: vec![],
             },
             Case {
                 // Invalid short-form for a k8s host.
                 host: "name.ns2.svc.cluster.",
                 client_namespace: "ns1",
-                expected: None,
+                expected: vec![],
             },
             Case {
                 // The request is already a k8s FQDN.
                 host: "name.ns2.svc.cluster.local",
                 client_namespace: "ns1",
-                expected: None,
+                expected: vec![],
             },
             Case {
                 // Non-k8s
                 host: "www.google.com.",
                 client_namespace: "ns1",
-                expected: None,
+                expected: vec![
+                    // Generated based on form: <pod-hostname>.<pod-sub-domain>.<namespace>.
+                    n("www.google.com.svc.cluster.local."),
+                ],
             },
         ];
 
@@ -615,8 +746,21 @@ mod tests {
             let mut wl = test_default_workload();
             wl.namespace = c.client_namespace.into();
 
-            let actual = to_kube_fqdn(&wl, &n(c.host));
-            assert_eq!(c.expected, actual);
+            // Create the DNS store.
+            let state = state();
+            let forwarder = forwarder();
+            let store = DnsStore {
+                domain: as_name("cluster.local"),
+                svc_domain: as_name("svc.cluster.local"),
+                network: NW1.to_string(),
+                state,
+                forwarder,
+            };
+
+            let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
+
+            let actual = store.to_kube_fqdns(&n(c.host), &namespaced_domain);
+            assert_eq!(c.expected, actual, "requested host: {}", c.host);
         }
     }
 
@@ -854,6 +998,28 @@ mod tests {
                     a(n("both-networks.ns1.svc.cluster.local."), ipv4("21.21.21.21"))],
                 ..Default::default()
             },
+            Case {
+                name: "success: headless service returns workload ips",
+                host: "headless.ns1.svc.cluster.local.",
+                expect_records: vec![
+                    a(n("headless.ns1.svc.cluster.local."), ipv4("30.30.30.30")),
+                    a(n("headless.ns1.svc.cluster.local."), ipv4("31.31.31.31"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: k8s pod - fqdn",
+                host: "headless.pod0.ns1.svc.cluster.local.",
+                expect_records: vec![
+                    a(n("headless.pod0.ns1.svc.cluster.local."), ipv4("30.30.30.30"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: k8s pod - name.domain.ns",
+                host: "headless.pod0.ns1.",
+                expect_records: vec![
+                    a(n("headless.pod0.ns1."), ipv4("30.30.30.30"))],
+                ..Default::default()
+            },
         ];
 
         // Create and start the proxy.
@@ -897,6 +1063,8 @@ mod tests {
         let state = state();
         let forwarder = forwarder();
         let store = DnsStore {
+            domain: as_name("cluster.local"),
+            svc_domain: as_name("svc.cluster.local"),
             network: NW1.to_string(),
             state,
             forwarder,
@@ -924,7 +1092,7 @@ mod tests {
     async fn ipv4_in_6_should_unwrap() {
         let _guard = subscribe();
         let fake_ips = vec![ip("2.2.2.2")];
-        let fake_wls = vec![xds_workload("client-fake", NS1, NW1, &fake_ips)];
+        let fake_wls = vec![xds_workload("client-fake", NS1, "", NW1, &[], &fake_ips)];
 
         // Create the DNS store.
         let fake_state = new_proxy_state(&fake_wls, &[], &[]).state;
@@ -933,6 +1101,8 @@ mod tests {
             network: NW1.to_string(),
             state: fake_state,
             forwarder,
+            domain: n("cluster.local"),
+            svc_domain: n("svc.cluster.local"),
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1062,11 +1232,30 @@ mod tests {
                 NS1,
                 &[na(NW1, "21.21.21.21"), na(NW2, "22.22.22.22")],
             ),
+            // Headless services.
+            xds_service("headless", NS1, &[]),
         ];
 
         let workloads = vec![
             // Just add a workload for the local machine that resides in NS1 on NW1.
             local_workload(),
+            // Workloads backing headless service.
+            xds_workload(
+                "headless0",
+                NS1,
+                "headless.pod0.ns1.svc.cluster.local",
+                NW1,
+                &[format!("{}/{}", NS1, kube_fqdn("headless", NS1)).as_str()],
+                &[ip("30.30.30.30")],
+            ),
+            xds_workload(
+                "headless1",
+                NS1,
+                "headless.pod1.ns1.svc.cluster.local",
+                NW1,
+                &[format!("{}/{}", NS1, kube_fqdn("headless", NS1)).as_str()],
+                &[ip("31.31.31.31")],
+            ),
         ];
 
         new_proxy_state(&workloads, &services, &[]).state
@@ -1081,7 +1270,7 @@ mod tests {
 
     /// Creates a workload for the local machine that resides in NS1 on NW1.
     fn local_workload() -> XdsWorkload {
-        xds_workload("client", NS1, NW1, &local_ips())
+        xds_workload("client", NS1, "", NW1, &[], &local_ips())
     }
 
     fn local_ips() -> Vec<IpAddr> {
@@ -1139,7 +1328,14 @@ mod tests {
         )
     }
 
-    fn xds_workload(name: &str, ns: &str, nw: &str, ips: &[IpAddr]) -> XdsWorkload {
+    fn xds_workload(
+        name: &str,
+        ns: &str,
+        host: &str,
+        nw: &str,
+        services: &[&str],
+        ips: &[IpAddr],
+    ) -> XdsWorkload {
         XdsWorkload {
             addresses: ips
                 .iter()
@@ -1148,21 +1344,28 @@ mod tests {
             uid: name.to_string(),
             name: name.to_string(),
             namespace: ns.to_string(),
+            hostname: host.to_string(),
             trust_domain: "cluster.local".to_string(),
             network: nw.to_string(),
             workload_name: name.to_string(),
             canonical_name: name.to_string(),
             node: name.to_string(),
             cluster_id: "Kubernetes".to_string(),
-            // virtual_ips: HashMap::from([(
-            //     vip(svc, ns, nw).to_string(),
-            //     XdsPortList {
-            //         ports: vec![XdsPort {
-            //             service_port: 80,
-            //             target_port: 8080,
-            //         }],
-            //     },
-            // )]),
+            services: {
+                let mut out = HashMap::new();
+                for service in services {
+                    out.insert(
+                        service.to_string(),
+                        XdsPortList {
+                            ports: vec![XdsPort {
+                                service_port: 80,
+                                target_port: 80,
+                            }],
+                        },
+                    );
+                }
+                out
+            },
             ..Default::default()
         }
     }
