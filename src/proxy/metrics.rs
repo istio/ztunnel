@@ -14,21 +14,53 @@
 
 use std::fmt::Write;
 
-use crate::identity::Identity;
-use crate::metrics::traffic::Reporter::source;
-use crate::metrics::{DefaultedUnknown, Recorder};
-use crate::state::workload::Workload;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
-pub(super) struct Metrics {
-    pub(super) connection_opens: Family<CommonTrafficLabels, Counter>,
-    pub(super) connection_close: Family<CommonTrafficLabels, Counter>,
-    pub(super) received_bytes: Family<CommonTrafficLabels, Counter>,
-    pub(super) sent_bytes: Family<CommonTrafficLabels, Counter>,
+use crate::identity::Identity;
+use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorder, Recorder};
+use crate::state::workload::Workload;
+
+pub struct Metrics {
+    pub connection_opens: Family<CommonTrafficLabels, Counter>,
+    pub connection_close: Family<CommonTrafficLabels, Counter>,
+    pub received_bytes: Family<CommonTrafficLabels, Counter>,
+    pub sent_bytes: Family<CommonTrafficLabels, Counter>,
 }
+
+impl Metrics {
+    #[must_use = "metric will be dropped (and thus recorded) immediately if not assigned"]
+    /// increment_defer is used to increment a metric now and another metric later once the MetricGuard is dropped
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let connection_open = ConnectionOpen {};
+    /// // Record connection opened now
+    /// let connection_close = self.metrics.increment_defer::<_, ConnectionClosed>(&connection_open);
+    /// // Eventually, report connection closed
+    /// drop(connection_close);
+    /// ```
+    pub fn increment_defer<'a, M1, M2>(
+        &'a self,
+        event: &'a M1,
+    ) -> Deferred<'a, impl FnOnce(&'a Self), Self>
+    where
+        M1: Clone + 'a,
+        M2: From<&'a M1> + 'a,
+        Metrics: IncrementRecorder<M1> + IncrementRecorder<M2>,
+    {
+        self.increment(event);
+        let m2: M2 = event.into();
+        self.defer_record(move |metrics| {
+            metrics.increment(&m2);
+        })
+    }
+}
+
+impl DeferRecorder for Metrics {}
 
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Reporter {
@@ -179,7 +211,7 @@ impl From<&ConnectionOpen> for CommonTrafficLabels {
 }
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
-pub(super) struct CommonTrafficLabels {
+pub struct CommonTrafficLabels {
     reporter: Reporter,
 
     source_workload: DefaultedUnknown<String>,
@@ -247,19 +279,17 @@ impl Metrics {
     }
 }
 
-impl Recorder<ConnectionOpen, u64> for super::Metrics {
+impl Recorder<ConnectionOpen, u64> for Metrics {
     fn record(&self, reason: &ConnectionOpen, count: u64) {
-        self.traffic
-            .connection_opens
+        self.connection_opens
             .get_or_create(&CommonTrafficLabels::from(reason))
             .inc_by(count);
     }
 }
 
-impl Recorder<ConnectionClose<'_>, u64> for super::Metrics {
+impl Recorder<ConnectionClose<'_>, u64> for Metrics {
     fn record(&self, reason: &ConnectionClose, count: u64) {
-        self.traffic
-            .connection_close
+        self.connection_close
             .get_or_create(&CommonTrafficLabels::from(reason.0))
             .inc_by(count);
     }
@@ -267,21 +297,19 @@ impl Recorder<ConnectionClose<'_>, u64> for super::Metrics {
 
 impl Recorder<BytesTransferred<'_>, (u64, u64)> for super::Metrics {
     fn record(&self, event: &BytesTransferred<'_>, m: (u64, u64)) {
-        let (sent, recv) = if event.0.reporter == source {
+        let (sent, recv) = if event.0.reporter == Reporter::source {
             // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
             (m.1, m.0)
         } else {
             (m.0, m.1)
         };
         if sent != 0 {
-            self.traffic
-                .sent_bytes
+            self.sent_bytes
                 .get_or_create(&CommonTrafficLabels::from(event.0))
                 .inc_by(sent);
         }
         if recv != 0 {
-            self.traffic
-                .received_bytes
+            self.received_bytes
                 .get_or_create(&CommonTrafficLabels::from(event.0))
                 .inc_by(recv);
         }

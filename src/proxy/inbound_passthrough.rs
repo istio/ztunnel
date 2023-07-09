@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
+
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{error, info, trace, warn, Instrument};
+
 use crate::config::ProxyMode;
-use crate::metrics::traffic;
-use crate::metrics::traffic::Reporter;
+use crate::proxy::metrics::Reporter;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{util, ProxyInputs};
+use crate::proxy::{metrics, util, ProxyInputs};
 use crate::proxy::{Error, TraceParent};
 use crate::rbac;
 use crate::state::workload::NetworkAddress;
 use crate::{proxy, socket};
-use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, trace, warn, Instrument};
 
 pub(super) struct InboundPassthrough {
     listener: TcpListener,
@@ -152,24 +153,24 @@ impl InboundPassthrough {
         } else {
             None
         };
-        let derived_source = traffic::DerivedWorkload {
+        let derived_source = metrics::DerivedWorkload {
             identity: conn.src_identity,
             ..Default::default()
         };
-        let connection_metrics = traffic::ConnectionOpen {
+        let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::destination,
             source: source_workload,
             derived_source: Some(derived_source),
             destination: Some(upstream),
-            connection_security_policy: traffic::SecurityPolicy::unknown,
+            connection_security_policy: metrics::SecurityPolicy::unknown,
             destination_service: None,
             destination_service_namespace: None,
             destination_service_name: None,
         };
         let _connection_close = pi
             .metrics
-            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
-        let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
+            .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
+        let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
         proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes).await?;
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())

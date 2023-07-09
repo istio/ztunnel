@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::identity::SecretManager;
-use crate::metrics::Metrics;
 use crate::proxy::Error;
 use crate::state::policy::PolicyStore;
 use crate::state::service::ServiceStore;
@@ -21,6 +20,7 @@ use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
+use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
 use rand::prelude::IteratorRandom;
@@ -29,7 +29,7 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::{debug, trace};
 
 pub mod policy;
@@ -191,6 +191,14 @@ pub struct DemandProxyState {
 impl DemandProxyState {
     pub fn new(state: Arc<RwLock<ProxyState>>, demand: Option<Demander>) -> Self {
         Self { state, demand }
+    }
+
+    pub fn read(&self) -> RwLockReadGuard<'_, ProxyState> {
+        self.state.read().unwrap()
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<'_, ProxyState> {
+        self.state.write().unwrap()
     }
 
     pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {
@@ -380,7 +388,7 @@ fn choose_workload_ip(workload: &Workload) -> Result<IpAddr, Error> {
 #[derive(serde::Serialize)]
 pub struct ProxyStateManager {
     #[serde(flatten)]
-    pub state: DemandProxyState,
+    state: DemandProxyState,
 
     #[serde(skip_serializing)]
     xds_client: Option<AdsClient>,
@@ -389,7 +397,7 @@ pub struct ProxyStateManager {
 impl ProxyStateManager {
     pub async fn new(
         config: config::Config,
-        metrics: Arc<Metrics>,
+        metrics: Metrics,
         awaiting_ready: readiness::BlockReady,
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<ProxyStateManager> {
@@ -421,6 +429,10 @@ impl ProxyStateManager {
             xds_client,
             state: DemandProxyState { state, demand },
         })
+    }
+
+    pub fn state(&self) -> DemandProxyState {
+        self.state.clone()
     }
 
     pub async fn run(self) -> anyhow::Result<()> {

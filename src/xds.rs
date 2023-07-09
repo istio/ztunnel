@@ -13,7 +13,10 @@
 // limitations under the License.
 
 mod client;
+pub mod metrics;
 mod types;
+
+pub use metrics::*;
 
 use self::service::discovery::v3::DeltaDiscoveryRequest;
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};

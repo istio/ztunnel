@@ -19,7 +19,7 @@ use prometheus_client::registry::Registry;
 
 use crate::version;
 
-pub(super) struct Metrics {}
+pub struct Metrics {}
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct IstioBuildLabel {

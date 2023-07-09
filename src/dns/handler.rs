@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::proxy::dns::resolver::{Answer, Resolver};
+use crate::dns::resolver::{Answer, Resolver};
 use std::sync::Arc;
 use tracing::{error, warn};
 use trust_dns_proto::op::{Edns, Header, MessageType, OpCode, ResponseCode};
@@ -21,18 +21,18 @@ use trust_dns_resolver::error::ResolveErrorKind;
 use trust_dns_server::authority::{LookupError, MessageResponse, MessageResponseBuilder};
 use trust_dns_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 
-/// A Trust-DNS [ResponseHandler] that proxies all DNS requests.
+/// A Trust-DNS [RequestHandler] that proxies all DNS requests.
 ///
-/// A proxy is fundamentally different than an `Authority` in TrustDNS, since the answers may
+/// A DNS proxy is fundamentally different than an `Authority` in TrustDNS, since the answers may
 /// or may not be authoritative based on whether they are served locally or forwarded. It is
 /// for this reason that we can't implement the proxy using existing TrustDNS server structures
 /// `Catalog` and `Authority`.
 // TODO(nmittler): Consider upstreaming this to TrustDNS
-pub struct Proxy {
+pub struct Handler {
     resolver: Arc<dyn Resolver>,
 }
 
-impl Proxy {
+impl Handler {
     /// Creates a new request handler for the resolver.
     pub fn new(resolver: Arc<dyn Resolver>) -> Self {
         Self { resolver }
@@ -51,7 +51,7 @@ impl Proxy {
 }
 
 #[async_trait::async_trait]
-impl RequestHandler for Proxy {
+impl RequestHandler for Handler {
     async fn handle_request<R: ResponseHandler>(
         &self,
         request: &Request,
@@ -200,8 +200,8 @@ fn response_edns(request: &Request) -> Option<Edns> {
 #[cfg(test)]
 #[cfg(any(unix, target_os = "windows"))]
 mod tests {
-    use crate::proxy::dns::proxy::Proxy;
-    use crate::proxy::dns::resolver::{Answer, Resolver};
+    use crate::dns::handler::Handler;
+    use crate::dns::resolver::{Answer, Resolver};
     use crate::test_helpers::dns::{a, a_request, n, socket_addr};
     use crate::test_helpers::helpers::subscribe;
     use std::net::Ipv4Addr;
@@ -221,7 +221,7 @@ mod tests {
     async fn record_found() {
         let _guard = subscribe();
 
-        let p = Proxy::new(Arc::new(FakeResolver {}));
+        let p = Handler::new(Arc::new(FakeResolver {}));
 
         // Lookup a host.
         let req = a_request(n("fake.com"), socket_addr("1.1.1.1:80"), Protocol::Udp);

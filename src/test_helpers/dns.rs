@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::proxy::dns::forwarder::Forwarder;
+use crate::dns::forwarder::Forwarder;
 use futures_util::ready;
 use futures_util::stream::{Stream, StreamExt};
 use std::future::Future;

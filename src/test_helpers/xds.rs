@@ -12,10 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures::Stream;
+use futures::StreamExt;
+use hyper::server::conn::http2;
+use prometheus_client::registry::Registry;
+use tokio::sync::{mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Response, Status, Streaming};
+use tracing::{error, info, warn};
+
 use super::test_config_with_port_xds_addr_and_root_cert;
 use crate::config::RootCert;
 use crate::hyper_util::TokioExecutor;
-use crate::metrics::Metrics;
+use crate::metrics::sub_registry;
 use crate::readiness::Ready;
 use crate::state::{DemandProxyState, ProxyState};
 use crate::tls;
@@ -26,19 +40,6 @@ use crate::xds::service::discovery::v3::{
     DeltaDiscoveryRequest, DeltaDiscoveryResponse, DiscoveryRequest, DiscoveryResponse,
 };
 use crate::xds::{self, AdsClient, ProxyStateUpdater};
-use async_trait::async_trait;
-use futures::Stream;
-use futures::StreamExt;
-use hyper::server::conn::http2;
-use log::info;
-use prometheus_client::registry::Registry;
-use std::pin::Pin;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
-use tokio::sync::{mpsc, watch};
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Response, Status, Streaming};
-use tracing::{error, warn};
 
 pub struct AdsServer {
     rx: watch::Receiver<Result<DeltaDiscoveryResponse, tonic::Status>>,
@@ -80,9 +81,11 @@ impl AdsServer {
             }
         });
 
-        let ready = Ready::new();
         let mut registry = Registry::default();
-        let metrics = Arc::new(Metrics::from(&mut registry));
+        let istio_registry = sub_registry(&mut registry);
+        let metrics = xds::metrics::Metrics::new(istio_registry);
+
+        let ready = Ready::new();
         let cfg = test_config_with_port_xds_addr_and_root_cert(
             80,
             Some(listener_addr_string),

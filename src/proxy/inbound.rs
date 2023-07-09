@@ -12,20 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Error;
-use crate::baggage::parse_baggage_header;
-use crate::config::Config;
-use crate::identity::SecretManager;
-use crate::metrics::traffic::{ConnectionOpen, Reporter};
-use crate::metrics::{traffic, Metrics, Recorder};
-use crate::proxy;
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
-use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::rbac::Connection;
-use crate::socket::to_canonical;
-use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
-use crate::state::DemandProxyState;
-use crate::tls::TlsError;
+use std::fmt;
+use std::fmt::{Display, Formatter};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Instant;
+
 use bytes::Bytes;
 use drain::Watch;
 use futures::stream::StreamExt;
@@ -33,13 +25,23 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use std::fmt;
-use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Instant;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
+
+use super::Error;
+use crate::baggage::parse_baggage_header;
+use crate::config::Config;
+use crate::identity::SecretManager;
+use crate::metrics::Recorder;
+use crate::proxy;
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
+use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::rbac::Connection;
+use crate::socket::to_canonical;
+use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
+use crate::state::DemandProxyState;
+use crate::tls::TlsError;
 
 pub(super) struct Inbound {
     cfg: Config,
@@ -161,14 +163,14 @@ impl Inbound {
                 tokio::task::spawn(
                     (async move {
                         let _connection_close = metrics
-                            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+                            .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
 
                         let _extra_conn_close = extra_connection_metrics
                             .as_ref()
-                            .map(|co| metrics.increment_defer::<_, traffic::ConnectionClose>(co));
+                            .map(|co| metrics.increment_defer::<_, metrics::ConnectionClose>(co));
 
                         let transferred_bytes =
-                            traffic::BytesTransferred::from(&connection_metrics);
+                            metrics::BytesTransferred::from(&connection_metrics);
                         match request_type {
                             DirectPath(mut incoming) => {
                                 match proxy::relay(
@@ -182,7 +184,7 @@ impl Inbound {
                                     Ok(transferred) => {
                                         if let Some(co) = extra_connection_metrics.as_ref() {
                                             metrics.record(
-                                                &traffic::BytesTransferred::from(co),
+                                                &metrics::BytesTransferred::from(co),
                                                 transferred,
                                             );
                                         }
@@ -326,7 +328,7 @@ impl Inbound {
                     }
                 };
 
-                let derived_source = traffic::DerivedWorkload {
+                let derived_source = metrics::DerivedWorkload {
                     identity: conn.src_identity,
                     cluster_id: baggage.cluster_id,
                     namespace: baggage.namespace,
@@ -339,7 +341,7 @@ impl Inbound {
                     source,
                     derived_source: Some(derived_source),
                     destination: Some(upstream),
-                    connection_security_policy: traffic::SecurityPolicy::mutual_tls,
+                    connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                     destination_service: None,
                     destination_service_namespace: None,
                     destination_service_name: None,

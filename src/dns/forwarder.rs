@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::proxy::dns::resolver::{Answer, Resolver};
+use crate::dns::resolver::{Answer, Resolver};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::error::ResolveError;
 use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
@@ -47,7 +47,7 @@ impl Resolver for Forwarder {
 #[cfg(test)]
 #[cfg(any(unix, target_os = "windows"))]
 mod tests {
-    use crate::proxy::dns::resolver::Resolver;
+    use crate::dns::resolver::Resolver;
     use crate::test_helpers::dns::{a_request, n, socket_addr, system_forwarder};
     use crate::test_helpers::helpers::subscribe;
     use trust_dns_proto::op::ResponseCode;
