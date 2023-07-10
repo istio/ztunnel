@@ -382,7 +382,7 @@ enum Verifier {
     // Does not verify an individual identity.
     None,
 
-    // Allows exactly one identity, making sure at least one of the presented certs matches that identity
+    // Allows a list of accepted identities, making sure at least one of the presented certs matches one in the list
     San(Vec<Identity>),
 
     // Allows all identities that share the same trust domain

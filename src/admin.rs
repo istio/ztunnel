@@ -30,6 +30,7 @@ use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
 use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{net::SocketAddr, time::Duration};
 use tokio::time;
@@ -357,12 +358,25 @@ fn list_loggers() -> Response<Full<Bytes>> {
 }
 
 fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
-    match telemetry::set_level(reset, level) {
-        Ok(_) => list_loggers(),
-        Err(e) => plaintext_response(
-            hyper::StatusCode::METHOD_NOT_ALLOWED,
-            format!("failed to set new level: {e}\n{HELP_STRING}",),
-        ),
+    match tracing::level_filters::LevelFilter::from_str(level) {
+        Ok(level_filter) => {
+            // Valid level, continue processing
+            tracing::info!("Parsed level: {:?}", level_filter);
+            match telemetry::set_level(reset, level) {
+                Ok(_) => list_loggers(),
+                Err(e) => plaintext_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    format!("Failed to set new level: {}\n{}", e, HELP_STRING),
+                ),
+            }
+        }
+        Err(_) => {
+            // Invalid level provided
+            plaintext_response(
+                hyper::StatusCode::BAD_REQUEST,
+                format!("Invalid level provided: {}\n{}", level, HELP_STRING),
+            )
+        }
     }
 }
 
@@ -426,13 +440,15 @@ async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
+    use super::change_log_level;
     use super::dump_certs;
     use super::handle_config_dump;
     use super::ConfigDump;
+    use crate::admin::HELP_STRING;
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
     use crate::identity;
-    use crate::test_helpers::new_proxy_state;
+    use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
@@ -684,8 +700,8 @@ mod tests {
             authorization_policies: Vec::new(),
             native_tunnel: false,
             workload_type: XdsWorkloadType::Deployment.into(),
-            virtual_ips: HashMap::from([(
-                "127.0.1.1".to_string(),
+            services: HashMap::from([(
+                "ns/svc1.ns.svc.cluster.local".to_string(),
                 XdsPortList {
                     ports: vec![XdsPort {
                         service_port: 80,
@@ -760,7 +776,7 @@ mod tests {
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
-        let proxy_state = new_proxy_state(vec![wl], vec![svc], vec![auth]).unwrap();
+        let proxy_state = new_proxy_state(&[wl], &[svc], &[auth]);
 
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
@@ -799,5 +815,48 @@ mod tests {
         assert!(
             resp_str.contains(r#"waypoint":{"destination":"defaultnw/127.0.0.10","port":15008}"#)
         );
+    }
+
+    // each of these tests assert that we can change the log level and the
+    // appropriate response string is returned.
+    //
+    // Note: tests need to be combined into one test function to be sure that
+    // individual tests don't affect each other by asynchronously changing
+    // the log level before the matching assert is called.
+    #[tokio::test(start_paused = true)]
+    async fn test_change_log_level() {
+        helpers::initialize_telemetry();
+
+        let resp = change_log_level(true, "");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is info\n");
+
+        let resp = change_log_level(true, "invalid_level");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains(HELP_STRING));
+
+        let resp = change_log_level(true, "debug");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is debug\n");
+
+        let resp = change_log_level(true, "warn");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is warn\n");
+
+        let resp = change_log_level(true, "error");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is error\n");
+
+        let resp = change_log_level(true, "trace");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is trace\n"));
+
+        let resp = change_log_level(true, "info");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is info\n"));
+
+        let resp = change_log_level(true, "off");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is off\n"));
     }
 }

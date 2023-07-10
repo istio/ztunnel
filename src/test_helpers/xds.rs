@@ -87,6 +87,7 @@ impl AdsServer {
             80,
             Some(listener_addr_string),
             Some(root_cert),
+            None,
         );
 
         let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));

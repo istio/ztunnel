@@ -19,6 +19,14 @@ use std::process::Command;
 use std::time::Instant;
 use tracing::debug;
 
+/// Sets the tracing subscriber to get tracing level from the 'RUST_LOG' env var.
+pub fn subscribe() -> tracing::subscriber::DefaultGuard {
+    let sub = tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .finish();
+    tracing::subscriber::set_default(sub)
+}
+
 // Ensure that the `tracing` stack is only initialised once using `once_cell`
 static TRACING: Lazy<()> = Lazy::new(telemetry::setup_logging);
 

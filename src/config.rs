@@ -47,10 +47,12 @@ const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
+const DEFAULT_DNS_PORT: u16 = 15053;
 const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
+const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
 
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
@@ -103,6 +105,10 @@ pub struct Config {
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
+    /// If true, a DNS proxy will be used.
+    pub dns_proxy: bool,
+    /// The socket address for the DNS proxy. Only applies if `dns_proxy` is true.
+    pub dns_proxy_addr: SocketAddr,
 
     /// The network of the node this ztunnel is running on.
     pub network: String,
@@ -251,7 +257,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
 
-    Ok(Config {
+    validate_config(Config {
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
@@ -273,10 +279,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
 
+        dns_proxy: pc
+            .proxy_metadata
+            .get(DNS_CAPTURE_METADATA)
+            .map_or(false, |value| value.to_lowercase() == "true"),
+
         socks5_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
+        dns_proxy_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
 
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
@@ -316,6 +328,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
     })
+}
+
+fn validate_config(cfg: Config) -> Result<Config, Error> {
+    if cfg.dns_proxy && cfg.xds_on_demand {
+        Err(Error::ProxyConfig(anyhow!(
+            "DNS proxy does not currently support on-demand mode"
+        )))
+    } else {
+        Ok(cfg)
+    }
 }
 
 // tries to parse the URI so we can fail early
