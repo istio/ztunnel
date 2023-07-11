@@ -341,15 +341,12 @@ impl Certs {
         Ok(conn.build())
     }
 
-    pub fn connector(&self, dest_id: &Identity) -> Result<ssl::SslConnector, Error> {
+    pub fn connector(&self, dest_id: Vec<Identity>) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
 
         // client verifies SAN
-        conn.set_verify_callback(
-            Self::verify_mode(),
-            Verifier::San(dest_id.clone()).callback(),
-        );
+        conn.set_verify_callback(Self::verify_mode(), Verifier::San(dest_id).callback());
 
         Ok(conn.build())
     }
@@ -385,8 +382,8 @@ enum Verifier {
     // Does not verify an individual identity.
     None,
 
-    // Allows exactly one identity, making sure at least one of the presented certs matches that identity
-    San(Identity),
+    // Allows a list of accepted identities, making sure at least one of the presented certs matches one in the list
+    San(Vec<Identity>),
 
     // Allows all identities that share the same trust domain
     SanTrustDomain(Identity),
@@ -400,7 +397,7 @@ impl Verifier {
         Ok(())
     }
 
-    fn verifiy_san(identity: &Identity, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+    fn verifiy_san(identities: &[Identity], ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         // internally, openssl tends to .expect the results of these methods.
         // TODO bubble up better error message
         let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
@@ -410,7 +407,7 @@ impl Verifier {
             .peer_certificate()
             .ok_or(TlsError::PeerCertError)?;
 
-        cert.verify_san(identity)
+        cert.verify_san(identities)
     }
 
     fn verifiy_san_trust_domain(
@@ -432,7 +429,7 @@ impl Verifier {
     fn verify(&self, verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         Self::base_verifier(verified, ctx)?;
         match self {
-            Self::San(identity) => Verifier::verifiy_san(identity, ctx)?,
+            Self::San(identities) => Verifier::verifiy_san(identities, ctx)?,
             Self::SanTrustDomain(identity) => Verifier::verifiy_san_trust_domain(identity, ctx)?,
             Self::None => (),
         };
@@ -452,13 +449,13 @@ impl Verifier {
 }
 
 pub trait SanChecker {
-    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError>;
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError>;
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError>;
 }
 
 impl SanChecker for Certs {
-    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
-        self.cert.x509.verify_san(identity)
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError> {
+        self.cert.x509.verify_san(identities)
     }
 
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
@@ -477,12 +474,14 @@ pub fn extract_sans(cert: &x509::X509) -> Vec<Identity> {
 }
 
 impl SanChecker for x509::X509 {
-    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError> {
         let sans = extract_sans(self);
-        sans.iter()
-            .find(|id| id == &identity)
-            .ok_or_else(|| TlsError::SanError(identity.to_owned(), sans.clone()))
-            .map(|_| ())
+        for ident in identities.iter() {
+            if let Some(_i) = sans.iter().find(|id| id == &ident) {
+                return Ok(());
+            }
+        }
+        Err(TlsError::SanError(identities.to_vec(), sans))
     }
 
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
@@ -546,8 +545,8 @@ pub enum TlsError {
     CertificateLookup(NetworkAddress),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
-    #[error("san verification error: remote did not present the expected SAN ({0}), got {1:?}")]
-    SanError(Identity, Vec<Identity>),
+    #[error("san verification error: remote did not present the expected SAN ({0:?}), got {1:?}")]
+    SanError(Vec<Identity>, Vec<Identity>),
     #[error(
         "san verification error: remote did not present the expected trustdomain ({0}), got {1:?}"
     )]

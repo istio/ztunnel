@@ -171,6 +171,7 @@ impl<'a> TestServiceBuilder<'a> {
                 vips: vec![],
                 ports: Default::default(),
                 endpoints: Default::default(), // populated later when workloads are added
+                subject_alt_names: vec![],
             },
             manager,
         }
