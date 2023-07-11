@@ -405,6 +405,23 @@ impl Resolver for DnsStore {
         // Find the service for the requested host.
         let requested_name = Name::from(request.query().name().clone());
         let Some(service_match) = self.find_server(&client, &requested_name) else {
+            // Most hostnames have a DNS response containing the A/AAAA records. In addition, this lookup computes a
+            // variant of the host+ the first search domain in resolv.conf as the first query
+            // is likely to be host.ns.svc.cluster.local (e.g., www.google.com.ns1.svc.cluster.local) due to
+            // the list of search namespaces in resolv.conf (unless the app explicitly does www.google.com. which is unlikely).
+            // We will resolve www.google.com.ns1.svc.cluster.local with a CNAME record pointing to www.google.com.
+            // which will cause the client's resolver to automatically resolve www.google.com. , and short circuit the lengthy
+            // search process down to just two DNS queries. This will eliminate unnecessary upstream DNS queries from the
+            // agent, reduce load on DNS servers and improve overall latency. This idea was borrowed and adapted from
+            // the autopath plugin in coredns. This idea is also borrowed from the sidecar istio-dns solution:
+            // https://github.com/istio/istio/blob/master/pkg/dns/client/dns.go#L580-L594
+            let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
+            if str::ends_with(requested_name.to_string().as_str(), namespaced_domain.to_string().as_str()) {
+                let mut records = Vec::new();
+                let canonical_name = as_name(str::trim_end_matches(requested_name.to_string().as_str(), namespaced_domain.to_string().as_str()));
+                records.push(cname_record(requested_name.clone(), canonical_name));
+                return Ok(Answer::new(records, true))
+            }
             // Unknown host. Forward to the upstream resolver.
             return self.forwarder.forward(&client, request).await;
         };
