@@ -36,6 +36,8 @@ use thiserror::Error;
 use tracing::{debug, error, trace};
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
+use trust_dns_resolver::Resolver;
+use trust_dns_resolver::config::*;
 
 #[derive(
     Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
@@ -146,6 +148,8 @@ pub struct Workload {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub hostname: String,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub async_hostname: String,
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub node: String,
@@ -192,10 +196,25 @@ impl Workload {
     pub fn choose_ip(&self) -> Result<IpAddr, Error> {
         // Randomly pick an IP
         // TODO: do this more efficiently, and not just randomly
-        let Some(ip) = self.workload_ips.choose(&mut rand::thread_rng()) else {
+
+        let mut addresses = Vec::new();
+
+        if self.async_hostname.is_empty() {
+            addresses = self.workload_ips.clone();
+        } else {
+
+            // addresses = vec![ip];
+
+            // addresses = self.workload_ips.clone();
+        }
+
+        let Some(ip) = addresses.choose(&mut rand::thread_rng()) else {
             debug!("workload {} has no suitable workload IPs for routing", self.name);
             return Err(Error::NoValidDestination(Box::new(self.clone())))
         };
+
+        debug!("workload {} chose IP {}", self.name, ip);
+
         Ok(*ip)
     }
 }
@@ -337,6 +356,7 @@ impl TryFrom<&XdsWorkload> for Workload {
             },
             node: resource.node,
             hostname: resource.hostname,
+            async_hostname: resource.async_hostname,
             network: resource.network,
             workload_name: resource.workload_name,
             workload_type,
@@ -506,8 +526,6 @@ pub struct WorkloadStore {
     by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
     by_uid: HashMap<String, Arc<Workload>>,
-    /// byHostname maps workload hostname to workloads.
-    by_hostname: HashMap<String, Arc<Workload>>,
 }
 
 impl WorkloadStore {
@@ -519,9 +537,6 @@ impl WorkloadStore {
         for ip in &w.workload_ips {
             self.by_addr
                 .insert(network_addr(&w.network, *ip), w.clone());
-        }
-        if !w.hostname.is_empty() {
-            self.by_hostname.insert(w.hostname.clone(), w.clone());
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
         Ok(())
@@ -537,7 +552,6 @@ impl WorkloadStore {
                 for wip in prev.workload_ips.iter() {
                     self.by_addr.remove(&network_addr(&prev.network, *wip));
                 }
-                self.by_hostname.remove(prev.hostname.as_str());
                 Some(prev.deref().clone())
             }
         }
@@ -548,11 +562,9 @@ impl WorkloadStore {
         self.by_addr.get(addr).map(|wl| wl.deref().clone())
     }
 
-    /// Finds the workload by hostname.
-    pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Workload> {
-        self.by_hostname
-            .get(hostname.as_ref())
-            .map(|wl| wl.deref().clone())
+    /// Returns all workloads that use async dataplane DNS resolution.
+    pub fn get_async_dns_workloads(&self) -> Vec<Workload> {
+        return self.by_uid.iter().filter(|(_, w)| !w.async_hostname.is_empty()).map(|(_, w)| w.deref().clone()).collect();
     }
 }
 

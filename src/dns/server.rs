@@ -320,15 +320,6 @@ impl Store {
                         name: search_name,
                         alias,
                     });
-                } else {
-                    // Didn't find a service, try a workload.
-                    if let Some(wl) = state.workloads.find_hostname(&search_name_str) {
-                        return Some(ServerMatch {
-                            server: Address::Workload(Box::new(wl)),
-                            name: search_name,
-                            alias,
-                        });
-                    }
                 }
             }
         }
@@ -633,6 +624,8 @@ pub trait Forwarder: Send + Sync {
         client: Option<&Workload>,
         request: &Request,
     ) -> Result<Answer, LookupError>;
+
+    fn resolver(&self) -> Arc<dyn Resolver>;
 }
 
 /// Creates the appropriate DNS forwarder for the proxy mode.
@@ -650,20 +643,39 @@ pub fn forwarder_for_mode(proxy_mode: ProxyMode) -> Result<Arc<dyn Forwarder>, E
 /// When running in dedicated (sidecar) proxy mode, this will be the same resolver configuration
 /// that would have been used by the client. For shared proxy mode, this will be the resolver
 /// configuration for the ztunnel DaemonSet (i.e. node-level resolver settings).
-struct SystemForwarder {
+pub struct SystemForwarder {
     search_domains: Vec<Name>,
     resolver: Arc<dyn Resolver>,
 }
 
+use std::net::{Ipv4Addr};
+
 impl SystemForwarder {
-    fn new() -> Result<Self, Error> {
+    pub fn new() -> Result<Self, Error> {
         // Get the resolver config from /etc/resolv.conf.
         let (cfg, opts) = read_system_conf()?;
 
         // Extract the parts.
         let domain = cfg.domain().cloned();
         let search_domains = cfg.search().to_vec();
-        let name_servers = cfg.name_servers().to_vec();
+        let mut name_servers = cfg.name_servers().to_vec();
+
+        warn!("domain: {:?}", domain);
+        warn!("search: {:?}", search_domains);
+        warn!("name_servers: {:?}", name_servers);
+
+        // nslookup nip.io
+        name_servers[0].socket_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(116,203,255,68)),
+            53
+        );
+        name_servers[1].socket_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(116,203,255,68)),
+            53
+        );
+
+        warn!("name_servers: {:?}", name_servers);
+
 
         // Remove the search list before passing to the resolver. The local resolver that
         // sends the original request will already have search domains applied. We want
@@ -694,6 +706,10 @@ impl Forwarder for SystemForwarder {
         request: &Request,
     ) -> Result<Answer, LookupError> {
         self.resolver.lookup(request).await
+    }
+
+    fn resolver(&self) -> Arc<dyn Resolver> {
+        self.resolver.clone()
     }
 }
 

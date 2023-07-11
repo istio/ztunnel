@@ -28,7 +28,7 @@ use rand::seq::SliceRandom;
 use std::convert::Into;
 use std::default::Default;
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::{debug, trace};
 
@@ -72,6 +72,48 @@ pub struct ProxyState {
 
     #[serde(flatten)]
     pub policies: PolicyStore,
+
+    pub resolved_dns: ResolvedDnsStore,
+}
+
+use std::collections::HashMap;
+use std::collections::HashSet;
+use tracing::{info};
+
+
+/// A WorkloadStore encapsulates all information about workloads in the mesh
+#[derive(serde::Serialize, Default, Debug)]
+pub struct ResolvedDnsStore {
+    // workload UID to resolved IP addresses
+    by_hostname: HashMap<String, HashSet<IpAddr>>,
+}
+
+impl ResolvedDnsStore {
+    pub fn get_dns(&self, hostname: String) -> Option<IpAddr> {
+        info!("get dns, by_hostname len: {}", self.by_hostname.len());
+
+        // TODO(kdorohs) add support for different dns logical vs strict LB
+
+        let Some(ipset) = self.by_hostname.get(&hostname) else {
+            // todo
+            return None;
+        };
+
+        let ips_vec = ipset.into_iter().collect::<Vec<_>>();
+
+        let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
+            // todo
+            return None;
+        };
+
+        return Some(**ip);
+    }
+
+    pub fn set_dns(&mut self, uid: String, ips : Vec<Ipv4Addr>) {
+        let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
+        self.by_hostname.insert(uid.clone(), set);
+        info!("set dns, by_hostname len: {}", self.by_hostname.len());
+    }
 }
 
 impl ProxyState {
@@ -103,12 +145,13 @@ impl ProxyState {
         // Hostnames for services are more common, so lookup service first and fallback
         // to workload.
         match self.services.get_by_namespaced_host(name) {
-            None => {
-                // Workload hostnames are globally unique, so ignore the namespace.
-                self.workloads
-                    .find_hostname(&name.hostname)
-                    .map(|wl| Address::Workload(Box::new(wl)))
-            }
+            // None => {
+            //     // Workload hostnames are globally unique, so ignore the namespace.
+            //     self.workloads
+            //         .find_hostname(&name.hostname)
+            //         .map(|wl| Address::Workload(Box::new(wl)))
+            // }
+            None => None,
             Some(svc) => Some(Address::Service(Box::new(svc))),
         }
     }

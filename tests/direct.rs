@@ -208,6 +208,12 @@ async fn test_vip_request() {
 }
 
 #[tokio::test]
+async fn test_dns_vip_request() {
+    run_request_test(&format!("{TEST_VIP_DNS_HBONE}:80"), "").await;
+}
+
+
+#[tokio::test]
 async fn test_hbone_request_local() {
     run_request_test(TEST_WORKLOAD_HBONE, "local").await;
 }

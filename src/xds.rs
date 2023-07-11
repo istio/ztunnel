@@ -291,7 +291,7 @@ impl LocalClient {
     pub async fn run(self) -> Result<(), anyhow::Error> {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = self.cfg.read_to_string().await?;
-        trace!("local config: {data}");
+        info!("local config: {data}");
         let r: LocalConfig = serde_yaml::from_str(&data)?;
         let mut state = self.state.write().unwrap();
         let num_workloads = r.workloads.len();

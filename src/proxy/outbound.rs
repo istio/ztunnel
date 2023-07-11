@@ -131,6 +131,9 @@ impl OutboundConnection {
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
     ) -> Result<(), Error> {
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip
         {
@@ -410,6 +413,14 @@ impl OutboundConnection {
         if us.workload.gateway_address.is_none() {
             return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
         }
+
+        // TODO(kdorosh) is it legal for waypoint to have hostname too?
+        let ipsmap =  self.pi.state.state.read().unwrap().resolved_dns.get_dns(us.workload.clone().uid);
+        let workload_ip = match ipsmap {
+            Some(ips) => ips,
+            None => us.workload.choose_ip()?,
+        };
+
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
@@ -424,7 +435,7 @@ impl OutboundConnection {
             return Ok(Request {
                 protocol: Protocol::HBONE,
                 source: source_workload,
-                destination: SocketAddr::from((us.workload.choose_ip()?, us.port)),
+                destination: SocketAddr::from((workload_ip, us.port)),
                 destination_workload: Some(us.workload.clone()),
                 expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
@@ -445,7 +456,7 @@ impl OutboundConnection {
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
-            destination: SocketAddr::from((us.workload.choose_ip()?, us.port)),
+            destination: SocketAddr::from((workload_ip, us.port)),
             destination_workload: Some(us.workload.clone()),
             expected_identity: Some(us.workload.identity()),
             gateway: us
