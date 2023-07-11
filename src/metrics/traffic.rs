@@ -16,7 +16,7 @@ use std::fmt::Write;
 
 use crate::identity::Identity;
 use crate::metrics::traffic::Reporter::source;
-use crate::metrics::Recorder;
+use crate::metrics::{DefaultedUnknown, Recorder};
 use crate::state::workload::Workload;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
@@ -65,41 +65,6 @@ pub enum SecurityPolicy {
     #[default]
     unknown,
     mutual_tls,
-}
-
-#[derive(Default, Hash, PartialEq, Eq, Clone, Debug)]
-// DefaultedUnknown is a wrapper around an Option that encodes as "unknown" when missing, rather than ""
-struct DefaultedUnknown<T>(Option<T>);
-
-impl From<String> for DefaultedUnknown<String> {
-    fn from(t: String) -> Self {
-        if t.is_empty() {
-            DefaultedUnknown(None)
-        } else {
-            DefaultedUnknown(Some(t))
-        }
-    }
-}
-
-impl<T> From<Option<T>> for DefaultedUnknown<T> {
-    fn from(t: Option<T>) -> Self {
-        DefaultedUnknown(t)
-    }
-}
-
-impl From<Identity> for DefaultedUnknown<Identity> {
-    fn from(t: Identity) -> Self {
-        DefaultedUnknown(Some(t))
-    }
-}
-
-impl<T: EncodeLabelValue> EncodeLabelValue for DefaultedUnknown<T> {
-    fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
-        match self {
-            DefaultedUnknown(Some(i)) => i.encode(writer),
-            DefaultedUnknown(None) => writer.write_str("unknown"),
-        }
-    }
 }
 
 pub struct ConnectionClose<'a>(&'a ConnectionOpen);

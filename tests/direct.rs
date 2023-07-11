@@ -231,12 +231,55 @@ async fn test_stats_exist() {
             ("istio_connection_terminations"),
             ("istio_tcp_connections_opened"),
             ("istio_tcp_connections_closed"),
+            // DNS.
+            ("istio_dns_requests"),
+            ("istio_dns_upstream_requests"),
+            ("istio_dns_upstream_failures"),
+            ("istio_dns_upstream_request_duration_seconds"),
         ] {
             assert!(
                 metrics.query(metric, &Default::default()).is_some(),
                 "expected metric {metric}"
             );
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_dns_metrics() {
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
+    tokio::spawn(echo.run());
+    testapp::with_app(test_config(), |app| async move {
+        // Make a valid request that will be forwarded to the upstream resolver.
+        _ = app.dns_request("www.google.com.", true, false).await;
+
+        let metrics = app.metrics().await.unwrap();
+        assert_eq!(
+            metrics.query_sum("istio_dns_requests_total", &Default::default()),
+            1,
+            "metrics: {}",
+            metrics.dump()
+        );
+
+        // TODO(nmittler): Remaining require adding a workload for this client (127.0.0.1).
+        /*assert_eq!(
+            metrics.query_sum("istio_dns_upstream_requests_total", &Default::default()),
+            1,
+            "metrics: {}",
+            metrics.dump()
+        );
+        assert_eq!(
+            metrics.query_sum("istio_dns_upstream_failures_total", &Default::default()),
+            0,
+            "metrics: {}",
+            metrics.dump()
+        );
+        assert!(
+            !metrics.query("istio_dns_upstream_request_duration_seconds", &Default::default()).unwrap().is_empty(),
+            "metrics: {}",
+            metrics.dump()
+        );*/
     })
     .await;
 }

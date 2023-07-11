@@ -74,6 +74,7 @@ impl WorkloadManager {
 
         let cfg = config::Config {
             xds_address: None,
+            dns_proxy: true,
             fake_ca: true,
             local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
             local_node: Some(node.to_string()),

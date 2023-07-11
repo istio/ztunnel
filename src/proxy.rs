@@ -132,6 +132,7 @@ async fn new_dns_proxy(pi: ProxyInputs) -> Result<Option<dns::DnsProxy>, Error> 
                 pi.cfg.network,
                 pi.state.state, // TODO(nmittler): this is ugly.
                 dns::forwarder_for_mode(pi.cfg.proxy_mode)?,
+                pi.metrics.clone(),
             )
             .await?,
         ))

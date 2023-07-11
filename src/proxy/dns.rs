@@ -18,9 +18,12 @@ pub mod proxy;
 pub mod resolver;
 
 use crate::config::ProxyMode;
+use crate::metrics::dns::{DnsRequest, ForwardedDuration, ForwardedFailure, ForwardedRequest};
+use crate::metrics::{IncrementRecorder, Metrics, Recorder};
 use crate::proxy::dns::name_util::{has_domain, trim_domain};
 use crate::proxy::dns::resolver::{Answer, Resolver};
 use crate::proxy::Error;
+use crate::socket::to_canonical;
 use crate::state::workload::address::Address;
 use crate::state::workload::{NetworkAddress, Workload};
 use crate::state::ProxyState;
@@ -30,7 +33,7 @@ use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -70,6 +73,7 @@ impl DnsProxy {
         network: S,
         state: Arc<RwLock<ProxyState>>,
         forwarder: Arc<dyn Forwarder>,
+        metrics: Arc<Metrics>,
     ) -> Result<Self, Error> {
         // TODO(nmittler): Get this from config (https://github.com/istio/ztunnel/issues/587)
         let domain = "cluster.local".to_string();
@@ -80,6 +84,7 @@ impl DnsProxy {
             network.as_ref().to_string(),
             state,
             forwarder,
+            metrics,
         )));
         let mut server = ServerFuture::new(handler);
 
@@ -87,6 +92,8 @@ impl DnsProxy {
         let udp_socket = UdpSocket::bind(addr)
             .await
             .map_err(|e| Error::Bind(addr, e))?;
+        // Save the bound address.
+        let addr = udp_socket.local_addr().unwrap();
         server.register_socket(udp_socket);
 
         // Bind and register the TCP socket.
@@ -125,6 +132,7 @@ struct DnsStore {
     forwarder: Arc<dyn Forwarder>,
     domain: Name,
     svc_domain: Name,
+    metrics: Arc<Metrics>,
 }
 
 impl DnsStore {
@@ -133,6 +141,7 @@ impl DnsStore {
         network: String,
         state: Arc<RwLock<ProxyState>>,
         forwarder: Arc<dyn Forwarder>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let domain = as_name(domain);
         let svc_domain = append_name(as_name("svc"), &domain);
@@ -143,6 +152,7 @@ impl DnsStore {
             forwarder,
             domain,
             svc_domain,
+            metrics,
         }
     }
 
@@ -385,6 +395,50 @@ impl DnsStore {
 
         addrs
     }
+
+    async fn forward(
+        &self,
+        client: Option<&Workload>,
+        request: &Request,
+    ) -> Result<Answer, LookupError> {
+        // Increment counter for all requests.
+        self.metrics.increment(&DnsRequest {
+            request,
+            source: client,
+            destination: None,
+        });
+
+        // Increment counter for forwarded requests.
+        self.metrics.increment(&ForwardedRequest {
+            request,
+            source: client,
+        });
+
+        // Record the forwarded request duration when the function exits.
+        let start = std::time::Instant::now();
+        let _forwarded_duration = self.metrics.defer(|metrics| {
+            metrics.record(
+                &ForwardedDuration {
+                    request,
+                    source: client,
+                },
+                start.elapsed(),
+            );
+        });
+
+        match self.forwarder.forward(client, request).await {
+            Ok(answer) => Ok(answer),
+            Err(e) => {
+                // Increment counter for forwarding failures.
+                self.metrics.increment(&ForwardedFailure {
+                    request,
+                    source: client,
+                });
+
+                Err(e)
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -392,22 +446,39 @@ impl Resolver for DnsStore {
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
         // Find the client workload.
         let client = match self.find_client(to_canonical(request.src())) {
-            None => return Err(LookupError::ResponseCode(ResponseCode::ServFail)),
+            None => {
+                // TODO(nmittler): make forwarding optional here.
+                // Increment request counter.
+                self.metrics.increment(&DnsRequest {
+                    request,
+                    source: None,
+                    destination: None,
+                });
+
+                return Err(LookupError::ResponseCode(ResponseCode::ServFail));
+            }
             Some(client) => client,
         };
 
         // Make sure the request is for IP records. Anything else, we forward.
         let record_type = request.query().query_type();
         if !is_record_type_supported(record_type) {
-            return self.forwarder.forward(&client, request).await;
+            return self.forward(Some(&client), request).await;
         }
 
         // Find the service for the requested host.
         let requested_name = Name::from(request.query().name().clone());
         let Some(service_match) = self.find_server(&client, &requested_name) else {
             // Unknown host. Forward to the upstream resolver.
-            return self.forwarder.forward(&client, request).await;
+            return self.forward(Some(&client), request).await;
         };
+
+        // Increment counter for all requests.
+        self.metrics.increment(&DnsRequest {
+            request,
+            source: Some(&client),
+            destination: Some(&service_match.server),
+        });
 
         // Get the addresses for the service.
         let addresses = self.get_addresses(&client, &service_match.server, record_type);
@@ -551,21 +622,6 @@ fn ip_records(name: Name, addrs: Vec<IpAddr>, out: &mut Vec<Record>) {
     }
 }
 
-// Sometimes we get IPv4 addresses in IPv6. These need to be extracted.
-// @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
-fn to_canonical(addr: SocketAddr) -> SocketAddr {
-    let ip = match addr.ip() {
-        IpAddr::V4(_) => return addr,
-        IpAddr::V6(i) => match i.octets() {
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
-                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
-            }
-            _ => return addr,
-        },
-    };
-    SocketAddr::from((ip, addr.port()))
-}
-
 /// Forwards a request to an upstream resolver.
 #[async_trait::async_trait]
 pub(super) trait Forwarder: Send + Sync {
@@ -573,7 +629,11 @@ pub(super) trait Forwarder: Send + Sync {
     fn search_domains(&self, client: &Workload) -> Vec<Name>;
 
     /// Forwards the request from the client.
-    async fn forward(&self, client: &Workload, request: &Request) -> Result<Answer, LookupError>;
+    async fn forward(
+        &self,
+        client: Option<&Workload>,
+        request: &Request,
+    ) -> Result<Answer, LookupError>;
 }
 
 /// Creates the appropriate DNS forwarder for the proxy mode.
@@ -622,7 +682,11 @@ impl Forwarder for SystemForwarder {
         self.search_domains.clone()
     }
 
-    async fn forward(&self, _: &Workload, request: &Request) -> Result<Answer, LookupError> {
+    async fn forward(
+        &self,
+        _: Option<&Workload>,
+        request: &Request,
+    ) -> Result<Answer, LookupError> {
         self.resolver.lookup(request).await
     }
 }
@@ -749,12 +813,14 @@ mod tests {
             // Create the DNS store.
             let state = state();
             let forwarder = forwarder();
+            let metrics = Arc::new(Default::default());
             let store = DnsStore {
                 domain: as_name("cluster.local"),
                 svc_domain: as_name("svc.cluster.local"),
                 network: NW1.to_string(),
                 state,
                 forwarder,
+                metrics,
             };
 
             let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
@@ -1026,7 +1092,10 @@ mod tests {
         let addr = new_socket_addr().await;
         let state = state();
         let forwarder = forwarder();
-        let proxy = DnsProxy::new(addr, NW1, state, forwarder).await.unwrap();
+        let metrics = Arc::new(Default::default());
+        let proxy = DnsProxy::new(addr, NW1, state, forwarder, metrics)
+            .await
+            .unwrap();
         tokio::spawn(proxy.run());
 
         let mut tcp_client = new_tcp_client(addr).await;
@@ -1062,12 +1131,15 @@ mod tests {
         // Create the DNS store.
         let state = state();
         let forwarder = forwarder();
+        let metrics = Arc::new(Default::default());
+
         let store = DnsStore {
             domain: as_name("cluster.local"),
             svc_domain: as_name("svc.cluster.local"),
             network: NW1.to_string(),
             state,
             forwarder,
+            metrics,
         };
 
         let bad_client_ip = ip("5.5.5.5");
@@ -1097,12 +1169,14 @@ mod tests {
         // Create the DNS store.
         let fake_state = new_proxy_state(&fake_wls, &[], &[]).state;
         let forwarder = forwarder();
+        let metrics = Arc::new(Default::default());
         let store = DnsStore {
             network: NW1.to_string(),
             state: fake_state,
             forwarder,
             domain: n("cluster.local"),
             svc_domain: n("svc.cluster.local"),
+            metrics,
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1381,7 +1455,11 @@ mod tests {
             self.search_domains.clone()
         }
 
-        async fn forward(&self, _: &Workload, request: &Request) -> Result<Answer, LookupError> {
+        async fn forward(
+            &self,
+            _: Option<&Workload>,
+            request: &Request,
+        ) -> Result<Answer, LookupError> {
             let name = request.query().name().into();
             let Some(ips) = self.ips.get(&name) else {
                 // Not found.

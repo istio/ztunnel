@@ -68,6 +68,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     config::Config {
         xds_address: xds_addr,
         fake_ca: true,
+        dns_proxy: true,
         // TODO: full FindRootCAForXDS logic like in Istio
         xds_root_cert: match xds_root_cert {
             Some(cert) => cert,
@@ -89,6 +90,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         stats_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        dns_proxy_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         ..config::parse_config().unwrap()
     }
 }
@@ -116,7 +118,6 @@ pub fn localhost_error_message() -> String {
         TEST_WORKLOAD_SOURCE,
         TEST_WORKLOAD_HBONE,
         TEST_WORKLOAD_TCP,
-        TEST_WORKLOAD_WAYPOINT,
         TEST_VIP,
     ];
     format!(
