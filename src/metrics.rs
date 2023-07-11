@@ -12,11 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write;
+use std::marker::PhantomData;
 use std::mem;
+use std::sync::Arc;
 
+use crate::identity::Identity;
+use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::registry::Registry;
 use tracing::error;
 
+pub mod dns;
 mod meta;
 #[allow(non_camel_case_types)]
 pub mod traffic;
@@ -28,6 +34,7 @@ pub struct Metrics {
     #[allow(dead_code)]
     meta: meta::Metrics,
     traffic: traffic::Metrics,
+    dns: dns::Metrics,
 }
 
 impl Metrics {
@@ -36,6 +43,7 @@ impl Metrics {
             xds: xds::Metrics::new(registry),
             meta: meta::Metrics::new(registry),
             traffic: traffic::Metrics::new(registry),
+            dns: dns::Metrics::new(registry),
         }
     }
 }
@@ -54,7 +62,15 @@ impl Default for Metrics {
 }
 
 impl Metrics {
-    #[must_use = "metric will be dropped (and thus recorded) immediately if not assign"]
+    #[must_use = "metric will be dropped (and thus recorded) immediately if not assigned"]
+    pub fn defer<'a, F>(self: &Arc<Metrics>, record: F) -> Deferred<'a, F>
+    where
+        F: FnOnce(Arc<Metrics>),
+    {
+        Deferred::new(self.clone(), record)
+    }
+
+    #[must_use = "metric will be dropped (and thus recorded) immediately if not assigned"]
     /// increment_defer is used to increment a metric now and another metric later once the MetricGuard is dropped
     ///
     /// # Examples
@@ -66,36 +82,52 @@ impl Metrics {
     /// // Eventually, report connection closed
     /// drop(connection_close);
     /// ```
-    pub fn increment_defer<'a, M1, M2>(&'a self, event: &'a M1) -> MetricGuard<'a, M2>
+    pub fn increment_defer<'a, M1, M2>(
+        self: &Arc<Metrics>,
+        event: &'a M1,
+    ) -> Deferred<'a, impl FnOnce(Arc<Metrics>)>
     where
         M1: Clone + 'a,
-        M2: From<&'a M1>,
+        M2: From<&'a M1> + 'a,
         Metrics: IncrementRecorder<M1> + IncrementRecorder<M2>,
     {
         self.increment(event);
         let m2: M2 = event.into();
-        MetricGuard {
-            metrics: self,
-            event: Some(m2),
+        self.defer(move |metrics| {
+            metrics.increment(&m2);
+        })
+    }
+}
+
+pub struct Deferred<'a, F>
+where
+    F: FnOnce(Arc<Metrics>),
+{
+    metrics: Arc<Metrics>,
+    record_fn: Option<F>,
+    _lifetime: PhantomData<&'a F>,
+}
+
+impl<'a, F> Deferred<'a, F>
+where
+    F: FnOnce(Arc<Metrics>),
+{
+    pub fn new(metrics: Arc<Metrics>, record_fn: F) -> Self {
+        Self {
+            metrics,
+            record_fn: Some(record_fn),
+            _lifetime: PhantomData::default(),
         }
     }
 }
 
-pub struct MetricGuard<'a, E>
+impl<'a, F> Drop for Deferred<'a, F>
 where
-    Metrics: IncrementRecorder<E>,
-{
-    metrics: &'a Metrics,
-    event: Option<E>,
-}
-
-impl<E> Drop for MetricGuard<'_, E>
-where
-    Metrics: IncrementRecorder<E>,
+    F: FnOnce(Arc<Metrics>),
 {
     fn drop(&mut self) {
-        if let Some(m) = mem::take(&mut self.event) {
-            self.metrics.increment(&m)
+        if let Some(record_fn) = mem::take(&mut self.record_fn) {
+            (record_fn)(self.metrics.clone());
         } else {
             error!("defer record failed, event is gone");
         }
@@ -118,5 +150,40 @@ where
 {
     fn increment(&self, event: &E) {
         self.record(event, 1);
+    }
+}
+
+#[derive(Default, Hash, PartialEq, Eq, Clone, Debug)]
+// DefaultedUnknown is a wrapper around an Option that encodes as "unknown" when missing, rather than ""
+struct DefaultedUnknown<T>(Option<T>);
+
+impl From<String> for DefaultedUnknown<String> {
+    fn from(t: String) -> Self {
+        if t.is_empty() {
+            DefaultedUnknown(None)
+        } else {
+            DefaultedUnknown(Some(t))
+        }
+    }
+}
+
+impl<T> From<Option<T>> for DefaultedUnknown<T> {
+    fn from(t: Option<T>) -> Self {
+        DefaultedUnknown(t)
+    }
+}
+
+impl From<Identity> for DefaultedUnknown<Identity> {
+    fn from(t: Identity) -> Self {
+        DefaultedUnknown(Some(t))
+    }
+}
+
+impl<T: EncodeLabelValue> EncodeLabelValue for DefaultedUnknown<T> {
+    fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+        match self {
+            DefaultedUnknown(Some(i)) => i.encode(writer),
+            DefaultedUnknown(None) => writer.write_str("unknown"),
+        }
     }
 }

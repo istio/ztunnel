@@ -169,6 +169,42 @@ impl TestApp {
         stream.set_nodelay(true).unwrap();
         socks5_connect(stream, addr).await.unwrap()
     }
+
+    pub async fn dns_request(
+        &self,
+        hostname: &str,
+        udp: bool,
+        ipv6: bool,
+    ) -> trust_dns_proto::xfer::DnsResponse {
+        let addr = self.proxy_addresses.dns_proxy.unwrap();
+        dns_request(addr, hostname, udp, ipv6).await
+    }
+}
+
+pub async fn dns_request(
+    addr: SocketAddr,
+    hostname: &str,
+    udp: bool,
+    ipv6: bool,
+) -> trust_dns_proto::xfer::DnsResponse {
+    use crate::test_helpers::dns::n;
+    use crate::test_helpers::dns::send_request;
+    use crate::test_helpers::dns::{new_tcp_client, new_udp_client};
+    use trust_dns_proto::rr::RecordType;
+
+    let mut client = if udp {
+        new_udp_client(addr).await
+    } else {
+        new_tcp_client(addr).await
+    };
+
+    let query_type = if ipv6 {
+        RecordType::AAAA
+    } else {
+        RecordType::A
+    };
+
+    send_request(&mut client, n(hostname), query_type).await
 }
 
 pub async fn socks5_connect(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Result<TcpStream> {
