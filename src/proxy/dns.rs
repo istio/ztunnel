@@ -414,7 +414,7 @@ impl Resolver for DnsStore {
             // search process down to just two DNS queries. This will eliminate unnecessary upstream DNS queries from the
             // agent, reduce load on DNS servers and improve overall latency. This idea was borrowed and adapted from
             // the autopath plugin in coredns. This idea is also borrowed from the sidecar istio-dns solution:
-            // https://github.com/istio/istio/blob/master/pkg/dns/client/dns.go#L580-L594
+            // https://github.com/istio/istio/blob/f052a3ff61c95c427f626fe4b952751fd900e803/pkg/dns/client/dns.go#L580-L594
             let namespaced_domain = append_name(as_name(&client.namespace), &self.svc_domain);
             if str::ends_with(requested_name.to_string().as_str(), namespaced_domain.to_string().as_str()) {
                 let mut records = Vec::new();
