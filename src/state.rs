@@ -47,7 +47,7 @@ impl fmt::Display for Upstream {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Upstream{{{} with uid {}:{} via {} ({:?})}}",
+            "Upstream{{{} with uid {}:{} via {} ({:?}) sans:{:?}}}",
             self.workload.name,
             self.workload.uid,
             self.port,
@@ -55,7 +55,8 @@ impl fmt::Display for Upstream {
                 .gateway_address
                 .map(|x| format!("{x}"))
                 .unwrap_or_else(|| "None".into()),
-            self.workload.protocol
+            self.workload.protocol,
+            self.sans,
         )
     }
 }
@@ -138,7 +139,7 @@ impl ProxyState {
             let mut us = Upstream {
                 workload: wl,
                 port: *target_port,
-                sans: Vec::new(),
+                sans: svc.subject_alt_names.clone(),
             };
             return match set_gateway_address(&mut us, hbone_port) {
                 Ok(_) => {
