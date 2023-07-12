@@ -70,15 +70,13 @@ impl Server {
     /// * `state` - The state of ztunnel.
     /// * `forwarder` - The forwarder to use for requests not handled by this server.
     pub async fn new<S: AsRef<str>>(
+        domain: String,
         addr: SocketAddr,
         network: S,
         state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
         metrics: Metrics,
     ) -> Result<Self, Error> {
-        // TODO(nmittler): Get this from config (https://github.com/istio/ztunnel/issues/587)
-        let domain = "cluster.local".to_string();
-
         // Create the DNS server, backed by ztunnel data structures.
         let handler = dns::handler::Handler::new(Arc::new(Store::new(
             domain,
@@ -1100,10 +1098,11 @@ mod tests {
         ];
 
         // Create and start the proxy.
+        let domain = "cluster.local".to_string();
         let addr = new_socket_addr().await;
         let state = state();
         let forwarder = forwarder();
-        let proxy = Server::new(addr, NW1, state, forwarder, test_metrics())
+        let proxy = Server::new(domain, addr, NW1, state, forwarder, test_metrics())
             .await
             .unwrap();
         tokio::spawn(proxy.run());
@@ -1188,10 +1187,11 @@ mod tests {
         ];
 
         // Create and start the server.
+        let domain = "cluster.local".to_string();
         let addr = new_socket_addr().await;
         let state = state();
         let forwarder = Arc::new(SystemForwarder::new().unwrap());
-        let server = Server::new(addr, NW1, state, forwarder, test_metrics())
+        let server = Server::new(domain, addr, NW1, state, forwarder, test_metrics())
             .await
             .unwrap();
         tokio::spawn(server.run());
