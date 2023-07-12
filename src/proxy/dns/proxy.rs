@@ -118,8 +118,9 @@ async fn send_lookup_error<R: ResponseHandler>(
         LookupError::ResponseCode(code) => send_error(request, response_handle, code).await,
         LookupError::ResolveError(e) => {
             match e.kind() {
-                ResolveErrorKind::NoRecordsFound { .. } => {
-                    send_empty_response(request, response_handle).await
+                ResolveErrorKind::NoRecordsFound { response_code, .. } => {
+                    // Respond with the error code.
+                    send_error(request, response_handle, *response_code).await
                 }
                 _ => {
                     // TODO(nmittler): log?
