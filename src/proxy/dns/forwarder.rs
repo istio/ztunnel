@@ -50,11 +50,13 @@ mod tests {
     use crate::proxy::dns::resolver::Resolver;
     use crate::test_helpers::dns::{a_request, n, socket_addr, system_forwarder};
     use crate::test_helpers::helpers::subscribe;
+    use trust_dns_proto::op::ResponseCode;
     use trust_dns_proto::rr::RecordType;
+    use trust_dns_resolver::error::ResolveErrorKind;
     use trust_dns_server::server::Protocol;
 
     #[tokio::test]
-    async fn forward_google_com() {
+    async fn found() {
         let _guard = subscribe();
 
         let f = system_forwarder();
@@ -71,5 +73,36 @@ mod tests {
         let record = answer.record_iter().next().unwrap();
         assert_eq!(n("www.google.com."), *record.name());
         assert_eq!(RecordType::A, record.rr_type());
+    }
+
+    #[tokio::test]
+    async fn not_found() {
+        let _guard = subscribe();
+
+        let f = system_forwarder();
+
+        // Lookup a host.
+        let req = a_request(
+            n("fake-blahblahblah.com"),
+            socket_addr("1.1.1.1:80"),
+            Protocol::Udp,
+        );
+
+        // Expect a ResolveError.
+        let err = f
+            .lookup(&req)
+            .await
+            .expect_err("expected error")
+            .into_resolve_error()
+            .expect("expected resolve error");
+
+        // Expect NoRecordsFound with a NXDomain response code.
+        let kind = err.kind();
+        match kind {
+            ResolveErrorKind::NoRecordsFound { response_code, .. } => {
+                assert_eq!(&ResponseCode::NXDomain, response_code);
+            }
+            _ => panic!("unexpected error kind {kind}"),
+        }
     }
 }

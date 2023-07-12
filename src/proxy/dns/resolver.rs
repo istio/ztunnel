@@ -20,7 +20,7 @@ use trust_dns_server::server::Request;
 
 /// Similar to a TrustDNS `Authority`, although the resulting [Answer] indicates whether
 /// the response is authoritative. This makes the interface generally more composable and
-/// better supports a proxy use case, where some responses may be authoriative and others
+/// better supports a proxy use case, where some responses may be authoritative and others
 /// may not.
 #[async_trait::async_trait]
 pub trait Resolver: Sync + Send {
@@ -28,6 +28,7 @@ pub trait Resolver: Sync + Send {
 }
 
 /// Answer returned by a [Resolver].
+#[derive(Debug)]
 pub struct Answer {
     records: Vec<Record>,
     is_authoritative: bool,

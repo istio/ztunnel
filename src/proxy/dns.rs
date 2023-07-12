@@ -42,6 +42,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use trust_dns_proto::error::ProtoErrorKind;
 use trust_dns_proto::op::ResponseCode;
 use trust_dns_proto::rr::{Name, RData, Record, RecordType};
+use trust_dns_resolver::config::ResolverConfig;
 use trust_dns_resolver::system_conf::read_system_conf;
 use trust_dns_server::authority::LookupError;
 use trust_dns_server::server::Request;
@@ -661,8 +662,15 @@ impl SystemForwarder {
         // Get the resolver config from /etc/resolv.conf.
         let (cfg, opts) = read_system_conf()?;
 
-        // Extract the search domains from the config.
+        // Extract the parts.
+        let domain = cfg.domain().cloned();
         let search_domains = cfg.search().to_vec();
+        let name_servers = cfg.name_servers().to_vec();
+
+        // Remove the search list before passing to the resolver. The local resolver that
+        // sends the original request will already have search domains applied. We want
+        // this resolver to simply use the request host rather than re-adding search domains.
+        let cfg = ResolverConfig::from_parts(domain, vec![], name_servers);
 
         // Create the resolver.
         let resolver = Arc::new(
@@ -1151,6 +1159,54 @@ mod tests {
                     assert_eq!(ResponseCode::ServFail, *resp_code);
                 } else {
                     panic!("unexpected error: {:?}", e)
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn system_forwarder() {
+        let _guard = subscribe();
+
+        struct Case {
+            name: &'static str,
+            host: &'static str,
+            expect_code: ResponseCode,
+        }
+
+        let cases = [
+            Case {
+                name: "success: www.google.com",
+                host: "www.google.com.",
+                expect_code: ResponseCode::NoError,
+            },
+            Case {
+                name: "failure: fake-blahblahblah.com",
+                host: "fake-blahblahblah.com",
+                expect_code: ResponseCode::NXDomain,
+            },
+        ];
+
+        // Create and start the server.
+        let addr = new_socket_addr().await;
+        let state = state();
+        let forwarder = Arc::new(SystemForwarder::new().unwrap());
+        let metrics = Arc::new(Default::default());
+        let proxy = DnsProxy::new(addr, NW1, state, forwarder, metrics)
+            .await
+            .unwrap();
+        tokio::spawn(proxy.run());
+
+        let mut tcp_client = new_tcp_client(addr).await;
+        let mut udp_client = new_udp_client(addr).await;
+
+        for c in cases {
+            for (protocol, client) in [("tcp", &mut tcp_client), ("udp", &mut udp_client)] {
+                let name = format!("[{protocol}] {}", c.name);
+                let resp = send_request(client, n(c.host), RecordType::A).await;
+                assert_eq!(c.expect_code, resp.response_code(), "{}", name);
+                if c.expect_code == ResponseCode::NoError {
+                    assert!(!resp.answers().is_empty());
                 }
             }
         }
