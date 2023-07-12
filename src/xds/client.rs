@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
 
@@ -27,10 +26,10 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::RootCert;
-use crate::metrics::xds::*;
-use crate::metrics::{IncrementRecorder, Metrics};
+use crate::metrics::IncrementRecorder;
 use crate::xds::istio::security::Authorization;
 use crate::xds::istio::workload::Address;
+use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
@@ -154,7 +153,7 @@ impl Config {
         self
     }
 
-    pub fn build(self, metrics: Arc<Metrics>, block_ready: readiness::BlockReady) -> AdsClient {
+    pub fn build(self, metrics: Metrics, block_ready: readiness::BlockReady) -> AdsClient {
         let (tx, rx) = mpsc::channel(100);
         AdsClient {
             config: self,
@@ -179,7 +178,7 @@ pub struct AdsClient {
     demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
     demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
 
-    pub(crate) metrics: Arc<Metrics>,
+    pub(crate) metrics: Metrics,
     block_ready: Option<readiness::BlockReady>,
 
     connection_id: u32,

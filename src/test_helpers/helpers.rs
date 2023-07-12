@@ -12,12 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::telemetry;
-use once_cell::sync::Lazy;
 use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
+
+use once_cell::sync::Lazy;
+use prometheus_client::registry::Registry;
 use tracing::debug;
+
+use crate::metrics::sub_registry;
+use crate::{proxy, telemetry};
 
 /// Sets the tracing subscriber to get tracing level from the 'RUST_LOG' env var.
 pub fn subscribe() -> tracing::subscriber::DefaultGuard {
@@ -32,6 +37,11 @@ static TRACING: Lazy<()> = Lazy::new(telemetry::setup_logging);
 
 pub fn initialize_telemetry() {
     Lazy::force(&TRACING);
+}
+
+pub fn test_proxy_metrics() -> Arc<proxy::Metrics> {
+    let mut registry = Registry::default();
+    Arc::new(proxy::Metrics::new(sub_registry(&mut registry)))
 }
 
 pub fn with_ip(s: SocketAddr, ip: IpAddr) -> SocketAddr {

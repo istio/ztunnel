@@ -24,10 +24,10 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
-use tokio::time;
 
 use crate::identity;
 
+const ENABLE_PROXY: &str = "ENABLE_PROXY";
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
@@ -94,6 +94,11 @@ pub enum ProxyMode {
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// If true, the HBONE proxy will be used.
+    pub proxy: bool,
+    /// If true, a DNS proxy will be used.
+    pub dns_proxy: bool,
+
     pub window_size: u32,
     pub connection_window_size: u32,
     pub frame_size: u32,
@@ -105,8 +110,6 @@ pub struct Config {
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
-    /// If true, a DNS proxy will be used.
-    pub dns_proxy: bool,
     /// The socket address for the DNS proxy. Only applies if `dns_proxy` is true.
     pub dns_proxy_addr: SocketAddr,
 
@@ -142,7 +145,7 @@ pub struct Config {
     pub auth: identity::AuthSource,
     // How long ztunnel should wait for in-flight requesthandlers to finish processing
     // before giving up when ztunnel is self-terminating (when instructed via the Admin API)
-    pub self_termination_deadline: time::Duration,
+    pub self_termination_deadline: Duration,
 
     pub proxy_metadata: HashMap<String, String>,
 
@@ -184,7 +187,7 @@ impl FromStr for GoDuration {
 }
 
 fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
-    match std::env::var(env) {
+    match env::var(env) {
         Ok(val) => val
             .parse()
             .map(|v| Some(v))
@@ -198,7 +201,7 @@ fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
 }
 
 fn parse_args() -> String {
-    let cli_args: Vec<String> = std::env::args().collect();
+    let cli_args: Vec<String> = env::args().collect();
     cli_args[1..].join(" ")
 }
 
@@ -215,7 +218,7 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
 }
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
-    let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
+    let default_istiod_address = if env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {
         "https://localhost:15012".to_string()
@@ -258,6 +261,12 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     };
 
     validate_config(Config {
+        proxy: parse_default(ENABLE_PROXY, true)?,
+        dns_proxy: pc
+            .proxy_metadata
+            .get(DNS_CAPTURE_METADATA)
+            .map_or(false, |value| value.to_lowercase() == "true"),
+
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
@@ -278,11 +287,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
-
-        dns_proxy: pc
-            .proxy_metadata
-            .get(DNS_CAPTURE_METADATA)
-            .map_or(false, |value| value.to_lowercase() == "true"),
 
         socks5_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
@@ -332,12 +336,18 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
 fn validate_config(cfg: Config) -> Result<Config, Error> {
     if cfg.dns_proxy && cfg.xds_on_demand {
-        Err(Error::ProxyConfig(anyhow!(
+        return Err(Error::ProxyConfig(anyhow!(
             "DNS proxy does not currently support on-demand mode"
-        )))
-    } else {
-        Ok(cfg)
+        )));
     }
+
+    if !cfg.proxy && !cfg.dns_proxy {
+        return Err(Error::ProxyConfig(anyhow!(
+            "ztunnel run without any servers enabled"
+        )));
+    }
+
+    Ok(cfg)
 }
 
 // tries to parse the URI so we can fail early

@@ -27,10 +27,9 @@ use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
-use crate::metrics::traffic;
-use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
-use crate::proxy::pool;
+use crate::proxy::metrics::Reporter;
+use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
@@ -154,15 +153,15 @@ impl OutboundConnection {
                 .as_ref()
                 .map(|w| w.native_tunnel)
                 .unwrap_or(false);
-        let connection_metrics = traffic::ConnectionOpen {
+        let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::source,
             derived_source: None,
             source: Some(req.source.clone()),
             destination: req.destination_workload.clone(),
             connection_security_policy: if req.protocol == Protocol::HBONE {
-                traffic::SecurityPolicy::mutual_tls
+                metrics::SecurityPolicy::mutual_tls
             } else {
-                traffic::SecurityPolicy::unknown
+                metrics::SecurityPolicy::unknown
             },
             destination_service: None,
             destination_service_namespace: None,
@@ -191,15 +190,15 @@ impl OutboundConnection {
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
             // same as above but inverted, this is the "inbound" metric
-            let inbound_connection_metrics = traffic::ConnectionOpen {
+            let inbound_connection_metrics = metrics::ConnectionOpen {
                 reporter: Reporter::destination,
                 derived_source: None,
                 source: Some(req.source.clone()),
                 destination: req.destination_workload.clone(),
                 connection_security_policy: if req.protocol == Protocol::HBONE {
-                    traffic::SecurityPolicy::mutual_tls
+                    metrics::SecurityPolicy::mutual_tls
                 } else {
-                    traffic::SecurityPolicy::unknown
+                    metrics::SecurityPolicy::unknown
                 },
                 destination_service: None,
                 destination_service_namespace: None,
@@ -217,13 +216,13 @@ impl OutboundConnection {
             .map_err(Error::Io);
         }
 
-        let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
+        let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
 
         // _connection_close will record once dropped
         let _connection_close = self
             .pi
             .metrics
-            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+            .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
         match req.protocol {
             Protocol::HBONE => {
                 info!(
@@ -517,16 +516,18 @@ pub async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+
     use super::*;
     use crate::config::Config;
+    use crate::test_helpers::helpers::test_proxy_metrics;
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, xds};
-    use bytes::Bytes;
-    use std::sync::Arc;
-    use std::time::Duration;
 
     async fn run_build_request(
         from: &str,
@@ -561,7 +562,7 @@ mod tests {
                 state,
                 hbone_port: 15008,
                 cfg,
-                metrics: Arc::new(Default::default()),
+                metrics: test_proxy_metrics(),
                 pool: pool::Pool::new(),
             },
             id: TraceParent::new(),

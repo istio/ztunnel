@@ -24,17 +24,22 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
 
 use crate::config::Config;
-use crate::hyper_util::{empty_response, Server};
+use crate::hyper_util;
 
-pub struct Service {
-    s: Server<Mutex<Registry>>,
+pub struct Server {
+    s: hyper_util::Server<Mutex<Registry>>,
 }
 
-impl Service {
-    pub async fn new(config: Config, registry: Registry, drain_rx: Watch) -> anyhow::Result<Self> {
-        Server::<Mutex<Registry>>::bind("stats", config.stats_addr, drain_rx, Mutex::new(registry))
-            .await
-            .map(|s| Service { s })
+impl Server {
+    pub async fn new(config: Config, drain_rx: Watch, registry: Registry) -> anyhow::Result<Self> {
+        hyper_util::Server::<Mutex<Registry>>::bind(
+            "stats",
+            config.stats_addr,
+            drain_rx,
+            Mutex::new(registry),
+        )
+        .await
+        .map(|s| Server { s })
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -45,7 +50,7 @@ impl Service {
         self.s.spawn(|registry, req| async move {
             match req.uri().path() {
                 "/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
-                _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
+                _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
     }

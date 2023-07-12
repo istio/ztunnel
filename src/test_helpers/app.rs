@@ -41,9 +41,10 @@ use super::helpers::*;
 #[derive(Clone)]
 pub struct TestApp {
     pub admin_address: SocketAddr,
-    pub stats_address: SocketAddr,
+    pub metrics_address: SocketAddr,
     pub readiness_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
+    pub dns_proxy_address: Option<SocketAddr>,
     pub cert_manager: Arc<SecretManager>,
 }
 
@@ -51,9 +52,10 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
     fn from((app, cert_manager): (&Bound, Arc<SecretManager>)) -> Self {
         Self {
             admin_address: app.admin_address,
-            stats_address: app.stats_address,
-            proxy_addresses: app.proxy_addresses,
+            metrics_address: app.metrics_address,
+            proxy_addresses: app.proxy_addresses.unwrap(),
             readiness_address: app.readiness_address,
+            dns_proxy_address: app.dns_proxy_address,
             cert_manager,
         }
     }
@@ -99,7 +101,7 @@ impl TestApp {
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!("http://{}/metrics", self.stats_address))
+            .uri(format!("http://{}/metrics", self.metrics_address))
             .header("content-type", "application/json")
             .body(Empty::<Bytes>::new())
             .unwrap();
@@ -176,7 +178,7 @@ impl TestApp {
         udp: bool,
         ipv6: bool,
     ) -> trust_dns_proto::xfer::DnsResponse {
-        let addr = self.proxy_addresses.dns_proxy.unwrap();
+        let addr = self.dns_proxy_address.unwrap();
         dns_request(addr, hostname, udp, ipv6).await
     }
 }

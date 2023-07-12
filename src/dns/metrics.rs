@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::metrics::{DefaultedUnknown, Recorder};
-use crate::state::workload::address::Address;
-use crate::state::workload::Workload;
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -22,6 +19,10 @@ use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use std::time::Duration;
 use trust_dns_server::server::Request;
+
+use crate::metrics::{DefaultedUnknown, DeferRecorder, Recorder};
+use crate::state::workload::address::Address;
+use crate::state::workload::Workload;
 
 pub struct Metrics {
     pub requests: Family<DnsLabels, Counter>,
@@ -31,7 +32,6 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    // TODO(nmittler): Metrics should only be added if the DNS feature is enabled.
     pub fn new(registry: &mut Registry) -> Self {
         let requests = Family::default();
         registry.register(
@@ -71,6 +71,8 @@ impl Metrics {
         }
     }
 }
+
+impl DeferRecorder for Metrics {}
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct DnsLabels {
@@ -134,10 +136,9 @@ pub struct DnsRequest<'a> {
     pub destination: Option<&'a Address>,
 }
 
-impl Recorder<DnsRequest<'_>, u64> for super::Metrics {
+impl Recorder<DnsRequest<'_>, u64> for Metrics {
     fn record(&self, reason: &DnsRequest, count: u64) {
-        self.dns
-            .requests
+        self.requests
             .get_or_create(&DnsLabels::from(reason))
             .inc_by(count);
     }
@@ -162,10 +163,9 @@ pub struct ForwardedRequest<'a> {
     pub source: Option<&'a Workload>,
 }
 
-impl Recorder<ForwardedRequest<'_>, u64> for super::Metrics {
+impl Recorder<ForwardedRequest<'_>, u64> for Metrics {
     fn record(&self, reason: &ForwardedRequest, count: u64) {
-        self.dns
-            .forwarded_requests
+        self.forwarded_requests
             .get_or_create(&DnsLabels::from(reason))
             .inc_by(count);
     }
@@ -187,10 +187,9 @@ pub struct ForwardedFailure<'a> {
     pub source: Option<&'a Workload>,
 }
 
-impl Recorder<ForwardedFailure<'_>, u64> for super::Metrics {
+impl Recorder<ForwardedFailure<'_>, u64> for Metrics {
     fn record(&self, reason: &ForwardedFailure, count: u64) {
-        self.dns
-            .forwarded_failures
+        self.forwarded_failures
             .get_or_create(&DnsLabels::from(reason))
             .inc_by(count);
     }
@@ -212,10 +211,9 @@ pub struct ForwardedDuration<'a> {
     pub source: Option<&'a Workload>,
 }
 
-impl Recorder<ForwardedDuration<'_>, Duration> for super::Metrics {
+impl Recorder<ForwardedDuration<'_>, Duration> for Metrics {
     fn record(&self, reason: &ForwardedDuration, duration: Duration) {
-        self.dns
-            .forwarded_duration
+        self.forwarded_duration
             .get_or_create(&DnsLabels::from(reason))
             .observe(duration.as_secs_f64());
     }

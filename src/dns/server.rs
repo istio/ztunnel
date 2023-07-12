@@ -12,33 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod forwarder;
-pub mod name_util;
-pub mod proxy;
-pub mod resolver;
-
-use crate::config::ProxyMode;
-use crate::metrics::dns::{DnsRequest, ForwardedDuration, ForwardedFailure, ForwardedRequest};
-use crate::metrics::{IncrementRecorder, Metrics, Recorder};
-use crate::proxy::dns::name_util::{has_domain, trim_domain};
-use crate::proxy::dns::resolver::{Answer, Resolver};
-use crate::proxy::Error;
-use crate::socket::to_canonical;
-use crate::state::workload::address::Address;
-use crate::state::workload::{NetworkAddress, Workload};
-use crate::state::ProxyState;
-use itertools::Itertools;
-use log::warn;
-use once_cell::sync::Lazy;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
+
+use itertools::Itertools;
+use once_cell::sync::Lazy;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use tokio::net::{TcpListener, UdpSocket};
+use tracing::warn;
 use trust_dns_proto::error::ProtoErrorKind;
 use trust_dns_proto::op::ResponseCode;
 use trust_dns_proto::rr::{Name, RData, Record, RecordType};
@@ -48,39 +34,53 @@ use trust_dns_server::authority::LookupError;
 use trust_dns_server::server::Request;
 use trust_dns_server::ServerFuture;
 
+use crate::config::ProxyMode;
+use crate::dns;
+use crate::dns::metrics::{
+    DnsRequest, ForwardedDuration, ForwardedFailure, ForwardedRequest, Metrics,
+};
+use crate::dns::name_util::{has_domain, trim_domain};
+use crate::dns::resolver::{Answer, Resolver};
+use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
+use crate::proxy::Error;
+use crate::socket::to_canonical;
+use crate::state::workload::address::Address;
+use crate::state::workload::{NetworkAddress, Workload};
+use crate::state::DemandProxyState;
+
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
 const DEFAULT_TTL_SECONDS: u32 = 30;
 
 static SVC: Lazy<Name> = Lazy::new(|| as_name("svc"));
 
-/// A proxy that serves known hostnames from ztunnel data structures. Unknown hosts are
-/// forwarded to an upstream resolver.
-pub(super) struct DnsProxy {
+/// A DNS server that serves known hostnames from ztunnel data structures.
+/// Unknown hosts are forwarded to an upstream resolver.
+pub struct Server {
     addr: SocketAddr,
-    server: ServerFuture<proxy::Proxy>,
+    server: ServerFuture<dns::handler::Handler>,
 }
 
-impl DnsProxy {
-    /// Creates a new proxy.
+impl Server {
+    /// Creates a new handler.
     ///
     /// # Arguments
     ///
-    /// * `addr` - The socket address on which to run the DNS proxy.
+    /// * `addr` - The socket address on which to run the DNS server.
     /// * `network` - The network of the current node.
-    /// * `state` - The state of this proxy.
-    /// * `forwarder` - The forwarder to use for requests not handled by this proxy.
-    pub(super) async fn new<S: AsRef<str>>(
+    /// * `state` - The state of ztunnel.
+    /// * `forwarder` - The forwarder to use for requests not handled by this server.
+    pub async fn new<S: AsRef<str>>(
         addr: SocketAddr,
         network: S,
-        state: Arc<RwLock<ProxyState>>,
+        state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
-        metrics: Arc<Metrics>,
+        metrics: Metrics,
     ) -> Result<Self, Error> {
         // TODO(nmittler): Get this from config (https://github.com/istio/ztunnel/issues/587)
         let domain = "cluster.local".to_string();
 
         // Create the DNS server, backed by ztunnel data structures.
-        let handler = proxy::Proxy::new(Arc::new(DnsStore::new(
+        let handler = dns::handler::Handler::new(Arc::new(Store::new(
             domain,
             network.as_ref().to_string(),
             state,
@@ -109,12 +109,12 @@ impl DnsProxy {
         Ok(Self { addr, server })
     }
 
-    /// Returns the address to which this DNS proxy is bound.
-    pub(super) fn address(&self) -> SocketAddr {
+    /// Returns the address to which this DNS server is bound.
+    pub fn address(&self) -> SocketAddr {
         self.addr
     }
 
-    /// Runs this DNS proxy to completion.
+    /// Runs this DNS server to completion.
     pub async fn run(self) {
         // TODO(nmittler): Do we need to use drain?
         if let Err(e) = self.server.block_until_done().await {
@@ -126,23 +126,23 @@ impl DnsProxy {
     }
 }
 
-/// A DNS [Resolver] backed by the ztunnel [ProxyState].
-struct DnsStore {
+/// A DNS [Resolver] backed by the ztunnel [DemandProxyState].
+struct Store {
     network: String,
-    state: Arc<RwLock<ProxyState>>,
+    state: DemandProxyState,
     forwarder: Arc<dyn Forwarder>,
     domain: Name,
     svc_domain: Name,
-    metrics: Arc<Metrics>,
+    metrics: Metrics,
 }
 
-impl DnsStore {
+impl Store {
     fn new(
         domain: String,
         network: String,
-        state: Arc<RwLock<ProxyState>>,
+        state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
-        metrics: Arc<Metrics>,
+        metrics: Metrics,
     ) -> Self {
         let domain = as_name(domain);
         let svc_domain = append_name(as_name("svc"), &domain);
@@ -159,7 +159,7 @@ impl DnsStore {
 
     /// Find the workload for the client address.
     fn find_client(&self, client_addr: SocketAddr) -> Option<Workload> {
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         state.workloads.find_address(&NetworkAddress {
             network: self.network.clone(),
             address: client_addr.ip(),
@@ -284,7 +284,7 @@ impl DnsStore {
     fn find_server(&self, client: &Workload, requested_name: &Name) -> Option<ServerMatch> {
         // Lock the workload store for the duration of this function, since we're calling it
         // in a loop.
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
 
         // Iterate over all possible aliases for the requested hostname from the perspective of
         // the client (e.g. <svc>, <svc>.<ns>, <svc>.<ns>.svc, <svc>.<ns>.svc.cluster.local).
@@ -417,7 +417,7 @@ impl DnsStore {
 
         // Record the forwarded request duration when the function exits.
         let start = std::time::Instant::now();
-        let _forwarded_duration = self.metrics.defer(|metrics| {
+        let _forwarded_duration = self.metrics.defer_record(|metrics| {
             metrics.record(
                 &ForwardedDuration {
                     request,
@@ -443,7 +443,7 @@ impl DnsStore {
 }
 
 #[async_trait::async_trait]
-impl Resolver for DnsStore {
+impl Resolver for Store {
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
         // Find the client workload.
         let client = match self.find_client(to_canonical(request.src())) {
@@ -625,7 +625,7 @@ fn ip_records(name: Name, addrs: Vec<IpAddr>, out: &mut Vec<Record>) {
 
 /// Forwards a request to an upstream resolver.
 #[async_trait::async_trait]
-pub(super) trait Forwarder: Send + Sync {
+pub trait Forwarder: Send + Sync {
     /// Returns the list of resolver search domains for the client.
     fn search_domains(&self, client: &Workload) -> Vec<Name>;
 
@@ -638,7 +638,7 @@ pub(super) trait Forwarder: Send + Sync {
 }
 
 /// Creates the appropriate DNS forwarder for the proxy mode.
-pub(super) fn forwarder_for_mode(proxy_mode: ProxyMode) -> Result<Arc<dyn Forwarder>, Error> {
+pub fn forwarder_for_mode(proxy_mode: ProxyMode) -> Result<Arc<dyn Forwarder>, Error> {
     Ok(match proxy_mode {
         ProxyMode::Shared => {
             // TODO(https://github.com/istio/ztunnel/issues/555): Use pod settings if available.
@@ -674,7 +674,7 @@ impl SystemForwarder {
 
         // Create the resolver.
         let resolver = Arc::new(
-            forwarder::Forwarder::new(cfg, opts).map_err(|e| Error::Generic(Box::new(e)))?,
+            dns::forwarder::Forwarder::new(cfg, opts).map_err(|e| Error::Generic(Box::new(e)))?,
         );
 
         Ok(Self {
@@ -701,7 +701,16 @@ impl Forwarder for SystemForwarder {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+    use std::collections::HashMap;
+    use std::net::{SocketAddrV4, SocketAddrV6};
+
+    use bytes::Bytes;
+    use prometheus_client::registry::Registry;
+    use trust_dns_server::server::Protocol;
+
     use super::*;
+    use crate::metrics;
     use crate::test_helpers::dns::{
         a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client,
         send_request, server_request, socket_addr,
@@ -713,11 +722,6 @@ mod tests {
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
-    use bytes::Bytes;
-    use std::cmp::Ordering;
-    use std::collections::HashMap;
-    use std::net::{SocketAddrV4, SocketAddrV6};
-    use trust_dns_server::server::Protocol;
 
     const NS1: &str = "ns1";
     const NS2: &str = "ns2";
@@ -821,14 +825,13 @@ mod tests {
             // Create the DNS store.
             let state = state();
             let forwarder = forwarder();
-            let metrics = Arc::new(Default::default());
-            let store = DnsStore {
+            let store = Store {
                 domain: as_name("cluster.local"),
                 svc_domain: as_name("svc.cluster.local"),
                 network: NW1.to_string(),
                 state,
                 forwarder,
-                metrics,
+                metrics: test_metrics(),
             };
 
             let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
@@ -1100,8 +1103,7 @@ mod tests {
         let addr = new_socket_addr().await;
         let state = state();
         let forwarder = forwarder();
-        let metrics = Arc::new(Default::default());
-        let proxy = DnsProxy::new(addr, NW1, state, forwarder, metrics)
+        let proxy = Server::new(addr, NW1, state, forwarder, test_metrics())
             .await
             .unwrap();
         tokio::spawn(proxy.run());
@@ -1139,15 +1141,13 @@ mod tests {
         // Create the DNS store.
         let state = state();
         let forwarder = forwarder();
-        let metrics = Arc::new(Default::default());
-
-        let store = DnsStore {
+        let store = Store {
             domain: as_name("cluster.local"),
             svc_domain: as_name("svc.cluster.local"),
             network: NW1.to_string(),
             state,
             forwarder,
-            metrics,
+            metrics: test_metrics(),
         };
 
         let bad_client_ip = ip("5.5.5.5");
@@ -1191,11 +1191,10 @@ mod tests {
         let addr = new_socket_addr().await;
         let state = state();
         let forwarder = Arc::new(SystemForwarder::new().unwrap());
-        let metrics = Arc::new(Default::default());
-        let proxy = DnsProxy::new(addr, NW1, state, forwarder, metrics)
+        let server = Server::new(addr, NW1, state, forwarder, test_metrics())
             .await
             .unwrap();
-        tokio::spawn(proxy.run());
+        tokio::spawn(server.run());
 
         let mut tcp_client = new_tcp_client(addr).await;
         let mut udp_client = new_udp_client(addr).await;
@@ -1223,16 +1222,15 @@ mod tests {
         let fake_wls = vec![xds_workload("client-fake", NS1, "", NW1, &[], &fake_ips)];
 
         // Create the DNS store.
-        let fake_state = new_proxy_state(&fake_wls, &[], &[]).state;
+        let state = new_proxy_state(&fake_wls, &[], &[]);
         let forwarder = forwarder();
-        let metrics = Arc::new(Default::default());
-        let store = DnsStore {
+        let store = Store {
             network: NW1.to_string(),
-            state: fake_state,
+            state,
             forwarder,
             domain: n("cluster.local"),
             svc_domain: n("svc.cluster.local"),
-            metrics,
+            metrics: test_metrics(),
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1326,7 +1324,7 @@ mod tests {
         s.local_addr().unwrap()
     }
 
-    fn state() -> Arc<RwLock<ProxyState>> {
+    fn state() -> DemandProxyState {
         let services = vec![
             xds_external_service("www.google.com", &[na(NW1, "1.1.1.1")]),
             xds_service("productpage", NS1, &[na(NW1, "9.9.9.9")]),
@@ -1388,7 +1386,7 @@ mod tests {
             ),
         ];
 
-        new_proxy_state(&workloads, &services, &[]).state
+        new_proxy_state(&workloads, &services, &[])
     }
 
     fn na<S1: AsRef<str>, S2: AsRef<str>>(network: S1, addr: S2) -> NetworkAddress {
@@ -1541,5 +1539,11 @@ mod tests {
 
             return Ok(Answer::new(out, false));
         }
+    }
+
+    fn test_metrics() -> Metrics {
+        let mut registry = Registry::default();
+        let istio_registry = metrics::sub_registry(&mut registry);
+        Metrics::new(istio_registry)
     }
 }

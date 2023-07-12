@@ -12,26 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod admin;
-pub mod app;
-pub mod baggage;
-pub mod cert_fetcher;
-pub mod config;
-pub mod dns;
-pub mod hyper_util;
-pub mod identity;
-pub mod metrics;
-pub mod proxy;
-pub mod rbac;
-pub mod readiness;
-pub mod signal;
-pub mod socket;
-pub mod state;
-pub mod telemetry;
-pub mod time;
-pub mod tls;
-pub mod version;
-pub mod xds;
+use std::io;
+use std::net::SocketAddr;
 
-#[cfg(any(test, feature = "testing"))]
-pub mod test_helpers;
+pub mod forwarder;
+pub mod handler;
+pub mod metrics;
+pub mod name_util;
+pub mod resolver;
+pub mod server;
+
+pub use metrics::*;
+pub use server::*;
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("failed to bind to address {0}: {1}")]
+    Bind(SocketAddr, io::Error),
+
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("{0}")]
+    Generic(Box<dyn std::error::Error + Send + Sync>),
+}

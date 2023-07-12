@@ -12,47 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+use std::{fmt, io};
+
+use boring::error::ErrorStack;
+use drain::Watch;
+use hyper::{header, Request};
+use inbound::Inbound;
+use rand::Rng;
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::time::timeout;
+use tracing::{error, trace, warn, Instrument};
+
 use crate::identity::SecretManager;
-use crate::metrics::{traffic, Metrics, Recorder};
+use crate::metrics::Recorder;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
 use crate::{config, identity, socket, tls};
-use boring::error::ErrorStack;
-use drain::Watch;
-use hyper::{header, Request};
-use inbound::Inbound;
-use rand::Rng;
-use std::fmt::Debug;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
-use std::{fmt, io};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::time::timeout;
-use tracing::{error, trace, warn, Instrument};
-
-// Only public for testing. Needed by test_util.
-#[cfg(any(test, feature = "testing"))]
-pub mod dns;
-#[cfg(not(any(test, feature = "testing")))]
-mod dns;
 
 mod inbound;
 mod inbound_passthrough;
+#[allow(non_camel_case_types)]
+pub mod metrics;
 mod outbound;
 mod pool;
 mod socks5;
 mod util;
+
+pub use metrics::*;
 
 pub struct Proxy {
     inbound: Inbound,
     inbound_passthrough: InboundPassthrough,
     outbound: Outbound,
     socks5: Socks5,
-    dns_proxy: Option<dns::DnsProxy>,
 }
 
 #[derive(Clone)]
@@ -70,9 +69,10 @@ impl Proxy {
         cfg: config::Config,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
-        metrics: Arc<Metrics>,
+        metrics: Metrics,
         drain: Watch,
     ) -> Result<Proxy, Error> {
+        let metrics = Arc::new(metrics);
         let mut pi = ProxyInputs {
             cfg: cfg.clone(),
             state,
@@ -88,28 +88,22 @@ impl Proxy {
         let inbound_passthrough = InboundPassthrough::new(pi.clone()).await?;
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
         let socks5 = Socks5::new(pi.clone(), drain).await?;
-        let dns_proxy = new_dns_proxy(pi.clone()).await?;
 
         Ok(Proxy {
             inbound,
             inbound_passthrough,
             outbound,
             socks5,
-            dns_proxy,
         })
     }
 
     pub async fn run(self) {
-        let mut tasks = vec![
+        let tasks = vec![
             tokio::spawn(self.inbound_passthrough.run().in_current_span()),
             tokio::spawn(self.inbound.run().in_current_span()),
             tokio::spawn(self.outbound.run().in_current_span()),
             tokio::spawn(self.socks5.run().in_current_span()),
         ];
-
-        if let Some(dns_proxy) = self.dns_proxy {
-            tasks.push(tokio::spawn(dns_proxy.run().in_current_span()));
-        }
 
         futures::future::join_all(tasks).await;
     }
@@ -119,25 +113,7 @@ impl Proxy {
             outbound: self.outbound.address(),
             inbound: self.inbound.address(),
             socks5: self.socks5.address(),
-            dns_proxy: self.dns_proxy.as_ref().map(|dns_proxy| dns_proxy.address()),
         }
-    }
-}
-
-async fn new_dns_proxy(pi: ProxyInputs) -> Result<Option<dns::DnsProxy>, Error> {
-    if pi.cfg.dns_proxy {
-        Ok(Some(
-            dns::DnsProxy::new(
-                pi.cfg.dns_proxy_addr,
-                pi.cfg.network,
-                pi.state.state, // TODO(nmittler): this is ugly.
-                dns::forwarder_for_mode(pi.cfg.proxy_mode)?,
-                pi.metrics.clone(),
-            )
-            .await?,
-        ))
-    } else {
-        Ok(None)
     }
 }
 
@@ -146,7 +122,6 @@ pub struct Addresses {
     pub outbound: SocketAddr,
     pub inbound: SocketAddr,
     pub socks5: SocketAddr,
-    pub dns_proxy: Option<SocketAddr>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -218,7 +193,7 @@ pub async fn copy_hbone(
     upgraded: &mut hyper::upgrade::Upgraded,
     stream: &mut TcpStream,
     metrics: impl AsRef<Metrics>,
-    transferred_bytes: traffic::BytesTransferred<'_>,
+    transferred_bytes: BytesTransferred<'_>,
 ) -> Result<(), Error> {
     use tokio::io::AsyncWriteExt;
     let (mut ri, mut wi) = tokio::io::split(upgraded);
@@ -412,7 +387,7 @@ pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
     metrics: impl AsRef<Metrics>,
-    transferred_bytes: traffic::BytesTransferred<'_>,
+    transferred_bytes: BytesTransferred<'_>,
 ) -> Result<(u64, u64), Error> {
     match socket::relay(downstream, upstream).await {
         Ok(transferred) => {

@@ -89,20 +89,18 @@ impl WorkloadManager {
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(cfg, cert_manager.clone()).await?;
 
+            let proxy_addresses = app.proxy_addresses.unwrap();
             let ta = TestApp {
                 // Not actually accessible
                 admin_address: helpers::with_ip(app.admin_address, ip),
-                stats_address: helpers::with_ip(app.stats_address, ip),
-                proxy_addresses: proxy::Addresses {
-                    outbound: helpers::with_ip(app.proxy_addresses.outbound, ip),
-                    inbound: helpers::with_ip(app.proxy_addresses.inbound, ip),
-                    socks5: helpers::with_ip(app.proxy_addresses.socks5, ip),
-                    dns_proxy: app
-                        .proxy_addresses
-                        .dns_proxy
-                        .map(|dns_proxy| helpers::with_ip(dns_proxy, ip)),
-                },
+                metrics_address: helpers::with_ip(app.metrics_address, ip),
                 readiness_address: helpers::with_ip(app.readiness_address, ip),
+                proxy_addresses: proxy::Addresses {
+                    outbound: helpers::with_ip(proxy_addresses.outbound, ip),
+                    inbound: helpers::with_ip(proxy_addresses.inbound, ip),
+                    socks5: helpers::with_ip(proxy_addresses.socks5, ip),
+                },
+                dns_proxy_address: Some(helpers::with_ip(app.dns_proxy_address.unwrap(), ip)),
                 cert_manager,
             };
             ta.ready().await;

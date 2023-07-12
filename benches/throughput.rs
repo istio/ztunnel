@@ -27,9 +27,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use ztunnel::metrics::traffic::ConnectionOpen;
-use ztunnel::metrics::{IncrementRecorder, Metrics};
-
+use ztunnel::metrics::IncrementRecorder;
 use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::tcp::Mode;
@@ -37,8 +35,7 @@ use ztunnel::test_helpers::TEST_WORKLOAD_HBONE;
 use ztunnel::test_helpers::TEST_WORKLOAD_SOURCE;
 use ztunnel::test_helpers::TEST_WORKLOAD_TCP;
 use ztunnel::test_helpers::{helpers, tcp};
-
-use ztunnel::{app, identity, test_helpers};
+use ztunnel::{app, identity, metrics, proxy, test_helpers};
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -354,12 +351,12 @@ pub fn rbac_connections(c: &mut Criterion) {
 
 pub fn metrics(c: &mut Criterion) {
     let mut registry = Registry::default();
-    let metrics = Metrics::from(&mut registry);
+    let metrics = proxy::Metrics::new(metrics::sub_registry(&mut registry));
 
     let mut c = c.benchmark_group("metrics");
     c.bench_function("write", |b| {
         b.iter(|| {
-            metrics.increment(&ConnectionOpen {
+            metrics.increment(&proxy::ConnectionOpen {
                 reporter: Default::default(),
                 source: Some(test_helpers::test_default_workload()),
                 derived_source: None,

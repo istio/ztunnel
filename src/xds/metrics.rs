@@ -19,8 +19,8 @@ use prometheus_client::registry::Registry;
 
 use crate::metrics::Recorder;
 
-pub(super) struct Metrics {
-    pub(super) connection_terminations: Family<ConnectionTermination, Counter>,
+pub struct Metrics {
+    pub connection_terminations: Family<ConnectionTermination, Counter>,
 }
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
@@ -51,10 +51,9 @@ impl Metrics {
     }
 }
 
-impl Recorder<ConnectionTerminationReason, u64> for super::Metrics {
+impl Recorder<ConnectionTerminationReason, u64> for Metrics {
     fn record(&self, reason: &ConnectionTerminationReason, count: u64) {
-        self.xds
-            .connection_terminations
+        self.connection_terminations
             .get_or_create(&ConnectionTermination { reason: *reason })
             .inc_by(count);
     }
