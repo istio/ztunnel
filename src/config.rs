@@ -34,6 +34,7 @@ const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
 const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
+const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
@@ -50,6 +51,7 @@ const DEFAULT_STATS_PORT: u16 = 15020;
 const DEFAULT_DNS_PORT: u16 = 15053;
 const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
+const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
@@ -123,6 +125,8 @@ pub struct Config {
     pub local_ip: Option<IpAddr>,
     /// The Cluster ID of the cluster that his ztunnel belongs to
     pub cluster_id: String,
+    /// The domain of the cluster that this ztunnel belongs to
+    pub cluster_domain: String,
 
     /// CA address to use. If fake_ca is set, this will be None.
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
@@ -230,6 +234,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     ))?;
 
     let cluster_id = parse_default(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?;
+    let cluster_domain = parse_default(CLUSTER_DOMAIN, DEFAULT_CLUSTER_DOMAIN.to_string())?;
 
     let fake_ca = parse_default(FAKE_CA, false)?;
     let ca_address = validate_uri(empty_to_none(if fake_ca {
@@ -306,6 +311,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         },
         local_ip: parse(INSTANCE_IP)?,
         cluster_id: cluster_id.clone(),
+        cluster_domain,
 
         xds_address,
         xds_root_cert,

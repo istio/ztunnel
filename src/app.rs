@@ -154,6 +154,7 @@ pub async fn build_with_cert(
     // Optionally create the DNS proxy.
     let dns_proxy_address = if config.dns_proxy {
         let dns_proxy = dns::Server::new(
+            config.cluster_domain.clone(),
             config.dns_proxy_addr,
             config.network,
             state.clone(),
