@@ -107,7 +107,7 @@ pub fn test_config() -> config::Config {
 pub const TEST_WORKLOAD_SOURCE: &str = "127.0.0.2";
 pub const TEST_WORKLOAD_HBONE: &str = "127.0.0.3";
 pub const TEST_WORKLOAD_TCP: &str = "127.0.0.4";
-pub const TEST_WORKLOAD_WAYPOINT: &str = "127.0.0.4";
+pub const TEST_WORKLOAD_WAYPOINT: &str = "127.0.0.5";
 pub const TEST_VIP: &str = "127.10.0.1";
 pub const TEST_SERVICE_NAMESPACE: &str = "default";
 pub const TEST_SERVICE_NAME: &str = "local-vip";
