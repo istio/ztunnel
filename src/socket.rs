@@ -152,7 +152,7 @@ mod linux {
     }
 }
 
-#[cfg(all(target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub async fn relay(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
