@@ -210,6 +210,8 @@ impl Dns {
         tokio::select! {
             res = accept => { res }
             _ = self.drain.signaled() => {
+                // info!("async dns draining");
+                // self.tasks.get_mut("foo").unwrap().task.abort();
                 info!("async dns drained");
             }
         }

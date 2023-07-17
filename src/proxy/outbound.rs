@@ -369,6 +369,9 @@ impl OutboundConnection {
             .state
             .fetch_upstream(&source_workload.network, target, self.pi.hbone_port)
             .await;
+        info!(
+            "upstream for {}:{} is {:?}",
+            source_workload.network, target, us);
         if us.is_none() {
             // For case no upstream found, passthrough it
             return Ok(Request {

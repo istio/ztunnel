@@ -352,9 +352,12 @@ impl Store {
                     service
                         .endpoints
                         .iter()
-                        .filter_map(|(addr, _)| {
+                        .filter_map(|(_, ep)| {
+                            let Some(addr) = ep.address.clone() else {
+                                return None
+                            };
                             if is_record_type(&addr.address, record_type) {
-                                Some(addr.address)
+                                Some(addr.address.clone())
                             } else {
                                 None
                             }

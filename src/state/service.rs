@@ -33,9 +33,9 @@ pub struct Service {
     pub vips: Vec<NetworkAddress>,
     pub ports: HashMap<u16, u16>,
 
-    /// Maps workload addresses to service [Endpoint]s.
+    /// Maps endpoint UIDs to service [Endpoint]s.
     #[serde(default)]
-    pub endpoints: HashMap<NetworkAddress, Endpoint>,
+    pub endpoints: HashMap<String, Endpoint>,
     #[serde(default)]
     pub subject_alt_names: Vec<String>,
 }
@@ -52,14 +52,24 @@ impl Service {
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
+    /// The workload UID for this endpoint.
+    pub workload_uid: String,
+
     /// The service for this endpoint.
     pub service: NamespacedHostname,
 
-    /// The workload address.
-    pub address: NetworkAddress,
+    /// The workload address, if any.
+    /// For example, a workload with async hostname will have no addresses.
+    /// If there is no address, users can look up the async hostname using the
+    /// workload UID.
+    pub address: Option<NetworkAddress>,
 
     /// The port mapping.
     pub port: HashMap<u16, u16>,
+}
+
+pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> String {
+    format!("{}:{}", workload_uid, address.map(|a| a.to_string()).unwrap_or_default())
 }
 
 impl TryFrom<&XdsService> for Service {
@@ -93,13 +103,13 @@ impl TryFrom<&XdsService> for Service {
 /// Data store for service information.
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ServiceStore {
-    /// Maintains a mapping of service key -> (workload IP -> workload endpoint)
+    /// Maintains a mapping of service key -> (endpoint UID -> workload endpoint)
     /// this is used to handle ordering issues if workloads are received before services.
-    staged_services: HashMap<NamespacedHostname, HashMap<NetworkAddress, Endpoint>>,
+    staged_services: HashMap<NamespacedHostname, HashMap<String, Endpoint>>,
 
-    /// Maintains a mapping of workload IP to service. This is used only to handle removal of
+    /// Maintains a mapping of workload UID to service. This is used only to handle removal of
     /// service endpoints when a workload is removed.
-    workload_to_services: HashMap<NetworkAddress, HashSet<NamespacedHostname>>,
+    workload_to_services: HashMap<String, HashSet<NamespacedHostname>>,
 
     /// Allows for lookup of services by network address, the service's xds secondary key.
     by_vip: HashMap<NetworkAddress, Arc<Service>>,
@@ -159,9 +169,10 @@ impl ServiceStore {
 
     /// Adds an endpoint for the service VIP.
     pub fn insert_endpoint(&mut self, ep: Endpoint) {
+        let ep_uid = endpoint_uid(&ep.workload_uid, ep.address.as_ref());
         if let Some(mut svc) = self.get_by_namespaced_host(&ep.service) {
             // Clone the service and add the endpoint.
-            svc.endpoints.insert(ep.address.clone(), ep);
+            svc.endpoints.insert(ep_uid, ep);
 
             // Update the service.
             self.insert(svc);
@@ -174,26 +185,26 @@ impl ServiceStore {
             self.staged_services
                 .entry(ep.service.clone())
                 .or_default()
-                .insert(ep.address.clone(), ep.clone());
+                .insert(ep_uid, ep.clone());
 
             // Insert a reverse-mapping from the workload address to the service.
             self.workload_to_services
-                .entry(ep.address.clone())
+                .entry(ep.workload_uid.clone())
                 .or_default()
                 .insert(ep.service.clone());
         }
     }
 
     /// Removes entries for the given endpoint address.
-    pub fn remove_endpoint(&mut self, addr: &NetworkAddress) {
+    pub fn remove_endpoint(&mut self, workload_uid: &str, endpoint_uid: &str) {
         let mut services_to_update = HashSet::new();
-        if let Some(prev_services) = self.workload_to_services.remove(addr) {
+        if let Some(prev_services) = self.workload_to_services.remove(workload_uid) {
             for svc in prev_services.iter() {
                 // Remove the endpoint from the staged services.
                 self.staged_services
                     .entry(svc.clone())
                     .or_default()
-                    .remove(addr);
+                    .remove(endpoint_uid);
                 if self.staged_services[svc].is_empty() {
                     self.staged_services.remove(svc);
                 }
@@ -205,7 +216,7 @@ impl ServiceStore {
         // Now remove the endpoint from all Services.
         for svc in &services_to_update {
             if let Some(mut svc) = self.get_by_namespaced_host(svc) {
-                svc.endpoints.remove(addr);
+                svc.endpoints.remove(endpoint_uid);
 
                 // Update the service.
                 self.insert(svc);
@@ -252,7 +263,7 @@ impl ServiceStore {
         // Map the workload address to the service.
         for (_, ep) in service.endpoints.iter() {
             self.workload_to_services
-                .entry(ep.address.clone())
+                .entry(ep.workload_uid.to_string())
                 .or_default()
                 .insert(namespaced_hostname.clone());
         }

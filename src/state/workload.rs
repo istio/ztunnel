@@ -196,25 +196,10 @@ impl Workload {
     pub fn choose_ip(&self) -> Result<IpAddr, Error> {
         // Randomly pick an IP
         // TODO: do this more efficiently, and not just randomly
-
-        let mut addresses = Vec::new();
-
-        if self.async_hostname.is_empty() {
-            addresses = self.workload_ips.clone();
-        } else {
-
-            // addresses = vec![ip];
-
-            // addresses = self.workload_ips.clone();
-        }
-
-        let Some(ip) = addresses.choose(&mut rand::thread_rng()) else {
+        let Some(ip) = self.workload_ips.choose(&mut rand::thread_rng()) else {
             debug!("workload {} has no suitable workload IPs for routing", self.name);
             return Err(Error::NoValidDestination(Box::new(self.clone())))
         };
-
-        debug!("workload {} chose IP {}", self.name, ip);
-
         Ok(*ip)
     }
 }
@@ -560,6 +545,11 @@ impl WorkloadStore {
     /// Finds the workload by address.
     pub fn find_address(&self, addr: &NetworkAddress) -> Option<Workload> {
         self.by_addr.get(addr).map(|wl| wl.deref().clone())
+    }
+
+    /// Finds the workload by uid.
+    pub fn find_uid(&self, uid: &str) -> Option<Workload> {
+        self.by_uid.get(uid).map(|wl| wl.deref().clone())
     }
 
     /// Returns all workloads that use async dataplane DNS resolution.

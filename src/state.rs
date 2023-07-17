@@ -164,17 +164,17 @@ impl ProxyState {
     ) -> Option<Upstream> {
         if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
-                debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
+                info!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
                 return None
             };
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
             let Some((_, ep)) = svc.endpoints.iter().choose(&mut rand::thread_rng()) else {
-                debug!("VIP {} has no healthy endpoints", addr);
+                info!("VIP {} has no healthy endpoints", addr);
                 return None
             };
-            let Some(wl) = self.workloads.find_address(&network_addr(&ep.address.network, ep.address.address)) else {
-                debug!("failed to fetch workload for {}", ep.address);
+            let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
+                info!("failed to fetch workload for {}", ep.workload_uid);
                 return None
             };
             // If endpoint overrides the target port, use that instead
@@ -184,7 +184,7 @@ impl ProxyState {
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
             };
-            return match set_gateway_address(&mut us, hbone_port) {
+            return match self.set_gateway_address(&mut us, hbone_port) {
                 Ok(_) => {
                     debug!("found upstream {} from VIP {}", us, addr.ip());
                     Some(us)
@@ -204,7 +204,7 @@ impl ProxyState {
                 port: addr.port(),
                 sans: Vec::new(),
             };
-            return match set_gateway_address(&mut us, hbone_port) {
+            return match self.set_gateway_address(&mut us, hbone_port) {
                 Ok(_) => {
                     debug!("found upstream {}", us);
                     Some(us)
@@ -215,8 +215,34 @@ impl ProxyState {
                 }
             };
         }
+        info!("no upstream found for {}", addr);
         None
     }
+
+    fn set_gateway_address(&self, us: &mut Upstream, hbone_port: u16) -> anyhow::Result<()> {
+
+        let ipsmap =  self.resolved_dns.get_dns(us.workload.clone().uid);
+        let workload_ip = match ipsmap {
+            Some(ips) => ips,
+            None => us.workload.choose_ip()?,
+        };
+
+        if us.workload.gateway_address.is_none() {
+            us.workload.gateway_address = Some(match us.workload.protocol {
+                Protocol::HBONE => {
+                    let ip = us
+                        .workload
+                        .waypoint_svc_ip_address()?
+                        .unwrap_or(workload_ip);
+                    SocketAddr::from((ip, hbone_port))
+                }
+                Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
+            });
+        }
+        Ok(())
+    }
+
+
 }
 
 /// Wrapper around [ProxyState] that provides additional methods for requesting information
@@ -313,6 +339,17 @@ impl DemandProxyState {
         self.state.read().unwrap().workloads.find_address(addr)
     }
 
+    // only support workload
+    pub async fn fetch_workload_by_uid(&self, uid: &str) -> Option<Workload> {
+        // Wait for it on-demand, *if* needed
+        debug!(%uid, "fetch workload");
+        if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
+            return Some(wl);
+        }
+        self.fetch_on_demand(uid.to_string()).await;
+        self.state.read().unwrap().workloads.find_uid(uid)
+    }
+
     pub async fn fetch_upstream(
         &self,
         network: &str,
@@ -398,22 +435,6 @@ impl DemandProxyState {
             debug!(%key, "on demand ready");
         }
     }
-}
-
-fn set_gateway_address(us: &mut Upstream, hbone_port: u16) -> anyhow::Result<()> {
-    if us.workload.gateway_address.is_none() {
-        us.workload.gateway_address = Some(match us.workload.protocol {
-            Protocol::HBONE => {
-                let ip = us
-                    .workload
-                    .waypoint_svc_ip_address()?
-                    .unwrap_or(choose_workload_ip(&us.workload)?);
-                SocketAddr::from((ip, hbone_port))
-            }
-            Protocol::TCP => SocketAddr::from((choose_workload_ip(&us.workload)?, us.port)),
-        });
-    }
-    Ok(())
 }
 
 // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.

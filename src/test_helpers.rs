@@ -108,7 +108,6 @@ pub fn test_config() -> config::Config {
 // Define some test workloads. Intentionally do not use 127.0.0.1 to avoid accidentally using a workload
 pub const TEST_WORKLOAD_SOURCE: &str = "127.0.0.2";
 pub const TEST_WORKLOAD_HBONE: &str = "127.0.0.3";
-// pub const TEST_WORKLOAD_HBONE: &str = "42.42.42.42";
 pub const TEST_WORKLOAD_TCP: &str = "127.0.0.4";
 pub const TEST_WORKLOAD_WAYPOINT: &str = "127.0.0.5";
 pub const TEST_VIP: &str = "127.10.0.1";
@@ -190,31 +189,14 @@ fn test_custom_workload(
     services_vec: Vec<&Service>,
     async_dns: bool,
 ) -> anyhow::Result<LocalWorkload> {
-
     let async_hostname = match async_dns {
-        true => format!("example.{}.nip.io.", TEST_WORKLOAD_HBONE),
-        // true => format!("example.{}.nip.io.", ip_str),
+        true => format!("example.{}.nip.io.", ip_str),
         false => "".to_string(),
     };
-
-    // TODO(kdorosh) needs to be empty and services need to allow lookups to these workloads :/
-    // let wips = match async_dns {
-    //     true => vec![],
-    //     false => vec![ip_str.parse()?],
-    // };
-
-    // let wip = match ip_str.ends_with("44") {
-    //     true => "42.42.42.44",
-    //     false => ip_str,
-    // };
-
-    // let mut hostname = "".to_string();
-    let mut wips = vec![ip_str.parse()?];
-
-    if async_dns {
-        wips = vec![TEST_WORKLOAD_HBONE.parse()?];
-    }
-
+    let wips = match async_dns {
+        true => vec![],
+        false => vec![ip_str.parse()?],
+    };
     let workload = Workload {
         workload_ips: wips,
         async_hostname: async_hostname,
@@ -230,12 +212,19 @@ fn test_custom_workload(
     for s in services_vec.iter() {
         let key = format!("{}/{}", s.namespace, s.hostname);
         services.insert(key, HashMap::from([(80u16, echo_port)]));
-        // services.insert(key, s.endpoints[NetworkAddress{}].clone());
     }
     Ok(LocalWorkload { workload, services })
 }
 
-fn test_custom_svc(name: &str, hostname: &str, vip: &str, echo_port: u16) -> anyhow::Result<Service> {
+fn test_custom_svc(name: &str, hostname: &str, vip: &str, workload_name: &str, endpoint: &str, echo_port: u16) -> anyhow::Result<Service> {
+    let addr = match endpoint.is_empty() {
+        // TODO(kdorosh) why is this flipped?
+        true => None,
+        false => Some(NetworkAddress {
+            network: "".to_string(),
+            address: endpoint.parse()?,
+        }),
+    };
     Ok(Service {
         name: name.to_string(),
         namespace: TEST_SERVICE_NAMESPACE.to_string(),
@@ -246,21 +235,14 @@ fn test_custom_svc(name: &str, hostname: &str, vip: &str, echo_port: u16) -> any
         }],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: HashMap::from([(
-            NetworkAddress {
-                network: "".to_string(),
-                // address: "42.42.42.42".parse()?,
-                address: TEST_WORKLOAD_HBONE.parse()?,
-            },
+            format!("cluster1//v1/Pod/default/{}", workload_name).to_string(),
             Endpoint {
+                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).to_string(),
                 service: NamespacedHostname {
                     namespace: TEST_SERVICE_NAMESPACE.to_string(),
                     hostname: hostname.to_string(),
                 },
-                address: NetworkAddress {
-                    network: "".to_string(),
-                    // address: "42.42.42.42".parse()?,
-                    address: TEST_WORKLOAD_HBONE.parse()?,
-                },
+                address: addr,
                 port: HashMap::from([(80u16, echo_port)]),
             },
         )]),
@@ -274,14 +256,13 @@ pub fn local_xds_config(
     policies: Vec<crate::rbac::Authorization>,
 ) -> anyhow::Result<Bytes> {
 
-    let default_svc = test_custom_svc(TEST_SERVICE_NAME, TEST_SERVICE_HOST, TEST_VIP,  echo_port)?;
-    let dns_svc = test_custom_svc(TEST_SERVICE_DNS_HBONE_NAME, TEST_SERVICE_DNS_HBONE_HOST, TEST_VIP_DNS_HBONE,  echo_port)?;
+    let default_svc = test_custom_svc(TEST_SERVICE_NAME, TEST_SERVICE_HOST, TEST_VIP,  "local-hbone", "", echo_port)?;
+    let dns_svc = test_custom_svc(TEST_SERVICE_DNS_HBONE_NAME, TEST_SERVICE_DNS_HBONE_HOST, TEST_VIP_DNS_HBONE,  "local-hbone-dns", TEST_WORKLOAD_HBONE, echo_port)?;
 
     let mut res: Vec<LocalWorkload> = vec![
         test_custom_workload(TEST_WORKLOAD_SOURCE, "local-source", TCP, echo_port, vec![&default_svc], false)?,
-        // test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone", HBONE, echo_port, vec![&default_svc], false)?,
-        test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone-to-42.42.42.42", HBONE, echo_port, vec![&dns_svc], true)?,
-        test_custom_workload("42.42.42.43", "local-hbone-to-42.42.42.43", HBONE, echo_port, vec![], false)?,
+        test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone", HBONE, echo_port, vec![&default_svc], false)?,
+        test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone-dns", HBONE, echo_port, vec![&dns_svc], true)?,
         test_custom_workload(TEST_WORKLOAD_TCP, "local-tcp", TCP, echo_port, vec![], false)?,
     ];
     if let Some(waypoint_ip) = waypoint_ip {
