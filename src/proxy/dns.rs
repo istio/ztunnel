@@ -56,6 +56,8 @@ pub(super) struct PollingDns {
     tasks: HashMap<String, TaskContext>,
 }
 
+// TODO(kdorosh) DRY the copied code following here and generally clean up any latest placeholder test values
+
 /// Constructs a new [Message] of type [MessageType::Query];
 pub fn new_message(name: Name, rr_type: RecordType) -> Message {
     let mut msg = Message::new();
@@ -97,7 +99,7 @@ impl PollingDns {
     pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<PollingDns, Error> {
         info!(
             component="dns",
-            "dns async client started",
+            "dns async polling client started",
         );
         Ok(PollingDns {
             pi,
