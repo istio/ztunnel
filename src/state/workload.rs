@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use crate::identity::Identity;
-use crate::proxy::Error;
 use crate::state::workload::WorkloadError::EnumParse;
 use crate::xds;
 use crate::xds::istio::workload::{Port, PortList};
 use bytes::Bytes;
-use rand::seq::SliceRandom;
 use serde::de::Visitor;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -33,7 +31,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
-use tracing::{debug, error, trace};
+use tracing::{error, trace};
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
 
@@ -188,18 +186,6 @@ impl Workload {
         }
         Ok(None)
     }
-
-    // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-    // if/when we support that, this function may need to move to get access to the necessary metadata.
-    pub fn choose_ip(&self) -> Result<IpAddr, Error> {
-        // Randomly pick an IP
-        // TODO: do this more efficiently, and not just randomly
-        let Some(ip) = self.workload_ips.choose(&mut rand::thread_rng()) else {
-            debug!("workload {} has no suitable workload IPs for routing", self.name);
-            return Err(Error::NoValidDestination(Box::new(self.clone())))
-        };
-        Ok(*ip)
-    }
 }
 
 impl fmt::Display for Workload {
@@ -290,6 +276,10 @@ impl TryFrom<&XdsWorkload> for Workload {
     type Error = WorkloadError;
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource: XdsWorkload = resource.to_owned();
+
+        if !resource.addresses.is_empty() && !resource.async_hostname.is_empty() {
+            return Err(WorkloadError::InvalidWorkload);
+        }
 
         let wp = match &resource.waypoint {
             Some(w) => Some(GatewayAddress::try_from(w)?),
@@ -585,6 +575,8 @@ pub enum WorkloadError {
     EnumParse(String),
     #[error("nonempty gateway address is missing address")]
     MissingGatewayAddress,
+    #[error("invalid workload; cannot provide ip addresses and an async hostname")]
+    InvalidWorkload,
 }
 
 #[cfg(test)]

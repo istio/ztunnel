@@ -109,12 +109,12 @@ pub const TEST_WORKLOAD_HBONE: &str = "127.0.0.3";
 pub const TEST_WORKLOAD_TCP: &str = "127.0.0.4";
 pub const TEST_WORKLOAD_WAYPOINT: &str = "127.0.0.5";
 pub const TEST_VIP: &str = "127.10.0.1";
-pub const TEST_VIP_DNS_HBONE: &str = "127.10.0.2";
+pub const TEST_VIP_DNS: &str = "127.10.0.2";
 pub const TEST_SERVICE_NAMESPACE: &str = "default";
 pub const TEST_SERVICE_NAME: &str = "local-vip";
 pub const TEST_SERVICE_HOST: &str = "local-vip.default.svc.cluster.local";
-pub const TEST_SERVICE_DNS_HBONE_NAME: &str = "local-vip-async-dns-hbone";
-pub const TEST_SERVICE_DNS_HBONE_HOST: &str = "local-vip-async-dns-hbone.default.svc.cluster.local";
+pub const TEST_SERVICE_DNS_HBONE_NAME: &str = "local-vip-async-dns";
+pub const TEST_SERVICE_DNS_HBONE_HOST: &str = "local-vip-async-dns.default.svc.cluster.local";
 
 pub fn localhost_error_message() -> String {
     let addrs = &[
@@ -187,7 +187,7 @@ fn test_custom_workload(
     services_vec: Vec<&Service>,
     async_dns: bool,
 ) -> anyhow::Result<LocalWorkload> {
-    let async_hostname = match async_dns {
+    let async_host = match async_dns {
         true => format!("example.{}.nip.io.", ip_str),
         false => "".to_string(),
     };
@@ -197,7 +197,7 @@ fn test_custom_workload(
     };
     let workload = Workload {
         workload_ips: wips,
-        async_hostname: async_hostname,
+        async_hostname: async_host,
         protocol,
         uid: format!("cluster1//v1/Pod/default/{}", name),
         name: name.to_string(),
@@ -216,7 +216,7 @@ fn test_custom_workload(
 
 fn test_custom_svc(name: &str, hostname: &str, vip: &str, workload_name: &str, endpoint: &str, echo_port: u16) -> anyhow::Result<Service> {
     let addr = match endpoint.is_empty() {
-        // TODO(kdorosh) why is this flipped?
+        // TODO(kdorosh) why is this flipped in printed output?
         true => None,
         false => Some(NetworkAddress {
             network: "".to_string(),
@@ -233,9 +233,9 @@ fn test_custom_svc(name: &str, hostname: &str, vip: &str, workload_name: &str, e
         }],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: HashMap::from([(
-            format!("cluster1//v1/Pod/default/{}", workload_name).to_string(),
+            format!("cluster1//v1/Pod/default/{}", workload_name),
             Endpoint {
-                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).to_string(),
+                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name),
                 service: NamespacedHostname {
                     namespace: TEST_SERVICE_NAMESPACE.to_string(),
                     hostname: hostname.to_string(),
@@ -255,12 +255,13 @@ pub fn local_xds_config(
 ) -> anyhow::Result<Bytes> {
 
     let default_svc = test_custom_svc(TEST_SERVICE_NAME, TEST_SERVICE_HOST, TEST_VIP,  "local-hbone", "", echo_port)?;
-    let dns_svc = test_custom_svc(TEST_SERVICE_DNS_HBONE_NAME, TEST_SERVICE_DNS_HBONE_HOST, TEST_VIP_DNS_HBONE,  "local-hbone-dns", TEST_WORKLOAD_HBONE, echo_port)?;
+    let dns_svc = test_custom_svc(TEST_SERVICE_DNS_HBONE_NAME, TEST_SERVICE_DNS_HBONE_HOST, TEST_VIP_DNS,  "local-tcp-via-dns", TEST_WORKLOAD_TCP, echo_port)?;
 
     let mut res: Vec<LocalWorkload> = vec![
         test_custom_workload(TEST_WORKLOAD_SOURCE, "local-source", TCP, echo_port, vec![&default_svc], false)?,
         test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone", HBONE, echo_port, vec![&default_svc], false)?,
-        test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone-dns", HBONE, echo_port, vec![&dns_svc], true)?,
+        // TODO: should protocol be decided by workload lookup again after DNS resolution?
+        test_custom_workload(TEST_WORKLOAD_TCP, "local-tcp-via-dns", TCP, echo_port, vec![&dns_svc], true)?,
         test_custom_workload(TEST_WORKLOAD_TCP, "local-tcp", TCP, echo_port, vec![], false)?,
     ];
     if let Some(waypoint_ip) = waypoint_ip {

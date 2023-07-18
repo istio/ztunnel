@@ -175,6 +175,10 @@ async fn test_quit_lifecycle() {
 }
 
 async fn run_request_test(target: &str, node: &str) {
+    run_request_test_with_delay(target, node, Duration::from_secs(0)).await;
+}
+
+async fn run_request_test_with_delay(target: &str, node: &str, delay: Duration) {
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
@@ -186,7 +190,7 @@ async fn run_request_test(target: &str, node: &str) {
     testapp::with_app(cfg, |app| async move {
         let dst = SocketAddr::from_str(target)
             .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
-        let mut stream = app.socks5_connect(dst).await;
+        let mut stream = app.socks5_connect_with_delay(dst, delay).await;
         read_write_stream(&mut stream).await;
     })
     .await;
@@ -209,9 +213,9 @@ async fn test_vip_request() {
 
 #[tokio::test]
 async fn test_dns_vip_request() {
-    run_request_test(&format!("{TEST_VIP_DNS_HBONE}:80"), "").await;
+    // we need delay to give async dns resolution time to populate the resolved DNS cache
+    run_request_test_with_delay(&format!("{TEST_VIP_DNS}:80"), "", Duration::from_millis(500)).await;
 }
-
 
 #[tokio::test]
 async fn test_hbone_request_local() {

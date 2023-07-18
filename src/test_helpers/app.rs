@@ -151,6 +151,14 @@ impl TestApp {
     }
 
     pub async fn socks5_connect(&self, addr: SocketAddr) -> TcpStream {
+        self.socks5_connect_with_delay(addr, Duration::from_secs(0)).await
+    }
+
+    pub async fn socks5_connect_with_delay(&self, addr: SocketAddr, delay: Duration) -> TcpStream {
+        // delay making the request after application startup.
+        if delay > Duration::from_secs(0) {
+            tokio::time::sleep(delay).await;
+        }
         // Always use IPv4 address. In theory, we can resolve `localhost` to pick to support any machine
         // However, we need to make sure the WorkloadStore knows about both families then.
         let socks_addr = with_ip(

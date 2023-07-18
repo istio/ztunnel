@@ -131,9 +131,6 @@ impl OutboundConnection {
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
     ) -> Result<(), Error> {
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip
         {
@@ -369,9 +366,6 @@ impl OutboundConnection {
             .state
             .fetch_upstream(&source_workload.network, target, self.pi.hbone_port)
             .await;
-        info!(
-            "upstream for {}:{} is {:?}",
-            source_workload.network, target, us);
         if us.is_none() {
             // For case no upstream found, passthrough it
             return Ok(Request {
@@ -393,8 +387,9 @@ impl OutboundConnection {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
+                let waypoint_ip = self.pi.state.state.read().unwrap().load_balance(&waypoint_workload)?;
                 let wp_socket_addr =
-                    SocketAddr::new(waypoint_workload.choose_ip()?, waypoint_us.port);
+                    SocketAddr::new(waypoint_ip, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
@@ -417,13 +412,7 @@ impl OutboundConnection {
             return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
         }
 
-        // TODO(kdorosh) is it legal for waypoint to have hostname too?
-        let ipsmap =  self.pi.state.state.read().unwrap().resolved_dns.get_dns(us.workload.clone().uid);
-        let workload_ip = match ipsmap {
-            Some(ips) => ips,
-            None => us.workload.choose_ip()?,
-        };
-
+        let workload_ip = self.pi.state.state.read().unwrap().load_balance(&us.workload)?;
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)

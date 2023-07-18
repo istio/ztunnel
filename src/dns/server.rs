@@ -366,7 +366,7 @@ impl Store {
                                 return None
                             };
                             if is_record_type(&addr.address, record_type) {
-                                Some(addr.address.clone())
+                                Some(addr.address)
                             } else {
                                 None
                             }
@@ -672,9 +672,8 @@ impl SystemForwarder {
         let search_domains = cfg.search().to_vec();
         let mut name_servers = cfg.name_servers().to_vec();
 
-        warn!("domain: {:?}", domain);
-        warn!("search: {:?}", search_domains);
-        warn!("name_servers: {:?}", name_servers);
+
+        // TODO(kdorosh): don't hardcode nip.io, allow test to pass in custom name_server to override system default
 
         // nslookup nip.io
         name_servers[0].socket_addr = SocketAddr::new(
@@ -685,9 +684,6 @@ impl SystemForwarder {
             IpAddr::V4(Ipv4Addr::new(116,203,255,68)),
             53
         );
-
-        warn!("name_servers: {:?}", name_servers);
-
 
         // Remove the search list before passing to the resolver. The local resolver that
         // sends the original request will already have search domains applied. We want
@@ -1535,6 +1531,10 @@ mod tests {
     impl Forwarder for FakeForwarder {
         fn search_domains(&self, _: &Workload) -> Vec<Name> {
             self.search_domains.clone()
+        }
+
+        fn resolver(&self) -> Arc<dyn Resolver> {
+            panic!("not implemented");
         }
 
         async fn forward(

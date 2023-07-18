@@ -31,7 +31,7 @@ use crate::identity::SecretManager;
 use crate::metrics::Recorder;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
-use crate::proxy::dns::Dns;
+use crate::proxy::dns::PollingDns;
 use crate::proxy::socks5::Socks5;
 use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
@@ -53,7 +53,7 @@ pub struct Proxy {
     inbound: Inbound,
     inbound_passthrough: InboundPassthrough,
     outbound: Outbound,
-    dns: Dns,
+    polling_dns: PollingDns,
     socks5: Socks5,
 }
 
@@ -90,14 +90,14 @@ impl Proxy {
 
         let inbound_passthrough = InboundPassthrough::new(pi.clone()).await?;
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
-        let dns = Dns::new(pi.clone(), drain.clone()).await?;
+        let polling_dns = PollingDns::new(pi.clone(), drain.clone()).await?;
         let socks5 = Socks5::new(pi.clone(), drain).await?;
 
         Ok(Proxy {
             inbound,
             inbound_passthrough,
             outbound,
-            dns,
+            polling_dns,
             socks5,
         })
     }
@@ -107,7 +107,7 @@ impl Proxy {
             tokio::spawn(self.inbound_passthrough.run().in_current_span()),
             tokio::spawn(self.inbound.run().in_current_span()),
             tokio::spawn(self.outbound.run().in_current_span()),
-            tokio::spawn(self.dns.run().in_current_span()),
+            tokio::spawn(self.polling_dns.run().in_current_span()),
             tokio::spawn(self.socks5.run().in_current_span()),
         ];
 
@@ -181,6 +181,12 @@ pub enum Error {
 
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
+
+    #[error("no ip addresses were pre-resolved aynchronously for workload: {0}")]
+    NoResolvedAddresses(String),
+
+    #[error("ip addresses were pre-resolved aynchronously for workload, but valid dns response had no A/AAAA records: {0}")]
+    EmptyResolvedAddresses(String),
 
     #[error("attempted recursive call to ourselves")]
     SelfCall,

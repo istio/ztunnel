@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use crate::identity::SecretManager;
-use crate::proxy::Error;
 use crate::state::policy::PolicyStore;
 use crate::state::service::ServiceStore;
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
+use crate::proxy::Error;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
@@ -30,6 +30,7 @@ use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, trace};
 
 pub mod policy;
@@ -76,43 +77,33 @@ pub struct ProxyState {
     pub resolved_dns: ResolvedDnsStore,
 }
 
-use std::collections::HashMap;
-use std::collections::HashSet;
-use tracing::{info};
-
-
-/// A WorkloadStore encapsulates all information about workloads in the mesh
+/// A ResolvedDnsStore encapsulates all per-workload resolved DNS information for workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ResolvedDnsStore {
     // workload UID to resolved IP addresses
-    by_hostname: HashMap<String, HashSet<IpAddr>>,
+    by_workload_uid: HashMap<String, HashSet<IpAddr>>,
 }
 
 impl ResolvedDnsStore {
-    pub fn get_dns(&self, hostname: String) -> Option<IpAddr> {
-        info!("get dns, by_hostname len: {}", self.by_hostname.len());
-
-        // TODO(kdorohs) add support for different dns logical vs strict LB
-
-        let Some(ipset) = self.by_hostname.get(&hostname) else {
-            // todo
-            return None;
+    pub fn load_balance_for_workload(&self, workload_uid: String) -> Result<IpAddr, Error> {
+        debug!("load_balance_for_workload({}) by_workload_uid len: {}", &workload_uid, self.by_workload_uid.len());
+        // TODO: add support for different async dns modes: e.g. logical DNS vs strict DNS.
+        // this is effectively envoy strict DNS; returning a pre-resolved IP address at random.
+        let Some(ipset) = self.by_workload_uid.get(&workload_uid) else {
+            return Err(Error::NoResolvedAddresses(workload_uid));
         };
-
-        let ips_vec = ipset.into_iter().collect::<Vec<_>>();
-
+        let ips_vec = ipset.iter().collect::<Vec<_>>();
         let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
-            // todo
-            return None;
+            return Err(Error::EmptyResolvedAddresses(workload_uid));
         };
-
-        return Some(**ip);
+        Ok(**ip)
     }
 
-    pub fn set_dns(&mut self, uid: String, ips : Vec<Ipv4Addr>) {
+    // TODO: ipv6 support
+    pub fn set_ips_for_workload(&mut self, workload_uid: String, ips: Vec<Ipv4Addr>) {
         let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
-        self.by_hostname.insert(uid.clone(), set);
-        info!("set dns, by_hostname len: {}", self.by_hostname.len());
+        self.by_workload_uid.insert(workload_uid.to_owned(), set);
+        trace!("set_ips_for_workload({}), by_workload_uid len: {}", workload_uid, self.by_workload_uid.len());
     }
 }
 
@@ -163,17 +154,17 @@ impl ProxyState {
     ) -> Option<Upstream> {
         if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
-                info!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
+                debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
                 return None
             };
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
             let Some((_, ep)) = svc.endpoints.iter().choose(&mut rand::thread_rng()) else {
-                info!("VIP {} has no healthy endpoints", addr);
+                debug!("VIP {} has no healthy endpoints", addr);
                 return None
             };
             let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
-                info!("failed to fetch workload for {}", ep.workload_uid);
+                debug!("failed to fetch workload for {}", ep.workload_uid);
                 return None
             };
             // If endpoint overrides the target port, use that instead
@@ -214,18 +205,11 @@ impl ProxyState {
                 }
             };
         }
-        info!("no upstream found for {}", addr);
         None
     }
 
     fn set_gateway_address(&self, us: &mut Upstream, hbone_port: u16) -> anyhow::Result<()> {
-
-        let ipsmap =  self.resolved_dns.get_dns(us.workload.clone().uid);
-        let workload_ip = match ipsmap {
-            Some(ips) => ips,
-            None => us.workload.choose_ip()?,
-        };
-
+        let workload_ip = self.load_balance(&us.workload)?;
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
                 Protocol::HBONE => {
@@ -241,7 +225,21 @@ impl ProxyState {
         Ok(())
     }
 
-
+    pub fn load_balance(&self, workload: &Workload) -> Result<IpAddr, Error> {
+        if !workload.async_hostname.is_empty() {
+            let ip = self.resolved_dns.load_balance_for_workload(workload.clone().uid)?;
+            return Ok(ip);
+        }
+        // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
+        // if/when we support that, this function may need to move to get access to the necessary metadata.
+        // Randomly pick an IP
+        // TODO: do this more efficiently, and not just randomly
+        let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
+            debug!("workload {} has no suitable workload IPs for routing", workload.name);
+            return Err(Error::NoValidDestination(Box::new(workload.clone())))
+        };
+        Ok(*ip)
+    }
 }
 
 /// Wrapper around [ProxyState] that provides additional methods for requesting information
@@ -434,18 +432,6 @@ impl DemandProxyState {
             debug!(%key, "on demand ready");
         }
     }
-}
-
-// TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-// if/when we support that, this function may need to move to get access to the necessary metadata.
-fn choose_workload_ip(workload: &Workload) -> Result<IpAddr, Error> {
-    // Randomly pick an IP
-    // TODO: do this more efficiently, and not just randomly
-    let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
-        debug!("workload {} has no suitable workload IPs for routing", workload.name);
-        return Err(Error::NoValidDestination(Box::new(workload.to_owned())))
-    };
-    Ok(*ip)
 }
 
 #[derive(serde::Serialize)]

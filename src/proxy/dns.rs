@@ -12,80 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
-// use std::time::Instant;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::net::SocketAddr;
+use std::time::Instant;
+use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, HashSet};
+
 use crate::state::ProxyState;
 
-use bytes::Bytes;
 use drain::Watch;
-use futures::stream::StreamExt;
-use http_body_util::Empty;
-use hyper::body::Incoming;
-use hyper::service::service_fn;
-use hyper::{Method, Response, StatusCode};
-// use hyper::{Method, Request, Response, StatusCode};
 use itertools::Itertools;
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
+use tracing::{info, trace, warn};
 
 use super::Error;
-use crate::baggage::parse_baggage_header;
-use crate::config::Config;
-use crate::identity::SecretManager;
-use crate::metrics::Recorder;
-use crate::proxy;
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
-use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
-use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::rbac::Connection;
-use crate::socket::to_canonical;
-use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
+use crate::proxy::ProxyInputs;
+use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
-use crate::tls::TlsError;
 
-use trust_dns_resolver::Resolver;
-use trust_dns_resolver::config::*;
 use crate::dns::SystemForwarder;
 use crate::dns::Forwarder;
-// use crate::test_helpers::dns::{a_request, n, socket_addr, system_forwarder};
-// use trust_dns_server::server::{Protocol};
-use std::collections::HashMap;
-use tokio::task::JoinHandle;
-use std::collections::HashSet;
 
-use trust_dns_client::client::{AsyncClient, ClientHandle};
-use trust_dns_client::error::ClientError;
-use trust_dns_proto::error::{ProtoError, ProtoErrorKind};
-use trust_dns_proto::iocompat::AsyncIoTokioAsStd;
-use trust_dns_proto::op::{Edns, Message, MessageType, OpCode, Query};
-use trust_dns_proto::rr::{DNSClass, Name, RData, Record, RecordType};
+use tokio::task::JoinHandle;
+
+use trust_dns_proto::op::{Message, MessageType, Query};
+use trust_dns_proto::rr::{Name, RecordType};
 use trust_dns_proto::serialize::binary::BinDecodable;
-use trust_dns_proto::tcp::TcpClientStream;
-use trust_dns_proto::udp::UdpClientStream;
-use trust_dns_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
-use trust_dns_proto::DnsHandle;
 use trust_dns_server::authority::MessageRequest;
 use trust_dns_server::server::{Protocol, Request};
-use std::time::{Duration, Instant};
 
 struct TaskContext {
     task: tokio::task::JoinHandle<()>,
     // monotonic task start time
     start: Instant,
     finished: bool,
-    // time started
-    // dns cache ttl?
+    // TODO: honor dns cache ttl?
 }
 
-pub(super) struct Dns {
-    cfg: Config,
+// PollingDns roughly maps to STRICT/LOGICAL DNS in envoy to allow ambient support for workload entry
+// hostnames that are resolved using async polling from the dataplane.
+// This can be important in niche cases, like geographic dns resolution, as documented in
+// https://github.com/istio/istio/blob/7bf52db38c91c89a4d56d6a94f402fd9ddaf6465/pilot/pkg/serviceregistry/kube/conversion.go#L151-L155
+pub(super) struct PollingDns {
     state: DemandProxyState,
     drain: Watch,
-    // metrics: Arc<Metrics>,
-
     // workload UID to task
     tasks: HashMap<String, TaskContext>,
 }
@@ -127,54 +95,46 @@ pub fn socket_addr<S: AsRef<str>>(socket_addr: S) -> SocketAddr {
     socket_addr.as_ref().parse().unwrap()
 }
 
-impl Dns {
-    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Dns, Error> {
+impl PollingDns {
+    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<PollingDns, Error> {
         info!(
             component="dns",
             "dns async client started",
         );
-        Ok(Dns {
-            cfg: pi.cfg,
+        Ok(PollingDns {
             state: pi.state,
-            // metrics: pi.metrics,
             drain,
             tasks: HashMap::new(),
         })
     }
 
     fn get_handle(state: Arc<RwLock<ProxyState>>, dns_workload: Workload) -> JoinHandle<()> {
-        return tokio::spawn(async move {
+        tokio::spawn(async move {
+            let hostname = dns_workload.async_hostname.clone();
+            trace!("dns workload async task started for {:?}", &hostname);
 
-            let hn = dns_workload.async_hostname.clone();
-
-            info!("dns workload async task started for {:?}", &hn);
-
+            // TODO(kdorosh): don't make a new forwarder for every request
             let fw = SystemForwarder::new().unwrap();
             let r = fw.resolver();
+
             // Lookup a host.
             let req = a_request(
-                n(&hn),
-                socket_addr("1.1.1.1:80"),
+                n(&hostname),
+                socket_addr("1.1.1.1:80"), // TODO(kdorosh): don't hardcode this
                 Protocol::Udp,
             );
-            // let r = forwarder.resolver();
             let resp = r.lookup(&req).await.unwrap();
-            info!("dns workload resp: {:?}", resp);
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            info!("dns workload async task done for {}", hn);
+            trace!("dns async response for workload {} is: {:?}", &dns_workload.uid, resp);
 
             let ips = resp.record_iter().filter_map(|record| {
                 if record.rr_type().is_ip_addr() {
                     // TODO: handle ipv6
-                    let a = record.data().unwrap().as_a();
-                    return Some(a.unwrap().clone());
+                    return record.data().unwrap().as_a().copied();
                 }
                 None
             }).collect_vec();
-            state.write().unwrap().resolved_dns.set_dns(dns_workload.uid, ips);
-
-        });
+            state.write().unwrap().resolved_dns.set_ips_for_workload(dns_workload.uid, ips);
+        })
     }
 
     pub(super) async fn run(mut self) {
@@ -188,7 +148,7 @@ impl Dns {
                 let mut workload_uid_to_remove_set: HashSet<String> = HashSet::new();
                 for (workload_uid, task) in self.tasks.iter() {
                     if !current_workload_uid_set.contains(workload_uid) {
-                        info!("dns workload async task no longer needed for {}; aborting", workload_uid);
+                        trace!("dns workload async task no longer needed for {}; aborting", workload_uid);
                         task.task.abort();
                         workload_uid_to_remove_set.insert(workload_uid.clone());
                     }
@@ -209,32 +169,30 @@ impl Dns {
                                 finished: false,
                             };
                             self.tasks.insert(dns_workload.uid.clone(), task);
-                            info!("dns workload async task queued for {:?}. curr tasks {}", dns_workload.async_hostname, self.tasks.len());
+                            trace!("dns workload async task queued for {:?}. curr tasks {}", dns_workload.async_hostname, self.tasks.len());
                         }
                         Some(t) => {
                             if t.task.is_finished() {
                                 if !t.finished {
-                                    info!("dns workload async task finished {:?}", t.task);
+                                    trace!("dns workload async task finished {:?}", t.task);
                                     t.finished = true;
                                 }
-                                if t.finished && Instant::now().duration_since(t.start).as_millis() > 100 {
-                                    info!("dns workload async task finished and queued for re-polling {:?}", t.task);
+                                if t.finished && Instant::now().duration_since(t.start).as_secs() > 5 { // TODO: make this configurable
+                                    trace!("dns workload async task finished and queued for re-polling {:?}", t.task);
                                     t.task = Self::get_handle(self.state.state.clone(), dns_workload.clone());
                                     t.start = Instant::now();
                                     t.finished = false;
                                 }
 
                                 if !t.finished && Instant::now().duration_since(t.start).as_secs() > 10 {
-                                    info!("dns workload async task still running after 10s; killing task and re-polling {:?}", t.task);
+                                    warn!("dns workload async task still running after 10s; killing task and re-polling {:?}", t.task);
                                     t.task.abort();
 
                                     t.task = Self::get_handle(self.state.state.clone(), dns_workload.clone());
                                     t.start = Instant::now();
                                 }
-
-                                info!("dns workload async task queued for {:?}", dns_workload.async_hostname);
+                                trace!("dns workload async task queued for {:?}", dns_workload.async_hostname);
                             }
-                            trace!("dns workload async task already exists {:?}", t.task);
                         }
                     }
                 }
@@ -246,7 +204,7 @@ impl Dns {
         tokio::select! {
             res = accept => { res }
             _ = self.drain.signaled() => {
-                info!("async dns drained");
+                info!("async dns client drained");
             }
         }
     }

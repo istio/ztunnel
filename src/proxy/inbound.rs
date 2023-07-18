@@ -474,6 +474,7 @@ impl crate::tls::CertProvider for InboundCertProvider {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::state::service::endpoint_uid;
     use crate::state::workload::NamespacedHostname;
     use crate::{
         identity::Identity,
@@ -552,6 +553,7 @@ mod test {
             canonical_name: "app".to_string(),
             canonical_revision: "".to_string(),
             hostname: "".to_string(),
+            async_hostname: "".to_string(),
             node: "".to_string(),
             status: Default::default(),
             cluster_id: "Kubernetes".to_string(),
@@ -579,6 +581,7 @@ mod test {
             canonical_name: "".to_string(),
             canonical_revision: "".to_string(),
             hostname: "".to_string(),
+            async_hostname: "".to_string(),
             node: "".to_string(),
             status: Default::default(),
             cluster_id: "Kubernetes".to_string(),
@@ -597,20 +600,19 @@ mod test {
         let mut ports = HashMap::new();
         ports.insert(8080, 80);
         let mut endpoints = HashMap::new();
+        let addr = Some(NetworkAddress {
+            network: "".to_string(),
+            address: IpAddr::V4(mock_default_gateway_ipaddr()),
+        });
         endpoints.insert(
-            NetworkAddress {
-                network: "".to_string(),
-                address: IpAddr::V4(mock_default_gateway_ipaddr()),
-            },
+            endpoint_uid(&mock_default_gateway_workload().uid, addr.as_ref()),
             Endpoint {
+                workload_uid: "".to_string(),
                 service: NamespacedHostname {
                     namespace: "gatewayns".to_string(),
                     hostname: "gateway".to_string(),
                 },
-                address: NetworkAddress {
-                    network: "".to_string(),
-                    address: IpAddr::V4(mock_default_gateway_ipaddr()),
-                },
+                address: addr,
                 port: ports.clone(),
             },
         );
