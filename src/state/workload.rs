@@ -36,8 +36,6 @@ use thiserror::Error;
 use tracing::{debug, error, trace};
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
-use trust_dns_resolver::Resolver;
-use trust_dns_resolver::config::*;
 
 #[derive(
     Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
@@ -511,6 +509,9 @@ pub struct WorkloadStore {
     by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
     by_uid: HashMap<String, Arc<Workload>>,
+    /// byHostname maps workload hostname to workloads.
+    /// these hostnames are generally per-pod statefulset hostnames.
+    by_hostname: HashMap<String, Arc<Workload>>,
 }
 
 impl WorkloadStore {
@@ -522,6 +523,9 @@ impl WorkloadStore {
         for ip in &w.workload_ips {
             self.by_addr
                 .insert(network_addr(&w.network, *ip), w.clone());
+        }
+        if !w.hostname.is_empty() {
+            self.by_hostname.insert(w.hostname.clone(), w.clone());
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
         Ok(())
@@ -537,6 +541,7 @@ impl WorkloadStore {
                 for wip in prev.workload_ips.iter() {
                     self.by_addr.remove(&network_addr(&prev.network, *wip));
                 }
+                self.by_hostname.remove(prev.hostname.as_str());
                 Some(prev.deref().clone())
             }
         }
@@ -545,6 +550,13 @@ impl WorkloadStore {
     /// Finds the workload by address.
     pub fn find_address(&self, addr: &NetworkAddress) -> Option<Workload> {
         self.by_addr.get(addr).map(|wl| wl.deref().clone())
+    }
+
+    /// Finds the workload by hostname.
+    pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Workload> {
+        self.by_hostname
+            .get(hostname.as_ref())
+            .map(|wl| wl.deref().clone())
     }
 
     /// Finds the workload by uid.

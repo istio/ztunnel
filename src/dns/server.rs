@@ -320,6 +320,15 @@ impl Store {
                         name: search_name,
                         alias,
                     });
+                } else {
+                    // Didn't find a service, try a workload. This hostname is generally a statefulset per-pod hostname
+                    if let Some(wl) = state.workloads.find_hostname(&search_name_str) {
+                        return Some(ServerMatch {
+                            server: Address::Workload(Box::new(wl)),
+                            name: search_name,
+                            alias,
+                        });
+                    }
                 }
             }
         }

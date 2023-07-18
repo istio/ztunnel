@@ -38,8 +38,6 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tracing::trace;
 
-use self::dns::ip;
-
 pub mod app;
 pub mod ca;
 pub mod dns;

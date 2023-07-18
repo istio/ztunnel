@@ -145,13 +145,12 @@ impl ProxyState {
         // Hostnames for services are more common, so lookup service first and fallback
         // to workload.
         match self.services.get_by_namespaced_host(name) {
-            // None => {
-            //     // Workload hostnames are globally unique, so ignore the namespace.
-            //     self.workloads
-            //         .find_hostname(&name.hostname)
-            //         .map(|wl| Address::Workload(Box::new(wl)))
-            // }
-            None => None,
+            None => {
+                // Workload hostnames (generally per-pod statefulset hostnames) are globally unique, so ignore the namespace.
+                self.workloads
+                    .find_hostname(&name.hostname)
+                    .map(|wl| Address::Workload(Box::new(wl)))
+            }
             Some(svc) => Some(Address::Service(Box::new(svc))),
         }
     }
