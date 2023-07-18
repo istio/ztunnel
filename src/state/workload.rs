@@ -1109,7 +1109,10 @@ mod tests {
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.clone().unwrap().port, 8080);
-        assert_eq!(us.unwrap().sans, vec!["spiffe://cluster.local/ns/default/sa/local".to_string()]);
+        assert_eq!(
+            us.unwrap().sans,
+            vec!["spiffe://cluster.local/ns/default/sa/local".to_string()]
+        );
 
         // test that we can have a service in another network than workloads it selects
         let us = demand.state.read().unwrap().find_upstream(
