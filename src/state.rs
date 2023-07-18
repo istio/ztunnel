@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use crate::identity::SecretManager;
+use crate::proxy::Error;
 use crate::state::policy::PolicyStore;
 use crate::state::service::ServiceStore;
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
-use crate::proxy::Error;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};

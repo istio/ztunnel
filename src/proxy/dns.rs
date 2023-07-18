@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 use std::collections::{HashMap, HashSet};
 
 use crate::state::ProxyState;
+use crate::config::ProxyMode;
 
 use drain::Watch;
 use itertools::Itertools;
@@ -26,10 +27,7 @@ use tracing::{info, trace, warn};
 use super::Error;
 use crate::proxy::ProxyInputs;
 use crate::state::workload::Workload;
-use crate::state::DemandProxyState;
-
-use crate::dns::SystemForwarder;
-use crate::dns::Forwarder;
+use crate::dns;
 
 use tokio::task::JoinHandle;
 
@@ -52,7 +50,7 @@ struct TaskContext {
 // This can be important in niche cases, like geographic dns resolution, as documented in
 // https://github.com/istio/istio/blob/7bf52db38c91c89a4d56d6a94f402fd9ddaf6465/pilot/pkg/serviceregistry/kube/conversion.go#L151-L155
 pub(super) struct PollingDns {
-    state: DemandProxyState,
+    pi: ProxyInputs,
     drain: Watch,
     // workload UID to task
     tasks: HashMap<String, TaskContext>,
@@ -102,19 +100,19 @@ impl PollingDns {
             "dns async client started",
         );
         Ok(PollingDns {
-            state: pi.state,
+            pi,
             drain,
             tasks: HashMap::new(),
         })
     }
 
-    fn get_handle(state: Arc<RwLock<ProxyState>>, dns_workload: Workload) -> JoinHandle<()> {
+    fn get_handle(proxy_mode: ProxyMode, state: Arc<RwLock<ProxyState>>, dns_workload: Workload) -> JoinHandle<()> {
         tokio::spawn(async move {
             let hostname = dns_workload.async_hostname.clone();
             trace!("dns workload async task started for {:?}", &hostname);
 
-            // TODO(kdorosh): don't make a new forwarder for every request
-            let fw = SystemForwarder::new().unwrap();
+            // TODO(kdorosh): don't make a new forwarder for every request?
+            let fw = dns::forwarder_for_mode(proxy_mode).unwrap(); // TODO(kdorosh) handle unwrap
             let r = fw.resolver();
 
             // Lookup a host.
@@ -123,9 +121,14 @@ impl PollingDns {
                 socket_addr("1.1.1.1:80"), // TODO(kdorosh): don't hardcode this
                 Protocol::Udp,
             );
-            let resp = r.lookup(&req).await.unwrap();
-            trace!("dns async response for workload {} is: {:?}", &dns_workload.uid, resp);
-
+            let resp = r.lookup(&req).await;
+            if resp.is_err() {
+                warn!("dns async response for workload {} is: {:?}", &dns_workload.uid, resp);
+                return;
+            } else {
+                trace!("dns async response for workload {} is: {:?}", &dns_workload.uid, resp);
+            }
+            let resp = resp.unwrap();
             let ips = resp.record_iter().filter_map(|record| {
                 if record.rr_type().is_ip_addr() {
                     // TODO: handle ipv6
@@ -140,7 +143,7 @@ impl PollingDns {
     pub(super) async fn run(mut self) {
         let accept = async move {
             loop {
-                let dns_workloads = self.state.state.read().unwrap().workloads.get_async_dns_workloads();
+                let dns_workloads = self.pi.state.state.read().unwrap().workloads.get_async_dns_workloads();
 
                 // kill tasks that no longer need to be running
                 let current_workload_uids = dns_workloads.iter().map(|w| w.uid.clone()).collect_vec();
@@ -162,7 +165,7 @@ impl PollingDns {
                     match self.tasks.get_mut(&dns_workload.uid) {
                         None => {
                             let clone = dns_workload.clone();
-                            let handle = Self::get_handle(self.state.state.clone(), clone);
+                            let handle = Self::get_handle(self.pi.cfg.proxy_mode.to_owned(), self.pi.state.state.clone(), clone);
                             let task = TaskContext {
                                 task: handle,
                                 start: Instant::now(),
@@ -179,7 +182,7 @@ impl PollingDns {
                                 }
                                 if t.finished && Instant::now().duration_since(t.start).as_secs() > 5 { // TODO: make this configurable
                                     trace!("dns workload async task finished and queued for re-polling {:?}", t.task);
-                                    t.task = Self::get_handle(self.state.state.clone(), dns_workload.clone());
+                                    t.task = Self::get_handle(self.pi.cfg.proxy_mode.to_owned(), self.pi.state.state.clone(), dns_workload.clone());
                                     t.start = Instant::now();
                                     t.finished = false;
                                 }
@@ -188,7 +191,7 @@ impl PollingDns {
                                     warn!("dns workload async task still running after 10s; killing task and re-polling {:?}", t.task);
                                     t.task.abort();
 
-                                    t.task = Self::get_handle(self.state.state.clone(), dns_workload.clone());
+                                    t.task = Self::get_handle(self.pi.cfg.proxy_mode.to_owned(), self.pi.state.state.clone(), dns_workload.clone());
                                     t.start = Instant::now();
                                 }
                                 trace!("dns workload async task queued for {:?}", dns_workload.async_hostname);

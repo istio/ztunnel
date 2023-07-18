@@ -655,40 +655,38 @@ pub fn forwarder_for_mode(proxy_mode: ProxyMode) -> Result<Arc<dyn Forwarder>, E
 /// When running in dedicated (sidecar) proxy mode, this will be the same resolver configuration
 /// that would have been used by the client. For shared proxy mode, this will be the resolver
 /// configuration for the ztunnel DaemonSet (i.e. node-level resolver settings).
-pub struct SystemForwarder {
+struct SystemForwarder {
     search_domains: Vec<Name>,
     resolver: Arc<dyn Resolver>,
 }
 
-use std::net::{Ipv4Addr};
+use std::net::{Ipv4Addr}; // TODO:(kdorosh) remove me
 
 impl SystemForwarder {
-    pub fn new() -> Result<Self, Error> {
+    fn new() -> Result<Self, Error> {
         // Get the resolver config from /etc/resolv.conf.
         let (cfg, opts) = read_system_conf()?;
 
         // Extract the parts.
         let domain = cfg.domain().cloned();
         let search_domains = cfg.search().to_vec();
-        let mut name_servers = cfg.name_servers().to_vec();
-
+        let name_servers = cfg.name_servers().to_vec();
 
         // TODO(kdorosh): don't hardcode nip.io, allow test to pass in custom name_server to override system default
-
-        // nslookup nip.io
-        name_servers[0].socket_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(116,203,255,68)),
+        let nip_io = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(116,203,255,68)), // nslookup nip.io
             53
         );
-        name_servers[1].socket_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(116,203,255,68)),
-            53
-        );
+        let mut updated_name_servers = vec![];
+        for mut ns in name_servers {
+            ns.socket_addr = nip_io;
+            updated_name_servers.push(ns);
+        }
 
         // Remove the search list before passing to the resolver. The local resolver that
         // sends the original request will already have search domains applied. We want
         // this resolver to simply use the request host rather than re-adding search domains.
-        let cfg = ResolverConfig::from_parts(domain, vec![], name_servers);
+        let cfg = ResolverConfig::from_parts(domain, vec![], updated_name_servers);
 
         // Create the resolver.
         let resolver = Arc::new(
