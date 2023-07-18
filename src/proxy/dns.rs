@@ -15,7 +15,7 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
-use std::time::Instant;
+// use std::time::Instant;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::state::ProxyState;
 
@@ -54,6 +54,7 @@ use crate::dns::Forwarder;
 // use trust_dns_server::server::{Protocol};
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
+use std::collections::HashSet;
 
 use trust_dns_client::client::{AsyncClient, ClientHandle};
 use trust_dns_client::error::ClientError;
@@ -68,9 +69,12 @@ use trust_dns_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
 use trust_dns_proto::DnsHandle;
 use trust_dns_server::authority::MessageRequest;
 use trust_dns_server::server::{Protocol, Request};
+use std::time::{Duration, Instant};
 
 struct TaskContext {
     task: tokio::task::JoinHandle<()>,
+    // monotonic task start time
+    start: Instant,
     finished: bool,
     // time started
     // dns cache ttl?
@@ -177,8 +181,23 @@ impl Dns {
         let accept = async move {
             loop {
                 let dns_workloads = self.state.state.read().unwrap().workloads.get_async_dns_workloads();
-                // TODO: kill tasks that no longer need to be running
 
+                // kill tasks that no longer need to be running
+                let current_workload_uids = dns_workloads.iter().map(|w| w.uid.clone()).collect_vec();
+                let current_workload_uid_set: HashSet<String> = HashSet::from_iter(current_workload_uids.iter().cloned());
+                let mut workload_uid_to_remove_set: HashSet<String> = HashSet::new();
+                for (workload_uid, task) in self.tasks.iter() {
+                    if !current_workload_uid_set.contains(workload_uid) {
+                        info!("dns workload async task no longer needed for {}; aborting", workload_uid);
+                        task.task.abort();
+                        workload_uid_to_remove_set.insert(workload_uid.clone());
+                    }
+                }
+                for workload_uid in workload_uid_to_remove_set.iter() {
+                    self.tasks.remove(workload_uid);
+                }
+
+                // start new tasks, if needed
                 for dns_workload in dns_workloads.iter() {
                     match self.tasks.get_mut(&dns_workload.uid) {
                         None => {
@@ -186,31 +205,34 @@ impl Dns {
                             let handle = Self::get_handle(self.state.state.clone(), clone);
                             let task = TaskContext {
                                 task: handle,
+                                start: Instant::now(),
                                 finished: false,
                             };
                             self.tasks.insert(dns_workload.uid.clone(), task);
                             info!("dns workload async task queued for {:?}. curr tasks {}", dns_workload.async_hostname, self.tasks.len());
-                            // let _ = tokio::try_join!(task.task).unwrap();
                         }
                         Some(t) => {
-                            // TODO: check if task is still running
                             if t.task.is_finished() {
-
                                 if !t.finished {
                                     info!("dns workload async task finished {:?}", t.task);
                                     t.finished = true;
                                 }
+                                if t.finished && Instant::now().duration_since(t.start).as_millis() > 100 {
+                                    info!("dns workload async task finished and queued for re-polling {:?}", t.task);
+                                    t.task = Self::get_handle(self.state.state.clone(), dns_workload.clone());
+                                    t.start = Instant::now();
+                                    t.finished = false;
+                                }
 
-                                // let clone = dns_workload.clone();
-                                // let handle = Self::get_handle(self.state.state.clone(), clone);
-                                // let task = TaskContext {
-                                //     task: handle,
-                                //     finished: false,
-                                // };
-                                // self.tasks.insert(dns_workload.uid.clone(), task);
+                                if !t.finished && Instant::now().duration_since(t.start).as_secs() > 10 {
+                                    info!("dns workload async task still running after 10s; killing task and re-polling {:?}", t.task);
+                                    t.task.abort();
 
-                                // info!("dns workload async task queued for {:?}. curr tasks {}", dns_workload.async_hostname, self.tasks.len());
+                                    t.task = Self::get_handle(self.state.state.clone(), dns_workload.clone());
+                                    t.start = Instant::now();
+                                }
 
+                                info!("dns workload async task queued for {:?}", dns_workload.async_hostname);
                             }
                             trace!("dns workload async task already exists {:?}", t.task);
                         }
