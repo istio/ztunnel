@@ -86,7 +86,10 @@ impl Server {
             metrics,
         )));
         let mut server = ServerFuture::new(handler);
-        info!("starting local DNS server on {}", addr);
+        info!(
+            address=%addr,
+            "starting local DNS server",
+        );
         // Bind and register the UDP socket.
         let udp_socket = UdpSocket::bind(addr)
             .await
