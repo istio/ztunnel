@@ -144,8 +144,6 @@ pub struct Workload {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub hostname: String,
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub async_hostname: String,
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub node: String,
@@ -277,10 +275,6 @@ impl TryFrom<&XdsWorkload> for Workload {
     fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
         let resource: XdsWorkload = resource.to_owned();
 
-        if !resource.addresses.is_empty() && !resource.async_hostname.is_empty() {
-            return Err(WorkloadError::InvalidWorkload);
-        }
-
         let wp = match &resource.waypoint {
             Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,
@@ -329,7 +323,6 @@ impl TryFrom<&XdsWorkload> for Workload {
             },
             node: resource.node,
             hostname: resource.hostname,
-            async_hostname: resource.async_hostname,
             network: resource.network,
             workload_name: resource.workload_name,
             workload_type,
@@ -559,7 +552,7 @@ impl WorkloadStore {
         return self
             .by_uid
             .iter()
-            .filter(|(_, w)| !w.async_hostname.is_empty())
+            .filter(|(_, w)| !w.hostname.is_empty())
             .map(|(_, w)| w.deref().clone())
             .collect();
     }

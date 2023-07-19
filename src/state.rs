@@ -234,17 +234,19 @@ impl ProxyState {
     }
 
     pub fn load_balance(&self, workload: &Workload) -> Result<IpAddr, Error> {
-        if !workload.async_hostname.is_empty() {
-            let ip = self
-                .resolved_dns
-                .load_balance_for_workload(workload.clone().uid)?;
-            return Ok(ip);
-        }
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
         // if/when we support that, this function may need to move to get access to the necessary metadata.
         // Randomly pick an IP
         // TODO: do this more efficiently, and not just randomly
         let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
+
+            if !workload.hostname.is_empty() {
+                let ip = self
+                    .resolved_dns
+                    .load_balance_for_workload(workload.clone().uid)?;
+                return Ok(ip);
+            }
+
             debug!("workload {} has no suitable workload IPs for routing", workload.name);
             return Err(Error::NoValidDestination(Box::new(workload.clone())))
         };

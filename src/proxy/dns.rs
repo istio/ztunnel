@@ -112,7 +112,7 @@ impl PollingDns {
         dns_workload: Workload,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let hostname = dns_workload.async_hostname.clone();
+            let hostname = dns_workload.hostname.clone();
             trace!("dns workload async task started for {:?}", &hostname);
 
             // TODO(kdorosh): don't make a new forwarder for every request?
@@ -209,7 +209,7 @@ impl PollingDns {
                             self.tasks.insert(dns_workload.uid.clone(), task);
                             trace!(
                                 "dns workload async task queued for {:?}. curr tasks {}",
-                                dns_workload.async_hostname,
+                                dns_workload.hostname,
                                 self.tasks.len()
                             );
                         }
@@ -250,7 +250,7 @@ impl PollingDns {
                                 }
                                 trace!(
                                     "dns workload async task queued for {:?}",
-                                    dns_workload.async_hostname
+                                    dns_workload.hostname
                                 );
                             }
                         }

@@ -670,7 +670,6 @@ mod tests {
         let wl = XdsWorkload {
             addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
             hostname: "".to_string(),
-            async_hostname: "".to_string(), // must be omitted since we have an address
             waypoint: Some(XdsGatewayAddress {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
                     network: "defaultnw".to_string(),

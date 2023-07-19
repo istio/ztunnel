@@ -170,7 +170,6 @@ pub fn test_default_workload() -> Workload {
         canonical_name: "".to_string(),
         canonical_revision: "".to_string(),
         hostname: "".to_string(),
-        async_hostname: "".to_string(),
         node: "".to_string(),
         status: Default::default(),
         cluster_id: "Kubernetes".to_string(),
@@ -186,19 +185,19 @@ fn test_custom_workload(
     protocol: Protocol,
     echo_port: u16,
     services_vec: Vec<&Service>,
-    async_dns: bool,
+    hostname_only: bool,
 ) -> anyhow::Result<LocalWorkload> {
-    let async_host = match async_dns {
+    let host = match hostname_only {
         true => format!("example.{}.nip.io.", ip_str),
         false => "".to_string(),
     };
-    let wips = match async_dns {
+    let wips = match hostname_only {
         true => vec![],
         false => vec![ip_str.parse()?],
     };
     let workload = Workload {
         workload_ips: wips,
-        async_hostname: async_host,
+        hostname: host,
         protocol,
         uid: format!("cluster1//v1/Pod/default/{}", name),
         name: name.to_string(),
