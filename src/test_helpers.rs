@@ -91,6 +91,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         dns_proxy_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        dns_nameservers: vec!["116.203.255.68:53".parse().unwrap()], // TODO(kdorosh) remove me? nip.io as resolver may not be required
         ..config::parse_config().unwrap()
     }
 }
@@ -216,7 +217,6 @@ fn test_custom_workload(
 
 fn test_custom_svc(name: &str, hostname: &str, vip: &str, workload_name: &str, endpoint: &str, echo_port: u16) -> anyhow::Result<Service> {
     let addr = match endpoint.is_empty() {
-        // TODO(kdorosh) why is this flipped in printed output?
         true => None,
         false => Some(NetworkAddress {
             network: "".to_string(),
@@ -254,8 +254,8 @@ pub fn local_xds_config(
     policies: Vec<crate::rbac::Authorization>,
 ) -> anyhow::Result<Bytes> {
 
-    let default_svc = test_custom_svc(TEST_SERVICE_NAME, TEST_SERVICE_HOST, TEST_VIP,  "local-hbone", "", echo_port)?;
-    let dns_svc = test_custom_svc(TEST_SERVICE_DNS_HBONE_NAME, TEST_SERVICE_DNS_HBONE_HOST, TEST_VIP_DNS,  "local-tcp-via-dns", TEST_WORKLOAD_TCP, echo_port)?;
+    let default_svc = test_custom_svc(TEST_SERVICE_NAME, TEST_SERVICE_HOST, TEST_VIP,  "local-hbone", TEST_WORKLOAD_HBONE, echo_port)?;
+    let dns_svc = test_custom_svc(TEST_SERVICE_DNS_HBONE_NAME, TEST_SERVICE_DNS_HBONE_HOST, TEST_VIP_DNS,  "local-tcp-via-dns", "", echo_port)?;
 
     let mut res: Vec<LocalWorkload> = vec![
         test_custom_workload(TEST_WORKLOAD_SOURCE, "local-source", TCP, echo_port, vec![&default_svc], false)?,

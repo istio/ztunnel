@@ -158,7 +158,7 @@ pub async fn build_with_cert(
             config.dns_proxy_addr,
             config.network,
             state.clone(),
-            dns::forwarder_for_mode(config.proxy_mode)?,
+            dns::forwarder_for_mode(config.proxy_mode, config.dns_nameservers)?,
             dns_metrics.unwrap(),
         )
         .await?;

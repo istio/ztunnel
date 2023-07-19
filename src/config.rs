@@ -161,6 +161,9 @@ pub struct Config {
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
+
+    // custom DNS nameservers; primarily for testing
+    pub dns_nameservers: Vec<SocketAddr>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -337,6 +340,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
+        dns_nameservers: vec![],
     })
 }
 
