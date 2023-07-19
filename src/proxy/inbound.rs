@@ -403,7 +403,11 @@ impl Inbound {
                 Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
                 Some(address::Address::Service(svc)) => {
                     for (_ep_uid, ep) in svc.endpoints.iter() {
-                        if state.fetch_workload_by_uid(&ep.workload_uid).await.map(|w| w.identity()) == conn.src_identity
+                        if state
+                            .fetch_workload_by_uid(&ep.workload_uid)
+                            .await
+                            .map(|w| w.identity())
+                            == conn.src_identity
                         {
                             return true;
                         }

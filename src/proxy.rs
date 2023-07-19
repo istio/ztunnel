@@ -29,17 +29,17 @@ use tracing::{error, trace, warn, Instrument};
 
 use crate::identity::SecretManager;
 use crate::metrics::Recorder;
+use crate::proxy::dns::PollingDns;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
-use crate::proxy::dns::PollingDns;
 use crate::proxy::socks5::Socks5;
 use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
 use crate::{config, identity, socket, tls};
 
+mod dns;
 mod inbound;
 mod inbound_passthrough;
-mod dns;
 #[allow(non_camel_case_types)]
 pub mod metrics;
 mod outbound;

@@ -28,7 +28,7 @@ use tracing::warn;
 use trust_dns_proto::error::ProtoErrorKind;
 use trust_dns_proto::op::ResponseCode;
 use trust_dns_proto::rr::{Name, RData, Record, RecordType};
-use trust_dns_resolver::config::{ResolverConfig, NameServerConfig, Protocol};
+use trust_dns_resolver::config::{NameServerConfig, Protocol, ResolverConfig};
 use trust_dns_resolver::system_conf::read_system_conf;
 use trust_dns_server::authority::LookupError;
 use trust_dns_server::server::Request;
@@ -641,7 +641,10 @@ pub trait Forwarder: Send + Sync {
 }
 
 /// Creates the appropriate DNS forwarder for the proxy mode.
-pub fn forwarder_for_mode(proxy_mode: ProxyMode, name_servers: Vec<SocketAddr>) -> Result<Arc<dyn Forwarder>, Error> {
+pub fn forwarder_for_mode(
+    proxy_mode: ProxyMode,
+    name_servers: Vec<SocketAddr>,
+) -> Result<Arc<dyn Forwarder>, Error> {
     Ok(match proxy_mode {
         ProxyMode::Shared => {
             // TODO(https://github.com/istio/ztunnel/issues/555): Use pod settings if available.

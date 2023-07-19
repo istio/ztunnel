@@ -214,7 +214,12 @@ async fn test_vip_request() {
 #[tokio::test]
 async fn test_dns_vip_request() {
     // we need delay to give async dns resolution time to populate the resolved DNS cache
-    run_request_test_with_delay(&format!("{TEST_VIP_DNS}:80"), "", Duration::from_millis(500)).await;
+    run_request_test_with_delay(
+        &format!("{TEST_VIP_DNS}:80"),
+        "",
+        Duration::from_millis(500),
+    )
+    .await;
 }
 
 #[tokio::test]

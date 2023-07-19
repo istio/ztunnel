@@ -215,7 +215,14 @@ fn test_custom_workload(
     Ok(LocalWorkload { workload, services })
 }
 
-fn test_custom_svc(name: &str, hostname: &str, vip: &str, workload_name: &str, endpoint: &str, echo_port: u16) -> anyhow::Result<Service> {
+fn test_custom_svc(
+    name: &str,
+    hostname: &str,
+    vip: &str,
+    workload_name: &str,
+    endpoint: &str,
+    echo_port: u16,
+) -> anyhow::Result<Service> {
     let addr = match endpoint.is_empty() {
         true => None,
         false => Some(NetworkAddress {
@@ -253,16 +260,57 @@ pub fn local_xds_config(
     waypoint_ip: Option<IpAddr>,
     policies: Vec<crate::rbac::Authorization>,
 ) -> anyhow::Result<Bytes> {
-
-    let default_svc = test_custom_svc(TEST_SERVICE_NAME, TEST_SERVICE_HOST, TEST_VIP,  "local-hbone", TEST_WORKLOAD_HBONE, echo_port)?;
-    let dns_svc = test_custom_svc(TEST_SERVICE_DNS_HBONE_NAME, TEST_SERVICE_DNS_HBONE_HOST, TEST_VIP_DNS,  "local-tcp-via-dns", "", echo_port)?;
+    let default_svc = test_custom_svc(
+        TEST_SERVICE_NAME,
+        TEST_SERVICE_HOST,
+        TEST_VIP,
+        "local-hbone",
+        TEST_WORKLOAD_HBONE,
+        echo_port,
+    )?;
+    let dns_svc = test_custom_svc(
+        TEST_SERVICE_DNS_HBONE_NAME,
+        TEST_SERVICE_DNS_HBONE_HOST,
+        TEST_VIP_DNS,
+        "local-tcp-via-dns",
+        "",
+        echo_port,
+    )?;
 
     let mut res: Vec<LocalWorkload> = vec![
-        test_custom_workload(TEST_WORKLOAD_SOURCE, "local-source", TCP, echo_port, vec![&default_svc], false)?,
-        test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone", HBONE, echo_port, vec![&default_svc], false)?,
+        test_custom_workload(
+            TEST_WORKLOAD_SOURCE,
+            "local-source",
+            TCP,
+            echo_port,
+            vec![&default_svc],
+            false,
+        )?,
+        test_custom_workload(
+            TEST_WORKLOAD_HBONE,
+            "local-hbone",
+            HBONE,
+            echo_port,
+            vec![&default_svc],
+            false,
+        )?,
         // TODO: should protocol be decided by workload lookup again after DNS resolution?
-        test_custom_workload(TEST_WORKLOAD_TCP, "local-tcp-via-dns", TCP, echo_port, vec![&dns_svc], true)?,
-        test_custom_workload(TEST_WORKLOAD_TCP, "local-tcp", TCP, echo_port, vec![], false)?,
+        test_custom_workload(
+            TEST_WORKLOAD_TCP,
+            "local-tcp-via-dns",
+            TCP,
+            echo_port,
+            vec![&dns_svc],
+            true,
+        )?,
+        test_custom_workload(
+            TEST_WORKLOAD_TCP,
+            "local-tcp",
+            TCP,
+            echo_port,
+            vec![],
+            false,
+        )?,
     ];
     if let Some(waypoint_ip) = waypoint_ip {
         res.push(LocalWorkload {

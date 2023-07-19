@@ -25,12 +25,12 @@ use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
+use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::collections::{HashMap, HashSet};
 use tracing::{debug, trace};
 
 pub mod policy;
@@ -86,7 +86,11 @@ pub struct ResolvedDnsStore {
 
 impl ResolvedDnsStore {
     pub fn load_balance_for_workload(&self, workload_uid: String) -> Result<IpAddr, Error> {
-        debug!("load_balance_for_workload({}) by_workload_uid len: {}", &workload_uid, self.by_workload_uid.len());
+        debug!(
+            "load_balance_for_workload({}) by_workload_uid len: {}",
+            &workload_uid,
+            self.by_workload_uid.len()
+        );
         // TODO: add support for different async dns modes: e.g. logical DNS vs strict DNS.
         // this is effectively envoy strict DNS; returning a pre-resolved IP address at random.
         let Some(ipset) = self.by_workload_uid.get(&workload_uid) else {
@@ -103,7 +107,11 @@ impl ResolvedDnsStore {
     pub fn set_ips_for_workload(&mut self, workload_uid: String, ips: Vec<Ipv4Addr>) {
         let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
         self.by_workload_uid.insert(workload_uid.to_owned(), set);
-        trace!("set_ips_for_workload({}), by_workload_uid len: {}", workload_uid, self.by_workload_uid.len());
+        trace!(
+            "set_ips_for_workload({}), by_workload_uid len: {}",
+            workload_uid,
+            self.by_workload_uid.len()
+        );
     }
 }
 
@@ -227,7 +235,9 @@ impl ProxyState {
 
     pub fn load_balance(&self, workload: &Workload) -> Result<IpAddr, Error> {
         if !workload.async_hostname.is_empty() {
-            let ip = self.resolved_dns.load_balance_for_workload(workload.clone().uid)?;
+            let ip = self
+                .resolved_dns
+                .load_balance_for_workload(workload.clone().uid)?;
             return Ok(ip);
         }
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.

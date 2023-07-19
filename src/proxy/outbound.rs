@@ -387,9 +387,14 @@ impl OutboundConnection {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
-                let waypoint_ip = self.pi.state.state.read().unwrap().load_balance(&waypoint_workload)?;
-                let wp_socket_addr =
-                    SocketAddr::new(waypoint_ip, waypoint_us.port);
+                let waypoint_ip = self
+                    .pi
+                    .state
+                    .state
+                    .read()
+                    .unwrap()
+                    .load_balance(&waypoint_workload)?;
+                let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
@@ -412,7 +417,13 @@ impl OutboundConnection {
             return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
         }
 
-        let workload_ip = self.pi.state.state.read().unwrap().load_balance(&us.workload)?;
+        let workload_ip = self
+            .pi
+            .state
+            .state
+            .read()
+            .unwrap()
+            .load_balance(&us.workload)?;
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)

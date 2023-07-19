@@ -556,7 +556,12 @@ impl WorkloadStore {
 
     /// Returns all workloads that use async dataplane DNS resolution.
     pub fn get_async_dns_workloads(&self) -> Vec<Workload> {
-        return self.by_uid.iter().filter(|(_, w)| !w.async_hostname.is_empty()).map(|(_, w)| w.deref().clone()).collect();
+        return self
+            .by_uid
+            .iter()
+            .filter(|(_, w)| !w.async_hostname.is_empty())
+            .map(|(_, w)| w.deref().clone())
+            .collect();
     }
 }
 

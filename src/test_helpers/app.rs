@@ -151,7 +151,8 @@ impl TestApp {
     }
 
     pub async fn socks5_connect(&self, addr: SocketAddr) -> TcpStream {
-        self.socks5_connect_with_delay(addr, Duration::from_secs(0)).await
+        self.socks5_connect_with_delay(addr, Duration::from_secs(0))
+            .await
     }
 
     pub async fn socks5_connect_with_delay(&self, addr: SocketAddr, delay: Duration) -> TcpStream {

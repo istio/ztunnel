@@ -69,7 +69,11 @@ pub struct Endpoint {
 }
 
 pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> String {
-    format!("{}:{}", workload_uid, address.map(|a| a.to_string()).unwrap_or_default())
+    format!(
+        "{}:{}",
+        workload_uid,
+        address.map(|a| a.to_string()).unwrap_or_default()
+    )
 }
 
 impl TryFrom<&XdsService> for Service {
