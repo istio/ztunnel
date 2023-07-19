@@ -24,7 +24,7 @@ use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use tokio::net::{TcpListener, UdpSocket};
-use tracing::warn;
+use tracing::{info, warn};
 use trust_dns_proto::error::ProtoErrorKind;
 use trust_dns_proto::op::ResponseCode;
 use trust_dns_proto::rr::{Name, RData, Record, RecordType};
@@ -86,7 +86,7 @@ impl Server {
             metrics,
         )));
         let mut server = ServerFuture::new(handler);
-
+        info!("starting local DNS server on {}", addr);
         // Bind and register the UDP socket.
         let udp_socket = UdpSocket::bind(addr)
             .await
