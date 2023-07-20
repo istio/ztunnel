@@ -156,13 +156,22 @@ pub struct ResolvedDns {
 }
 
 impl ResolvedDns {
-    pub fn new(hostname: String, ips: HashSet<IpAddr>, dns_ttl: std::time::Duration) -> Self {
+    pub fn new(
+        hostname: String,
+        ips: HashSet<IpAddr>,
+        last_queried: Option<std::time::Instant>,
+        dns_ttl: std::time::Duration,
+    ) -> Self {
         Self {
             hostname,
             ips,
-            last_queried: None,
+            last_queried,
             dns_ttl,
         }
+    }
+
+    pub fn get_last_queried(&self) -> Option<std::time::Instant> {
+        self.last_queried
     }
 }
 
@@ -384,13 +393,13 @@ impl DemandProxyState {
                 let resp = r.lookup(&req).await;
                 if resp.is_err() {
                     warn!(
-                        "dns async response for workload {} is: {:?}",
+                        "dns async poller: response for workload {} is: {:?}",
                         &workload_uid_clone, resp
                     );
                     return;
                 } else {
                     trace!(
-                        "dns async response for workload {} is: {:?}",
+                        "dns async poller: response for workload {} is: {:?}",
                         &workload_uid_clone,
                         resp
                     );
