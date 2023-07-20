@@ -175,6 +175,10 @@ async fn test_quit_lifecycle() {
 }
 
 async fn run_request_test(target: &str, node: &str) {
+    run_request_tests(target, node, 1).await
+}
+
+async fn run_request_tests(target: &str, node: &str, num_queries: u8) {
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
@@ -186,8 +190,10 @@ async fn run_request_test(target: &str, node: &str) {
     testapp::with_app(cfg, |app| async move {
         let dst = SocketAddr::from_str(target)
             .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
-        let mut stream = app.socks5_connect(dst).await;
-        read_write_stream(&mut stream).await;
+        for _ in 0..num_queries {
+            let mut stream = app.socks5_connect(dst).await;
+            read_write_stream(&mut stream).await;
+        }
     })
     .await;
 }
@@ -210,10 +216,8 @@ async fn test_vip_request() {
 #[tokio::test]
 async fn test_on_demand_dns_request() {
     // first request should trigger on-demand DNS resolution
-    run_request_test(&format!("{TEST_VIP_DNS}:80"), "").await;
-
-    // TODO: second request should used cached DNS response
-    // run_request_test(&format!("{TEST_VIP_DNS}:80"), "").await;
+    // second request should used cached DNS response
+    run_request_tests(&format!("{TEST_VIP_DNS}:80"), "", 2).await;
 }
 
 #[tokio::test]
