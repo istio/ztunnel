@@ -1062,11 +1062,12 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            if let Some(us) = state.state.read().unwrap().find_upstream(
-                "",
-                "127.0.1.1:80".parse().unwrap(),
-                15008,
-            ) {
+            if let Some(us) = state
+                .state
+                .read()
+                .unwrap()
+                .find_upstream("", "127.0.1.1:80".parse().unwrap())
+            {
                 let n = &us.workload.name; // borrow name instead of cloning
                 found.insert(n.to_owned()); // insert an owned copy of the borrowed n
                 wants.remove(n); // remove using the borrow
@@ -1104,12 +1105,11 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.unwrap().service_account, "default");
-        let us =
-            demand
-                .state
-                .read()
-                .unwrap()
-                .find_upstream("", "127.10.0.1:80".parse().unwrap(), 15008);
+        let us = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream("", "127.10.0.1:80".parse().unwrap());
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.clone().unwrap().port, 8080);
@@ -1119,11 +1119,11 @@ mod tests {
         );
 
         // test that we can have a service in another network than workloads it selects
-        let us = demand.state.read().unwrap().find_upstream(
-            "remote",
-            "127.10.0.2:80".parse().unwrap(),
-            15008,
-        );
+        let us = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream("remote", "127.10.0.2:80".parse().unwrap());
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.unwrap().port, 8080);

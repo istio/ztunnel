@@ -364,7 +364,7 @@ impl OutboundConnection {
         let us = self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, target, self.pi.hbone_port)
+            .fetch_upstream(&source_workload.network, target)
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
@@ -381,19 +381,26 @@ impl OutboundConnection {
             });
         }
 
-        let us = us.unwrap();
+        let mut mutable_us = us.unwrap();
+        let us = match self
+            .pi
+            .state
+            .set_gateway_address(&mut mutable_us, self.pi.hbone_port)
+            .await
+        {
+            Ok(_) => mutable_us.clone(),
+            Err(e) => {
+                debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
+                return Err(Error::UnknownWaypoint(mutable_us.workload.workload_name));
+            }
+        };
+
         // For case upstream server has enabled waypoint
         match self.pi.state.fetch_waypoint(us.workload.clone()).await {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
-                let waypoint_ip = self
-                    .pi
-                    .state
-                    .state
-                    .read()
-                    .unwrap()
-                    .load_balance(&waypoint_workload)?;
+                let waypoint_ip = self.pi.state.load_balance(&waypoint_workload).await?;
                 let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here
@@ -417,13 +424,7 @@ impl OutboundConnection {
             return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
         }
 
-        let workload_ip = self
-            .pi
-            .state
-            .state
-            .read()
-            .unwrap()
-            .load_balance(&us.workload)?;
+        let workload_ip = self.pi.state.load_balance(&us.workload).await?;
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)

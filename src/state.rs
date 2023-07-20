@@ -154,12 +154,7 @@ impl ProxyState {
         }
     }
 
-    pub fn find_upstream(
-        &self,
-        network: &str,
-        addr: SocketAddr,
-        hbone_port: u16,
-    ) -> Option<Upstream> {
+    pub fn find_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
         if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
                 debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
@@ -177,80 +172,25 @@ impl ProxyState {
             };
             // If endpoint overrides the target port, use that instead
             let target_port = ep.port.get(&addr.port()).unwrap_or(target_port);
-            let mut us = Upstream {
+            let us = Upstream {
                 workload: wl,
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
             };
-            return match self.set_gateway_address(&mut us, hbone_port) {
-                Ok(_) => {
-                    debug!("found upstream {} from VIP {}", us, addr.ip());
-                    Some(us)
-                }
-                Err(e) => {
-                    debug!("failed to set gateway address for upstream: {}", e);
-                    None
-                }
-            };
+            return Some(us);
         }
         if let Some(wl) = self
             .workloads
             .find_address(&network_addr(network, addr.ip()))
         {
-            let mut us = Upstream {
+            let us = Upstream {
                 workload: wl,
                 port: addr.port(),
                 sans: Vec::new(),
             };
-            return match self.set_gateway_address(&mut us, hbone_port) {
-                Ok(_) => {
-                    debug!("found upstream {}", us);
-                    Some(us)
-                }
-                Err(e) => {
-                    debug!("failed to set gateway address for upstream: {}", e);
-                    None
-                }
-            };
+            return Some(us);
         }
         None
-    }
-
-    fn set_gateway_address(&self, us: &mut Upstream, hbone_port: u16) -> anyhow::Result<()> {
-        let workload_ip = self.load_balance(&us.workload)?;
-        if us.workload.gateway_address.is_none() {
-            us.workload.gateway_address = Some(match us.workload.protocol {
-                Protocol::HBONE => {
-                    let ip = us
-                        .workload
-                        .waypoint_svc_ip_address()?
-                        .unwrap_or(workload_ip);
-                    SocketAddr::from((ip, hbone_port))
-                }
-                Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
-            });
-        }
-        Ok(())
-    }
-
-    pub fn load_balance(&self, workload: &Workload) -> Result<IpAddr, Error> {
-        // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-        // if/when we support that, this function may need to move to get access to the necessary metadata.
-        // Randomly pick an IP
-        // TODO: do this more efficiently, and not just randomly
-        let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
-
-            if !workload.hostname.is_empty() {
-                let ip = self
-                    .resolved_dns
-                    .load_balance_for_workload(workload.clone().uid)?;
-                return Ok(ip);
-            }
-
-            debug!("workload {} has no suitable workload IPs for routing", workload.name);
-            return Err(Error::NoValidDestination(Box::new(workload.clone())))
-        };
-        Ok(*ip)
     }
 }
 
@@ -337,6 +277,50 @@ impl DemandProxyState {
         false
     }
 
+    pub async fn load_balance(&self, workload: &Workload) -> Result<IpAddr, Error> {
+        // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
+        // if/when we support that, this function may need to move to get access to the necessary metadata.
+        // Randomly pick an IP
+        // TODO: do this more efficiently, and not just randomly
+        let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
+
+            if !workload.hostname.is_empty() {
+                let ip = self
+                    .state
+                    .read()
+                    .unwrap()
+                    .resolved_dns
+                    .load_balance_for_workload(workload.clone().uid)?;
+                return Ok(ip);
+            }
+
+            debug!("workload {} has no suitable workload IPs for routing", workload.name);
+            return Err(Error::NoValidDestination(Box::new(workload.clone())))
+        };
+        Ok(*ip)
+    }
+
+    pub async fn set_gateway_address(
+        &self,
+        us: &mut Upstream,
+        hbone_port: u16,
+    ) -> anyhow::Result<()> {
+        let workload_ip = self.load_balance(&us.workload).await?;
+        if us.workload.gateway_address.is_none() {
+            us.workload.gateway_address = Some(match us.workload.protocol {
+                Protocol::HBONE => {
+                    let ip = us
+                        .workload
+                        .waypoint_svc_ip_address()?
+                        .unwrap_or(workload_ip);
+                    SocketAddr::from((ip, hbone_port))
+                }
+                Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
+            });
+        }
+        Ok(())
+    }
+
     // only support workload
     pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
@@ -359,17 +343,9 @@ impl DemandProxyState {
         self.state.read().unwrap().workloads.find_uid(uid)
     }
 
-    pub async fn fetch_upstream(
-        &self,
-        network: &str,
-        addr: SocketAddr,
-        hbone_port: u16,
-    ) -> Option<Upstream> {
+    pub async fn fetch_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
         self.fetch_address(&network_addr(network, addr.ip())).await;
-        self.state
-            .read()
-            .unwrap()
-            .find_upstream(network, addr, hbone_port)
+        self.state.read().unwrap().find_upstream(network, addr)
     }
 
     pub async fn fetch_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
@@ -388,12 +364,21 @@ impl DemandProxyState {
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.port);
         match self
-            .fetch_upstream(&wp_nw_addr.network, wp_socket_addr, gw_address.port)
+            .fetch_upstream(&wp_nw_addr.network, wp_socket_addr)
             .await
         {
-            Some(upstream) => {
+            Some(mut upstream) => {
                 debug!(%wl.name, "found waypoint upstream");
-                Ok(Some(upstream))
+                match self
+                    .set_gateway_address(&mut upstream, gw_address.port)
+                    .await
+                {
+                    Ok(_) => Ok(Some(upstream)),
+                    Err(e) => {
+                        debug!(%wl.name, "failed to set gateway address for upstream: {}", e);
+                        Err(WaypointError::FindWaypointError(wl.name))
+                    }
+                }
             }
             None => {
                 debug!(%wl.name, "waypoint upstream not found");
