@@ -14,11 +14,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::config::ProxyMode;
-use crate::state::ProxyState;
+use crate::state::DemandProxyState;
 
 use drain::Watch;
 use itertools::Itertools;
@@ -108,7 +107,7 @@ impl PollingDns {
     fn get_handle(
         proxy_mode: ProxyMode,
         dns_nameservers: Vec<SocketAddr>,
-        state: Arc<RwLock<ProxyState>>,
+        mut state: DemandProxyState,
         dns_workload: Workload,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -150,17 +149,15 @@ impl PollingDns {
                     None
                 })
                 .collect_vec();
-            state
-                .write()
-                .unwrap()
-                .resolved_dns
-                .set_ips_for_workload(dns_workload.uid, ips);
+            state.set_ips_for_workload(dns_workload.uid, ips);
         })
     }
 
     pub(super) async fn run(mut self) {
         let accept = async move {
             loop {
+                // TODO(kdorosh) impl+test polling only if requests were received during last DNS ttl
+
                 let dns_workloads = self
                     .pi
                     .state
@@ -198,7 +195,7 @@ impl PollingDns {
                             let handle = Self::get_handle(
                                 self.pi.cfg.proxy_mode.to_owned(),
                                 self.pi.cfg.dns_nameservers.to_owned(),
-                                self.pi.state.state.clone(),
+                                self.pi.state.clone(),
                                 clone,
                             );
                             let task = TaskContext {
@@ -227,7 +224,7 @@ impl PollingDns {
                                     t.task = Self::get_handle(
                                         self.pi.cfg.proxy_mode.to_owned(),
                                         self.pi.cfg.dns_nameservers.to_owned(),
-                                        self.pi.state.state.clone(),
+                                        self.pi.state.clone(),
                                         dns_workload.clone(),
                                     );
                                     t.start = Instant::now();
@@ -243,7 +240,7 @@ impl PollingDns {
                                     t.task = Self::get_handle(
                                         self.pi.cfg.proxy_mode.to_owned(),
                                         self.pi.cfg.dns_nameservers.to_owned(),
-                                        self.pi.state.state.clone(),
+                                        self.pi.state.clone(),
                                         dns_workload.clone(),
                                     );
                                     t.start = Instant::now();

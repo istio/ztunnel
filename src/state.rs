@@ -37,6 +37,61 @@ pub mod policy;
 pub mod service;
 pub mod workload;
 
+// TODO(kdorosh) DRY the copied code following here and generally clean up any latest placeholder test values
+use crate::dns;
+use itertools::Itertools;
+use tracing::warn;
+use trust_dns_proto::op::{Message, MessageType, Query};
+use trust_dns_proto::rr::{Name, RecordType};
+use trust_dns_proto::serialize::binary::BinDecodable;
+use trust_dns_server::authority::MessageRequest;
+use trust_dns_server::server::Request;
+
+/// Constructs a new [Message] of type [MessageType::Query];
+pub fn new_message(name: Name, rr_type: RecordType) -> Message {
+    let mut msg = Message::new();
+    msg.set_id(123);
+    msg.set_message_type(MessageType::Query);
+    msg.set_recursion_desired(true);
+    msg.add_query(Query::query(name, rr_type));
+    msg
+}
+
+/// Converts the given [Message] into a server-side [Request] with dummy values for
+/// the client IP and protocol.
+pub fn server_request(
+    msg: &Message,
+    client_addr: SocketAddr,
+    protocol: trust_dns_server::server::Protocol,
+) -> Request {
+    // Serialize the message.
+    let wire_bytes = msg.to_vec().unwrap();
+
+    // Deserialize into a server-side request.
+    let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
+
+    Request::new(msg_request, client_addr, protocol)
+}
+
+/// Creates a A-record [Request] for the given name.
+pub fn a_request(
+    name: Name,
+    client_addr: SocketAddr,
+    protocol: trust_dns_server::server::Protocol,
+) -> Request {
+    server_request(&new_message(name, RecordType::A), client_addr, protocol)
+}
+
+/// A short-hand helper for constructing a [Name].
+pub fn n<S: AsRef<str>>(name: S) -> Name {
+    Name::from_utf8(name).unwrap()
+}
+
+/// Helper for parsing a [SocketAddr] string.
+pub fn socket_addr<S: AsRef<str>>(socket_addr: S) -> SocketAddr {
+    socket_addr.as_ref().parse().unwrap()
+}
+
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
 pub struct Upstream {
     pub workload: Workload,
@@ -82,37 +137,6 @@ pub struct ProxyState {
 pub struct ResolvedDnsStore {
     // workload UID to resolved IP addresses
     by_workload_uid: HashMap<String, HashSet<IpAddr>>,
-}
-
-impl ResolvedDnsStore {
-    pub fn load_balance_for_workload(&self, workload_uid: String) -> Result<IpAddr, Error> {
-        debug!(
-            "load_balance_for_workload({}) by_workload_uid len: {}",
-            &workload_uid,
-            self.by_workload_uid.len()
-        );
-        // TODO: add support for different async dns modes: e.g. logical DNS vs strict DNS.
-        // this is effectively envoy strict DNS; returning a pre-resolved IP address at random.
-        let Some(ipset) = self.by_workload_uid.get(&workload_uid) else {
-            return Err(Error::NoResolvedAddresses(workload_uid));
-        };
-        let ips_vec = ipset.iter().collect::<Vec<_>>();
-        let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
-            return Err(Error::EmptyResolvedAddresses(workload_uid));
-        };
-        Ok(**ip)
-    }
-
-    // TODO: ipv6 support
-    pub fn set_ips_for_workload(&mut self, workload_uid: String, ips: Vec<Ipv4Addr>) {
-        let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
-        self.by_workload_uid.insert(workload_uid.to_owned(), set);
-        trace!(
-            "set_ips_for_workload({}), by_workload_uid len: {}",
-            workload_uid,
-            self.by_workload_uid.len()
-        );
-    }
 }
 
 impl ProxyState {
@@ -286,11 +310,7 @@ impl DemandProxyState {
 
             if !workload.hostname.is_empty() {
                 let ip = self
-                    .state
-                    .read()
-                    .unwrap()
-                    .resolved_dns
-                    .load_balance_for_workload(workload.clone().uid)?;
+                    .load_balance_for_workload(workload.clone().uid, workload.clone().hostname).await?;
                 return Ok(ip);
             }
 
@@ -298,6 +318,113 @@ impl DemandProxyState {
             return Err(Error::NoValidDestination(Box::new(workload.clone())))
         };
         Ok(*ip)
+    }
+
+    async fn load_balance_for_workload(
+        &self,
+        workload_uid: String,
+        hostname: String,
+    ) -> Result<IpAddr, Error> {
+        let mut s_to_move: DemandProxyState = self.clone();
+        let mut s_not_moved: DemandProxyState = self.clone();
+        let Some(ipset) = s_to_move.get_ips_for_workload(workload_uid.to_owned()) else {
+
+            // no current task ongoing for DNS to resolve this workload. kick one off
+            let workload_uid_clone = workload_uid.clone();
+
+            // TODO(kdorosh) DRY this code
+            let jh = tokio::spawn(async move {
+                let hostname = hostname.clone();
+                trace!("dns workload async task started for {:?}", &hostname);
+
+                // TODO(kdorosh): don't make a new forwarder for every request?
+
+                // nip_io = "116.203.255.68"
+                let sa = SocketAddr::from(([116, 203, 255, 68], 53));
+
+                let fw = dns::forwarder_for_mode(config::ProxyMode::Shared, vec![sa]).unwrap(); // TODO(kdorosh) handle unwrap, don't hardcode
+                let r = fw.resolver();
+
+                // Lookup a host.
+                let req = a_request(
+                    n(&hostname),
+                    socket_addr("1.1.1.1:80"), // TODO(kdorosh): don't hardcode this
+                    trust_dns_server::server::Protocol::Udp,
+                );
+                let resp = r.lookup(&req).await;
+                if resp.is_err() {
+                    warn!(
+                        "dns async response for workload {} is: {:?}",
+                        &workload_uid_clone, resp
+                    );
+                    return;
+                } else {
+                    trace!(
+                        "dns async response for workload {} is: {:?}",
+                        &workload_uid_clone,
+                        resp
+                    );
+                }
+                let resp = resp.unwrap();
+                let ips = resp
+                    .record_iter()
+                    .filter_map(|record| {
+                        if record.rr_type().is_ip_addr() {
+                            // TODO: handle ipv6
+                            return record.data().unwrap().as_a().copied();
+                        }
+                        None
+                    })
+                    .collect_vec();
+                s_to_move.set_ips_for_workload(workload_uid_clone, ips);
+            });
+
+            match jh.await {
+                Ok(_) => {
+                    trace!("dns async task finished for {:?}", &workload_uid);
+                }
+                Err(e) => {
+                    warn!("dns async task failed for {:?}: {:?}", &workload_uid, e);
+                    return Err(Error::NoResolvedAddresses(workload_uid));
+                }
+            };
+
+            // try to get it again
+            let new_ipset = s_not_moved.get_ips_for_workload(workload_uid.to_owned());
+            match new_ipset {
+                Some(ipset) => {
+                    let ips_vec = ipset.iter().collect::<Vec<_>>();
+                    let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
+                        return Err(Error::EmptyResolvedAddresses(workload_uid));
+                    };
+                    return Ok(**ip);
+                }
+                None => {
+                    return Err(Error::NoResolvedAddresses(workload_uid));
+                }
+            }
+        };
+        let ips_vec = ipset.iter().collect::<Vec<_>>();
+        let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
+            return Err(Error::EmptyResolvedAddresses(workload_uid));
+        };
+        Ok(**ip)
+    }
+
+    // TODO: ipv6 support
+    pub fn set_ips_for_workload(&mut self, workload_uid: String, ips: Vec<Ipv4Addr>) {
+        let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
+        self.state
+            .write()
+            .unwrap()
+            .resolved_dns
+            .by_workload_uid
+            .insert(workload_uid, set);
+    }
+
+    pub fn get_ips_for_workload(&mut self, workload_uid: String) -> Option<HashSet<IpAddr>> {
+        let s = self.state.read().unwrap();
+        s.resolved_dns.by_workload_uid.get(&workload_uid).cloned()
     }
 
     pub async fn set_gateway_address(
