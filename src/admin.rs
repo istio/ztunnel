@@ -776,6 +776,7 @@ mod tests {
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
+        // TODO(kdorosh) update to include resolved DNS and ensure we can serialize / deserialize the parts we care about
         let proxy_state = new_proxy_state(&[wl], &[svc], &[auth]);
 
         let default_config = construct_config(ProxyConfig::default())

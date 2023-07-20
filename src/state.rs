@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::{debug, trace};
 
@@ -136,7 +136,34 @@ pub struct ProxyState {
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ResolvedDnsStore {
     // workload UID to resolved IP addresses
-    by_workload_uid: HashMap<String, HashSet<IpAddr>>,
+    by_workload_uid: HashMap<String, ResolvedDns>,
+}
+
+// TODO(kdorosh) placeholder for now, to refactor
+#[derive(serde::Serialize, Default, Debug, Clone, Hash, Eq, PartialEq)]
+pub struct WorkloadUidHostname {
+    pub workload_uid: String,
+    pub hostname: String,
+}
+
+#[derive(serde::Serialize, Default, Debug, Clone)]
+pub struct ResolvedDns {
+    hostname: String,
+    ips: HashSet<IpAddr>,
+    #[serde(skip_serializing)]
+    last_queried: Option<std::time::Instant>,
+    dns_ttl: std::time::Duration,
+}
+
+impl ResolvedDns {
+    pub fn new(hostname: String, ips: HashSet<IpAddr>, dns_ttl: std::time::Duration) -> Self {
+        Self {
+            hostname,
+            ips,
+            last_queried: None,
+            dns_ttl,
+        }
+    }
 }
 
 impl ProxyState {
@@ -329,7 +356,7 @@ impl DemandProxyState {
     ) -> Result<IpAddr, Error> {
         let mut s_to_move: DemandProxyState = self.clone();
         let mut s_not_moved: DemandProxyState = self.clone();
-        let Some(ipset) = s_to_move.get_ips_for_workload(workload_uid.to_owned()) else {
+        let Some(rdns) = s_to_move.get_ips_for_workload(workload_uid.to_owned()) else {
 
             // no current task ongoing for DNS to resolve this workload. kick one off
             let workload_uid_clone = workload_uid.clone();
@@ -378,7 +405,15 @@ impl DemandProxyState {
                         None
                     })
                     .collect_vec();
-                s_to_move.set_ips_for_workload(workload_uid_clone, ips);
+                let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
+                let now = std::time::Instant::now();
+                let rdns = ResolvedDns {
+                    hostname: hostname.clone(),
+                    ips: set,
+                    last_queried: Some(now),
+                    dns_ttl: std::time::Duration::from_secs(60), // TODO(kdorosh) get from DNS record
+                };
+                s_to_move.set_ips_for_workload(workload_uid_clone, rdns);
             });
 
             match jh.await {
@@ -394,7 +429,8 @@ impl DemandProxyState {
             // try to get it again
             let new_ipset = s_not_moved.get_ips_for_workload(workload_uid.to_owned());
             match new_ipset {
-                Some(ipset) => {
+                Some(rdns) => {
+                    let ipset = rdns.ips;
                     let ips_vec = ipset.iter().collect::<Vec<_>>();
                     let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
                         return Err(Error::EmptyResolvedAddresses(workload_uid));
@@ -406,6 +442,10 @@ impl DemandProxyState {
                 }
             }
         };
+
+        s_not_moved.update_latest_request(&workload_uid);
+
+        let ipset = rdns.ips;
         let ips_vec = ipset.iter().collect::<Vec<_>>();
         let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
             return Err(Error::EmptyResolvedAddresses(workload_uid));
@@ -414,19 +454,43 @@ impl DemandProxyState {
     }
 
     // TODO: ipv6 support
-    pub fn set_ips_for_workload(&mut self, workload_uid: String, ips: Vec<Ipv4Addr>) {
-        let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
+    pub fn set_ips_for_workload(&mut self, workload_uid: String, rdns: ResolvedDns) {
         self.state
             .write()
             .unwrap()
             .resolved_dns
             .by_workload_uid
-            .insert(workload_uid, set);
+            .insert(workload_uid, rdns);
     }
 
-    pub fn get_ips_for_workload(&mut self, workload_uid: String) -> Option<HashSet<IpAddr>> {
+    pub fn get_ips_for_workload(&mut self, workload_uid: String) -> Option<ResolvedDns> {
         let s = self.state.read().unwrap();
         s.resolved_dns.by_workload_uid.get(&workload_uid).cloned()
+    }
+
+    // we had a resolved DNS cache hit; update the last_queried time
+    pub fn update_latest_request(&mut self, workload_uid: &String) {
+        let mut s = self.state.write().unwrap();
+        s.resolved_dns
+            .by_workload_uid
+            .get_mut(workload_uid)
+            .unwrap()
+            .last_queried = Some(std::time::Instant::now());
+    }
+
+    // get workloads that have received requests recently to their hostname
+    pub fn get_recent_workloads_queried(&mut self) -> HashSet<WorkloadUidHostname> {
+        let s = self.state.read().unwrap();
+        let mut set = HashSet::new();
+        for (uid, rdns) in s.resolved_dns.by_workload_uid.iter() {
+            if rdns.last_queried.is_some() && rdns.last_queried.unwrap().elapsed() < rdns.dns_ttl {
+                set.insert(WorkloadUidHostname {
+                    workload_uid: uid.to_owned(),
+                    hostname: rdns.hostname.to_owned(),
+                });
+            }
+        }
+        set
     }
 
     pub async fn set_gateway_address(

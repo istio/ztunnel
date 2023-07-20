@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use crate::config::ProxyMode;
-use crate::state::DemandProxyState;
+use crate::state::{DemandProxyState, ResolvedDns};
 
 use drain::Watch;
 use itertools::Itertools;
@@ -26,7 +26,6 @@ use tracing::{info, trace, warn};
 use super::Error;
 use crate::dns;
 use crate::proxy::ProxyInputs;
-use crate::state::workload::Workload;
 
 use tokio::task::JoinHandle;
 
@@ -39,7 +38,7 @@ use trust_dns_server::server::{Protocol, Request};
 struct TaskContext {
     task: tokio::task::JoinHandle<()>,
     // monotonic task start time
-    start: Instant,
+    start: Instant, // TODO(kdorosh): get this value from resolved DNS
     finished: bool,
     // TODO: honor dns cache ttl?
 }
@@ -108,10 +107,11 @@ impl PollingDns {
         proxy_mode: ProxyMode,
         dns_nameservers: Vec<SocketAddr>,
         mut state: DemandProxyState,
-        dns_workload: Workload,
+        hostname: String,
+        workload_uid: String,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let hostname = dns_workload.hostname.clone();
+            let hostname = hostname.clone();
             trace!("dns workload async task started for {:?}", &hostname);
 
             // TODO(kdorosh): don't make a new forwarder for every request?
@@ -128,13 +128,13 @@ impl PollingDns {
             if resp.is_err() {
                 warn!(
                     "dns async response for workload {} is: {:?}",
-                    &dns_workload.uid, resp
+                    &workload_uid, resp
                 );
                 return;
             } else {
                 trace!(
                     "dns async response for workload {} is: {:?}",
-                    &dns_workload.uid,
+                    &workload_uid,
                     resp
                 );
             }
@@ -149,7 +149,10 @@ impl PollingDns {
                     None
                 })
                 .collect_vec();
-            state.set_ips_for_workload(dns_workload.uid, ips);
+            let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
+            // TODO(kdorosh) get from DNS record TTL
+            let rdns = ResolvedDns::new(hostname, set, std::time::Duration::from_secs(60));
+            state.set_ips_for_workload(workload_uid, rdns);
         })
     }
 
@@ -158,18 +161,13 @@ impl PollingDns {
             loop {
                 // TODO(kdorosh) impl+test polling only if requests were received during last DNS ttl
 
-                let dns_workloads = self
-                    .pi
-                    .state
-                    .state
-                    .read()
-                    .unwrap()
-                    .workloads
-                    .get_async_dns_workloads();
+                let dns_workloads = self.pi.state.get_recent_workloads_queried();
 
                 // kill tasks that no longer need to be running
-                let current_workload_uids =
-                    dns_workloads.iter().map(|w| w.uid.clone()).collect_vec();
+                let current_workload_uids = dns_workloads
+                    .iter()
+                    .map(|w| w.workload_uid.clone())
+                    .collect_vec();
                 let current_workload_uid_set: HashSet<String> =
                     HashSet::from_iter(current_workload_uids.iter().cloned());
                 let mut workload_uid_to_remove_set: HashSet<String> = HashSet::new();
@@ -189,21 +187,23 @@ impl PollingDns {
 
                 // start new tasks, if needed
                 for dns_workload in dns_workloads.iter() {
-                    match self.tasks.get_mut(&dns_workload.uid) {
+                    let cloned_hostname = dns_workload.hostname.clone();
+                    let cloned_uid = dns_workload.workload_uid.clone();
+                    match self.tasks.get_mut(&dns_workload.workload_uid) {
                         None => {
-                            let clone = dns_workload.clone();
                             let handle = Self::get_handle(
                                 self.pi.cfg.proxy_mode.to_owned(),
                                 self.pi.cfg.dns_nameservers.to_owned(),
                                 self.pi.state.clone(),
-                                clone,
+                                cloned_hostname.to_owned(),
+                                cloned_uid.to_owned(),
                             );
                             let task = TaskContext {
                                 task: handle,
                                 start: Instant::now(),
                                 finished: false,
                             };
-                            self.tasks.insert(dns_workload.uid.clone(), task);
+                            self.tasks.insert(cloned_uid.clone(), task);
                             trace!(
                                 "dns workload async task queued for {:?}. curr tasks {}",
                                 dns_workload.hostname,
@@ -225,7 +225,8 @@ impl PollingDns {
                                         self.pi.cfg.proxy_mode.to_owned(),
                                         self.pi.cfg.dns_nameservers.to_owned(),
                                         self.pi.state.clone(),
-                                        dns_workload.clone(),
+                                        cloned_hostname.to_owned(),
+                                        cloned_uid.to_owned(),
                                     );
                                     t.start = Instant::now();
                                     t.finished = false;
@@ -241,7 +242,8 @@ impl PollingDns {
                                         self.pi.cfg.proxy_mode.to_owned(),
                                         self.pi.cfg.dns_nameservers.to_owned(),
                                         self.pi.state.clone(),
-                                        dns_workload.clone(),
+                                        cloned_hostname,
+                                        cloned_uid,
                                     );
                                     t.start = Instant::now();
                                 }
