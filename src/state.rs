@@ -306,18 +306,20 @@ impl DemandProxyState {
         // if/when we support that, this function may need to move to get access to the necessary metadata.
         // Randomly pick an IP
         // TODO: do this more efficiently, and not just randomly
-        let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
-
-            if !workload.hostname.is_empty() {
-                let ip = self
-                    .load_balance_for_workload(workload.clone().uid, workload.clone().hostname).await?;
-                return Ok(ip);
-            }
-
-            debug!("workload {} has no suitable workload IPs for routing", workload.name);
-            return Err(Error::NoValidDestination(Box::new(workload.clone())))
-        };
-        Ok(*ip)
+        if let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) {
+            return Ok(*ip);
+        }
+        if workload.hostname.is_empty() {
+            debug!(
+                "workload {} has no suitable workload IPs for routing",
+                workload.name
+            );
+            return Err(Error::NoValidDestination(Box::new(workload.clone())));
+        }
+        let ip = self
+            .load_balance_for_workload(workload.clone().uid, workload.clone().hostname)
+            .await?;
+        Ok(ip)
     }
 
     async fn load_balance_for_workload(

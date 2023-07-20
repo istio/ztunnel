@@ -305,7 +305,7 @@ impl LocalClient {
         let num_workloads = r.workloads.len();
         let num_policies = r.policies.len();
         for wl in r.workloads {
-            debug!("inserting local workload {}", &wl.workload.uid);
+            trace!("inserting local workload {}", &wl.workload.uid);
             state.workloads.insert(wl.workload.clone())?;
             self.cert_fetcher.prefetch_cert(&wl.workload);
 
