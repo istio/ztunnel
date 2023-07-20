@@ -209,7 +209,11 @@ async fn test_vip_request() {
 
 #[tokio::test]
 async fn test_on_demand_dns_request() {
+    // first request should trigger on-demand DNS resolution
     run_request_test(&format!("{TEST_VIP_DNS}:80"), "").await;
+
+    // TODO: second request should used cached DNS response
+    // run_request_test(&format!("{TEST_VIP_DNS}:80"), "").await;
 }
 
 #[tokio::test]

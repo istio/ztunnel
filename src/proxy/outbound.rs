@@ -382,10 +382,11 @@ impl OutboundConnection {
         }
 
         let mut mutable_us = us.unwrap();
+        let workload_ip = self.pi.state.load_balance(&mutable_us.workload).await?;
         let us = match self
             .pi
             .state
-            .set_gateway_address(&mut mutable_us, self.pi.hbone_port)
+            .set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port)
             .await
         {
             Ok(_) => mutable_us.clone(),
@@ -396,7 +397,12 @@ impl OutboundConnection {
         };
 
         // For case upstream server has enabled waypoint
-        match self.pi.state.fetch_waypoint(us.workload.clone()).await {
+        match self
+            .pi
+            .state
+            .fetch_waypoint(us.workload.clone(), workload_ip)
+            .await
+        {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
@@ -424,7 +430,6 @@ impl OutboundConnection {
             return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
         }
 
-        let workload_ip = self.pi.state.load_balance(&us.workload).await?;
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
@@ -447,7 +452,7 @@ impl OutboundConnection {
                         .gateway_address
                         .expect("gateway address confirmed")
                         .ip(),
-                    15008,
+                    self.pi.hbone_port,
                 )),
                 direction: Direction::Outbound,
                 // Sending to a node on the same node (ourselves).

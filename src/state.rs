@@ -196,7 +196,7 @@ impl ProxyState {
         // to workload.
         match self.services.get_by_namespaced_host(name) {
             None => {
-                // Workload hostnames (generally per-pod statefulset hostnames) are globally unique, so ignore the namespace.
+                // Workload hostnames are globally unique, so ignore the namespace.
                 self.workloads
                     .find_hostname(&name.hostname)
                     .map(|wl| Address::Workload(Box::new(wl)))
@@ -328,6 +328,7 @@ impl DemandProxyState {
         false
     }
 
+    // this should only be called once per workload (the workload itself and it's waypoint) per outgoing request
     pub async fn load_balance(&self, workload: &Workload) -> Result<IpAddr, Error> {
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
         // if/when we support that, this function may need to move to get access to the necessary metadata.
@@ -496,9 +497,9 @@ impl DemandProxyState {
     pub async fn set_gateway_address(
         &self,
         us: &mut Upstream,
+        workload_ip: IpAddr,
         hbone_port: u16,
     ) -> anyhow::Result<()> {
-        let workload_ip = self.load_balance(&us.workload).await?;
         if us.workload.gateway_address.is_none() {
             us.workload.gateway_address = Some(match us.workload.protocol {
                 Protocol::HBONE => {
@@ -541,7 +542,11 @@ impl DemandProxyState {
         self.state.read().unwrap().find_upstream(network, addr)
     }
 
-    pub async fn fetch_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
+    pub async fn fetch_waypoint(
+        &self,
+        wl: Workload,
+        workload_ip: IpAddr,
+    ) -> Result<Option<Upstream>, WaypointError> {
         let Some(gw_address) = &wl.waypoint else {
             return Ok(None);
         };
@@ -563,7 +568,7 @@ impl DemandProxyState {
             Some(mut upstream) => {
                 debug!(%wl.name, "found waypoint upstream");
                 match self
-                    .set_gateway_address(&mut upstream, gw_address.port)
+                    .set_gateway_address(&mut upstream, workload_ip, gw_address.port)
                     .await
                 {
                     Ok(_) => Ok(Some(upstream)),
