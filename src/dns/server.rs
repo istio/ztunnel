@@ -88,6 +88,7 @@ impl Server {
         let mut server = ServerFuture::new(handler);
         info!(
             address=%addr,
+            component="dns",
             "starting local DNS server",
         );
         // Bind and register the UDP socket.
