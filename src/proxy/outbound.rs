@@ -382,7 +382,15 @@ impl OutboundConnection {
         }
 
         let mut mutable_us = us.unwrap();
-        let workload_ip = self.pi.state.load_balance(&mutable_us.workload).await?;
+        let workload_ip = self
+            .pi
+            .state
+            .load_balance(
+                &mutable_us.workload,
+                &source_workload,
+                self.pi.metrics.clone(),
+            )
+            .await?;
         let us = match self
             .pi
             .state
@@ -406,7 +414,15 @@ impl OutboundConnection {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
-                let waypoint_ip = self.pi.state.load_balance(&waypoint_workload).await?;
+                let waypoint_ip = self
+                    .pi
+                    .state
+                    .load_balance(
+                        &waypoint_workload,
+                        &source_workload,
+                        self.pi.metrics.clone(),
+                    )
+                    .await?;
                 let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here

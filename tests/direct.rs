@@ -27,8 +27,8 @@ use tokio::time::timeout;
 
 use ztunnel::config;
 use ztunnel::identity::mock::new_secret_manager;
-use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
 use ztunnel::test_helpers::assert_eventually;
 use ztunnel::test_helpers::*;
 
@@ -175,10 +175,15 @@ async fn test_quit_lifecycle() {
 }
 
 async fn run_request_test(target: &str, node: &str) {
-    run_request_tests(target, node, 1).await
+    run_requests_test(target, node, 1, None).await
 }
 
-async fn run_request_tests(target: &str, node: &str, num_queries: u8) {
+async fn run_requests_test(
+    target: &str,
+    node: &str,
+    num_queries: u8,
+    metrics_assertions: Option<fn(metrics: ParsedMetrics)>,
+) {
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
@@ -193,6 +198,10 @@ async fn run_request_tests(target: &str, node: &str, num_queries: u8) {
         for _ in 0..num_queries {
             let mut stream = app.socks5_connect(dst).await;
             read_write_stream(&mut stream).await;
+        }
+        if let Some(assertions) = metrics_assertions {
+            let metrics = app.metrics().await.unwrap();
+            assertions(metrics);
         }
     })
     .await;
@@ -213,11 +222,38 @@ async fn test_vip_request() {
     run_request_test(&format!("{TEST_VIP}:80"), "").await;
 }
 
+fn on_demand_dns_assertions(metrics: ParsedMetrics) {
+    for metric in &[
+        ("istio_on_demand_dns_cache_hits_total"),
+        ("istio_on_demand_dns_cache_misses_total"),
+    ] {
+        let m = metrics.query(metric, &Default::default());
+        assert!(m.is_some(), "expected metric {metric}");
+        // expecting one cache hit and one cache miss
+        assert!(
+            m.to_owned().unwrap().len() == 1,
+            "expected metric {metric} to have len(1)"
+        );
+        let value = m.unwrap()[0].value.clone();
+        assert!(
+            value == prometheus_parse::Value::Untyped(1.0),
+            "expected metric {metric} to be 1, was {:?}",
+            value
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_on_demand_dns_request() {
     // first request should trigger on-demand DNS resolution
-    // second request should used cached DNS response
-    run_request_tests(&format!("{TEST_VIP_DNS}:80"), "", 2).await;
+    // second request should use cached DNS response
+    run_requests_test(
+        &format!("{TEST_VIP_DNS}:80"),
+        "",
+        2,
+        Some(on_demand_dns_assertions),
+    )
+    .await;
 }
 
 #[tokio::test]

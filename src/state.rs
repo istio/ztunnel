@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::identity::SecretManager;
-use crate::proxy::Error;
+use crate::proxy;
+use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
 use crate::state::service::ServiceStore;
 use crate::state::workload::{
@@ -338,42 +339,55 @@ impl DemandProxyState {
     }
 
     // this should only be called once per workload (the workload itself and it's waypoint) per outgoing request
-    pub async fn load_balance(&self, workload: &Workload) -> Result<IpAddr, Error> {
+    pub async fn load_balance(
+        &self,
+        dst_workload: &Workload,
+        src_workload: &Workload,
+        metrics: Arc<proxy::Metrics>,
+    ) -> Result<IpAddr, Error> {
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
         // if/when we support that, this function may need to move to get access to the necessary metadata.
         // Randomly pick an IP
         // TODO: do this more efficiently, and not just randomly
-        if let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) {
+        if let Some(ip) = dst_workload.workload_ips.choose(&mut rand::thread_rng()) {
             return Ok(*ip);
         }
-        if workload.hostname.is_empty() {
+        if dst_workload.hostname.is_empty() {
             debug!(
                 "workload {} has no suitable workload IPs for routing",
-                workload.name
+                dst_workload.name
             );
-            return Err(Error::NoValidDestination(Box::new(workload.clone())));
+            return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
         }
         let ip = self
-            .load_balance_for_workload(workload.clone().uid, workload.clone().hostname)
+            .load_balance_for_workload(dst_workload, src_workload, metrics)
             .await?;
         Ok(ip)
     }
 
     async fn load_balance_for_workload(
         &self,
-        workload_uid: String,
-        hostname: String,
+        workload: &Workload,
+        src_workload: &Workload,
+        metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
         let mut s_to_move: DemandProxyState = self.clone();
         let mut s_not_moved: DemandProxyState = self.clone();
-        let Some(rdns) = s_to_move.get_ips_for_workload(workload_uid.to_owned()) else {
+        let labels = OnDemandDnsLabels::new()
+            .with_destination(workload)
+            .with_source(src_workload);
+        let workload_uid = workload.uid.to_owned();
+
+        let Some(rdns) = s_to_move.get_ips_for_workload(workload.uid.to_owned()) else {
 
             // no current task ongoing for DNS to resolve this workload. kick one off
-            let workload_uid_clone = workload_uid.clone();
+            let workload_uid_clone = workload.uid.to_owned();
+            let hostname = workload.hostname.to_owned();
+
+            metrics.as_ref().on_demand_dns_cache_misses.get_or_create(&labels).inc();
 
             // TODO(kdorosh) DRY this code
             let jh = tokio::spawn(async move {
-                let hostname = hostname.clone();
                 trace!("dns workload async task started for {:?}", &hostname);
 
                 // TODO(kdorosh): don't make a new forwarder for every request?
@@ -453,6 +467,11 @@ impl DemandProxyState {
             }
         };
 
+        metrics
+            .as_ref()
+            .on_demand_dns_cache_hits
+            .get_or_create(&labels)
+            .inc();
         s_not_moved.update_latest_request(&workload_uid);
 
         let ipset = rdns.ips;

@@ -293,7 +293,6 @@ pub fn local_xds_config(
             vec![&default_svc],
             false,
         )?,
-        // TODO: should protocol be decided by workload lookup again after DNS resolution?
         test_custom_workload(
             TEST_WORKLOAD_TCP,
             "local-tcp-via-dns",
