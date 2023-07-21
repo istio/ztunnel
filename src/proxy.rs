@@ -182,10 +182,10 @@ pub enum Error {
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
 
-    #[error("no ip addresses were pre-resolved aynchronously for workload: {0}")]
+    #[error("no ip addresses were resolved for workload: {0}")]
     NoResolvedAddresses(String),
 
-    #[error("ip addresses were pre-resolved aynchronously for workload, but valid dns response had no A/AAAA records: {0}")]
+    #[error("ip addresses were resolved for workload, but valid dns response had no A/AAAA records: {0}")]
     EmptyResolvedAddresses(String),
 
     #[error("attempted recursive call to ourselves")]

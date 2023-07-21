@@ -37,6 +37,8 @@ use std::ops::Add;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tracing::trace;
+use trust_dns_resolver::config::*;
+use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
 pub mod app;
 pub mod ca;
@@ -91,9 +93,32 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         dns_proxy_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        dns_nameservers: vec!["116.203.255.68:53".parse().unwrap()], // TODO(kdorosh) remove me? nip.io as resolver may not be required
         ..config::parse_config().unwrap()
     }
+}
+
+pub async fn add_nip_io_nameserver(mut cfg: config::Config) -> config::Config {
+    // add nip.io as a nameserver so our test hostnames can resolve to reliable IPs
+    let r = TokioAsyncResolver::new(
+        ResolverConfig::default(),
+        ResolverOpts::default(),
+        TokioHandle,
+    )
+    .unwrap();
+    let resp = r.lookup_ip("nip.io").await.unwrap();
+    let ips = resp.iter().collect::<Vec<_>>();
+    assert!(!ips.is_empty());
+    for ip in ips {
+        let name_server = NameServerConfig {
+            socket_addr: SocketAddr::new(ip, 53),
+            protocol: trust_dns_resolver::config::Protocol::Udp,
+            tls_dns_name: None,
+            trust_nx_responses: false,
+            bind_addr: None,
+        };
+        cfg.dns_resolver_config.add_name_server(name_server);
+    }
+    cfg
 }
 
 pub fn test_config_with_port(port: u16) -> config::Config {

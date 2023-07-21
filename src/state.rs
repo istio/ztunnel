@@ -32,66 +32,15 @@ use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
+
+use itertools::Itertools;
+use trust_dns_resolver::config::*;
+use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
 pub mod policy;
 pub mod service;
 pub mod workload;
-
-// TODO(kdorosh) DRY the copied code following here and generally clean up any latest placeholder test values
-use crate::dns;
-use itertools::Itertools;
-use tracing::warn;
-use trust_dns_proto::op::{Message, MessageType, Query};
-use trust_dns_proto::rr::{Name, RecordType};
-use trust_dns_proto::serialize::binary::BinDecodable;
-use trust_dns_server::authority::MessageRequest;
-use trust_dns_server::server::Request;
-
-/// Constructs a new [Message] of type [MessageType::Query];
-pub fn new_message(name: Name, rr_type: RecordType) -> Message {
-    let mut msg = Message::new();
-    msg.set_id(123);
-    msg.set_message_type(MessageType::Query);
-    msg.set_recursion_desired(true);
-    msg.add_query(Query::query(name, rr_type));
-    msg
-}
-
-/// Converts the given [Message] into a server-side [Request] with dummy values for
-/// the client IP and protocol.
-pub fn server_request(
-    msg: &Message,
-    client_addr: SocketAddr,
-    protocol: trust_dns_server::server::Protocol,
-) -> Request {
-    // Serialize the message.
-    let wire_bytes = msg.to_vec().unwrap();
-
-    // Deserialize into a server-side request.
-    let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
-
-    Request::new(msg_request, client_addr, protocol)
-}
-
-/// Creates a A-record [Request] for the given name.
-pub fn a_request(
-    name: Name,
-    client_addr: SocketAddr,
-    protocol: trust_dns_server::server::Protocol,
-) -> Request {
-    server_request(&new_message(name, RecordType::A), client_addr, protocol)
-}
-
-/// A short-hand helper for constructing a [Name].
-pub fn n<S: AsRef<str>>(name: S) -> Name {
-    Name::from_utf8(name).unwrap()
-}
-
-/// Helper for parsing a [SocketAddr] string.
-pub fn socket_addr<S: AsRef<str>>(socket_addr: S) -> SocketAddr {
-    socket_addr.as_ref().parse().unwrap()
-}
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
 pub struct Upstream {
@@ -130,6 +79,7 @@ pub struct ProxyState {
     #[serde(flatten)]
     pub policies: PolicyStore,
 
+    #[serde(flatten)]
     pub resolved_dns: ResolvedDnsStore,
 }
 
@@ -343,6 +293,8 @@ impl DemandProxyState {
         &self,
         dst_workload: &Workload,
         src_workload: &Workload,
+        dns_resolver_config: &ResolverConfig,
+        dns_resolver_opts: &ResolverOpts,
         metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
@@ -360,7 +312,13 @@ impl DemandProxyState {
             return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
         }
         let ip = self
-            .load_balance_for_workload(dst_workload, src_workload, metrics)
+            .load_balance_for_workload(
+                dst_workload,
+                src_workload,
+                dns_resolver_config,
+                dns_resolver_opts,
+                metrics,
+            )
             .await?;
         Ok(ip)
     }
@@ -369,6 +327,8 @@ impl DemandProxyState {
         &self,
         workload: &Workload,
         src_workload: &Workload,
+        dns_resolver_config: &ResolverConfig,
+        dns_resolver_opts: &ResolverOpts,
         metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
         let mut s_to_move: DemandProxyState = self.clone();
@@ -383,28 +343,17 @@ impl DemandProxyState {
             // no current task ongoing for DNS to resolve this workload. kick one off
             let workload_uid_clone = workload.uid.to_owned();
             let hostname = workload.hostname.to_owned();
+            let dns_resolver_config_clone = dns_resolver_config.clone();
+            let dns_resolver_opts_clone = *dns_resolver_opts;
 
             metrics.as_ref().on_demand_dns_cache_misses.get_or_create(&labels).inc();
 
             // TODO(kdorosh) DRY this code
             let jh = tokio::spawn(async move {
                 trace!("dns workload async task started for {:?}", &hostname);
-
-                // TODO(kdorosh): don't make a new forwarder for every request?
-
-                // nip_io = "116.203.255.68"
-                let sa = SocketAddr::from(([116, 203, 255, 68], 53));
-
-                let fw = dns::forwarder_for_mode(config::ProxyMode::Shared, vec![sa]).unwrap(); // TODO(kdorosh) handle unwrap, don't hardcode
-                let r = fw.resolver();
-
-                // Lookup a host.
-                let req = a_request(
-                    n(&hostname),
-                    socket_addr("1.1.1.1:80"), // TODO(kdorosh): don't hardcode this
-                    trust_dns_server::server::Protocol::Udp,
-                );
-                let resp = r.lookup(&req).await;
+                // TODO(kdorosh) handle unwrap
+                let r = TokioAsyncResolver::new(dns_resolver_config_clone, dns_resolver_opts_clone, TokioHandle).unwrap();
+                let resp = r.lookup_ip(&hostname).await;
                 if resp.is_err() {
                     warn!(
                         "dns async poller: response for workload {} is: {:?}",
@@ -420,6 +369,7 @@ impl DemandProxyState {
                 }
                 let resp = resp.unwrap();
                 let ips = resp
+                    .as_lookup()
                     .record_iter()
                     .filter_map(|record| {
                         if record.rr_type().is_ip_addr() {

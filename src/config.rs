@@ -24,6 +24,7 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 use crate::identity;
 
@@ -162,8 +163,9 @@ pub struct Config {
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
 
-    // custom DNS nameservers; primarily for testing
-    pub dns_nameservers: Vec<SocketAddr>,
+    pub dns_resolver_config: ResolverConfig,
+
+    pub dns_resolver_opts: ResolverOpts,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -268,6 +270,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
 
+    use trust_dns_resolver::system_conf::read_system_conf;
+    let (cfg, opts) = read_system_conf().unwrap();
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         dns_proxy: pc
@@ -340,7 +345,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
-        dns_nameservers: vec![],
+        dns_resolver_config: cfg,
+        dns_resolver_opts: opts,
     })
 }
 

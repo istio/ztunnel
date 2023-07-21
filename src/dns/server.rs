@@ -28,7 +28,7 @@ use tracing::warn;
 use trust_dns_proto::error::ProtoErrorKind;
 use trust_dns_proto::op::ResponseCode;
 use trust_dns_proto::rr::{Name, RData, Record, RecordType};
-use trust_dns_resolver::config::{NameServerConfig, Protocol, ResolverConfig};
+use trust_dns_resolver::config::ResolverConfig;
 use trust_dns_resolver::system_conf::read_system_conf;
 use trust_dns_server::authority::LookupError;
 use trust_dns_server::server::Request;
@@ -636,21 +636,16 @@ pub trait Forwarder: Send + Sync {
         client: Option<&Workload>,
         request: &Request,
     ) -> Result<Answer, LookupError>;
-
-    fn resolver(&self) -> Arc<dyn Resolver>;
 }
 
 /// Creates the appropriate DNS forwarder for the proxy mode.
-pub fn forwarder_for_mode(
-    proxy_mode: ProxyMode,
-    name_servers: Vec<SocketAddr>,
-) -> Result<Arc<dyn Forwarder>, Error> {
+pub fn forwarder_for_mode(proxy_mode: ProxyMode) -> Result<Arc<dyn Forwarder>, Error> {
     Ok(match proxy_mode {
         ProxyMode::Shared => {
             // TODO(https://github.com/istio/ztunnel/issues/555): Use pod settings if available.
-            Arc::new(SystemForwarder::new(name_servers)?)
+            Arc::new(SystemForwarder::new()?)
         }
-        ProxyMode::Dedicated => Arc::new(SystemForwarder::new(name_servers)?),
+        ProxyMode::Dedicated => Arc::new(SystemForwarder::new()?),
     })
 }
 
@@ -664,33 +659,14 @@ struct SystemForwarder {
 }
 
 impl SystemForwarder {
-    fn new(custom_name_servers: Vec<SocketAddr>) -> Result<Self, Error> {
+    fn new() -> Result<Self, Error> {
         // Get the resolver config from /etc/resolv.conf.
         let (cfg, opts) = read_system_conf()?;
 
         // Extract the parts.
         let domain = cfg.domain().cloned();
         let search_domains = cfg.search().to_vec();
-        let mut name_servers = cfg.name_servers().to_vec();
-
-        for s in &custom_name_servers {
-            let nsc_udp = NameServerConfig {
-                socket_addr: s.to_owned(),
-                protocol: Protocol::Udp,
-                tls_dns_name: None,
-                trust_nx_responses: false,
-                bind_addr: None,
-            };
-            name_servers.push(nsc_udp);
-            let nsc_tcp = NameServerConfig {
-                socket_addr: s.to_owned(),
-                protocol: Protocol::Tcp,
-                tls_dns_name: None,
-                trust_nx_responses: false,
-                bind_addr: None,
-            };
-            name_servers.push(nsc_tcp);
-        }
+        let name_servers = cfg.name_servers().to_vec();
 
         // Remove the search list before passing to the resolver. The local resolver that
         // sends the original request will already have search domains applied. We want
@@ -721,10 +697,6 @@ impl Forwarder for SystemForwarder {
         request: &Request,
     ) -> Result<Answer, LookupError> {
         self.resolver.lookup(request).await
-    }
-
-    fn resolver(&self) -> Arc<dyn Resolver> {
-        self.resolver.clone()
     }
 }
 
@@ -1221,7 +1193,7 @@ mod tests {
         let domain = "cluster.local".to_string();
         let addr = new_socket_addr().await;
         let state = state();
-        let forwarder = Arc::new(SystemForwarder::new(vec![]).unwrap());
+        let forwarder = Arc::new(SystemForwarder::new().unwrap());
         let server = Server::new(domain, addr, NW1, state, forwarder, test_metrics())
             .await
             .unwrap();
@@ -1538,10 +1510,6 @@ mod tests {
     impl Forwarder for FakeForwarder {
         fn search_domains(&self, _: &Workload) -> Vec<Name> {
             self.search_domains.clone()
-        }
-
-        fn resolver(&self) -> Arc<dyn Resolver> {
-            panic!("not implemented");
         }
 
         async fn forward(

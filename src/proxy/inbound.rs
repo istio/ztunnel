@@ -609,7 +609,7 @@ mod test {
         endpoints.insert(
             endpoint_uid(&mock_default_gateway_workload().uid, addr.as_ref()),
             Endpoint {
-                workload_uid: "".to_string(),
+                workload_uid: mock_default_gateway_workload().uid,
                 service: NamespacedHostname {
                     namespace: "gatewayns".to_string(),
                     hostname: "gateway".to_string(),

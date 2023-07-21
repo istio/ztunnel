@@ -187,10 +187,11 @@ async fn run_requests_test(
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
-    let cfg = config::Config {
+    let cfg = add_nip_io_nameserver(config::Config {
         local_node: (!node.is_empty()).then(|| node.to_string()),
         ..test_config_with_port(echo_addr.port())
-    };
+    })
+    .await;
     tokio::spawn(echo.run());
     testapp::with_app(cfg, |app| async move {
         let dst = SocketAddr::from_str(target)

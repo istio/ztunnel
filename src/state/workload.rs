@@ -545,17 +545,6 @@ impl WorkloadStore {
     pub fn find_uid(&self, uid: &str) -> Option<Workload> {
         self.by_uid.get(uid).map(|wl| wl.deref().clone())
     }
-
-    /// Returns all workloads that have received a request during the last DNS ttl time period.
-    /// We can proactively resync DNS before DNS timeout finishes to ensure speedy request path.
-    pub fn get_on_demand_dns_workloads_to_poll(&self) -> Vec<Workload> {
-        return self
-            .by_uid
-            .iter()
-            .filter(|(_, w)| !w.hostname.is_empty() && w.workload_ips.is_empty())
-            .map(|(_, w)| w.deref().clone())
-            .collect();
-    }
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -573,8 +562,6 @@ pub enum WorkloadError {
     EnumParse(String),
     #[error("nonempty gateway address is missing address")]
     MissingGatewayAddress,
-    #[error("invalid workload; cannot provide ip addresses and an async hostname")]
-    InvalidWorkload,
 }
 
 #[cfg(test)]
