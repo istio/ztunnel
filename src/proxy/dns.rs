@@ -24,7 +24,7 @@ use tracing::{info, trace, warn};
 
 use super::Error;
 use crate::proxy::ProxyInputs;
-
+use crate::state::WorkloadDnsInfo;
 use tokio::task::JoinHandle;
 
 use trust_dns_resolver::config::*;
@@ -33,9 +33,8 @@ use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 struct TaskContext {
     task: tokio::task::JoinHandle<()>,
     // monotonic task start time
-    start: Instant, // TODO(kdorosh): get this value from resolved DNS
+    start: Instant,
     finished: bool,
-    // TODO: honor dns cache ttl?
 }
 
 // PollingDns is an implementation of https://github.com/envoyproxy/envoy/issues/20562
@@ -54,7 +53,10 @@ pub(super) struct PollingDns {
 
 impl PollingDns {
     pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<PollingDns, Error> {
-        info!(component = "dns", "dns async polling client started",);
+        info!(
+            component = "dns",
+            "on-demand dns async polling client started",
+        );
         Ok(PollingDns {
             pi,
             drain,
@@ -66,12 +68,12 @@ impl PollingDns {
         mut state: DemandProxyState,
         dns_resolver_config: ResolverConfig,
         dns_resolver_opts: ResolverOpts,
-        hostname: String,
-        workload_uid: String,
+        workload_dns: WorkloadDnsInfo,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let hostname = hostname.clone();
-            trace!("dns workload async task started for {:?}", &hostname);
+            let hostname = workload_dns.hostname.clone();
+            let workload_uid = workload_dns.workload_uid.clone();
+            trace!("dns async poller: task started for {:?}", &hostname);
 
             // TODO(kdorosh): handle unwrap
             let r = TokioAsyncResolver::new(dns_resolver_config, dns_resolver_opts, TokioHandle)
@@ -103,11 +105,12 @@ impl PollingDns {
                 })
                 .collect_vec();
             let set = HashSet::from_iter(ips.iter().map(|x| IpAddr::V4(*x)));
-            let old = state.get_ips_for_workload(workload_uid.to_owned());
+            let old = state.get_ips_for_workload(&workload_uid);
             // TODO(kdorosh) get from DNS record TTL
             let rdns = ResolvedDns::new(
                 hostname,
                 set,
+                Some(Instant::now()),
                 old.unwrap_or_default().get_last_queried(),
                 std::time::Duration::from_secs(30),
             );
@@ -120,7 +123,7 @@ impl PollingDns {
             loop {
                 // TODO(kdorosh) impl+test polling only if requests were received during last DNS ttl
 
-                let dns_workloads = self.pi.state.get_recent_workloads_queried();
+                let dns_workloads = self.pi.state.get_workloads_ready_for_dns_refresh();
 
                 // kill tasks that no longer need to be running
                 let current_workload_uids = dns_workloads
@@ -133,7 +136,7 @@ impl PollingDns {
                 for (workload_uid, task) in self.tasks.iter() {
                     if !current_workload_uid_set.contains(workload_uid) {
                         trace!(
-                            "dns workload async task no longer needed for {}; aborting",
+                            "dns async poller: task no longer needed for {}; aborting",
                             workload_uid
                         );
                         task.task.abort();
@@ -142,30 +145,28 @@ impl PollingDns {
                 }
                 for workload_uid in workload_uid_to_remove_set.iter() {
                     self.tasks.remove(workload_uid);
+                    self.pi.state.remove_ips_for_workload(workload_uid);
                 }
 
                 // start new tasks, if needed
-                for dns_workload in dns_workloads.iter() {
-                    let cloned_hostname = dns_workload.hostname.clone();
-                    let cloned_uid = dns_workload.workload_uid.clone();
-                    match self.tasks.get_mut(&dns_workload.workload_uid) {
+                for workload_dns in dns_workloads.iter() {
+                    match self.tasks.get_mut(&workload_dns.workload_uid) {
                         None => {
                             let handle = Self::get_handle(
                                 self.pi.state.clone(),
                                 self.pi.cfg.dns_resolver_config.clone(),
                                 self.pi.cfg.dns_resolver_opts,
-                                cloned_hostname.to_owned(),
-                                cloned_uid.to_owned(),
+                                workload_dns.to_owned(),
                             );
                             let task = TaskContext {
                                 task: handle,
                                 start: Instant::now(),
                                 finished: false,
                             };
-                            self.tasks.insert(cloned_uid.clone(), task);
+                            self.tasks.insert(workload_dns.workload_uid.clone(), task);
                             trace!(
-                                "dns workload async task queued for {:?}. curr tasks {}",
-                                dns_workload.hostname,
+                                "dns async poller: task queued for {:?}. curr tasks {}",
+                                workload_dns.hostname,
                                 self.tasks.len()
                             );
                         }
@@ -174,34 +175,19 @@ impl PollingDns {
                                 return;
                             }
                             if !t.finished {
-                                trace!("dns workload async task finished {:?}", t.task);
+                                trace!("dns async poller: task finished {:?}", t.task);
                                 t.finished = true;
-                            }
-                            // TODO(kdorosh): dont harcode 1s; time comes from dns ttl
-                            if t.finished && Instant::now().duration_since(t.start).as_secs() > 1 {
-                                trace!("dns workload async task finished and queued for re-polling {:?}", t.task);
-                                t.task = Self::get_handle(
-                                    self.pi.state.clone(),
-                                    self.pi.cfg.dns_resolver_config.clone(),
-                                    self.pi.cfg.dns_resolver_opts,
-                                    cloned_hostname,
-                                    cloned_uid,
-                                );
-                                t.start = Instant::now();
-                                t.finished = false;
-                                return;
                             }
                             if !t.finished && Instant::now().duration_since(t.start).as_secs() > 10
                             {
-                                warn!("dns workload async task still running after 10s; killing task and re-polling {:?}", t.task);
+                                warn!("dns async poller: task still running after 10s; killing task and re-polling {:?}", t.task);
                                 t.task.abort();
 
                                 t.task = Self::get_handle(
                                     self.pi.state.clone(),
                                     self.pi.cfg.dns_resolver_config.clone(),
                                     self.pi.cfg.dns_resolver_opts,
-                                    cloned_hostname,
-                                    cloned_uid,
+                                    workload_dns.to_owned(),
                                 );
                                 t.start = Instant::now();
                                 return;
