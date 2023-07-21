@@ -52,6 +52,7 @@ pub fn tls_server<T: CertProvider + Clone + 'static>(
                     None
                 }
                 Ok(s) => {
+                    s.get_ref().set_nodelay(true).unwrap();
                     debug!("TLS handshake succeeded");
                     Some(s)
                 }
