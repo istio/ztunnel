@@ -394,19 +394,12 @@ impl OutboundConnection {
                 self.pi.metrics.clone(),
             )
             .await?;
-        let us = match set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port) {
-            Ok(_) => mutable_us,
-            Err(e) => {
-                debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
-                return Err(Error::UnknownWaypoint(mutable_us.workload.workload_name));
-            }
-        };
 
         // For case upstream server has enabled waypoint
         match self
             .pi
             .state
-            .fetch_waypoint(us.workload.clone(), workload_ip)
+            .fetch_waypoint(&mutable_us.workload, workload_ip)
             .await
         {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
@@ -430,20 +423,29 @@ impl OutboundConnection {
                     source: source_workload,
                     // Use the original VIP, not translated
                     destination: target,
-                    destination_workload: Some(us.workload),
+                    destination_workload: Some(mutable_us.workload),
                     expected_identity: Some(waypoint_workload.identity()),
                     gateway: wp_socket_addr,
                     // Let the client remote know we are on the inbound path.
                     direction: Direction::Inbound,
                     request_type: RequestType::ToServerWaypoint,
-                    upstream_sans: us.sans.clone(),
+                    upstream_sans: mutable_us.sans,
                 });
             }
             // we expected the workload to have a waypoint, but could not find one
             Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
         }
+
+        let us = match set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port) {
+            Ok(_) => mutable_us,
+            Err(e) => {
+                debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
+                return Err(Error::UnknownWaypoint(mutable_us.workload.workload_name));
+            }
+        };
+
         if us.workload.gateway_address.is_none() {
-            return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
+            return Err(Error::NoGatewayAddress(Box::new(us.workload)));
         }
 
         // For case source client and upstream server are on the same node
@@ -474,7 +476,7 @@ impl OutboundConnection {
                 // Sending to a node on the same node (ourselves).
                 // In the future this could be optimized to avoid a full network traversal.
                 request_type: RequestType::DirectLocal,
-                upstream_sans: us.sans.clone(),
+                upstream_sans: us.sans,
             });
         }
         // For case no waypoint for both side and direct to remote node proxy
@@ -490,7 +492,7 @@ impl OutboundConnection {
                 .expect("gateway address confirmed"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
-            upstream_sans: us.sans.clone(),
+            upstream_sans: us.sans,
         })
     }
 }

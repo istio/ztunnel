@@ -496,7 +496,7 @@ impl DemandProxyState {
 
     pub async fn fetch_waypoint(
         &self,
-        wl: Workload,
+        wl: &Workload,
         workload_ip: IpAddr,
     ) -> Result<Option<Upstream>, WaypointError> {
         let Some(gw_address) = &wl.waypoint else {
@@ -523,13 +523,13 @@ impl DemandProxyState {
                     Ok(_) => Ok(Some(upstream)),
                     Err(e) => {
                         debug!(%wl.name, "failed to set gateway address for upstream: {}", e);
-                        Err(WaypointError::FindWaypointError(wl.name))
+                        Err(WaypointError::FindWaypointError(wl.name.to_owned()))
                     }
                 }
             }
             None => {
                 debug!(%wl.name, "waypoint upstream not found");
-                Err(WaypointError::FindWaypointError(wl.name))
+                Err(WaypointError::FindWaypointError(wl.name.to_owned()))
             }
         }
     }
