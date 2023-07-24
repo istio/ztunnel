@@ -32,7 +32,6 @@ use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 use itertools::Itertools;
@@ -84,11 +83,15 @@ pub struct ProxyState {
     pub resolved_dns: ResolvedDnsStore,
 }
 
-/// A ResolvedDnsStore encapsulates all per-workload resolved DNS information for workloads in the mesh
+/// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ResolvedDnsStore {
-    // workload UID to resolved IP addresses
-    by_workload_uid: HashMap<String, ResolvedDns>,
+    // by_hostname is a map from hostname to resolved IP addresses for now.
+    //
+    // in a future with support for per-pod DNS resolv.conf settings we may
+    // need to change this to a map from source workload to hostname to
+    // resolved IP addresses.
+    by_hostname: HashMap<String, ResolvedDns>,
 }
 
 #[derive(serde::Serialize, Default, Debug, Clone, Hash, Eq, PartialEq)]
@@ -104,35 +107,8 @@ pub struct ResolvedDns {
     ips: HashSet<IpAddr>,
     #[serde(skip_serializing)]
     initial_query: Option<std::time::Instant>,
-    #[serde(skip_serializing)]
-    last_queried: Option<std::time::Instant>,
+    // the shortest DNS ttl of all records in the response; used for cache refresh
     dns_ttl: std::time::Duration,
-}
-
-impl ResolvedDns {
-    pub fn new(
-        hostname: String,
-        ips: HashSet<IpAddr>,
-        initial_query: Option<std::time::Instant>,
-        last_queried: Option<std::time::Instant>,
-        dns_ttl: std::time::Duration,
-    ) -> Self {
-        Self {
-            hostname,
-            ips,
-            initial_query,
-            last_queried,
-            dns_ttl,
-        }
-    }
-
-    pub fn get_last_queried(&self) -> Option<std::time::Instant> {
-        self.last_queried
-    }
-
-    pub fn get_initial_query(&self) -> Option<std::time::Instant> {
-        self.initial_query
-    }
 }
 
 impl ProxyState {
@@ -357,7 +333,6 @@ impl DemandProxyState {
 
             metrics.as_ref().on_demand_dns_cache_misses.get_or_create(&labels).inc();
 
-            // TODO(kdorosh) DRY this code
             let jh = tokio::spawn(async move {
                 trace!("dns workload async task started for {:?}", &hostname);
                 // TODO(kdorosh) handle unwrap
@@ -365,13 +340,13 @@ impl DemandProxyState {
                 let resp = r.lookup_ip(&hostname).await;
                 if resp.is_err() {
                     warn!(
-                        "dns async poller: response for workload {} is: {:?}",
+                        "system dns async resolution: error response for workload {} is: {:?}",
                         &workload_uid_clone, resp
                     );
                     return;
                 } else {
                     trace!(
-                        "dns async poller: response for workload {} is: {:?}",
+                        "system dns async resolution: response for workload {} is: {:?}",
                         &workload_uid_clone,
                         resp
                     );
@@ -394,18 +369,17 @@ impl DemandProxyState {
                     hostname: hostname.clone(),
                     ips: set,
                     initial_query: Some(now),
-                    last_queried: Some(now),
-                    dns_ttl: std::time::Duration::from_secs(60), // TODO(kdorosh) get from DNS record
+                    dns_ttl: std::time::Duration::from_secs(1), // TODO(kdorosh) get from DNS record
                 };
                 s_to_move.set_ips_for_workload(workload_uid_clone, rdns);
             });
 
             match jh.await {
                 Ok(_) => {
-                    trace!("dns async task finished for {:?}", &workload_uid);
+                    trace!("system dns async resolution: task finished for {:?}", &workload_uid);
                 }
                 Err(e) => {
-                    warn!("dns async task failed for {:?}: {:?}", &workload_uid, e);
+                    warn!("system dns async resolution: error for {:?} is: {:?}", &workload_uid, e);
                     return Err(Error::NoResolvedAddresses(workload_uid));
                 }
             };
@@ -432,7 +406,6 @@ impl DemandProxyState {
             .on_demand_dns_cache_hits
             .get_or_create(&labels)
             .inc();
-        s_not_moved.update_latest_request(&workload_uid);
 
         let ipset = rdns.ips;
         let ips_vec = ipset.iter().collect::<Vec<_>>();
@@ -448,70 +421,19 @@ impl DemandProxyState {
             .write()
             .unwrap()
             .resolved_dns
-            .by_workload_uid
+            .by_hostname
             .insert(workload_uid, rdns);
     }
 
     pub fn get_ips_for_workload(&mut self, workload_uid: &String) -> Option<ResolvedDns> {
         let s = self.state.read().unwrap();
-        s.resolved_dns.by_workload_uid.get(workload_uid).cloned()
-    }
-
-    pub fn remove_ips_for_workload(&mut self, workload_uid: &String) {
-        self.state
-            .write()
-            .unwrap()
-            .resolved_dns
-            .by_workload_uid
-            .remove(workload_uid);
-    }
-
-    // we had a resolved DNS cache hit; update the last_queried time
-    pub fn update_latest_request(&mut self, workload_uid: &String) {
-        let mut s = self.state.write().unwrap();
         s.resolved_dns
-            .by_workload_uid
-            .get_mut(workload_uid)
-            .unwrap()
-            .last_queried = Some(std::time::Instant::now());
-    }
-
-    // get workloads that have received requests recently to their hostname
-    pub fn get_workloads_ready_for_dns_refresh(&mut self) -> HashSet<WorkloadDnsInfo> {
-        let mut s = self.state.write().unwrap();
-        let mut set = HashSet::new();
-        let mut workload_uid_to_remove_set: HashSet<String> = HashSet::new();
-        for (uid, rdns) in s.resolved_dns.by_workload_uid.iter() {
-            if rdns.initial_query.is_none() {
-                continue;
-            }
-            let initial_query = rdns.initial_query.unwrap();
-            if rdns.last_queried.is_none() {
-                continue;
-            }
-            let last_queried = rdns.last_queried.unwrap();
-
-            if Instant::now().duration_since(last_queried) > rdns.dns_ttl {
-                workload_uid_to_remove_set.insert(uid.to_owned());
-                continue;
-            }
-            // if time since initial request is > 90% of the DNS TTL, and we have
-            // received at least one following request to this workload; refresh
-            // DNS proactively
-            if initial_query.elapsed().as_secs_f64() > 0.9 * rdns.dns_ttl.as_secs_f64()
-                && !last_queried.duration_since(initial_query).is_zero()
-            {
-                set.insert(WorkloadDnsInfo {
-                    workload_uid: uid.to_owned(),
-                    hostname: rdns.hostname.to_owned(),
-                    dns_ttl: rdns.dns_ttl.as_secs(),
-                });
-            }
-        }
-        for uid in workload_uid_to_remove_set.iter() {
-            s.resolved_dns.by_workload_uid.remove(uid);
-        }
-        set
+            .by_hostname
+            .get(workload_uid)
+            .filter(|rdns| {
+                rdns.initial_query.is_some() && rdns.initial_query.unwrap().elapsed() < rdns.dns_ttl
+            })
+            .cloned()
     }
 
     pub async fn set_gateway_address(
