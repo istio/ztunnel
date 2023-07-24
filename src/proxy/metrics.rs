@@ -258,8 +258,8 @@ pub struct OnDemandDnsLabels {
     source_version: DefaultedUnknown<String>,
     source_cluster: DefaultedUnknown<String>,
 
-    // on-demand DNS is resolved per destination workload, so this is the most interesting part
-    destination_workload_uid: DefaultedUnknown<String>,
+    // on-demand DNS is resolved per hostname, so this is the most interesting part
+    hostname: DefaultedUnknown<String>,
 }
 
 impl OnDemandDnsLabels {
@@ -280,7 +280,7 @@ impl OnDemandDnsLabels {
     }
 
     pub fn with_destination(mut self, w: &Workload) -> Self {
-        self.destination_workload_uid = w.uid.clone().into();
+        self.hostname = w.hostname.clone().into();
         self
     }
 }
