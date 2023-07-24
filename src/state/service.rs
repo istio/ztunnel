@@ -59,9 +59,7 @@ pub struct Endpoint {
     pub service: NamespacedHostname,
 
     /// The workload address, if any.
-    /// For example, a workload with async hostname will have no addresses.
-    /// If there is no address, users can look up the async hostname using the
-    /// workload UID.
+    /// A workload with a hostname may have no addresses.
     pub address: Option<NetworkAddress>,
 
     /// The port mapping.

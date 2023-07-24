@@ -179,7 +179,9 @@ pub enum Error {
     #[error("no ip addresses were resolved for workload: {0}")]
     NoResolvedAddresses(String),
 
-    #[error("ip addresses were resolved for workload, but valid dns response had no A/AAAA records: {0}")]
+    #[error(
+        "ip addresses were resolved for workload {0}, but valid dns response had no A/AAAA records"
+    )]
     EmptyResolvedAddresses(String),
 
     #[error("attempted recursive call to ourselves")]
