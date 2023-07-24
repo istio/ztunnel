@@ -366,7 +366,7 @@ impl Store {
                         .endpoints
                         .iter()
                         .filter_map(|(_, ep)| {
-                            let Some(addr) = ep.address.clone() else {
+                            let Some(addr) = &ep.address else {
                                 return None
                             };
                             if is_record_type(&addr.address, record_type) {

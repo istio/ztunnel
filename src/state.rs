@@ -267,7 +267,7 @@ impl DemandProxyState {
         false
     }
 
-    // this should only be called once per workload (the workload itself and it's waypoint) per outgoing request
+    // this should only be called once per request (for the workload itself and potentially its waypoint)
     pub async fn load_balance(
         &self,
         dst_workload: &Workload,
