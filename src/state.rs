@@ -364,16 +364,14 @@ impl DemandProxyState {
             }
         };
 
-        let ipset = rdns.ips;
-        let ips_vec = ipset.iter().collect::<Vec<_>>();
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
         // if/when we support that, this function may need to move to get access to the necessary metadata.
         // Randomly pick an IP
         // TODO: do this more efficiently, and not just randomly
-        let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
+        let Some(ip) = rdns.ips.iter().choose(&mut rand::thread_rng()) else {
             return Err(Error::EmptyResolvedAddresses(workload_uid));
         };
-        Ok(**ip)
+        Ok(*ip)
     }
 
     fn resolve_on_demand_dns(

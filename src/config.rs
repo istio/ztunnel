@@ -163,8 +163,10 @@ pub struct Config {
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
 
+    // System dns resolver config used for on-demand ztunnel dns resolution
     pub dns_resolver_config: ResolverConfig,
 
+    // System dns resolver opts used for on-demand ztunnel dns resolution
     pub dns_resolver_opts: ResolverOpts,
 }
 

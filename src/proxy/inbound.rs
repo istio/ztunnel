@@ -403,6 +403,7 @@ impl Inbound {
                 Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
                 Some(address::Address::Service(svc)) => {
                     for (_ep_uid, ep) in svc.endpoints.iter() {
+                        // fetch endpoints by endpoint UID since we may not have an IP for an endpoint (i.e, endpoint is just a hostname)
                         if state
                             .fetch_workload_by_uid(&ep.workload_uid)
                             .await
