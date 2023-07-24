@@ -430,6 +430,10 @@ impl DemandProxyState {
                 }
                 None
             }));
+            if ips.is_empty() {
+                // if we have no DNS records with a TTL to lean on; lets try to refresh again in 60s
+                dns_refresh_rate = std::time::Duration::from_secs(60);
+            }
             let now = std::time::Instant::now();
             let rdns = ResolvedDns {
                 hostname: hostname.to_owned(),
@@ -451,8 +455,10 @@ impl DemandProxyState {
     }
 
     pub fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
-        let s = self.state.read().unwrap();
-        s.resolved_dns
+        self.state
+            .read()
+            .unwrap()
+            .resolved_dns
             .by_hostname
             .get(hostname)
             .filter(|rdns| {
