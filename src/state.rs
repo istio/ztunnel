@@ -34,6 +34,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::{debug, trace, warn};
 
+use tokio::task::JoinHandle;
 use trust_dns_resolver::config::*;
 use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
@@ -93,21 +94,16 @@ pub struct ResolvedDnsStore {
     by_hostname: HashMap<String, ResolvedDns>,
 }
 
-#[derive(serde::Serialize, Default, Debug, Clone, Hash, Eq, PartialEq)]
-pub struct WorkloadDnsInfo {
-    pub workload_uid: String,
-    pub hostname: String,
-    pub dns_ttl: u64,
-}
-
 #[derive(serde::Serialize, Default, Debug, Clone)]
 pub struct ResolvedDns {
     hostname: String,
     ips: HashSet<IpAddr>,
     #[serde(skip_serializing)]
     initial_query: Option<std::time::Instant>,
-    // the shortest DNS ttl of all records in the response; used for cache refresh
-    dns_ttl: std::time::Duration,
+    // the shortest DNS ttl of all records in the response; used for cache refresh.
+    // we use the shortest ttl rather than just relying on the older records so we don't
+    // load-balance to just the older records as the records with early ttl expire.
+    dns_refresh_rate: std::time::Duration,
 }
 
 impl ProxyState {
@@ -321,105 +317,53 @@ impl DemandProxyState {
             .with_source(src_workload);
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
-
-        let Some(rdns) = state.get_ips_for_hostname(&workload.hostname) else {
-            // no current task ongoing for DNS to resolve this workload. kick one off
-            // make copies of our variables that are owned by the async task
-            let mut async_state: DemandProxyState = self.clone();
-            let async_workload_uid = workload.uid.to_owned();
-            let async_hostname = workload.hostname.to_owned();
-            let dns_resolver_cfg = dns_resolver_config.clone();
-            let dns_resolver_opts = *dns_resolver_opts;
-
-            metrics.as_ref().on_demand_dns_cache_misses.get_or_create(&labels).inc();
-
-            let jh = tokio::spawn(async move {
-                trace!("dns workload async task started for {:?}", &async_hostname);
-                // TODO(kdorosh) handle unwrap
-                let r = TokioAsyncResolver::new(dns_resolver_cfg, dns_resolver_opts, TokioHandle).unwrap();
-                let resp = r.lookup_ip(&async_hostname).await;
-                if resp.is_err() {
-                    warn!(
-                        "system dns async resolution: error response for workload {} is: {:?}",
-                        &async_workload_uid, resp
-                    );
-                    return;
-                } else {
-                    trace!(
-                        "system dns async resolution: response for workload {} is: {:?}",
-                        &async_workload_uid,
-                        resp
-                    );
-                }
-                let resp = resp.unwrap();
-                let mut dns_refresh_rate = std::time::Duration::from_secs(u64::MAX);
-                let ips = HashSet::from_iter(resp
-                    .as_lookup()
-                    .record_iter()
-                    .filter_map(|record| {
-                        if record.rr_type().is_ip_addr() {
-                            let record_ttl = u64::from(record.ttl());
-                            if let Some(ipv4) = record.data().unwrap().as_a() {
-                                if record_ttl < dns_refresh_rate.as_secs() {
-                                    dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
-                                }
-                                return Some(IpAddr::V4(*ipv4));
-                            }
-                            if let Some(ipv6) = record.data().unwrap().as_aaaa() {
-                                if record_ttl < dns_refresh_rate.as_secs() {
-                                    dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
-                                }
-                                return Some(IpAddr::V6(*ipv6));
-                            }
-                            return None
-                        }
-                        None
-                    }));
-                let now = std::time::Instant::now();
-                let rdns = ResolvedDns {
-                    hostname: async_hostname.to_owned(),
-                    ips,
-                    initial_query: Some(now),
-                    dns_ttl: dns_refresh_rate,
+        let rdns = match state.get_ips_for_hostname(&workload.hostname) {
+            Some(r) => {
+                metrics
+                    .as_ref()
+                    .on_demand_dns_cache_hits
+                    .get_or_create(&labels)
+                    .inc();
+                r
+            }
+            None => {
+                metrics
+                    .as_ref()
+                    .on_demand_dns_cache_misses
+                    .get_or_create(&labels)
+                    .inc();
+                let jh = tokio::spawn(Self::resolve_on_demand_dns(
+                    self.clone(),
+                    workload,
+                    dns_resolver_config.to_owned(),
+                    dns_resolver_opts.to_owned(),
+                ));
+                match jh.await {
+                    Ok(_) => {
+                        trace!(
+                            "system dns async resolution: task finished for {:?}",
+                            &workload_uid
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "system dns async resolution: error for {:?} is: {:?}",
+                            &workload_uid, e
+                        );
+                        return Err(Error::NoResolvedAddresses(workload_uid));
+                    }
                 };
-                async_state.set_ips_for_hostname(async_hostname, rdns);
-            });
-
-            match jh.await {
-                Ok(_) => {
-                    trace!("system dns async resolution: task finished for {:?}", &workload_uid);
-                }
-                Err(e) => {
-                    warn!("system dns async resolution: error for {:?} is: {:?}", &workload_uid, e);
-                    return Err(Error::NoResolvedAddresses(workload_uid));
-                }
-            };
-
-            // try to get it again
-            let new_ipset = state.get_ips_for_hostname(&hostname);
-            match new_ipset {
-                Some(rdns) => {
-                    let ipset = rdns.ips;
-                    let ips_vec = ipset.iter().collect::<Vec<_>>();
-                    // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-                    // if/when we support that, this function may need to move to get access to the necessary metadata.
-                    // Randomly pick an IP
-                    // TODO: do this more efficiently, and not just randomly
-                    let Some(ip) = ips_vec.choose(&mut rand::thread_rng()) else {
-                        return Err(Error::EmptyResolvedAddresses(workload_uid));
-                    };
-                    return Ok(**ip);
-                }
-                None => {
-                    return Err(Error::NoResolvedAddresses(workload_uid));
+                // try to get it again
+                let updated_rdns = state.get_ips_for_hostname(&hostname);
+                match updated_rdns {
+                    Some(rdns) => rdns,
+                    None => {
+                        return Err(Error::NoResolvedAddresses(workload_uid));
+                    }
                 }
             }
         };
-        metrics
-            .as_ref()
-            .on_demand_dns_cache_hits
-            .get_or_create(&labels)
-            .inc();
+
         let ipset = rdns.ips;
         let ips_vec = ipset.iter().collect::<Vec<_>>();
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
@@ -430,6 +374,73 @@ impl DemandProxyState {
             return Err(Error::EmptyResolvedAddresses(workload_uid));
         };
         Ok(**ip)
+    }
+
+    fn resolve_on_demand_dns(
+        mut state: DemandProxyState,
+        workload: &Workload,
+        dns_resolver_cfg: ResolverConfig,
+        dns_resolver_opts: ResolverOpts,
+    ) -> JoinHandle<()> {
+        let workload_uid = workload.uid.to_owned();
+        let hostname = workload.hostname.to_owned();
+        tokio::spawn(async move {
+            trace!("dns workload async task started for {:?}", &hostname);
+            let resolver_result =
+                TokioAsyncResolver::new(dns_resolver_cfg, dns_resolver_opts, TokioHandle);
+            if resolver_result.is_err() {
+                warn!(
+                    "system dns async resolution: error creating resolver for workload {} is: {:?}",
+                    &workload_uid, resolver_result
+                );
+                return;
+            }
+            let r = resolver_result.unwrap();
+
+            let resp = r.lookup_ip(&hostname).await;
+            if resp.is_err() {
+                warn!(
+                    "system dns async resolution: error response for workload {} is: {:?}",
+                    &workload_uid, resp
+                );
+                return;
+            } else {
+                trace!(
+                    "system dns async resolution: response for workload {} is: {:?}",
+                    &workload_uid,
+                    resp
+                );
+            }
+            let resp = resp.unwrap();
+            let mut dns_refresh_rate = std::time::Duration::from_secs(u64::MAX);
+            let ips = HashSet::from_iter(resp.as_lookup().record_iter().filter_map(|record| {
+                if record.rr_type().is_ip_addr() {
+                    let record_ttl = u64::from(record.ttl());
+                    if let Some(ipv4) = record.data().unwrap().as_a() {
+                        if record_ttl < dns_refresh_rate.as_secs() {
+                            dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
+                        }
+                        return Some(IpAddr::V4(*ipv4));
+                    }
+                    if let Some(ipv6) = record.data().unwrap().as_aaaa() {
+                        if record_ttl < dns_refresh_rate.as_secs() {
+                            dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
+                        }
+                        return Some(IpAddr::V6(*ipv6));
+                    }
+                    return None;
+                }
+                None
+            }));
+            let now = std::time::Instant::now();
+            let rdns = ResolvedDns {
+                hostname: hostname.to_owned(),
+                ips,
+                initial_query: Some(now),
+                dns_refresh_rate,
+            };
+            state.set_ips_for_hostname(hostname, rdns);
+        })
     }
 
     pub fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
@@ -447,7 +458,8 @@ impl DemandProxyState {
             .by_hostname
             .get(hostname)
             .filter(|rdns| {
-                rdns.initial_query.is_some() && rdns.initial_query.unwrap().elapsed() < rdns.dns_ttl
+                rdns.initial_query.is_some()
+                    && rdns.initial_query.unwrap().elapsed() < rdns.dns_refresh_rate
             })
             .cloned()
     }
