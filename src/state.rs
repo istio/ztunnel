@@ -467,27 +467,6 @@ impl DemandProxyState {
             .cloned()
     }
 
-    pub async fn set_gateway_address(
-        &self,
-        us: &mut Upstream,
-        workload_ip: IpAddr,
-        hbone_port: u16,
-    ) -> anyhow::Result<()> {
-        if us.workload.gateway_address.is_none() {
-            us.workload.gateway_address = Some(match us.workload.protocol {
-                Protocol::HBONE => {
-                    let ip = us
-                        .workload
-                        .waypoint_svc_ip_address()?
-                        .unwrap_or(workload_ip);
-                    SocketAddr::from((ip, hbone_port))
-                }
-                Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
-            });
-        }
-        Ok(())
-    }
-
     // only support workload
     pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
@@ -540,10 +519,7 @@ impl DemandProxyState {
         {
             Some(mut upstream) => {
                 debug!(%wl.name, "found waypoint upstream");
-                match self
-                    .set_gateway_address(&mut upstream, workload_ip, gw_address.port)
-                    .await
-                {
+                match set_gateway_address(&mut upstream, workload_ip, gw_address.port) {
                     Ok(_) => Ok(Some(upstream)),
                     Err(e) => {
                         debug!(%wl.name, "failed to set gateway address for upstream: {}", e);
@@ -600,6 +576,26 @@ impl DemandProxyState {
             debug!(%key, "on demand ready");
         }
     }
+}
+
+pub fn set_gateway_address(
+    us: &mut Upstream,
+    workload_ip: IpAddr,
+    hbone_port: u16,
+) -> anyhow::Result<()> {
+    if us.workload.gateway_address.is_none() {
+        us.workload.gateway_address = Some(match us.workload.protocol {
+            Protocol::HBONE => {
+                let ip = us
+                    .workload
+                    .waypoint_svc_ip_address()?
+                    .unwrap_or(workload_ip);
+                SocketAddr::from((ip, hbone_port))
+            }
+            Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
+        });
+    }
+    Ok(())
 }
 
 #[derive(serde::Serialize)]

@@ -31,6 +31,7 @@ use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::state::set_gateway_address;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 
@@ -393,12 +394,7 @@ impl OutboundConnection {
                 self.pi.metrics.clone(),
             )
             .await?;
-        let us = match self
-            .pi
-            .state
-            .set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port)
-            .await
-        {
+        let us = match set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port) {
             Ok(_) => mutable_us,
             Err(e) => {
                 debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
