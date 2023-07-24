@@ -88,9 +88,8 @@ pub struct ProxyState {
 pub struct ResolvedDnsStore {
     // by_hostname is a map from hostname to resolved IP addresses for now.
     //
-    // in a future with support for per-pod DNS resolv.conf settings we may
-    // need to change this to a map from source workload to hostname to
-    // resolved IP addresses.
+    // in a future with support for per-pod DNS resolv.conf settings we may need
+    // to change this to a map from source workload uid to resolved IP addresses.
     by_hostname: HashMap<String, ResolvedDns>,
 }
 

@@ -399,7 +399,7 @@ impl OutboundConnection {
             .set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port)
             .await
         {
-            Ok(_) => mutable_us.clone(),
+            Ok(_) => mutable_us,
             Err(e) => {
                 debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
                 return Err(Error::UnknownWaypoint(mutable_us.workload.workload_name));
