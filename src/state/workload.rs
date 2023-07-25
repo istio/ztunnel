@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use crate::identity::Identity;
-use crate::proxy::Error;
 use crate::state::workload::WorkloadError::EnumParse;
 use crate::xds;
 use crate::xds::istio::workload::{Port, PortList};
 use bytes::Bytes;
-use rand::seq::SliceRandom;
 use serde::de::Visitor;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -33,7 +31,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
-use tracing::{debug, error, trace};
+use tracing::{error, trace};
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
 
@@ -185,18 +183,6 @@ impl Workload {
             };
         }
         Ok(None)
-    }
-
-    // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-    // if/when we support that, this function may need to move to get access to the necessary metadata.
-    pub fn choose_ip(&self) -> Result<IpAddr, Error> {
-        // Randomly pick an IP
-        // TODO: do this more efficiently, and not just randomly
-        let Some(ip) = self.workload_ips.choose(&mut rand::thread_rng()) else {
-            debug!("workload {} has no suitable workload IPs for routing", self.name);
-            return Err(Error::NoValidDestination(Box::new(self.clone())))
-        };
-        Ok(*ip)
     }
 }
 
@@ -554,6 +540,11 @@ impl WorkloadStore {
             .get(hostname.as_ref())
             .map(|wl| wl.deref().clone())
     }
+
+    /// Finds the workload by uid.
+    pub fn find_uid(&self, uid: &str) -> Option<Workload> {
+        self.by_uid.get(uid).map(|wl| wl.deref().clone())
+    }
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -590,6 +581,7 @@ mod tests {
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::RwLock;
+    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
     use xds::istio::workload::NetworkAddress as XdsNetworkAddress;
 
     #[test]
@@ -674,7 +666,12 @@ mod tests {
     fn workload_information() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
-        let demand = DemandProxyState::new(state.clone(), None);
+        let demand = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let updater = ProxyStateUpdater::new_no_fetch(state.clone());
 
         let ip1 = Ipv4Addr::new(127, 0, 0, 1);
@@ -989,7 +986,12 @@ mod tests {
     fn staged_services_cleanup() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
-        let demand = DemandProxyState::new(state.clone(), None);
+        let demand = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let updater = ProxyStateUpdater::new_no_fetch(state.clone());
         assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
         assert_eq!((state.read().unwrap().workloads.by_uid.len()), 0);
@@ -1058,11 +1060,12 @@ mod tests {
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
         for _ in 0..1000 {
-            if let Some(us) = state.state.read().unwrap().find_upstream(
-                "",
-                "127.0.1.1:80".parse().unwrap(),
-                15008,
-            ) {
+            if let Some(us) = state
+                .state
+                .read()
+                .unwrap()
+                .find_upstream("", "127.0.1.1:80".parse().unwrap())
+            {
                 let n = &us.workload.name; // borrow name instead of cloning
                 found.insert(n.to_owned()); // insert an owned copy of the borrowed n
                 wants.remove(n); // remove using the borrow
@@ -1084,7 +1087,12 @@ mod tests {
                 .join("localhost.yaml"),
         );
         let state = Arc::new(RwLock::new(ProxyState::default()));
-        let demand = DemandProxyState::new(state.clone(), None);
+        let demand = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let local_client = LocalClient {
             cfg,
             state: state.clone(),
@@ -1100,12 +1108,11 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.unwrap().service_account, "default");
-        let us =
-            demand
-                .state
-                .read()
-                .unwrap()
-                .find_upstream("", "127.10.0.1:80".parse().unwrap(), 15008);
+        let us = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream("", "127.10.0.1:80".parse().unwrap());
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.clone().unwrap().port, 8080);
@@ -1115,11 +1122,11 @@ mod tests {
         );
 
         // test that we can have a service in another network than workloads it selects
-        let us = demand.state.read().unwrap().find_upstream(
-            "remote",
-            "127.10.0.2:80".parse().unwrap(),
-            15008,
-        );
+        let us = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream("remote", "127.10.0.2:80".parse().unwrap());
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.unwrap().port, 8080);

@@ -37,6 +37,8 @@ use std::ops::Add;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tracing::trace;
+use trust_dns_resolver::config::*;
+use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
 pub mod app;
 pub mod ca;
@@ -95,6 +97,30 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     }
 }
 
+pub async fn add_nip_io_nameserver(mut cfg: config::Config) -> config::Config {
+    // add nip.io as a nameserver so our test hostnames can resolve to reliable IPs
+    let r = TokioAsyncResolver::new(
+        ResolverConfig::default(),
+        ResolverOpts::default(),
+        TokioHandle,
+    )
+    .unwrap();
+    let resp = r.lookup_ip("nip.io").await.unwrap();
+    let ips = resp.iter().collect::<Vec<_>>();
+    assert!(!ips.is_empty());
+    for ip in ips {
+        let name_server = NameServerConfig {
+            socket_addr: SocketAddr::new(ip, 53),
+            protocol: trust_dns_resolver::config::Protocol::Udp,
+            tls_dns_name: None,
+            trust_nx_responses: false,
+            bind_addr: None,
+        };
+        cfg.dns_resolver_config.add_name_server(name_server);
+    }
+    cfg
+}
+
 pub fn test_config_with_port(port: u16) -> config::Config {
     test_config_with_port_xds_addr_and_root_cert(port, None, None, None)
 }
@@ -109,9 +135,12 @@ pub const TEST_WORKLOAD_HBONE: &str = "127.0.0.3";
 pub const TEST_WORKLOAD_TCP: &str = "127.0.0.4";
 pub const TEST_WORKLOAD_WAYPOINT: &str = "127.0.0.5";
 pub const TEST_VIP: &str = "127.10.0.1";
+pub const TEST_VIP_DNS: &str = "127.10.0.2";
 pub const TEST_SERVICE_NAMESPACE: &str = "default";
 pub const TEST_SERVICE_NAME: &str = "local-vip";
 pub const TEST_SERVICE_HOST: &str = "local-vip.default.svc.cluster.local";
+pub const TEST_SERVICE_DNS_HBONE_NAME: &str = "local-vip-async-dns";
+pub const TEST_SERVICE_DNS_HBONE_HOST: &str = "local-vip-async-dns.default.svc.cluster.local";
 
 pub fn localhost_error_message() -> String {
     let addrs = &[
@@ -180,11 +209,20 @@ fn test_custom_workload(
     name: &str,
     protocol: Protocol,
     echo_port: u16,
-    include_service: bool,
+    services_vec: Vec<&Service>,
+    hostname_only: bool,
 ) -> anyhow::Result<LocalWorkload> {
-    let ip = ip_str.parse()?;
+    let host = match hostname_only {
+        true => format!("example.{}.nip.io.", ip_str),
+        false => "".to_string(),
+    };
+    let wips = match hostname_only {
+        true => vec![],
+        false => vec![ip_str.parse()?],
+    };
     let workload = Workload {
-        workload_ips: vec![ip],
+        workload_ips: wips,
+        hostname: host,
         protocol,
         uid: format!("cluster1//v1/Pod/default/{}", name),
         name: name.to_string(),
@@ -194,11 +232,51 @@ fn test_custom_workload(
         ..test_default_workload()
     };
     let mut services = HashMap::new();
-    if include_service {
-        let key = format!("{}/{}", TEST_SERVICE_NAMESPACE, TEST_SERVICE_HOST);
+    for s in services_vec.iter() {
+        let key = format!("{}/{}", s.namespace, s.hostname);
         services.insert(key, HashMap::from([(80u16, echo_port)]));
     }
     Ok(LocalWorkload { workload, services })
+}
+
+fn test_custom_svc(
+    name: &str,
+    hostname: &str,
+    vip: &str,
+    workload_name: &str,
+    endpoint: &str,
+    echo_port: u16,
+) -> anyhow::Result<Service> {
+    let addr = match endpoint.is_empty() {
+        true => None,
+        false => Some(NetworkAddress {
+            network: "".to_string(),
+            address: endpoint.parse()?,
+        }),
+    };
+    Ok(Service {
+        name: name.to_string(),
+        namespace: TEST_SERVICE_NAMESPACE.to_string(),
+        hostname: hostname.to_string(),
+        vips: vec![NetworkAddress {
+            network: "".to_string(),
+            address: vip.parse()?,
+        }],
+        ports: HashMap::from([(80u16, echo_port)]),
+        endpoints: HashMap::from([(
+            format!("cluster1//v1/Pod/default/{}", workload_name),
+            Endpoint {
+                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name),
+                service: NamespacedHostname {
+                    namespace: TEST_SERVICE_NAMESPACE.to_string(),
+                    hostname: hostname.to_string(),
+                },
+                address: addr,
+                port: HashMap::from([(80u16, echo_port)]),
+            },
+        )]),
+        subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".to_string()],
+    })
 }
 
 pub fn local_xds_config(
@@ -206,10 +284,56 @@ pub fn local_xds_config(
     waypoint_ip: Option<IpAddr>,
     policies: Vec<crate::rbac::Authorization>,
 ) -> anyhow::Result<Bytes> {
+    let default_svc = test_custom_svc(
+        TEST_SERVICE_NAME,
+        TEST_SERVICE_HOST,
+        TEST_VIP,
+        "local-hbone",
+        TEST_WORKLOAD_HBONE,
+        echo_port,
+    )?;
+    let dns_svc = test_custom_svc(
+        TEST_SERVICE_DNS_HBONE_NAME,
+        TEST_SERVICE_DNS_HBONE_HOST,
+        TEST_VIP_DNS,
+        "local-tcp-via-dns",
+        "",
+        echo_port,
+    )?;
+
     let mut res: Vec<LocalWorkload> = vec![
-        test_custom_workload(TEST_WORKLOAD_SOURCE, "local-source", TCP, echo_port, true)?,
-        test_custom_workload(TEST_WORKLOAD_HBONE, "local-hbone", HBONE, echo_port, true)?,
-        test_custom_workload(TEST_WORKLOAD_TCP, "local-tcp", TCP, echo_port, false)?,
+        test_custom_workload(
+            TEST_WORKLOAD_SOURCE,
+            "local-source",
+            TCP,
+            echo_port,
+            vec![&default_svc],
+            false,
+        )?,
+        test_custom_workload(
+            TEST_WORKLOAD_HBONE,
+            "local-hbone",
+            HBONE,
+            echo_port,
+            vec![&default_svc],
+            false,
+        )?,
+        test_custom_workload(
+            TEST_WORKLOAD_TCP,
+            "local-tcp-via-dns",
+            TCP,
+            echo_port,
+            vec![&dns_svc],
+            true,
+        )?,
+        test_custom_workload(
+            TEST_WORKLOAD_TCP,
+            "local-tcp",
+            TCP,
+            echo_port,
+            vec![],
+            false,
+        )?,
     ];
     if let Some(waypoint_ip) = waypoint_ip {
         res.push(LocalWorkload {
@@ -233,34 +357,7 @@ pub fn local_xds_config(
             services: Default::default(),
         })
     }
-    let svcs: Vec<Service> = vec![Service {
-        name: TEST_SERVICE_NAME.to_string(),
-        namespace: TEST_SERVICE_NAMESPACE.to_string(),
-        hostname: TEST_SERVICE_HOST.to_string(),
-        vips: vec![NetworkAddress {
-            network: "".to_string(),
-            address: TEST_VIP.parse()?,
-        }],
-        ports: HashMap::from([(80u16, echo_port)]),
-        endpoints: HashMap::from([(
-            NetworkAddress {
-                network: "".to_string(),
-                address: TEST_WORKLOAD_HBONE.parse()?,
-            },
-            Endpoint {
-                service: NamespacedHostname {
-                    namespace: TEST_SERVICE_NAMESPACE.to_string(),
-                    hostname: TEST_SERVICE_HOST.to_string(),
-                },
-                address: NetworkAddress {
-                    network: "".to_string(),
-                    address: TEST_WORKLOAD_HBONE.parse()?,
-                },
-                port: HashMap::from([(80u16, echo_port)]),
-            },
-        )]),
-        subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".to_string()],
-    }];
+    let svcs: Vec<Service> = vec![default_svc, dns_svc];
     let lc = LocalConfig {
         workloads: res,
         policies,
@@ -313,7 +410,12 @@ pub fn new_proxy_state(
     for a in xds_authorizations {
         updater.insert_authorization(a.clone()).unwrap();
     }
-    DemandProxyState::new(state, None)
+    DemandProxyState::new(
+        state,
+        None,
+        ResolverConfig::default(),
+        ResolverOpts::default(),
+    )
 }
 
 pub async fn get_response_str(resp: Response<Full<Bytes>>) -> String {

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::identity::SecretManager;
-use crate::proxy::Error;
+use crate::proxy;
+use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
 use crate::state::service::ServiceStore;
 use crate::state::workload::{
@@ -25,12 +26,16 @@ use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
+use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
+
+use trust_dns_resolver::config::*;
+use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
 pub mod policy;
 pub mod service;
@@ -72,6 +77,31 @@ pub struct ProxyState {
 
     #[serde(flatten)]
     pub policies: PolicyStore,
+
+    #[serde(flatten)]
+    pub resolved_dns: ResolvedDnsStore,
+}
+
+/// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
+#[derive(serde::Serialize, Default, Debug)]
+pub struct ResolvedDnsStore {
+    // by_hostname is a map from hostname to resolved IP addresses for now.
+    //
+    // in a future with support for per-pod DNS resolv.conf settings we may need
+    // to change this to a map from source workload uid to resolved IP addresses.
+    by_hostname: HashMap<String, ResolvedDns>,
+}
+
+#[derive(serde::Serialize, Default, Debug, Clone)]
+pub struct ResolvedDns {
+    hostname: String,
+    ips: HashSet<IpAddr>,
+    #[serde(skip_serializing)]
+    initial_query: Option<std::time::Instant>,
+    // the shortest DNS ttl of all records in the response; used for cache refresh.
+    // we use the shortest ttl rather than just relying on the older records so we don't
+    // load-balance to just the older records as the records with early ttl expire.
+    dns_refresh_rate: std::time::Duration,
 }
 
 impl ProxyState {
@@ -113,12 +143,7 @@ impl ProxyState {
         }
     }
 
-    pub fn find_upstream(
-        &self,
-        network: &str,
-        addr: SocketAddr,
-        hbone_port: u16,
-    ) -> Option<Upstream> {
+    pub fn find_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
         if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
                 debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
@@ -130,47 +155,29 @@ impl ProxyState {
                 debug!("VIP {} has no healthy endpoints", addr);
                 return None
             };
-            let Some(wl) = self.workloads.find_address(&network_addr(&ep.address.network, ep.address.address)) else {
-                debug!("failed to fetch workload for {}", ep.address);
+            let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
+                debug!("failed to fetch workload for {}", ep.workload_uid);
                 return None
             };
             // If endpoint overrides the target port, use that instead
             let target_port = ep.port.get(&addr.port()).unwrap_or(target_port);
-            let mut us = Upstream {
+            let us = Upstream {
                 workload: wl,
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
             };
-            return match set_gateway_address(&mut us, hbone_port) {
-                Ok(_) => {
-                    debug!("found upstream {} from VIP {}", us, addr.ip());
-                    Some(us)
-                }
-                Err(e) => {
-                    debug!("failed to set gateway address for upstream: {}", e);
-                    None
-                }
-            };
+            return Some(us);
         }
         if let Some(wl) = self
             .workloads
             .find_address(&network_addr(network, addr.ip()))
         {
-            let mut us = Upstream {
+            let us = Upstream {
                 workload: wl,
                 port: addr.port(),
                 sans: Vec::new(),
             };
-            return match set_gateway_address(&mut us, hbone_port) {
-                Ok(_) => {
-                    debug!("found upstream {}", us);
-                    Some(us)
-                }
-                Err(e) => {
-                    debug!("failed to set gateway address for upstream: {}", e);
-                    None
-                }
-            };
+            return Some(us);
         }
         None
     }
@@ -186,11 +193,27 @@ pub struct DemandProxyState {
     /// If present, used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
     demand: Option<Demander>,
+
+    #[serde(skip_serializing)]
+    pub dns_resolver_cfg: ResolverConfig,
+
+    #[serde(skip_serializing)]
+    pub dns_resolver_opts: ResolverOpts,
 }
 
 impl DemandProxyState {
-    pub fn new(state: Arc<RwLock<ProxyState>>, demand: Option<Demander>) -> Self {
-        Self { state, demand }
+    pub fn new(
+        state: Arc<RwLock<ProxyState>>,
+        demand: Option<Demander>,
+        dns_resolver_cfg: ResolverConfig,
+        dns_resolver_opts: ResolverOpts,
+    ) -> Self {
+        Self {
+            state,
+            demand,
+            dns_resolver_cfg,
+            dns_resolver_opts,
+        }
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, ProxyState> {
@@ -259,6 +282,173 @@ impl DemandProxyState {
         false
     }
 
+    // this should only be called once per request (for the workload itself and potentially its waypoint)
+    pub async fn load_balance(
+        &self,
+        dst_workload: &Workload,
+        src_workload: &Workload,
+        metrics: Arc<proxy::Metrics>,
+    ) -> Result<IpAddr, Error> {
+        // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
+        // if/when we support that, this function may need to move to get access to the necessary metadata.
+        // Randomly pick an IP
+        // TODO: do this more efficiently, and not just randomly
+        if let Some(ip) = dst_workload.workload_ips.choose(&mut rand::thread_rng()) {
+            return Ok(*ip);
+        }
+        if dst_workload.hostname.is_empty() {
+            debug!(
+                "workload {} has no suitable workload IPs for routing",
+                dst_workload.name
+            );
+            return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
+        }
+        let ip = self
+            .load_balance_for_hostname(dst_workload, src_workload, metrics)
+            .await?;
+        Ok(ip)
+    }
+
+    async fn load_balance_for_hostname(
+        &self,
+        workload: &Workload,
+        src_workload: &Workload,
+        metrics: Arc<proxy::Metrics>,
+    ) -> Result<IpAddr, Error> {
+        let mut state: DemandProxyState = self.clone();
+        let labels = OnDemandDnsLabels::new()
+            .with_destination(workload)
+            .with_source(src_workload);
+        let workload_uid = workload.uid.to_owned();
+        let hostname = workload.hostname.to_owned();
+        let rdns = match state.get_ips_for_hostname(&workload.hostname) {
+            Some(r) => {
+                metrics
+                    .as_ref()
+                    .on_demand_dns_cache_hits
+                    .get_or_create(&labels)
+                    .inc();
+                r
+            }
+            None => {
+                metrics
+                    .as_ref()
+                    .on_demand_dns_cache_misses
+                    .get_or_create(&labels)
+                    .inc();
+                Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                // try to get it again
+                let updated_rdns = state.get_ips_for_hostname(&hostname);
+                match updated_rdns {
+                    Some(rdns) => rdns,
+                    None => {
+                        return Err(Error::NoResolvedAddresses(workload_uid));
+                    }
+                }
+            }
+        };
+
+        // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
+        // if/when we support that, this function may need to move to get access to the necessary metadata.
+        // Randomly pick an IP
+        // TODO: do this more efficiently, and not just randomly
+        let Some(ip) = rdns.ips.iter().choose(&mut rand::thread_rng()) else {
+            return Err(Error::EmptyResolvedAddresses(workload_uid));
+        };
+        Ok(*ip)
+    }
+
+    async fn resolve_on_demand_dns(mut state: DemandProxyState, workload: &Workload) {
+        let workload_uid = workload.uid.to_owned();
+        let hostname = workload.hostname.to_owned();
+        trace!("dns workload async task started for {:?}", &hostname);
+
+        let resolver_result = TokioAsyncResolver::new(
+            state.dns_resolver_cfg.to_owned(),
+            state.dns_resolver_opts,
+            TokioHandle,
+        );
+        if resolver_result.is_err() {
+            warn!(
+                "system dns async resolution: error creating resolver for workload {} is: {:?}",
+                &workload_uid, resolver_result
+            );
+            return;
+        }
+        let r = resolver_result.unwrap();
+
+        let resp = r.lookup_ip(&hostname).await;
+        if resp.is_err() {
+            warn!(
+                "system dns async resolution: error response for workload {} is: {:?}",
+                &workload_uid, resp
+            );
+            return;
+        } else {
+            trace!(
+                "system dns async resolution: response for workload {} is: {:?}",
+                &workload_uid,
+                resp
+            );
+        }
+        let resp = resp.unwrap();
+        let mut dns_refresh_rate = std::time::Duration::from_secs(u64::MAX);
+        let ips = HashSet::from_iter(resp.as_lookup().record_iter().filter_map(|record| {
+            if record.rr_type().is_ip_addr() {
+                let record_ttl = u64::from(record.ttl());
+                if let Some(ipv4) = record.data().unwrap().as_a() {
+                    if record_ttl < dns_refresh_rate.as_secs() {
+                        dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
+                    }
+                    return Some(IpAddr::V4(*ipv4));
+                }
+                if let Some(ipv6) = record.data().unwrap().as_aaaa() {
+                    if record_ttl < dns_refresh_rate.as_secs() {
+                        dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
+                    }
+                    return Some(IpAddr::V6(*ipv6));
+                }
+                return None;
+            }
+            None
+        }));
+        if ips.is_empty() {
+            // if we have no DNS records with a TTL to lean on; lets try to refresh again in 60s
+            dns_refresh_rate = std::time::Duration::from_secs(60);
+        }
+        let now = std::time::Instant::now();
+        let rdns = ResolvedDns {
+            hostname: hostname.to_owned(),
+            ips,
+            initial_query: Some(now),
+            dns_refresh_rate,
+        };
+        state.set_ips_for_hostname(hostname, rdns);
+    }
+
+    pub fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
+        self.state
+            .write()
+            .unwrap()
+            .resolved_dns
+            .by_hostname
+            .insert(hostname, rdns);
+    }
+
+    pub fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
+        self.state
+            .read()
+            .unwrap()
+            .resolved_dns
+            .by_hostname
+            .get(hostname)
+            .filter(|rdns| {
+                rdns.initial_query.is_some()
+                    && rdns.initial_query.unwrap().elapsed() < rdns.dns_refresh_rate
+            })
+            .cloned()
+    }
+
     // only support workload
     pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
@@ -270,20 +460,27 @@ impl DemandProxyState {
         self.state.read().unwrap().workloads.find_address(addr)
     }
 
-    pub async fn fetch_upstream(
-        &self,
-        network: &str,
-        addr: SocketAddr,
-        hbone_port: u16,
-    ) -> Option<Upstream> {
-        self.fetch_address(&network_addr(network, addr.ip())).await;
-        self.state
-            .read()
-            .unwrap()
-            .find_upstream(network, addr, hbone_port)
+    // only support workload
+    pub async fn fetch_workload_by_uid(&self, uid: &str) -> Option<Workload> {
+        // Wait for it on-demand, *if* needed
+        debug!(%uid, "fetch workload");
+        if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
+            return Some(wl);
+        }
+        self.fetch_on_demand(uid.to_string()).await;
+        self.state.read().unwrap().workloads.find_uid(uid)
     }
 
-    pub async fn fetch_waypoint(&self, wl: Workload) -> Result<Option<Upstream>, WaypointError> {
+    pub async fn fetch_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
+        self.fetch_address(&network_addr(network, addr.ip())).await;
+        self.state.read().unwrap().find_upstream(network, addr)
+    }
+
+    pub async fn fetch_waypoint(
+        &self,
+        wl: &Workload,
+        workload_ip: IpAddr,
+    ) -> Result<Option<Upstream>, WaypointError> {
         let Some(gw_address) = &wl.waypoint else {
             return Ok(None);
         };
@@ -299,16 +496,22 @@ impl DemandProxyState {
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.port);
         match self
-            .fetch_upstream(&wp_nw_addr.network, wp_socket_addr, gw_address.port)
+            .fetch_upstream(&wp_nw_addr.network, wp_socket_addr)
             .await
         {
-            Some(upstream) => {
+            Some(mut upstream) => {
                 debug!(%wl.name, "found waypoint upstream");
-                Ok(Some(upstream))
+                match set_gateway_address(&mut upstream, workload_ip, gw_address.port) {
+                    Ok(_) => Ok(Some(upstream)),
+                    Err(e) => {
+                        debug!(%wl.name, "failed to set gateway address for upstream: {}", e);
+                        Err(WaypointError::FindWaypointError(wl.name.to_owned()))
+                    }
+                }
             }
             None => {
                 debug!(%wl.name, "waypoint upstream not found");
-                Err(WaypointError::FindWaypointError(wl.name))
+                Err(WaypointError::FindWaypointError(wl.name.to_owned()))
             }
         }
     }
@@ -357,32 +560,24 @@ impl DemandProxyState {
     }
 }
 
-fn set_gateway_address(us: &mut Upstream, hbone_port: u16) -> anyhow::Result<()> {
+pub fn set_gateway_address(
+    us: &mut Upstream,
+    workload_ip: IpAddr,
+    hbone_port: u16,
+) -> anyhow::Result<()> {
     if us.workload.gateway_address.is_none() {
         us.workload.gateway_address = Some(match us.workload.protocol {
             Protocol::HBONE => {
                 let ip = us
                     .workload
                     .waypoint_svc_ip_address()?
-                    .unwrap_or(choose_workload_ip(&us.workload)?);
+                    .unwrap_or(workload_ip);
                 SocketAddr::from((ip, hbone_port))
             }
-            Protocol::TCP => SocketAddr::from((choose_workload_ip(&us.workload)?, us.port)),
+            Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
         });
     }
     Ok(())
-}
-
-// TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-// if/when we support that, this function may need to move to get access to the necessary metadata.
-fn choose_workload_ip(workload: &Workload) -> Result<IpAddr, Error> {
-    // Randomly pick an IP
-    // TODO: do this more efficiently, and not just randomly
-    let Some(ip) = workload.workload_ips.choose(&mut rand::thread_rng()) else {
-        debug!("workload {} has no suitable workload IPs for routing", workload.name);
-        return Err(Error::NoValidDestination(Box::new(workload.to_owned())))
-    };
-    Ok(*ip)
 }
 
 #[derive(serde::Serialize)]
@@ -427,7 +622,12 @@ impl ProxyStateManager {
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         Ok(ProxyStateManager {
             xds_client,
-            state: DemandProxyState { state, demand },
+            state: DemandProxyState {
+                state,
+                demand,
+                dns_resolver_cfg: config.dns_resolver_config,
+                dns_resolver_opts: config.dns_resolver_opts,
+            },
         })
     }
 
@@ -459,7 +659,12 @@ mod tests {
             .unwrap();
         state.services.insert(test_helpers::mock_default_service());
 
-        let mock_proxy_state = DemandProxyState::new(Arc::new(RwLock::new(state)), None);
+        let mock_proxy_state = DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
 
         // Some from Address
         let dst = Destination::Address(NetworkAddress {

@@ -15,7 +15,7 @@
 use crate::rbac::{Authorization, RbacScope};
 use std::collections::{HashMap, HashSet};
 
-/// A WorkloadStore encapsulates all information about workloads in the mesh
+/// A PolicyStore encapsulates all policy information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
 pub struct PolicyStore {
     /// policies maintains a mapping of ns/name to policy.

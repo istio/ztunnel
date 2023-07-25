@@ -23,7 +23,7 @@ use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::rbac;
 use crate::rbac::Authorization;
-use crate::state::service::{Endpoint, Service};
+use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
 use crate::state::ProxyState;
 use crate::xds;
@@ -112,7 +112,14 @@ impl ProxyStateUpdater {
             // Also remove service endpoints for the workload.
             for wip in prev.workload_ips.iter() {
                 let prev_addr = &network_addr(&prev.network, *wip);
-                state.services.remove_endpoint(prev_addr);
+                state
+                    .services
+                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, Some(prev_addr)));
+            }
+            if prev.workload_ips.is_empty() {
+                state
+                    .services
+                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, None));
             }
 
             // We removed a workload, no reason to attempt to remove a service with the same name
@@ -238,8 +245,17 @@ fn service_endpoints(
         // Create service endpoints for all the workload IPs.
         for wip in &workload.workload_ips {
             out.push(Endpoint {
+                workload_uid: workload.uid.clone(),
                 service: namespaced_host.clone(),
-                address: network_addr(&workload.network, *wip),
+                address: Some(network_addr(&workload.network, *wip)),
+                port: ports.into(),
+            })
+        }
+        if workload.workload_ips.is_empty() {
+            out.push(Endpoint {
+                workload_uid: workload.uid.clone(),
+                service: namespaced_host.clone(),
+                address: None,
                 port: ports.into(),
             })
         }
@@ -291,13 +307,13 @@ impl LocalClient {
     pub async fn run(self) -> Result<(), anyhow::Error> {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = self.cfg.read_to_string().await?;
-        trace!("local config: {data}");
+        debug!("local config: {data}");
         let r: LocalConfig = serde_yaml::from_str(&data)?;
         let mut state = self.state.write().unwrap();
         let num_workloads = r.workloads.len();
         let num_policies = r.policies.len();
         for wl in r.workloads {
-            debug!("inserting local workload {}", &wl.workload.uid);
+            trace!("inserting local workload {}", &wl.workload.uid);
             state.workloads.insert(wl.workload.clone())?;
             self.cert_fetcher.prefetch_cert(&wl.workload);
 

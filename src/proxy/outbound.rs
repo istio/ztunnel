@@ -31,6 +31,7 @@ use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::state::set_gateway_address;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 
@@ -364,7 +365,7 @@ impl OutboundConnection {
         let us = self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, target, self.pi.hbone_port)
+            .fetch_upstream(&source_workload.network, target)
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
@@ -381,35 +382,68 @@ impl OutboundConnection {
             });
         }
 
-        let us = us.unwrap();
+        let mut mutable_us = us.unwrap();
+        let workload_ip = self
+            .pi
+            .state
+            .load_balance(
+                &mutable_us.workload,
+                &source_workload,
+                self.pi.metrics.clone(),
+            )
+            .await?;
+
         // For case upstream server has enabled waypoint
-        match self.pi.state.fetch_waypoint(us.workload.clone()).await {
+        match self
+            .pi
+            .state
+            .fetch_waypoint(&mutable_us.workload, workload_ip)
+            .await
+        {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
-                let wp_socket_addr =
-                    SocketAddr::new(waypoint_workload.choose_ip()?, waypoint_us.port);
+                let waypoint_ip = self
+                    .pi
+                    .state
+                    .load_balance(
+                        &waypoint_workload,
+                        &source_workload,
+                        self.pi.metrics.clone(),
+                    )
+                    .await?;
+                let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     // Use the original VIP, not translated
                     destination: target,
-                    destination_workload: Some(us.workload),
+                    destination_workload: Some(mutable_us.workload),
                     expected_identity: Some(waypoint_workload.identity()),
                     gateway: wp_socket_addr,
                     // Let the client remote know we are on the inbound path.
                     direction: Direction::Inbound,
                     request_type: RequestType::ToServerWaypoint,
-                    upstream_sans: us.sans.clone(),
+                    upstream_sans: mutable_us.sans,
                 });
             }
             // we expected the workload to have a waypoint, but could not find one
             Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
         }
+
+        let us = match set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port) {
+            Ok(_) => mutable_us,
+            Err(e) => {
+                debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
+                return Err(Error::UnknownWaypoint(mutable_us.workload.workload_name));
+            }
+        };
+
         if us.workload.gateway_address.is_none() {
-            return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
+            return Err(Error::NoGatewayAddress(Box::new(us.workload)));
         }
+
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
@@ -424,7 +458,7 @@ impl OutboundConnection {
             return Ok(Request {
                 protocol: Protocol::HBONE,
                 source: source_workload,
-                destination: SocketAddr::from((us.workload.choose_ip()?, us.port)),
+                destination: SocketAddr::from((workload_ip, us.port)),
                 destination_workload: Some(us.workload.clone()),
                 expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
@@ -432,20 +466,20 @@ impl OutboundConnection {
                         .gateway_address
                         .expect("gateway address confirmed")
                         .ip(),
-                    15008,
+                    self.pi.hbone_port,
                 )),
                 direction: Direction::Outbound,
                 // Sending to a node on the same node (ourselves).
                 // In the future this could be optimized to avoid a full network traversal.
                 request_type: RequestType::DirectLocal,
-                upstream_sans: us.sans.clone(),
+                upstream_sans: us.sans,
             });
         }
         // For case no waypoint for both side and direct to remote node proxy
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
-            destination: SocketAddr::from((us.workload.choose_ip()?, us.port)),
+            destination: SocketAddr::from((workload_ip, us.port)),
             destination_workload: Some(us.workload.clone()),
             expected_identity: Some(us.workload.identity()),
             gateway: us
@@ -454,7 +488,7 @@ impl OutboundConnection {
                 .expect("gateway address confirmed"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
-            upstream_sans: us.sans.clone(),
+            upstream_sans: us.sans,
         })
     }
 }
