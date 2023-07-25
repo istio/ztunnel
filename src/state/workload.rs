@@ -581,6 +581,7 @@ mod tests {
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::RwLock;
+    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
     use xds::istio::workload::NetworkAddress as XdsNetworkAddress;
 
     #[test]
@@ -665,7 +666,12 @@ mod tests {
     fn workload_information() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
-        let demand = DemandProxyState::new(state.clone(), None);
+        let demand = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let updater = ProxyStateUpdater::new_no_fetch(state.clone());
 
         let ip1 = Ipv4Addr::new(127, 0, 0, 1);
@@ -980,7 +986,12 @@ mod tests {
     fn staged_services_cleanup() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
-        let demand = DemandProxyState::new(state.clone(), None);
+        let demand = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let updater = ProxyStateUpdater::new_no_fetch(state.clone());
         assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
         assert_eq!((state.read().unwrap().workloads.by_uid.len()), 0);
@@ -1076,7 +1087,12 @@ mod tests {
                 .join("localhost.yaml"),
         );
         let state = Arc::new(RwLock::new(ProxyState::default()));
-        let demand = DemandProxyState::new(state.clone(), None);
+        let demand = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let local_client = LocalClient {
             cfg,
             state: state.clone(),

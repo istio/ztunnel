@@ -194,11 +194,27 @@ pub struct DemandProxyState {
     /// If present, used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
     demand: Option<Demander>,
+
+    #[serde(skip_serializing)]
+    pub dns_resolver_cfg: ResolverConfig,
+
+    #[serde(skip_serializing)]
+    pub dns_resolver_opts: ResolverOpts,
 }
 
 impl DemandProxyState {
-    pub fn new(state: Arc<RwLock<ProxyState>>, demand: Option<Demander>) -> Self {
-        Self { state, demand }
+    pub fn new(
+        state: Arc<RwLock<ProxyState>>,
+        demand: Option<Demander>,
+        dns_resolver_cfg: ResolverConfig,
+        dns_resolver_opts: ResolverOpts,
+    ) -> Self {
+        Self {
+            state,
+            demand,
+            dns_resolver_cfg,
+            dns_resolver_opts,
+        }
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, ProxyState> {
@@ -272,8 +288,6 @@ impl DemandProxyState {
         &self,
         dst_workload: &Workload,
         src_workload: &Workload,
-        dns_resolver_config: &ResolverConfig,
-        dns_resolver_opts: &ResolverOpts,
         metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
@@ -291,23 +305,15 @@ impl DemandProxyState {
             return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
         }
         let ip = self
-            .load_balance_for_workload(
-                dst_workload,
-                src_workload,
-                dns_resolver_config,
-                dns_resolver_opts,
-                metrics,
-            )
+            .load_balance_for_hostname(dst_workload, src_workload, metrics)
             .await?;
         Ok(ip)
     }
 
-    async fn load_balance_for_workload(
+    async fn load_balance_for_hostname(
         &self,
         workload: &Workload,
         src_workload: &Workload,
-        dns_resolver_config: &ResolverConfig,
-        dns_resolver_opts: &ResolverOpts,
         metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
         let mut state: DemandProxyState = self.clone();
@@ -331,13 +337,7 @@ impl DemandProxyState {
                     .on_demand_dns_cache_misses
                     .get_or_create(&labels)
                     .inc();
-                let jh = tokio::spawn(Self::resolve_on_demand_dns(
-                    self.clone(),
-                    workload,
-                    dns_resolver_config.to_owned(),
-                    dns_resolver_opts.to_owned(),
-                ));
-                match jh.await {
+                match Self::resolve_on_demand_dns(self.to_owned(), workload).await {
                     Ok(_) => {
                         trace!(
                             "system dns async resolution: task finished for {:?}",
@@ -373,18 +373,16 @@ impl DemandProxyState {
         Ok(*ip)
     }
 
-    fn resolve_on_demand_dns(
-        mut state: DemandProxyState,
-        workload: &Workload,
-        dns_resolver_cfg: ResolverConfig,
-        dns_resolver_opts: ResolverOpts,
-    ) -> JoinHandle<()> {
+    fn resolve_on_demand_dns(mut state: DemandProxyState, workload: &Workload) -> JoinHandle<()> {
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         tokio::spawn(async move {
             trace!("dns workload async task started for {:?}", &hostname);
-            let resolver_result =
-                TokioAsyncResolver::new(dns_resolver_cfg, dns_resolver_opts, TokioHandle);
+            let resolver_result = TokioAsyncResolver::new(
+                state.dns_resolver_cfg.to_owned(),
+                state.dns_resolver_opts,
+                TokioHandle,
+            );
             if resolver_result.is_err() {
                 warn!(
                     "system dns async resolution: error creating resolver for workload {} is: {:?}",
@@ -640,7 +638,12 @@ impl ProxyStateManager {
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
         Ok(ProxyStateManager {
             xds_client,
-            state: DemandProxyState { state, demand },
+            state: DemandProxyState {
+                state,
+                demand,
+                dns_resolver_cfg: config.dns_resolver_config,
+                dns_resolver_opts: config.dns_resolver_opts,
+            },
         })
     }
 
@@ -672,7 +675,12 @@ mod tests {
             .unwrap();
         state.services.insert(test_helpers::mock_default_service());
 
-        let mock_proxy_state = DemandProxyState::new(Arc::new(RwLock::new(state)), None);
+        let mock_proxy_state = DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
 
         // Some from Address
         let dst = Destination::Address(NetworkAddress {

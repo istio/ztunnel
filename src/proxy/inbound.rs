@@ -478,6 +478,8 @@ impl crate::tls::CertProvider for InboundCertProvider {
 
 #[cfg(test)]
 mod test {
+    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+
     use super::*;
     use crate::state::service::endpoint_uid;
     use crate::state::workload::NamespacedHostname;
@@ -504,7 +506,12 @@ mod test {
             panic!("received error inserting workload: {}", err);
         }
         state.services.insert(s);
-        let state = state::DemandProxyState::new(Arc::new(RwLock::new(state)), None);
+        let state = state::DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
 
         let gateawy_id = Identity::Spiffe {
             trust_domain: "cluster.local".to_string(),

@@ -410,7 +410,12 @@ pub fn new_proxy_state(
     for a in xds_authorizations {
         updater.insert_authorization(a.clone()).unwrap();
     }
-    DemandProxyState::new(state, None)
+    DemandProxyState::new(
+        state,
+        None,
+        ResolverConfig::default(),
+        ResolverOpts::default(),
+    )
 }
 
 pub async fn get_response_str(resp: Response<Full<Bytes>>) -> String {

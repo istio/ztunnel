@@ -389,8 +389,6 @@ impl OutboundConnection {
             .load_balance(
                 &mutable_us.workload,
                 &source_workload,
-                &self.pi.cfg.dns_resolver_config,
-                &self.pi.cfg.dns_resolver_opts,
                 self.pi.metrics.clone(),
             )
             .await?;
@@ -411,8 +409,6 @@ impl OutboundConnection {
                     .load_balance(
                         &waypoint_workload,
                         &source_workload,
-                        &self.pi.cfg.dns_resolver_config,
-                        &self.pi.cfg.dns_resolver_opts,
                         self.pi.metrics.clone(),
                     )
                     .await?;
