@@ -34,7 +34,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::{debug, trace, warn};
 
-use tokio::task::JoinHandle;
 use trust_dns_resolver::config::*;
 use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
@@ -337,21 +336,7 @@ impl DemandProxyState {
                     .on_demand_dns_cache_misses
                     .get_or_create(&labels)
                     .inc();
-                match Self::resolve_on_demand_dns(self.to_owned(), workload).await {
-                    Ok(_) => {
-                        trace!(
-                            "system dns async resolution: task finished for {:?}",
-                            &workload_uid
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "system dns async resolution: error for {:?} is: {:?}",
-                            &workload_uid, e
-                        );
-                        return Err(Error::NoResolvedAddresses(workload_uid));
-                    }
-                };
+                Self::resolve_on_demand_dns(self.to_owned(), workload).await;
                 // try to get it again
                 let updated_rdns = state.get_ips_for_hostname(&hostname);
                 match updated_rdns {
@@ -373,10 +358,10 @@ impl DemandProxyState {
         Ok(*ip)
     }
 
-    fn resolve_on_demand_dns(mut state: DemandProxyState, workload: &Workload) -> JoinHandle<()> {
+    async fn resolve_on_demand_dns(mut state: DemandProxyState, workload: &Workload) {
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
-        tokio::spawn(async move {
+        async move {
             trace!("dns workload async task started for {:?}", &hostname);
             let resolver_result = TokioAsyncResolver::new(
                 state.dns_resolver_cfg.to_owned(),
@@ -439,7 +424,8 @@ impl DemandProxyState {
                 dns_refresh_rate,
             };
             state.set_ips_for_hostname(hostname, rdns);
-        })
+        }
+        .await;
     }
 
     pub fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
