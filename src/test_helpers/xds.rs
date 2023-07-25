@@ -102,8 +102,10 @@ impl AdsServer {
             ResolverOpts::default(),
         );
         let store_updater = ProxyStateUpdater::new_no_fetch(state);
-
-        let xds_client = xds::Config::new(cfg)
+        let tls_client_fetcher = Box::new(tls::FileClientCertProviderImpl::RootCert(
+            cfg.xds_root_cert.clone(),
+        ));
+        let xds_client = xds::Config::new(cfg, tls_client_fetcher)
             .with_address_handler(store_updater.clone())
             .with_authorization_handler(store_updater)
             .watch(xds::ADDRESS_TYPE.into())

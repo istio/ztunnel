@@ -25,7 +25,6 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::config::RootCert;
 use crate::metrics::IncrementRecorder;
 use crate::xds::istio::security::Authorization;
 use crate::xds::istio::workload::Address;
@@ -114,8 +113,7 @@ pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyho
 
 pub struct Config {
     address: String,
-    root_cert: RootCert,
-    client_fetcher: Option<Box<dyn identity::CaClientTrait>>,
+    tls_builder: Box<dyn tls::ClientCertProvider>,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
 
@@ -126,11 +124,13 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(config: crate::config::Config) -> Config {
+    pub fn new(
+        config: crate::config::Config,
+        tls_builder: Box<dyn tls::ClientCertProvider>,
+    ) -> Config {
         Config {
             address: config.xds_address.clone().unwrap(),
-            root_cert: config.xds_root_cert.clone(),
-            client_fetcher: None,
+            tls_builder,
             auth: config.auth,
             address_handler: Box::new(NopHandler {}),
             authorization_handler: Box::new(NopHandler {}),
@@ -142,11 +142,6 @@ impl Config {
 
     pub fn with_address_handler(mut self, f: impl Handler<Address>) -> Config {
         self.address_handler = Box::new(f);
-        self
-    }
-
-    pub fn with_client_fetcher(mut self, client_fetcher: Box<dyn identity::CaClientTrait>) -> Config {
-        self.client_fetcher = Some(client_fetcher);
         self
     }
 
@@ -371,7 +366,6 @@ impl AdsClient {
     }
 
     async fn run_internal(&mut self) -> Result<(), Error> {
-
         let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);
         // For each type in initial_watches we will send a request on connection to subscribe
         let initial_requests = self.construct_initial_requests();
@@ -387,35 +381,20 @@ impl AdsClient {
             warn!("outbound stream complete");
         };
 
-        let ads_connection = match self.config.client_fetcher {
-            Some(ref bundle) => {
-                let trust_domain = identity::manager::Identity::default();
-                let bundle = bundle.fetch_certificate(&trust_domain).await.map_err(|e| Error::ClientBundleFetch(e))?;
-                let svc = tls::grpc_mtls_connector(
-                    self.config.address.clone(),
-                    &bundle,
-                )
-                .unwrap();
-                let mut tls_client = AggregatedDiscoveryServiceClient::new(svc);
-                tls_client
-                    .delta_aggregated_resources(tonic::Request::new(outbound))
-                    .await
-            },
-            None => {
-                let address = self.config.address.clone();
-                let svc = tls::grpc_tls_connector(address, self.config.root_cert.clone()).unwrap();
-                let mut client =
-                    AggregatedDiscoveryServiceClient::with_interceptor(svc, self.config.auth.clone());
+        let tls_grpc_channel = tls::grpc_connector(
+            self.config.address.clone(),
+            self.config.tls_builder.fetch_cert().await.unwrap(),
+        )
+        .unwrap();
 
-                client
-                    .delta_aggregated_resources(tonic::Request::new(outbound))
-                    .await
-            }
-        };        
+        let ads_connection = AggregatedDiscoveryServiceClient::with_interceptor(
+            tls_grpc_channel,
+            self.config.auth.clone(),
+        )
+        .delta_aggregated_resources(tonic::Request::new(outbound))
+        .await;
 
-        let mut response_stream = ads_connection
-            .map_err(Error::Connection)?
-            .into_inner();
+        let mut response_stream = ads_connection.map_err(Error::Connection)?.into_inner();
         debug!("connected established");
 
         info!("Stream established");

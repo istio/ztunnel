@@ -206,6 +206,57 @@ pub struct TlsGrpcChannel {
     >,
 }
 
+#[async_trait::async_trait]
+pub trait ClientCertProvider: Send + Sync {
+    async fn fetch_cert(&self) -> Result<ssl::SslConnectorBuilder, Error>;
+}
+
+#[derive(Clone, Debug)]
+pub enum FileClientCertProviderImpl {
+    RootCert(RootCert),
+    ClientBundle(Certs),
+}
+
+#[async_trait::async_trait]
+impl ClientCertProvider for FileClientCertProviderImpl {
+    async fn fetch_cert(&self) -> Result<ssl::SslConnectorBuilder, Error> {
+        match self {
+            FileClientCertProviderImpl::RootCert(root_cert) => {
+                let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+
+                conn.set_verify(ssl::SslVerifyMode::PEER);
+                conn.set_alpn_protos(Alpn::H2.encode())?;
+                conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
+                conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+                match root_cert {
+                    RootCert::File(f) => {
+                        conn.set_ca_file(f).map_err(Error::InvalidRootCert)?;
+                    }
+                    RootCert::Static(b) => {
+                        conn.cert_store_mut()
+                            .add_cert(x509::X509::from_pem(b).map_err(Error::InvalidRootCert)?)
+                            .map_err(Error::InvalidRootCert)?;
+                    }
+                    RootCert::Default => {} // Already configured to use system root certs
+                }
+                return Ok(conn);
+            }
+            FileClientCertProviderImpl::ClientBundle(bundle) => {
+                let mut conn: ssl::SslConnectorBuilder =
+                    ssl::SslConnector::builder(ssl::SslMethod::tls_client()).unwrap();
+                match bundle.setup_ctx(&mut conn) {
+                    Ok(_) => {
+                        return Ok(conn);
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// grpc_connector provides a client TLS channel for gRPC requests.
 pub fn grpc_tls_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
@@ -224,23 +275,20 @@ pub fn grpc_tls_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcCha
                 .map_err(Error::InvalidRootCert)?;
         }
         RootCert::Default => {} // Already configured to use system root certs
-    
     }
 
     grpc_connector(uri, conn)
 }
 
-pub fn grpc_mtls_connector(uri: String, bundle: &Certs) -> Result<TlsGrpcChannel, Error> {
-    let mut conn: ssl::SslConnectorBuilder = ssl::SslConnector::builder(ssl::SslMethod::tls_client()).unwrap();
-    bundle.setup_ctx(&mut conn).unwrap();
-    grpc_connector(uri, conn)
-}
-
 /// grpc_connector provides a client TLS channel for gRPC requests.
-fn grpc_connector(uri: String, conn: ssl::SslConnectorBuilder) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_connector(
+    uri: String,
+    conn: ssl::SslConnectorBuilder,
+) -> Result<TlsGrpcChannel, Error> {
     let uri = Uri::try_from(uri)?;
     let is_localhost_call = uri.host() == Some("localhost");
-    let mut http: hyper_util::client::connect::HttpConnector = hyper_util::client::connect::HttpConnector::new();
+    let mut http: hyper_util::client::connect::HttpConnector =
+        hyper_util::client::connect::HttpConnector::new();
     http.enforce_http(false);
     let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
     https.set_callback(move |cc, _| {
@@ -265,7 +313,6 @@ fn grpc_connector(uri: String, conn: ssl::SslConnectorBuilder) -> Result<TlsGrpc
 
     Ok(TlsGrpcChannel { uri, client })
 }
-
 
 type BoxBody1 = HttpBody04ToHttpBody1<BoxBody>;
 
@@ -527,7 +574,7 @@ impl Alpn {
 }
 
 #[async_trait::async_trait]
-pub trait CertProvider: Send + Sync {
+pub trait ServerCertProvider: Send + Sync {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<ssl::SslAcceptor, TlsError>;
 }
 
@@ -535,7 +582,7 @@ pub trait CertProvider: Send + Sync {
 pub struct ControlPlaneCertProvider(pub Certs);
 
 #[async_trait::async_trait]
-impl CertProvider for ControlPlaneCertProvider {
+impl ServerCertProvider for ControlPlaneCertProvider {
     async fn fetch_cert(&mut self, _: &TcpStream) -> Result<ssl::SslAcceptor, TlsError> {
         let acc = self.0.acceptor()?;
         Ok(acc)
@@ -543,7 +590,7 @@ impl CertProvider for ControlPlaneCertProvider {
 }
 
 #[derive(Clone)]
-pub struct BoringTlsAcceptor<F: CertProvider> {
+pub struct BoringTlsAcceptor<F: ServerCertProvider> {
     /// Acceptor is a function that determines the TLS context to use. As input, the FD of the client
     /// connection is provided.
     pub acceptor: F,
@@ -575,7 +622,7 @@ pub enum TlsError {
 
 impl<F> tls_listener::AsyncTls<TcpStream> for BoringTlsAcceptor<F>
 where
-    F: CertProvider + Clone + 'static,
+    F: ServerCertProvider + Clone + 'static,
 {
     type Stream = tokio_boring::SslStream<TcpStream>;
     type Error = TlsError;

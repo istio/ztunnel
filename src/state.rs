@@ -21,6 +21,7 @@ use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
+use crate::tls;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
@@ -596,8 +597,11 @@ impl ProxyStateManager {
         let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
         let xds_client = if config.xds_address.is_some() {
             let updater = ProxyStateUpdater::new(state.clone(), cert_fetcher.clone());
+            let tls_client_fetcher = Box::new(tls::FileClientCertProviderImpl::RootCert(
+                config.xds_root_cert.clone(),
+            ));
             Some(
-                xds::Config::new(config.clone())
+                xds::Config::new(config.clone(), tls_client_fetcher)
                     .with_address_handler(updater.clone())
                     .with_authorization_handler(updater)
                     .watch(xds::ADDRESS_TYPE.into())
