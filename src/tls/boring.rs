@@ -207,11 +207,9 @@ pub struct TlsGrpcChannel {
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_tls_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
 
-    let uri = Uri::try_from(uri)?;
-    let is_localhost_call = uri.host() == Some("localhost");
     conn.set_verify(ssl::SslVerifyMode::PEER);
     conn.set_alpn_protos(Alpn::H2.encode())?;
     conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
@@ -226,8 +224,23 @@ pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel
                 .map_err(Error::InvalidRootCert)?;
         }
         RootCert::Default => {} // Already configured to use system root certs
+    
     }
-    let mut http = hyper_util::client::connect::HttpConnector::new();
+
+    grpc_connector(uri, conn)
+}
+
+pub fn grpc_mtls_connector(uri: String, bundle: &Certs) -> Result<TlsGrpcChannel, Error> {
+    let mut conn: ssl::SslConnectorBuilder = ssl::SslConnector::builder(ssl::SslMethod::tls_client()).unwrap();
+    bundle.setup_ctx(&mut conn).unwrap();
+    grpc_connector(uri, conn)
+}
+
+/// grpc_connector provides a client TLS channel for gRPC requests.
+fn grpc_connector(uri: String, conn: ssl::SslConnectorBuilder) -> Result<TlsGrpcChannel, Error> {
+    let uri = Uri::try_from(uri)?;
+    let is_localhost_call = uri.host() == Some("localhost");
+    let mut http: hyper_util::client::connect::HttpConnector = hyper_util::client::connect::HttpConnector::new();
     http.enforce_http(false);
     let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
     https.set_callback(move |cc, _| {
@@ -252,6 +265,7 @@ pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel
 
     Ok(TlsGrpcChannel { uri, client })
 }
+
 
 type BoxBody1 = HttpBody04ToHttpBody1<BoxBody>;
 

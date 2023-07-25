@@ -41,7 +41,7 @@ impl CaClient {
         auth: AuthSource,
         enable_impersonated_identity: bool,
     ) -> Result<CaClient, Error> {
-        let svc = tls::grpc_connector(address, root_cert)?;
+        let svc = tls::grpc_tls_connector(address, root_cert)?;
         // let client = IstioCertificateServiceClient::new(svc);
         // let svc =
         //     tower_hyper_http_body_compat::Hyper1HttpServiceAsTowerService03HttpService::new(svc);

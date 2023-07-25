@@ -52,6 +52,8 @@ pub enum Error {
     RequestFailure(#[from] Box<mpsc::error::SendError<DeltaDiscoveryRequest>>),
     #[error("failed to send on demand resource")]
     OnDemandSend(),
+    #[error("Failed to fetch client bundle: {0}")]
+    ClientBundleFetch(#[from] identity::Error),
 }
 
 /// Updates the [ProxyState] from XDS.
