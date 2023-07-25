@@ -251,6 +251,14 @@ fn service_endpoints(
                 port: ports.into(),
             })
         }
+        if workload.workload_ips.is_empty() {
+            out.push(Endpoint {
+                workload_uid: workload.uid.clone(),
+                service: namespaced_host.clone(),
+                address: None,
+                port: ports.into(),
+            })
+        }
     }
     Ok(out)
 }
