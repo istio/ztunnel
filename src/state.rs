@@ -321,21 +321,17 @@ impl DemandProxyState {
             .with_source(src_workload);
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
+        metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
         let rdns = match state.get_ips_for_hostname(&workload.hostname) {
-            Some(r) => {
-                metrics
-                    .as_ref()
-                    .on_demand_dns_cache_hits
-                    .get_or_create(&labels)
-                    .inc();
-                r
-            }
+            Some(r) => r,
             None => {
                 metrics
                     .as_ref()
                     .on_demand_dns_cache_misses
                     .get_or_create(&labels)
                     .inc();
+                // TODO: optimize so that if multiple requests to the same hostname come in at the same time,
+                // we don't start more than one background on-demand DNS task
                 Self::resolve_on_demand_dns(self.to_owned(), workload).await;
                 // try to get it again
                 let updated_rdns = state.get_ips_for_hostname(&hostname);
@@ -625,7 +621,7 @@ impl ProxyStateManager {
             state: DemandProxyState {
                 state,
                 demand,
-                dns_resolver_cfg: config.dns_resolver_config,
+                dns_resolver_cfg: config.dns_resolver_cfg,
                 dns_resolver_opts: config.dns_resolver_opts,
             },
         })

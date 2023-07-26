@@ -225,7 +225,7 @@ async fn test_vip_request() {
 
 fn on_demand_dns_assertions(metrics: ParsedMetrics) {
     for metric in &[
-        ("istio_on_demand_dns_cache_hits_total"),
+        ("istio_on_demand_dns_total"),
         ("istio_on_demand_dns_cache_misses_total"),
     ] {
         let m = metrics.query(metric, &Default::default());
@@ -236,8 +236,15 @@ fn on_demand_dns_assertions(metrics: ParsedMetrics) {
             "expected metric {metric} to have len(1)"
         );
         let value = m.unwrap()[0].value.clone();
+        let expected = match *metric {
+            "istio_on_demand_dns_total" => prometheus_parse::Value::Untyped(2.0),
+            "istio_on_demand_dns_cache_misses_total" => prometheus_parse::Value::Untyped(1.0),
+            &_ => {
+                panic!("dev error; unexpected metric");
+            }
+        };
         assert!(
-            value == prometheus_parse::Value::Untyped(1.0),
+            value == expected,
             "expected metric {metric} to be 1, was {:?}",
             value
         );
