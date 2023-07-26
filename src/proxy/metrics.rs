@@ -30,7 +30,7 @@ pub struct Metrics {
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
 
     // on-demand DNS is not a part of DNS proxy, but part of ztunnel proxy itself
-    pub on_demand_dns_cache_hits: Family<OnDemandDnsLabels, Counter>,
+    pub on_demand_dns: Family<OnDemandDnsLabels, Counter>,
     pub on_demand_dns_cache_misses: Family<OnDemandDnsLabels, Counter>,
 }
 
@@ -312,16 +312,16 @@ impl Metrics {
             "The size of total bytes sent during response in case of a TCP connection",
             sent_bytes.clone(),
         );
-        let on_demand_dns_cache_hits = Family::default();
+        let on_demand_dns = Family::default();
         registry.register(
-            "on_demand_dns_cache_hits",
-            "The total number of cache hits for on-demand DNS",
-            on_demand_dns_cache_hits.clone(),
+            "on_demand_dns",
+            "The total number of requests that used on-demand DNS",
+            on_demand_dns.clone(),
         );
         let on_demand_dns_cache_misses = Family::default();
         registry.register(
             "on_demand_dns_cache_misses",
-            "The total number of cache misses for on-demand DNS",
+            "The total number of cache misses for requests on-demand DNS",
             on_demand_dns_cache_misses.clone(),
         );
 
@@ -330,7 +330,7 @@ impl Metrics {
             connection_close,
             received_bytes,
             sent_bytes,
-            on_demand_dns_cache_hits,
+            on_demand_dns,
             on_demand_dns_cache_misses,
         }
     }

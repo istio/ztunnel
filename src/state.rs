@@ -321,15 +321,9 @@ impl DemandProxyState {
             .with_source(src_workload);
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
+        metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
         let rdns = match state.get_ips_for_hostname(&workload.hostname) {
-            Some(r) => {
-                metrics
-                    .as_ref()
-                    .on_demand_dns_cache_hits
-                    .get_or_create(&labels)
-                    .inc();
-                r
-            }
+            Some(r) => r,
             None => {
                 metrics
                     .as_ref()
