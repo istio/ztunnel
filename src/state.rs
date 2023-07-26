@@ -330,6 +330,8 @@ impl DemandProxyState {
                     .on_demand_dns_cache_misses
                     .get_or_create(&labels)
                     .inc();
+                // TODO: optimize so that if multiple requests to the same hostname come in at the same time,
+                // we don't start more than one background on-demand DNS task
                 Self::resolve_on_demand_dns(self.to_owned(), workload).await;
                 // try to get it again
                 let updated_rdns = state.get_ips_for_hostname(&hostname);
