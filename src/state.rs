@@ -625,7 +625,7 @@ impl ProxyStateManager {
             state: DemandProxyState {
                 state,
                 demand,
-                dns_resolver_cfg: config.dns_resolver_config,
+                dns_resolver_cfg: config.dns_resolver_cfg,
                 dns_resolver_opts: config.dns_resolver_opts,
             },
         })

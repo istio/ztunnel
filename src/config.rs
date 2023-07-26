@@ -164,7 +164,7 @@ pub struct Config {
     pub proxy_args: String,
 
     // System dns resolver config used for on-demand ztunnel dns resolution
-    pub dns_resolver_config: ResolverConfig,
+    pub dns_resolver_cfg: ResolverConfig,
 
     // System dns resolver opts used for on-demand ztunnel dns resolution
     pub dns_resolver_opts: ResolverOpts,
@@ -273,7 +273,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     };
 
     use trust_dns_resolver::system_conf::read_system_conf;
-    let (cfg, opts) = read_system_conf().unwrap();
+    let (dns_resolver_cfg, dns_resolver_opts) = read_system_conf().unwrap();
 
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
@@ -347,8 +347,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
-        dns_resolver_config: cfg,
-        dns_resolver_opts: opts,
+        dns_resolver_cfg,
+        dns_resolver_opts,
     })
 }
 

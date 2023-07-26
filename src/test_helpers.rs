@@ -116,7 +116,7 @@ pub async fn add_nip_io_nameserver(mut cfg: config::Config) -> config::Config {
             trust_nx_responses: false,
             bind_addr: None,
         };
-        cfg.dns_resolver_config.add_name_server(name_server);
+        cfg.dns_resolver_cfg.add_name_server(name_server);
     }
     cfg
 }
