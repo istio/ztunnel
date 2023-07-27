@@ -28,6 +28,10 @@ pub struct Metrics {
     pub connection_close: Family<CommonTrafficLabels, Counter>,
     pub received_bytes: Family<CommonTrafficLabels, Counter>,
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
+
+    // on-demand DNS is not a part of DNS proxy, but part of ztunnel proxy itself
+    pub on_demand_dns: Family<OnDemandDnsLabels, Counter>,
+    pub on_demand_dns_cache_misses: Family<OnDemandDnsLabels, Counter>,
 }
 
 impl Metrics {
@@ -242,6 +246,45 @@ pub struct CommonTrafficLabels {
     connection_security_policy: SecurityPolicy,
 }
 
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
+pub struct OnDemandDnsLabels {
+    // on-demand DNS client information is just nice-to-have
+    source_workload: DefaultedUnknown<String>,
+    source_canonical_service: DefaultedUnknown<String>,
+    source_canonical_revision: DefaultedUnknown<String>,
+    source_workload_namespace: DefaultedUnknown<String>,
+    source_principal: DefaultedUnknown<Identity>,
+    source_app: DefaultedUnknown<String>,
+    source_version: DefaultedUnknown<String>,
+    source_cluster: DefaultedUnknown<String>,
+
+    // on-demand DNS is resolved per hostname, so this is the most interesting part
+    hostname: DefaultedUnknown<String>,
+}
+
+impl OnDemandDnsLabels {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn with_source(mut self, w: &Workload) -> Self {
+        self.source_workload = w.workload_name.clone().into();
+        self.source_canonical_service = w.canonical_name.clone().into();
+        self.source_canonical_revision = w.canonical_revision.clone().into();
+        self.source_workload_namespace = w.namespace.clone().into();
+        self.source_principal = w.identity().into();
+        self.source_app = w.canonical_name.clone().into();
+        self.source_version = w.canonical_revision.clone().into();
+        self.source_cluster = w.cluster_id.to_string().into();
+        self
+    }
+
+    pub fn with_destination(mut self, w: &Workload) -> Self {
+        self.hostname = w.hostname.clone().into();
+        self
+    }
+}
+
 impl Metrics {
     pub fn new(registry: &mut Registry) -> Self {
         let connection_opens = Family::default();
@@ -269,12 +312,26 @@ impl Metrics {
             "The size of total bytes sent during response in case of a TCP connection",
             sent_bytes.clone(),
         );
+        let on_demand_dns = Family::default();
+        registry.register(
+            "on_demand_dns",
+            "The total number of requests that used on-demand DNS",
+            on_demand_dns.clone(),
+        );
+        let on_demand_dns_cache_misses = Family::default();
+        registry.register(
+            "on_demand_dns_cache_misses",
+            "The total number of cache misses for requests on-demand DNS",
+            on_demand_dns_cache_misses.clone(),
+        );
 
         Self {
             connection_opens,
             connection_close,
             received_bytes,
             sent_bytes,
+            on_demand_dns,
+            on_demand_dns_cache_misses,
         }
     }
 }

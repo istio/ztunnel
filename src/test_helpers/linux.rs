@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config::ConfigSource;
-use crate::state::service::{Endpoint, Service};
+use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{gatewayaddress, Workload};
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
@@ -300,12 +300,14 @@ impl<'a> TestWorkloadBuilder<'a> {
                 };
 
                 let ep = Endpoint {
+                    workload_uid: self.w.workload.uid.to_string(),
                     service: service_name.clone(),
-                    address: ep_network_addr.clone(),
+                    address: Some(ep_network_addr.clone()),
                     port: ports.to_owned(),
                 };
                 let mut svc = self.manager.services.get(&service_name).unwrap().clone();
-                svc.endpoints.insert(ep_network_addr.clone(), ep.clone());
+                let ep_uid = endpoint_uid(&self.w.workload.uid, Some(&ep_network_addr));
+                svc.endpoints.insert(ep_uid, ep.clone());
             }
         }
 

@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Status, Streaming};
 use tracing::{error, info, warn};
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 use super::test_config_with_port_xds_addr_and_root_cert;
 use crate::config::RootCert;
@@ -94,7 +95,12 @@ impl AdsServer {
         );
 
         let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
-        let dstate = DemandProxyState::new(state.clone(), None);
+        let dstate = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let store_updater = ProxyStateUpdater::new_no_fetch(state);
 
         let xds_client = xds::Config::new(cfg)

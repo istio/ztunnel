@@ -176,6 +176,14 @@ pub enum Error {
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
 
+    #[error("no ip addresses were resolved for workload: {0}")]
+    NoResolvedAddresses(String),
+
+    #[error(
+        "ip addresses were resolved for workload {0}, but valid dns response had no A/AAAA records"
+    )]
+    EmptyResolvedAddresses(String),
+
     #[error("attempted recursive call to ourselves")]
     SelfCall,
 

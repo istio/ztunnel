@@ -402,8 +402,13 @@ impl Inbound {
             let from_gateway = match state.fetch_destination(&gateway_address.destination).await {
                 Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
                 Some(address::Address::Service(svc)) => {
-                    for (ip, _ep) in svc.endpoints.iter() {
-                        if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
+                    for (_ep_uid, ep) in svc.endpoints.iter() {
+                        // fetch workloads by workload UID since we may not have an IP for an endpoint (e.g., endpoint is just a hostname)
+                        if state
+                            .fetch_workload_by_uid(&ep.workload_uid)
+                            .await
+                            .map(|w| w.identity())
+                            == conn.src_identity
                         {
                             return true;
                         }
@@ -473,7 +478,10 @@ impl crate::tls::CertProvider for InboundCertProvider {
 
 #[cfg(test)]
 mod test {
+    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+
     use super::*;
+    use crate::state::service::endpoint_uid;
     use crate::state::workload::NamespacedHostname;
     use crate::{
         identity::Identity,
@@ -498,7 +506,12 @@ mod test {
             panic!("received error inserting workload: {}", err);
         }
         state.services.insert(s);
-        let state = state::DemandProxyState::new(Arc::new(RwLock::new(state)), None);
+        let state = state::DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
 
         let gateawy_id = Identity::Spiffe {
             trust_domain: "cluster.local".to_string(),
@@ -597,20 +610,19 @@ mod test {
         let mut ports = HashMap::new();
         ports.insert(8080, 80);
         let mut endpoints = HashMap::new();
+        let addr = Some(NetworkAddress {
+            network: "".to_string(),
+            address: IpAddr::V4(mock_default_gateway_ipaddr()),
+        });
         endpoints.insert(
-            NetworkAddress {
-                network: "".to_string(),
-                address: IpAddr::V4(mock_default_gateway_ipaddr()),
-            },
+            endpoint_uid(&mock_default_gateway_workload().uid, addr.as_ref()),
             Endpoint {
+                workload_uid: mock_default_gateway_workload().uid,
                 service: NamespacedHostname {
                     namespace: "gatewayns".to_string(),
                     hostname: "gateway".to_string(),
                 },
-                address: NetworkAddress {
-                    network: "".to_string(),
-                    address: IpAddr::V4(mock_default_gateway_ipaddr()),
-                },
+                address: addr,
                 port: ports.clone(),
             },
         );
