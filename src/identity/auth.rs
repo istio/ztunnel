@@ -61,7 +61,7 @@ impl Interceptor for AuthSource {
                     request.metadata_mut().insert("clusterid", id);
                 }
             }
-            // When no authentication is required, do nothing.
+            // When no token based authentication is required, do not load or insert the token.
             AuthSource::None => {}
         }
         Ok(request)
