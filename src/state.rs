@@ -16,7 +16,7 @@ use crate::identity::SecretManager;
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
-use crate::state::service::ServiceStore;
+use crate::state::service::{Service, ServiceStore};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
@@ -41,11 +41,12 @@ pub mod policy;
 pub mod service;
 pub mod workload;
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize)]
 pub struct Upstream {
     pub workload: Workload,
     pub port: u16,
     pub sans: Vec<String>,
+    pub destination_service: Option<Arc<Service>>,
 }
 
 impl fmt::Display for Upstream {
@@ -165,6 +166,7 @@ impl ProxyState {
                 workload: wl,
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
+                destination_service: Some(Arc::new(svc)),
             };
             return Some(us);
         }
@@ -176,6 +178,7 @@ impl ProxyState {
                 workload: wl,
                 port: addr.port(),
                 sans: Vec::new(),
+                destination_service: None,
             };
             return Some(us);
         }
