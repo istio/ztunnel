@@ -21,6 +21,7 @@ use prometheus_client::registry::Registry;
 
 use crate::identity::Identity;
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorder, Recorder};
+use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
 
 pub struct Metrics {
@@ -123,9 +124,7 @@ pub struct ConnectionOpen {
     pub source: Option<Workload>,
     pub derived_source: Option<DerivedWorkload>,
     pub destination: Option<Workload>,
-    pub destination_service: Option<String>,
-    pub destination_service_namespace: Option<String>,
-    pub destination_service_name: Option<String>,
+    pub destination_service: Option<ServiceDescription>,
     pub connection_security_policy: SecurityPolicy,
 }
 
@@ -190,6 +189,16 @@ impl CommonTrafficLabels {
         self.destination_cluster = w.cluster_id.to_string().into();
         self
     }
+
+    fn with_destination_service(mut self, w: Option<&ServiceDescription>) -> Self {
+        let Some(w) = w else {
+            return self
+        };
+        self.destination_service = w.hostname.clone().into();
+        self.destination_service_name = w.name.clone().into();
+        self.destination_service_namespace = w.namespace.clone().into();
+        self
+    }
 }
 
 impl From<BytesTransferred<'_>> for CommonTrafficLabels {
@@ -205,14 +214,12 @@ impl From<&ConnectionOpen> for CommonTrafficLabels {
             request_protocol: RequestProtocol::tcp,
             response_flags: ResponseFlags::none,
             connection_security_policy: c.connection_security_policy,
-            destination_service: c.destination_service.clone().into(),
-            destination_service_name: c.destination_service_name.clone().into(),
-            destination_service_namespace: c.destination_service_namespace.clone().into(),
             ..CommonTrafficLabels::new()
                 // Intentionally before with_source; source is more reliable
                 .with_derived_source(c.derived_source.as_ref())
                 .with_source(c.source.as_ref())
                 .with_destination(c.destination.as_ref())
+                .with_destination_service(c.destination_service.as_ref())
         }
     }
 }
