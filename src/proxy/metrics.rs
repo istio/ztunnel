@@ -205,6 +205,9 @@ impl From<&ConnectionOpen> for CommonTrafficLabels {
             request_protocol: RequestProtocol::tcp,
             response_flags: ResponseFlags::none,
             connection_security_policy: c.connection_security_policy,
+            destination_service: c.destination_service.clone().into(),
+            destination_service_name: c.destination_service_name.clone().into(),
+            destination_service_namespace: c.destination_service_namespace.clone().into(),
             ..CommonTrafficLabels::new()
                 // Intentionally before with_source; source is more reliable
                 .with_derived_source(c.derived_source.as_ref())
