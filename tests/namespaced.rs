@@ -92,22 +92,14 @@ mod namespaced {
         run_tcp_server(
             manager
                 .workload_builder("server1", REMOTE_NODE)
-                .service(
-                    "default/default.server1-svc.svc.cluster.local",
-                    80,
-                    SERVER_PORT,
-                )
+                .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
                 .register()?,
         )?;
         run_tcp_server(
             manager
                 .workload_builder("server2", REMOTE_NODE)
                 .hbone()
-                .service(
-                    "default/default.server1-svc.svc.cluster.local",
-                    80,
-                    SERVER_PORT,
-                )
+                .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
                 .register()?,
         )?;
         let client = manager
@@ -140,24 +132,67 @@ mod namespaced {
         // Proxying to 10.0.2.3:8080 using HBONE via 10.0.2.3:15008 type Direct
         // Proxying to 10.0.2.2:8080 using TCP via 10.0.2.2:8080 type Direct
         let (_remote_metrics, local_metrics) =
-            verify_local_remote_metrics(remote, local.clone(), &metrics).await;
+            verify_local_remote_metrics(&remote, &local, &metrics).await;
 
         // ensure the service is load-balancing across endpoints
-        let local_metrics_dump = local_metrics.dump();
-        let lb_to_nodelocal =
-            local_metrics_dump.contains("\"connection_security_policy\": \"unknown\"");
-        let lb_to_remote =
-            local_metrics_dump.contains("\"connection_security_policy\": \"mutual_tls\"");
+        let lb_to_nodelocal = local_metrics.query_sum(
+            CONNECTIONS_OPENED,
+            &HashMap::from([("connection_security_policy".into(), "unknown".into())]),
+        ) > 0;
+        let lb_to_remote = local_metrics.query_sum(
+            CONNECTIONS_OPENED,
+            &HashMap::from([("connection_security_policy".into(), "mutual_tls".into())]),
+        ) > 0;
         // ensure we hit one endpoint or the other, not both somehow
         assert!(lb_to_nodelocal || lb_to_remote);
         if lb_to_nodelocal {
             assert!(!lb_to_remote);
         }
 
+        // Currently we do not do destination-reported service. Maybe we should
+        verify_metrics(
+            &remote,
+            &metrics,
+            &HashMap::from([
+                ("reporter".to_string(), "destination".to_string()),
+                ("destination_service".to_string(), "unknown".to_string()),
+                (
+                    "destination_service_name".to_string(),
+                    "unknown".to_string(),
+                ),
+                (
+                    "destination_service_namespace".to_string(),
+                    "unknown".to_string(),
+                ),
+            ]),
+        )
+        .await;
+
+        verify_metrics(
+            &local,
+            &metrics,
+            &HashMap::from([
+                ("reporter".to_string(), "source".to_string()),
+                (
+                    "destination_service".to_string(),
+                    "server1.default.svc.cluster.local".to_string(),
+                ),
+                (
+                    "destination_service_name".to_string(),
+                    "server1".to_string(),
+                ),
+                (
+                    "destination_service_namespace".to_string(),
+                    "default".to_string(),
+                ),
+            ]),
+        )
+        .await;
+
         // response needed is opposite of what we got before
         let needed_response = match lb_to_nodelocal {
-            true => "\"connection_security_policy\": \"mutual_tls\"", // we got node local so need remote
-            false => "\"connection_security_policy\": \"unknown\"", // we got remote so need node local
+            true => "mutual_tls".to_string(), // we got node local so need remote
+            false => "unknown".to_string(),   // we got remote so need node local
         };
 
         // run 15 requests so chance of flake here is 1/2^15 = ~0.003%
@@ -165,8 +200,13 @@ mod namespaced {
             run_tcp_client(lb_client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
         }
 
-        let updated_local_metrics = local.metrics().await.unwrap().dump();
-        assert!(updated_local_metrics.contains(needed_response));
+        let updated_local_metrics = local.metrics().await.unwrap();
+        assert!(
+            updated_local_metrics.query_sum(
+                CONNECTIONS_OPENED,
+                &HashMap::from([("connection_security_policy".into(), needed_response)])
+            ) > 0
+        );
 
         Ok(())
     }
@@ -189,7 +229,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_local_remote_metrics(remote, local, &metrics).await;
+        verify_local_remote_metrics(&remote, &local, &metrics).await;
         Ok(())
     }
 
@@ -215,7 +255,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -250,7 +290,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_local_remote_metrics(remote, local, &metrics).await;
+        verify_local_remote_metrics(&remote, &local, &metrics).await;
         Ok(())
     }
 
@@ -263,7 +303,7 @@ mod namespaced {
     }
 
     async fn verify_metrics(
-        ztunnel: TestApp,
+        ztunnel: &TestApp,
         assertions: &[(&str, u64)],
         labels: &HashMap<String, String>,
     ) -> ParsedMetrics {
@@ -298,8 +338,8 @@ mod namespaced {
     }
 
     async fn verify_local_remote_metrics(
-        remote: TestApp,
-        local: TestApp,
+        remote: &TestApp,
+        local: &TestApp,
         metrics: &[(&str, u64)],
     ) -> (ParsedMetrics, ParsedMetrics) {
         let remote_metrics = verify_metrics(remote, metrics, &destination_labels()).await;
@@ -329,7 +369,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -357,7 +397,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, HBONE_REQ_SIZE),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -386,7 +426,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, HBONE_REQ_SIZE),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -700,11 +740,7 @@ mod namespaced {
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
-                .service(
-                    "default/default.server1-svc.svc.cluster.local",
-                    80,
-                    SERVER_PORT,
-                )
+                .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
                 .hbone()
                 .register()?,
         )?;

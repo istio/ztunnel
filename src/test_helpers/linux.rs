@@ -166,7 +166,7 @@ impl<'a> TestServiceBuilder<'a> {
             s: Service {
                 name: name.to_string(),
                 namespace: "default".to_string(),
-                hostname: format!("default.{}-svc.svc.cluster.local", name),
+                hostname: format!("{name}.default.svc.cluster.local"),
                 vips: vec![],
                 ports: Default::default(),
                 endpoints: Default::default(), // populated later when workloads are added

@@ -362,8 +362,6 @@ pub fn metrics(c: &mut Criterion) {
                 derived_source: None,
                 destination: None,
                 destination_service: None,
-                destination_service_name: None,
-                destination_service_namespace: None,
                 connection_security_policy: Default::default(),
             })
         })

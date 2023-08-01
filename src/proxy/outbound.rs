@@ -14,7 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::Arc;
+
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -32,7 +32,8 @@ use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::state::service::Service;
+
+use crate::state::service::ServiceDescription;
 use crate::state::set_gateway_address;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
@@ -166,15 +167,7 @@ impl OutboundConnection {
             } else {
                 metrics::SecurityPolicy::unknown
             },
-            destination_service: req
-                .destination_service
-                .clone()
-                .map(|svc| svc.hostname.clone()),
-            destination_service_namespace: req
-                .destination_service
-                .clone()
-                .map(|svc| svc.namespace.clone()),
-            destination_service_name: req.destination_service.clone().map(|svc| svc.name.clone()),
+            destination_service: req.destination_service.clone(),
         };
 
         if req.request_type == RequestType::DirectLocal && can_fastpath {
@@ -209,9 +202,7 @@ impl OutboundConnection {
                 } else {
                     metrics::SecurityPolicy::unknown
                 },
-                destination_service: None,
-                destination_service_namespace: None,
-                destination_service_name: None,
+                destination_service: None, // TODO: in Envoy, we guess the destination service for inbound
             };
             return Inbound::handle_inbound(
                 InboundConnect::DirectPath(stream),
@@ -524,7 +515,7 @@ struct Request {
     // The intended destination workload. This is always the original intended target, even in the case
     // of other proxies along the path.
     destination_workload: Option<Workload>,
-    destination_service: Option<Arc<Service>>,
+    destination_service: Option<ServiceDescription>,
     // The identity we will assert for the next hop; this may not be the same as destination_workload
     // in the case of proxies along the path.
     expected_identity: Option<Identity>,
