@@ -164,8 +164,6 @@ impl InboundPassthrough {
             destination: Some(upstream),
             connection_security_policy: metrics::SecurityPolicy::unknown,
             destination_service: None,
-            destination_service_namespace: None,
-            destination_service_name: None,
         };
         let _connection_close = pi
             .metrics

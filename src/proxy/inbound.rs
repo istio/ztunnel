@@ -343,8 +343,6 @@ impl Inbound {
                     destination: Some(upstream),
                     connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                     destination_service: None,
-                    destination_service_namespace: None,
-                    destination_service_name: None,
                 };
                 let status_code = match Self::handle_inbound(
                     Hbone(req),
