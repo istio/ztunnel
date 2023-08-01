@@ -14,6 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -31,6 +32,8 @@ use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+
+use crate::state::service::ServiceDescription;
 use crate::state::set_gateway_address;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
@@ -164,9 +167,7 @@ impl OutboundConnection {
             } else {
                 metrics::SecurityPolicy::unknown
             },
-            destination_service: None,
-            destination_service_namespace: None,
-            destination_service_name: None,
+            destination_service: req.destination_service.clone(),
         };
 
         if req.request_type == RequestType::DirectLocal && can_fastpath {
@@ -201,9 +202,7 @@ impl OutboundConnection {
                 } else {
                     metrics::SecurityPolicy::unknown
                 },
-                destination_service: None,
-                destination_service_namespace: None,
-                destination_service_name: None,
+                destination_service: None, // TODO: in Envoy, we guess the destination service for inbound
             };
             return Inbound::handle_inbound(
                 InboundConnect::DirectPath(stream),
@@ -374,6 +373,7 @@ impl OutboundConnection {
                 source: source_workload,
                 destination: target,
                 destination_workload: None,
+                destination_service: None,
                 expected_identity: None,
                 gateway: target,
                 direction: Direction::Outbound,
@@ -420,6 +420,7 @@ impl OutboundConnection {
                     // Use the original VIP, not translated
                     destination: target,
                     destination_workload: Some(mutable_us.workload),
+                    destination_service: mutable_us.destination_service.clone(),
                     expected_identity: Some(waypoint_workload.identity()),
                     gateway: wp_socket_addr,
                     // Let the client remote know we are on the inbound path.
@@ -460,6 +461,7 @@ impl OutboundConnection {
                 source: source_workload,
                 destination: SocketAddr::from((workload_ip, us.port)),
                 destination_workload: Some(us.workload.clone()),
+                destination_service: us.destination_service.clone(),
                 expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
                     us.workload
@@ -481,6 +483,7 @@ impl OutboundConnection {
             source: source_workload,
             destination: SocketAddr::from((workload_ip, us.port)),
             destination_workload: Some(us.workload.clone()),
+            destination_service: us.destination_service.clone(),
             expected_identity: Some(us.workload.identity()),
             gateway: us
                 .workload
@@ -512,6 +515,7 @@ struct Request {
     // The intended destination workload. This is always the original intended target, even in the case
     // of other proxies along the path.
     destination_workload: Option<Workload>,
+    destination_service: Option<ServiceDescription>,
     // The identity we will assert for the next hop; this may not be the same as destination_workload
     // in the case of proxies along the path.
     expected_identity: Option<Identity>,

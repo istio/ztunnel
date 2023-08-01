@@ -49,6 +49,23 @@ impl Service {
     }
 }
 
+#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
+pub struct ServiceDescription {
+    pub hostname: String,
+    pub name: String,
+    pub namespace: String,
+}
+
+impl From<Service> for ServiceDescription {
+    fn from(value: Service) -> Self {
+        ServiceDescription {
+            hostname: value.hostname.clone(),
+            name: value.name.clone(),
+            namespace: value.namespace.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
