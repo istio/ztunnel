@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::state::workload::{
-    byte_to_ip, network_addr, NamespacedHostname, NetworkAddress, WorkloadError,
-};
-use crate::xds;
-use crate::xds::istio::workload::PortList;
-use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
+
+use bytes::Bytes;
 use tracing::trace;
+
 use xds::istio::workload::Service as XdsService;
+
+use crate::state::workload::{
+    byte_to_ip, network_addr, NamespacedHostname, NetworkAddress, Workload, WorkloadError,
+};
+use crate::xds;
+use crate::xds::istio::workload::PortList;
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -56,8 +59,8 @@ pub struct ServiceDescription {
     pub namespace: String,
 }
 
-impl From<Service> for ServiceDescription {
-    fn from(value: Service) -> Self {
+impl From<&Service> for ServiceDescription {
+    fn from(value: &Service) -> Self {
         ServiceDescription {
             hostname: value.hostname.clone(),
             name: value.name.clone(),
@@ -160,6 +163,15 @@ impl ServiceStore {
                 .map(|service| service.deref().clone())
                 .collect()
         })
+    }
+
+    pub fn get_by_workload(&self, workload: &Workload) -> Vec<Service> {
+        let Some(svc) = self.workload_to_services.get(&workload.uid) else {
+            return Vec::new()
+        };
+        svc.iter()
+            .filter_map(|s| self.get_by_namespaced_host(s))
+            .collect()
     }
 
     /// Returns the [Service] matching the given namespace and hostname. Istio `ServiceEntry`
