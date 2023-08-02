@@ -419,7 +419,6 @@ pub fn pick_upstream_service(
     dest: &Workload,
 ) -> Option<ServiceDescription> {
     let dport = conn.dst.port();
-    error!("upstream service... {upstream_service:?}");
     let netaddr = network_addr(&dest.network, conn.dst.ip());
     let euid = endpoint_uid(&dest.uid, Some(&netaddr));
     upstream_service
@@ -430,6 +429,8 @@ pub fn pick_upstream_service(
                     // TargetPort directly matches
                     return true;
                 }
+                // The service itself didn't have a explicit TargetPort match, but an endpoint might.
+                // This happens when there is a named port (in Kubernetes, anyways).
                 if s.endpoints.get(&euid).and_then(|e| e.port.get(sport)) == Some(&dport) {
                     // Named port matched
                     return true;
