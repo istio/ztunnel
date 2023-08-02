@@ -33,7 +33,7 @@ use tokio::net::{TcpSocket, TcpStream};
 
 use crate::app::Bound;
 use crate::identity::SecretManager;
-use crate::test_helpers::{localhost_error_message, TEST_WORKLOAD_SOURCE};
+use crate::test_helpers::localhost_error_message;
 use crate::*;
 
 use super::helpers::*;
@@ -150,7 +150,7 @@ impl TestApp {
         panic!("failed to get ready (last: {last_err:?})");
     }
 
-    pub async fn socks5_connect(&self, addr: SocketAddr) -> TcpStream {
+    pub async fn socks5_connect(&self, addr: SocketAddr, source: IpAddr) -> TcpStream {
         // Always use IPv4 address. In theory, we can resolve `localhost` to pick to support any machine
         // However, we need to make sure the WorkloadStore knows about both families then.
         let socks_addr = with_ip(
@@ -161,7 +161,7 @@ impl TestApp {
         let socket = TcpSocket::new_v4().unwrap();
         socket
             .bind(SocketAddr::from((
-                TEST_WORKLOAD_SOURCE.parse::<IpAddr>().unwrap(),
+                source,
                 0,
             )))
             .map_err(|e| anyhow!("{:?}. {}", e, localhost_error_message()))

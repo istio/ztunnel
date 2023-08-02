@@ -105,7 +105,9 @@ async fn test_shutdown_drain() {
     // we shouldn't be shutdown yet
     assert!(shutdown_rx.try_recv().is_err());
     let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
-    let mut stream = ta.socks5_connect(dst).await;
+    let mut stream = ta
+        .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+        .await;
     read_write_stream(&mut stream).await;
     // Since we are connected, the app shouldn't shutdown
     shutdown.shutdown_now().await;
@@ -146,7 +148,9 @@ async fn test_shutdown_forced_drain() {
     // we shouldn't be shutdown yet
     assert!(shutdown_rx.try_recv().is_err());
     let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
-    let mut stream = ta.socks5_connect(dst).await;
+    let mut stream = ta
+        .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+        .await;
     const BODY: &[u8] = "hello world".as_bytes();
     stream.write_all(BODY).await.unwrap();
 
@@ -197,7 +201,10 @@ async fn run_requests_test(
         let dst = SocketAddr::from_str(target)
             .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
         for _ in 0..num_queries {
-            let mut stream = app.socks5_connect(dst).await;
+            let mut stream = app.socks5_connect(dst,
+
+                    TEST_WORKLOAD_SOURCE.parse().unwrap(),
+            ).await;
             read_write_stream(&mut stream).await;
         }
         if let Some(assertions) = metrics_assertions {
@@ -349,7 +356,9 @@ async fn test_tcp_connections_metrics() {
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
-        let mut stream = app.socks5_connect(dst).await;
+        let mut stream = app
+            .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+            .await;
         read_write_stream(&mut stream).await;
 
         // We should have 1 open connection but 0 closed connections
@@ -405,7 +414,9 @@ async fn test_tcp_bytes_metrics() {
     let cfg = test_config();
     testapp::with_app(cfg, |app| async move {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
-        let mut stream = app.socks5_connect(dst).await;
+        let mut stream = app
+            .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+            .await;
         let size = read_write_stream(&mut stream).await as u64;
         drop(stream);
 
