@@ -27,13 +27,11 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::config::RootCert;
 use crate::metrics::IncrementRecorder;
-use crate::xds::istio::security::Authorization;
-use crate::xds::istio::workload::Address;
 use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{identity, readiness, tls, xds};
+use crate::{identity, readiness, tls};
 
 use super::Error;
 
@@ -76,18 +74,6 @@ impl Display for RejectedConfig {
     }
 }
 
-pub trait Handler<T: prost::Message>: Send + Sync + 'static {
-    fn handle(&self, res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>>;
-}
-
-struct NopHandler {}
-
-impl<T: prost::Message> Handler<T> for NopHandler {
-    fn handle(&self, _res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>> {
-        Ok(())
-    }
-}
-
 /// handle_single_resource is a helper to process a set of updates with a closure that processes items one-by-one.
 /// It handles aggregating errors as NACKS.
 pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyhow::Result<()>>(
@@ -112,63 +98,68 @@ pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyho
     }
 }
 
+// Handler is responsible for handling a discovery response.
+// Handlers can mutate state and return a list of rejected configurations (if there are any).
+pub trait Handler<T: prost::Message>: Send + Sync + 'static {
+    fn handle(&self, res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>>;
+}
+
+// ResponseHandler is responsible for handling a discovery response.
+// Handlers can mutate state and return a list of rejected configurations (if there are any).
+// This is an internal only trait; public usage uses the Handler type which is typed.
+trait RawHandler: Send + Sync + 'static {
+    fn handle(
+        &self,
+        state: &mut State,
+        res: DeltaDiscoveryResponse,
+    ) -> Result<(), Vec<RejectedConfig>>;
+}
+
+// HandlerWrapper is responsible for implementing RawHandler the provided handler.
+struct HandlerWrapper<T: prost::Message> {
+    h: Box<dyn Handler<T>>,
+}
+
+impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
+    fn handle(
+        &self,
+        state: &mut State,
+        res: DeltaDiscoveryResponse,
+    ) -> Result<(), Vec<RejectedConfig>> {
+        let type_url = res.type_url.clone();
+        let removes = state.handle_removes(&res);
+        let updates: Vec<XdsUpdate<T>> = res
+            .resources
+            .into_iter()
+            .map(|r| {
+                let key = ResourceKey {
+                    name: r.name.clone(),
+                    type_url: type_url.clone(),
+                };
+                state.notify_on_demand(&key);
+                state.add_resource(key.type_url, key.name);
+                r
+            })
+            .map(|raw| decode_proto::<T>(raw).unwrap())
+            .map(XdsUpdate::Update)
+            .chain(removes.into_iter().map(XdsUpdate::Remove))
+            .collect();
+
+        self.h.handle(updates)
+    }
+}
+
 pub struct Config {
     address: String,
     root_cert: RootCert,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
-
-    address_handler: Box<dyn Handler<Address>>,
-    authorization_handler: Box<dyn Handler<Authorization>>,
+    handlers: HashMap<String, Box<dyn RawHandler>>,
     initial_watches: Vec<String>,
     on_demand: bool,
 }
 
-impl Config {
-    pub fn new(config: crate::config::Config) -> Config {
-        Config {
-            address: config.xds_address.clone().unwrap(),
-            root_cert: config.xds_root_cert.clone(),
-            auth: config.auth,
-            address_handler: Box::new(NopHandler {}),
-            authorization_handler: Box::new(NopHandler {}),
-            initial_watches: Vec::new(),
-            on_demand: config.xds_on_demand,
-            proxy_metadata: config.proxy_metadata,
-        }
-    }
-
-    pub fn with_address_handler(mut self, f: impl Handler<Address>) -> Config {
-        self.address_handler = Box::new(f);
-        self
-    }
-
-    pub fn with_authorization_handler(mut self, f: impl Handler<Authorization>) -> Config {
-        self.authorization_handler = Box::new(f);
-        self
-    }
-
-    pub fn watch(mut self, type_url: String) -> Config {
-        self.initial_watches.push(type_url);
-        self
-    }
-
-    pub fn build(self, metrics: Metrics, block_ready: readiness::BlockReady) -> AdsClient {
-        let (tx, rx) = mpsc::channel(100);
-        AdsClient {
-            config: self,
-            known_resources: Default::default(),
-            pending: Default::default(),
-            demand: rx,
-            demand_tx: tx,
-            metrics,
-            block_ready: Some(block_ready),
-            connection_id: 0,
-        }
-    }
-}
-pub struct AdsClient {
-    config: Config,
+pub struct State {
     /// Stores all known workload resources. Map from type_url to name
     known_resources: HashMap<String, HashSet<String>>,
 
@@ -177,6 +168,107 @@ pub struct AdsClient {
 
     demand: mpsc::Receiver<(oneshot::Sender<()>, ResourceKey)>,
     demand_tx: mpsc::Sender<(oneshot::Sender<()>, ResourceKey)>,
+}
+
+impl State {
+    fn notify_on_demand(&mut self, key: &ResourceKey) {
+        if let Some(send) = self.pending.remove(key) {
+            debug!("on demand notify {}", key.name);
+            if send.send(()).is_err() {
+                warn!("on demand dropped event for {}", key.name)
+            }
+        }
+    }
+    fn add_resource(&mut self, type_url: String, name: String) {
+        self.known_resources
+            .entry(type_url)
+            .or_default()
+            .insert(name.clone());
+    }
+    fn handle_removes(&mut self, resp: &DeltaDiscoveryResponse) -> Vec<String> {
+        resp.removed_resources
+            .iter()
+            .map(|res| {
+                let k = ResourceKey {
+                    name: res.to_owned(),
+                    type_url: resp.type_url.clone(),
+                };
+                debug!("received delete resource {k}");
+                self.known_resources.remove(res);
+                self.notify_on_demand(&k);
+                k.name
+            })
+            .collect()
+    }
+}
+
+impl Config {
+    pub fn new(config: crate::config::Config) -> Config {
+        Config {
+            address: config.xds_address.clone().unwrap(),
+            root_cert: config.xds_root_cert.clone(),
+            auth: config.auth,
+            handlers: HashMap::new(),
+            initial_watches: Vec::new(),
+            on_demand: config.xds_on_demand,
+            proxy_metadata: config.proxy_metadata,
+        }
+    }
+
+    pub fn with_watched_handler<F>(self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
+    where
+        F: 'static + prost::Message + Default,
+    {
+        let type_url = type_url.into();
+        self.with_handler(type_url.clone(), f).watch(type_url)
+    }
+
+    pub fn with_handler<F>(mut self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
+    where
+        F: 'static + prost::Message + Default,
+    {
+        let h = HandlerWrapper { h: Box::new(f) };
+        self.handlers.insert(type_url.into(), Box::new(h));
+        self
+    }
+
+    pub fn watch(mut self, type_url: impl Into<String>) -> Config {
+        self.initial_watches.push(type_url.into());
+        self
+    }
+
+    pub fn build(self, metrics: Metrics, block_ready: readiness::BlockReady) -> AdsClient {
+        let (tx, rx) = mpsc::channel(100);
+        let state = State {
+            known_resources: Default::default(),
+            pending: Default::default(),
+            demand: rx,
+            demand_tx: tx,
+        };
+        AdsClient {
+            config: self,
+            metrics,
+            state,
+            block_ready: Some(block_ready),
+            connection_id: 0,
+        }
+    }
+}
+
+/// AdsClient provides a (mostly) generic DeltaAggregatedResources XDS client.
+///
+/// The client works by accepting arbitrary handlers for types, configured by user.
+/// These handlers can do whatever they want with incoming responses, but are responsible for maintaining their own state.
+/// For example, if a usage wants to keep track of all Foo resources recieved, it needs to handle the add/removes in the configured handler.
+///
+/// The client also supports on-demand lookup of resources; see demander() for more information.
+///
+/// Currently, this is not quite a fully general purpose XDS client, as there is no dependant resource support.
+/// This could be added if needed, though.
+pub struct AdsClient {
+    config: Config,
+
+    state: State,
 
     pub(crate) metrics: Metrics,
     block_ready: Option<readiness::BlockReady>,
@@ -223,16 +315,10 @@ impl Display for XdsSignal {
 
 impl Demander {
     /// Demand requests a given workload by name
-    pub async fn demand(&self, name: String) -> Demanded {
+    pub async fn demand(&self, type_url: String, name: String) -> Demanded {
         let (tx, rx) = oneshot::channel::<()>();
         self.demand
-            .send((
-                tx,
-                ResourceKey {
-                    name,
-                    type_url: xds::ADDRESS_TYPE.to_string(),
-                },
-            ))
+            .send((tx, ResourceKey { name, type_url }))
             .await
             .unwrap();
         Demanded { b: rx }
@@ -244,7 +330,7 @@ impl AdsClient {
     pub fn demander(&self) -> Option<Demander> {
         if self.config.on_demand {
             Some(Demander {
-                demand: self.demand_tx.clone(),
+                demand: self.state.demand_tx.clone(),
             })
         } else {
             None
@@ -406,7 +492,7 @@ impl AdsClient {
 
         loop {
             tokio::select! {
-                _demand_event = self.demand.recv() => {
+                _demand_event = self.state.demand.recv() => {
                     self.handle_demand_event(_demand_event, &discovery_req_tx).await?;
                 }
                 msg = response_stream.message() => {
@@ -433,6 +519,7 @@ impl AdsClient {
             .iter()
             .map(|request_type| {
                 let irv: HashMap<String, String> = self
+                    .state
                     .known_resources
                     .get(request_type)
                     .map(|hs| {
@@ -476,21 +563,14 @@ impl AdsClient {
             size = response.resources.len(),
             "received response"
         );
-        // Due to lack of dynamic typing in Rust we have some code duplication here. In the future this could be a macro,
-        // but for now its easier to just have a bit of duplication.
-        let handler_response: Result<(), Vec<RejectedConfig>> = match type_url.as_str() {
-            xds::ADDRESS_TYPE => {
-                self.decode_and_handle::<Address, _>(|a| &a.config.address_handler, response)
-            }
-            xds::AUTHORIZATION_TYPE => self.decode_and_handle::<Authorization, _>(
-                |a| &a.config.authorization_handler,
-                response,
-            ),
-            _ => {
-                error!("unknown type");
-                Ok(())
-            }
-        };
+        let handler_response: Result<(), Vec<RejectedConfig>> =
+            match self.config.handlers.get(&type_url) {
+                Some(h) => h.handle(&mut self.state, response),
+                None => {
+                    error!(%type_url, "unknown type");
+                    Ok(())
+                }
+            };
 
         let (response_type, error) = match handler_response {
             Err(rejects) => {
@@ -534,11 +614,8 @@ impl AdsClient {
         };
         info!("received on demand request {demand_event}");
         let ResourceKey { type_url, name } = demand_event.clone();
-        self.pending.insert(demand_event, tx);
-        self.known_resources
-            .entry(type_url.clone())
-            .or_default()
-            .insert(name.clone());
+        self.state.pending.insert(demand_event, tx);
+        self.state.add_resource(type_url.clone(), name.clone());
         send.send(DeltaDiscoveryRequest {
             type_url,
             resource_names_subscribe: vec![name],
@@ -547,63 +624,6 @@ impl AdsClient {
         .await
         .map_err(|e| Error::RequestFailure(Box::new(e)))?;
         Ok(())
-    }
-    fn notify_on_demand(&mut self, key: &ResourceKey) {
-        if let Some(send) = self.pending.remove(key) {
-            debug!("on demand notify {}", key.name);
-            if send.send(()).is_err() {
-                warn!("on demand dropped event for {}", key.name)
-            }
-        }
-    }
-    fn handle_removes(&mut self, resp: &DeltaDiscoveryResponse) -> Vec<String> {
-        resp.removed_resources
-            .iter()
-            .map(|res| {
-                let k = ResourceKey {
-                    name: res.to_owned(),
-                    type_url: resp.type_url.clone(),
-                };
-                debug!("received delete resource {k}");
-                self.known_resources.remove(res);
-                self.notify_on_demand(&k);
-                k.name
-            })
-            .collect()
-    }
-
-    fn decode_and_handle<
-        T: prost::Message + Default + 'static,
-        F: FnOnce(&AdsClient) -> &Box<dyn Handler<T>>,
-    >(
-        &mut self,
-        f: F,
-        response: DeltaDiscoveryResponse,
-    ) -> Result<(), Vec<RejectedConfig>> {
-        let type_url = response.type_url.clone();
-        let removes = self.handle_removes(&response);
-        let updates: Vec<XdsUpdate<T>> = response
-            .resources
-            .into_iter()
-            .map(|r| {
-                let key = ResourceKey {
-                    name: r.name.clone(),
-                    type_url: type_url.clone(),
-                };
-                self.notify_on_demand(&key);
-                self.known_resources
-                    .entry(key.type_url)
-                    .or_default()
-                    .insert(key.name);
-                r
-            })
-            .map(|raw| decode_proto::<T>(raw).unwrap())
-            .map(XdsUpdate::Update)
-            .chain(removes.into_iter().map(XdsUpdate::Remove))
-            .collect();
-        let handler = f(self);
-
-        handler.handle(updates)
     }
 }
 
@@ -653,27 +673,31 @@ pub enum AdsError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::SystemTime,
+    };
+
+    use prost::Message;
+    use prost_types::Any;
+    use textnonce::TextNonce;
+    use tokio::time::sleep;
+
+    use crate::xds::istio::workload::address::Type as XdsType;
+    use crate::xds::istio::workload::Address as XdsAddress;
+    use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::xds::istio::workload::WorkloadType;
+    use crate::xds::ADDRESS_TYPE;
+    use workload::Workload;
+
     use crate::state::workload::NetworkAddress;
     use crate::state::{workload, DemandProxyState};
     use crate::test_helpers::{
         helpers::{self},
         xds::AdsServer,
     };
-    use prost::Message;
-    use prost_types::Any;
-    use std::{
-        net::{IpAddr, Ipv4Addr},
-        time::SystemTime,
-    };
-    use textnonce::TextNonce;
-    use tokio::time::sleep;
-    use workload::Workload;
-    use xds::istio::workload::address::Type as XdsType;
-    use xds::istio::workload::Address as XdsAddress;
-    use xds::istio::workload::Workload as XdsWorkload;
-    use xds::istio::workload::WorkloadType;
-    use xds::ADDRESS_TYPE;
+
+    use super::*;
 
     const POLL_RATE: Duration = Duration::from_millis(2);
     const TEST_TIMEOUT: Duration = Duration::from_millis(100);

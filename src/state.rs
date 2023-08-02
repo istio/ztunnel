@@ -22,6 +22,8 @@ use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
+use crate::xds::istio::security::Authorization as XdsAuthorization;
+use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
@@ -554,7 +556,11 @@ impl DemandProxyState {
     async fn fetch_on_demand(&self, key: String) {
         if let Some(demand) = &self.demand {
             debug!(%key, "sending demand request");
-            demand.demand(key.clone()).await.recv().await;
+            demand
+                .demand(xds::ADDRESS_TYPE.to_string(), key.clone())
+                .await
+                .recv()
+                .await;
             debug!(%key, "on demand ready");
         }
     }
@@ -602,10 +608,8 @@ impl ProxyStateManager {
             let updater = ProxyStateUpdater::new(state.clone(), cert_fetcher.clone());
             Some(
                 xds::Config::new(config.clone())
-                    .with_address_handler(updater.clone())
-                    .with_authorization_handler(updater)
-                    .watch(xds::ADDRESS_TYPE.into())
-                    .watch(xds::AUTHORIZATION_TYPE.into())
+                    .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
+                    .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater)
                     .build(metrics, awaiting_ready),
             )
         } else {
