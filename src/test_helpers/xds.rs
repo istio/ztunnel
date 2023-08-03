@@ -16,6 +16,8 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use crate::xds::istio::security::Authorization as XdsAuthorization;
+use crate::xds::istio::workload::Address as XdsAddress;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
@@ -104,10 +106,8 @@ impl AdsServer {
         let store_updater = ProxyStateUpdater::new_no_fetch(state);
 
         let xds_client = xds::Config::new(cfg)
-            .with_address_handler(store_updater.clone())
-            .with_authorization_handler(store_updater)
-            .watch(xds::ADDRESS_TYPE.into())
-            .watch(xds::AUTHORIZATION_TYPE.into())
+            .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, store_updater.clone())
+            .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, store_updater)
             .build(metrics, ready.register_task("ads client"));
 
         (tx, xds_client, dstate)
