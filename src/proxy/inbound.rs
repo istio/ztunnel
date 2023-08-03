@@ -338,7 +338,7 @@ impl Inbound {
                     revision: baggage.revision,
                     ..Default::default()
                 };
-                let ds = proxy::pick_upstream_service(&conn, upstream_service, &upstream);
+                let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
                 let connection_metrics = ConnectionOpen {
                     reporter: Reporter::destination,
                     source,

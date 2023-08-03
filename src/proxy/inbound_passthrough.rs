@@ -157,7 +157,7 @@ impl InboundPassthrough {
             identity: conn.src_identity.clone(),
             ..Default::default()
         };
-        let ds = proxy::pick_upstream_service(&conn, upstream_service, &upstream);
+        let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
         let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::destination,
             source: source_workload,

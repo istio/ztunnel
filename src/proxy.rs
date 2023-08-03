@@ -410,10 +410,10 @@ pub async fn relay(
     }
 }
 
-// pick_upstream_service selects an upstream service for inbound metrics.
+// guess_inbound_service selects an upstream service for inbound metrics.
 // There may be many services for a single workload. We find the the first one with an applicable port
 // as a best guess.
-pub fn pick_upstream_service(
+pub fn guess_inbound_service(
     conn: &Connection,
     upstream_service: Vec<Service>,
     dest: &Workload,
