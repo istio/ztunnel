@@ -201,10 +201,9 @@ async fn run_requests_test(
         let dst = SocketAddr::from_str(target)
             .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
         for _ in 0..num_queries {
-            let mut stream = app.socks5_connect(dst,
-
-                    TEST_WORKLOAD_SOURCE.parse().unwrap(),
-            ).await;
+            let mut stream = app
+                .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+                .await;
             read_write_stream(&mut stream).await;
         }
         if let Some(assertions) = metrics_assertions {

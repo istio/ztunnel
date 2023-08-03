@@ -396,7 +396,7 @@ fn next_ip_pair(ip_pair: (u8, u8)) -> (u8, u8) {
 }
 
 /// Reserve IPs in 127.0.1.0/24 for these HBONE connection tests.
-/// Thus, we identify hosts by a u8 in the form 127.0.1.x
+/// Thus, we identify hosts by a u8 which represents an IP in the form 127.0.1.x.
 fn hbone_connection_ip(x: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(127, 0, 1, x))
 }
@@ -404,7 +404,7 @@ fn hbone_connection_ip(x: u8) -> IpAddr {
 fn hbone_connection_config() -> ztunnel::config::ConfigSource {
     let mut workloads: Vec<LocalWorkload> = Vec::with_capacity(MAX_HBONE_WORKLOADS as usize);
     // We can't create one work load with many IPs because ztunnel could connect to any one causing
-    // inconsistent behavior.
+    // inconsistent behavior. Instead, we create one workload per IP.
     for i in 1..MAX_HBONE_WORKLOADS + 1 {
         let lwl = LocalWorkload {
             workload: Workload {
@@ -469,11 +469,10 @@ fn hbone_connections(c: &mut Criterion) {
     });
 
     let ta: Arc<Mutex<TestApp>> = Arc::new(Mutex::new(ta));
-    // Host addresses can't end with 0.
     let addresses = Arc::new(Mutex::new((1u8, 2u8)));
 
     let mut c = c.benchmark_group("hbone_connection");
-    // WARNING increasing the measurement time could lead to running out of IP pairs or having to
+    // WARNING: increasing the measurement time could lead to running out of IP pairs or having too
     // many open connections.
     c.measurement_time(Duration::from_secs(5));
     c.bench_function("connect_request_response", |b| {
