@@ -21,7 +21,6 @@ pub use metrics::*;
 use self::service::discovery::v3::DeltaDiscoveryRequest;
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
-use crate::identity;
 use crate::rbac;
 use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service};
