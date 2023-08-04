@@ -16,8 +16,8 @@ use crate::identity::SecretManager;
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
-use crate::state::service::ServiceDescription;
 use crate::state::service::ServiceStore;
+use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
@@ -169,7 +169,7 @@ impl ProxyState {
                 workload: wl,
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
-                destination_service: Some(svc.into()),
+                destination_service: Some((&svc).into()),
             };
             return Some(us);
         }
@@ -449,6 +449,26 @@ impl DemandProxyState {
                     && rdns.initial_query.unwrap().elapsed() < rdns.dns_refresh_rate
             })
             .cloned()
+    }
+
+    pub async fn fetch_workload_services(
+        &self,
+        addr: &NetworkAddress,
+    ) -> Option<(Workload, Vec<Service>)> {
+        // Wait for it on-demand, *if* needed
+        debug!(%addr, "fetch workload and service");
+        let fetch = |addr: &NetworkAddress| {
+            let state = self.state.read().unwrap();
+            state.workloads.find_address(addr).map(|wl| {
+                let svc = state.services.get_by_workload(&wl);
+                (wl, svc)
+            })
+        };
+        if let Some(wl) = fetch(addr) {
+            return Some(wl);
+        }
+        self.fetch_on_demand(addr.to_string()).await;
+        fetch(addr)
     }
 
     // only support workload

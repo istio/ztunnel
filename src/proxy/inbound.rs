@@ -25,6 +25,7 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
@@ -39,6 +40,7 @@ use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
+
 use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::tls::TlsError;
@@ -272,7 +274,7 @@ impl Inbound {
                     network: conn.dst_network.to_string(), // dst must be on our network
                     address: addr.ip(),
                 };
-                let Some(upstream) = state.fetch_workload(&dst_network_addr).await else {
+                let Some((upstream, upstream_service)) = state.fetch_workload_services(&dst_network_addr).await else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
@@ -329,20 +331,21 @@ impl Inbound {
                 };
 
                 let derived_source = metrics::DerivedWorkload {
-                    identity: conn.src_identity,
+                    identity: conn.src_identity.clone(),
                     cluster_id: baggage.cluster_id,
                     namespace: baggage.namespace,
                     workload_name: baggage.workload_name,
                     revision: baggage.revision,
                     ..Default::default()
                 };
+                let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
                 let connection_metrics = ConnectionOpen {
                     reporter: Reporter::destination,
                     source,
                     derived_source: Some(derived_source),
                     destination: Some(upstream),
                     connection_security_policy: metrics::SecurityPolicy::mutual_tls,
-                    destination_service: None,
+                    destination_service: ds,
                 };
                 let status_code = match Self::handle_inbound(
                     Hbone(req),

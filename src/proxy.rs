@@ -21,18 +21,23 @@ use std::{fmt, io};
 use boring::error::ErrorStack;
 use drain::Watch;
 use hyper::{header, Request};
-use inbound::Inbound;
+
 use rand::Rng;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tracing::{error, trace, warn, Instrument};
+
+use inbound::Inbound;
+pub use metrics::*;
 
 use crate::identity::SecretManager;
 use crate::metrics::Recorder;
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
-use crate::state::workload::Workload;
+use crate::rbac::Connection;
+use crate::state::service::{endpoint_uid, Service, ServiceDescription};
+use crate::state::workload::{network_addr, Workload};
 use crate::state::DemandProxyState;
 use crate::{config, identity, socket, tls};
 
@@ -44,8 +49,6 @@ mod outbound;
 mod pool;
 mod socks5;
 mod util;
-
-pub use metrics::*;
 
 pub struct Proxy {
     inbound: Inbound,
@@ -405,6 +408,38 @@ pub async fn relay(
         }
         Err(e) => Err(Error::Io(e)),
     }
+}
+
+// guess_inbound_service selects an upstream service for inbound metrics.
+// There may be many services for a single workload. We find the the first one with an applicable port
+// as a best guess.
+pub fn guess_inbound_service(
+    conn: &Connection,
+    upstream_service: Vec<Service>,
+    dest: &Workload,
+) -> Option<ServiceDescription> {
+    let dport = conn.dst.port();
+    let netaddr = network_addr(&dest.network, conn.dst.ip());
+    let euid = endpoint_uid(&dest.uid, Some(&netaddr));
+    upstream_service
+        .iter()
+        .find(|s| {
+            for (sport, tport) in s.ports.iter() {
+                if tport == &dport {
+                    // TargetPort directly matches
+                    return true;
+                }
+                // The service itself didn't have a explicit TargetPort match, but an endpoint might.
+                // This happens when there is a named port (in Kubernetes, anyways).
+                if s.endpoints.get(&euid).and_then(|e| e.port.get(sport)) == Some(&dport) {
+                    // Named port matched
+                    return true;
+                }
+                // no match
+            }
+            false
+        })
+        .map(ServiceDescription::from)
 }
 
 #[cfg(test)]
