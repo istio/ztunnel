@@ -93,7 +93,7 @@ impl InboundPassthrough {
             network: pi.cfg.network.clone(), // inbound request must be on our network
             address: orig.ip(),
         };
-        let Some(upstream) = pi.state.fetch_workload(&network_addr).await else {
+        let Some((upstream, upstream_service)) = pi.state.fetch_workload_services(&network_addr).await else {
             return Err(Error::UnknownDestination(orig.ip()))
         };
         if upstream.waypoint.is_some() {
@@ -154,16 +154,17 @@ impl InboundPassthrough {
             None
         };
         let derived_source = metrics::DerivedWorkload {
-            identity: conn.src_identity,
+            identity: conn.src_identity.clone(),
             ..Default::default()
         };
+        let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
         let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::destination,
             source: source_workload,
             derived_source: Some(derived_source),
             destination: Some(upstream),
             connection_security_policy: metrics::SecurityPolicy::unknown,
-            destination_service: None,
+            destination_service: ds,
         };
         let _connection_close = pi
             .metrics

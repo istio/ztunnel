@@ -202,7 +202,7 @@ impl OutboundConnection {
                 } else {
                     metrics::SecurityPolicy::unknown
                 },
-                destination_service: None, // TODO: in Envoy, we guess the destination service for inbound
+                destination_service: req.destination_service,
             };
             return Inbound::handle_inbound(
                 InboundConnect::DirectPath(stream),

@@ -27,7 +27,7 @@ use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
 use crate::state::ProxyState;
-use crate::xds;
+use crate::{tls, xds};
 pub use client::*;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -53,8 +53,8 @@ pub enum Error {
     RequestFailure(#[from] Box<mpsc::error::SendError<DeltaDiscoveryRequest>>),
     #[error("failed to send on demand resource")]
     OnDemandSend(),
-    #[error("Failed to fetch client bundle: {0}")]
-    ClientBundleFetch(#[from] identity::Error),
+    #[error("TLS Error: {0}")]
+    TLSError(#[from] tls::Error),
 }
 
 /// Updates the [ProxyState] from XDS.

@@ -155,14 +155,17 @@ mod namespaced {
             &metrics,
             &HashMap::from([
                 ("reporter".to_string(), "destination".to_string()),
-                ("destination_service".to_string(), "unknown".to_string()),
+                (
+                    "destination_service".to_string(),
+                    "server1.default.svc.cluster.local".to_string(),
+                ),
                 (
                     "destination_service_name".to_string(),
-                    "unknown".to_string(),
+                    "server1".to_string(),
                 ),
                 (
                     "destination_service_namespace".to_string(),
-                    "unknown".to_string(),
+                    "default".to_string(),
                 ),
             ]),
         )

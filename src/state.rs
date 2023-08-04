@@ -16,13 +16,15 @@ use crate::identity::SecretManager;
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
-use crate::state::service::ServiceDescription;
 use crate::state::service::ServiceStore;
+use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
 use crate::tls;
+use crate::xds::istio::security::Authorization as XdsAuthorization;
+use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, readiness, xds};
@@ -168,7 +170,7 @@ impl ProxyState {
                 workload: wl,
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
-                destination_service: Some(svc.into()),
+                destination_service: Some((&svc).into()),
             };
             return Some(us);
         }
@@ -450,6 +452,26 @@ impl DemandProxyState {
             .cloned()
     }
 
+    pub async fn fetch_workload_services(
+        &self,
+        addr: &NetworkAddress,
+    ) -> Option<(Workload, Vec<Service>)> {
+        // Wait for it on-demand, *if* needed
+        debug!(%addr, "fetch workload and service");
+        let fetch = |addr: &NetworkAddress| {
+            let state = self.state.read().unwrap();
+            state.workloads.find_address(addr).map(|wl| {
+                let svc = state.services.get_by_workload(&wl);
+                (wl, svc)
+            })
+        };
+        if let Some(wl) = fetch(addr) {
+            return Some(wl);
+        }
+        self.fetch_on_demand(addr.to_string()).await;
+        fetch(addr)
+    }
+
     // only support workload
     pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
@@ -555,7 +577,11 @@ impl DemandProxyState {
     async fn fetch_on_demand(&self, key: String) {
         if let Some(demand) = &self.demand {
             debug!(%key, "sending demand request");
-            demand.demand(key.clone()).await.recv().await;
+            demand
+                .demand(xds::ADDRESS_TYPE.to_string(), key.clone())
+                .await
+                .recv()
+                .await;
             debug!(%key, "on demand ready");
         }
     }
@@ -606,10 +632,8 @@ impl ProxyStateManager {
             ));
             Some(
                 xds::Config::new(config.clone(), tls_client_fetcher)
-                    .with_address_handler(updater.clone())
-                    .with_authorization_handler(updater)
-                    .watch(xds::ADDRESS_TYPE.into())
-                    .watch(xds::AUTHORIZATION_TYPE.into())
+                    .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
+                    .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater)
                     .build(metrics, awaiting_ready),
             )
         } else {
