@@ -170,6 +170,9 @@ pub enum Error {
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
 
+    #[error("unauthenticated source: {0}")]
+    UnauthenticatedSource(IpAddr),
+
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
 
