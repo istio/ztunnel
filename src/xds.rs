@@ -76,6 +76,8 @@ impl ProxyStateUpdater {
     }
 
     pub fn insert_workload(&self, w: XdsWorkload) -> anyhow::Result<()> {
+        debug!("handling insert {}", w.uid);
+
         // Convert the workload.
         let workload = Workload::try_from(&w)?;
 
@@ -104,7 +106,7 @@ impl ProxyStateUpdater {
     }
 
     pub fn remove(&self, xds_name: &String) {
-        info!("handling delete {}", xds_name);
+        debug!("handling delete {}", xds_name);
         let mut state = self.state.write().unwrap();
 
         // remove workload by UID; if xds_name is a service then this will no-op
