@@ -299,10 +299,10 @@ async fn handle_config_dump(
         }
     }
 
-    let vec = serde_json::to_vec(&dump).unwrap();
+    let body = serde_json::to_string_pretty(&dump).unwrap();
     Response::builder()
         .status(hyper::StatusCode::OK)
-        .body(vec.into())
+        .body(body.into())
         .unwrap()
 }
 
