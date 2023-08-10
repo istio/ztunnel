@@ -420,17 +420,10 @@ mod namespaced {
             .workload_builder("client", REMOTE_NODE)
             .uncaptured()
             .register()?;
-        let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
+        let _ = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
-        run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
+        run_tcp_to_hbone_client_expect_err(client, manager.resolver(), "server")?;
 
-        let metrics = [
-            (CONNECTIONS_OPENED, 1),
-            (CONNECTIONS_CLOSED, 1),
-            (BYTES_RECV, REQ_SIZE),
-            (BYTES_SENT, HBONE_REQ_SIZE),
-        ];
-        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -609,6 +602,34 @@ mod namespaced {
             .unwrap()
     }
 
+
+    fn run_tcp_to_hbone_client_expect_err(
+        client: Namespace,
+        resolver: Resolver,
+        target: &str,
+    ) -> anyhow::Result<()> {
+        let srv = resolve_target(resolver, target);
+
+        client
+            .run(move || async move {
+                let mut tcp_stream = TcpStream::connect(&srv.to_string()).await?;
+                tcp_stream.write_all(b"hello world!").await?;
+                let mut buf = [0; 10];
+                let mut buf = ReadBuf::new(&mut buf);
+
+                let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
+                assert!(result.is_err()); // exepct a connection reset due to TLS SAN mismatch
+                assert_eq!(
+                    result.err().unwrap().kind(),
+                    std::io::ErrorKind::ConnectionReset
+                );
+
+                Ok(())
+            })?
+            .join()
+            .unwrap()
+    }
+
     /// run_tcp_server deploys a simple echo server in the provided namespace
     fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
         server.run_ready(|ready| async move {
@@ -758,26 +779,8 @@ mod namespaced {
             .register()?;
         let _ = manager.deploy_ztunnel(DEFAULT_NODE)?;
 
-        let srv = resolve_target(manager.resolver(), &format!("{TEST_VIP}:80"));
+        run_tcp_to_hbone_client_expect_err(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
 
-        client
-            .run(move || async move {
-                let mut tcp_stream = TcpStream::connect(&srv.to_string()).await?;
-                tcp_stream.write_all(b"hello world!").await?;
-                let mut buf = [0; 10];
-                let mut buf = ReadBuf::new(&mut buf);
-
-                let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
-                assert!(result.is_err()); // exepct a connection reset due to TLS SAN mismatch
-                assert_eq!(
-                    result.err().unwrap().kind(),
-                    std::io::ErrorKind::ConnectionReset
-                );
-
-                Ok(())
-            })?
-            .join()
-            .unwrap()?;
         Ok(())
     }
 }

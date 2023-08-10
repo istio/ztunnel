@@ -19,9 +19,8 @@ use tracing::{error, info, trace, warn, Instrument};
 
 use crate::config::ProxyMode;
 use crate::proxy::metrics::Reporter;
-use crate::proxy::outbound::OutboundConnection;
+use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
-use crate::proxy::{Error, TraceParent};
 use crate::rbac;
 use crate::state::workload::NetworkAddress;
 use crate::{proxy, socket};
@@ -103,15 +102,9 @@ impl InboundPassthrough {
             // The request needs to go through the waypoint for policy enforcement.
             // This can happen from clients that are not part of the mesh; they won't know to send
             // to the waypoint.
-            // To handle this, we forward it to the waypoint ourselves, which will hairpin back to us.
-            let mut oc = OutboundConnection {
-                pi: pi.clone(),
-                id: TraceParent::new(),
-            };
-            // Spoofing the source IP only works when the destination or the source are on our node.
-            // In this case, the source and the destination might both be remote, so we need to disable it.
-            oc.pi.cfg.enable_original_source = Some(false);
-            return oc.proxy_to(inbound, source.ip(), orig, false).await;
+            // Deny this because we cannot attest anything about the source.
+            // TODO make decision on: https://github.com/istio/istio/issues/44530
+            return Err(Error::UnauthenticatedSource(source.ip()));
         }
 
         // We enforce RBAC only for non-hairpin cases. This is because we may not be able to properly
