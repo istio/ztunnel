@@ -299,10 +299,10 @@ async fn handle_config_dump(
         }
     }
 
-    let vec = serde_json::to_vec(&dump).unwrap();
+    let body = serde_json::to_string_pretty(&dump).unwrap();
     Response::builder()
         .status(hyper::StatusCode::OK)
-        .body(vec.into())
+        .body(body.into())
         .unwrap()
 }
 
@@ -812,9 +812,12 @@ mod tests {
         // the config dump at all from our internal types
         assert!(resp_str.contains("defaultnw/127.0.0.2"));
         // Check a waypoint
-        assert!(
-            resp_str.contains(r#"waypoint":{"destination":"defaultnw/127.0.0.10","port":15008}"#)
-        );
+        assert!(resp_str.contains(
+            r#"waypoint": {
+        "destination": "defaultnw/127.0.0.10",
+        "port": 15008
+      }"#
+        ));
     }
 
     // each of these tests assert that we can change the log level and the
