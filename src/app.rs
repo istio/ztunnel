@@ -249,7 +249,7 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
         identity::mock::new_secret_manager(Duration::from_secs(86400))
     } else {
-        Arc::new(SecretManager::new(config.clone())?)
+        Arc::new(SecretManager::new(config.clone()).await?)
     };
     build_with_cert(config, cert_manager).await
 }

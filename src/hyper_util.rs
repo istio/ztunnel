@@ -33,9 +33,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
 use tracing::{debug, info, warn};
 
-use crate::tls::{BoringTlsAcceptor, CertProvider};
+use crate::tls::{BoringTlsAcceptor, ServerCertProvider};
 
-pub fn tls_server<T: CertProvider + Clone + 'static>(
+pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
     acceptor: T,
     listener: TcpListener,
 ) -> impl Stream<Item = tokio_boring::SslStream<TcpStream>> {

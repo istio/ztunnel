@@ -18,7 +18,7 @@ use std::str::Utf8Error;
 mod caclient;
 pub use caclient::*;
 
-mod manager;
+pub mod manager;
 pub use manager::*;
 
 mod auth;

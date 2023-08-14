@@ -452,7 +452,7 @@ struct InboundCertProvider {
 }
 
 #[async_trait::async_trait]
-impl crate::tls::CertProvider for InboundCertProvider {
+impl crate::tls::ServerCertProvider for InboundCertProvider {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {

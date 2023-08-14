@@ -25,7 +25,6 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::config::RootCert;
 use crate::metrics::IncrementRecorder;
 use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
@@ -151,7 +150,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
 
 pub struct Config {
     address: String,
-    root_cert: RootCert,
+    tls_builder: Box<dyn tls::ClientCertProvider>,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
     handlers: HashMap<String, Box<dyn RawHandler>>,
@@ -203,10 +202,13 @@ impl State {
 }
 
 impl Config {
-    pub fn new(config: crate::config::Config) -> Config {
+    pub fn new(
+        config: crate::config::Config,
+        tls_builder: Box<dyn tls::ClientCertProvider>,
+    ) -> Config {
         Config {
             address: config.xds_address.clone().unwrap(),
-            root_cert: config.xds_root_cert.clone(),
+            tls_builder,
             auth: config.auth,
             handlers: HashMap::new(),
             initial_watches: Vec::new(),
@@ -450,10 +452,6 @@ impl AdsClient {
     }
 
     async fn run_internal(&mut self) -> Result<(), Error> {
-        let address = self.config.address.clone();
-        let svc = tls::grpc_connector(address, self.config.root_cert.clone()).unwrap();
-        let mut client =
-            AggregatedDiscoveryServiceClient::with_interceptor(svc, self.config.auth.clone());
         let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);
         // For each type in initial_watches we will send a request on connection to subscribe
         let initial_requests = self.construct_initial_requests();
@@ -469,11 +467,19 @@ impl AdsClient {
             warn!("outbound stream complete");
         };
 
-        let mut response_stream = client
-            .delta_aggregated_resources(tonic::Request::new(outbound))
-            .await
-            .map_err(Error::Connection)?
-            .into_inner();
+        let tls_grpc_channel = tls::grpc_connector(
+            self.config.address.clone(),
+            self.config.tls_builder.fetch_cert().await?,
+        )?;
+
+        let ads_connection = AggregatedDiscoveryServiceClient::with_interceptor(
+            tls_grpc_channel,
+            self.config.auth.clone(),
+        )
+        .delta_aggregated_resources(tonic::Request::new(outbound))
+        .await;
+
+        let mut response_stream = ads_connection.map_err(Error::Connection)?.into_inner();
         debug!("connected established");
 
         info!("Stream established");

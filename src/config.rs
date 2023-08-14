@@ -61,6 +61,7 @@ const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
+const DEFAULT_TOKEN_PROVIDER: &str = "./var/run/secrets/tokens/istio-token";
 const CERT_SYSTEM: &str = "SYSTEM";
 
 const PROXY_MODE_DEDICATED: &str = "dedicated";
@@ -272,6 +273,13 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
 
+    let auth = match std::fs::read(DEFAULT_TOKEN_PROVIDER) {
+        Ok(_) => {
+            identity::AuthSource::Token(PathBuf::from(DEFAULT_TOKEN_PROVIDER), cluster_id.clone())
+        }
+        Err(_) => identity::AuthSource::None,
+    };
+
     use trust_dns_resolver::system_conf::read_system_conf;
     let (dns_resolver_cfg, dns_resolver_opts) = read_system_conf().unwrap();
 
@@ -320,7 +328,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             None => ProxyMode::Shared,
         },
         local_ip: parse(INSTANCE_IP)?,
-        cluster_id: cluster_id.clone(),
+        cluster_id,
         cluster_domain,
 
         xds_address,
@@ -332,10 +340,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         proxy_metadata: pc.proxy_metadata,
 
         fake_ca,
-        auth: identity::AuthSource::Token(
-            PathBuf::from(r"./var/run/secrets/tokens/istio-token"),
-            cluster_id,
-        ),
+        auth,
 
         num_worker_threads: parse_default(
             ZTUNNEL_WORKER_THREADS,
