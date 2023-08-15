@@ -115,7 +115,7 @@ impl Inbound {
                     .initial_connection_window_size(self.cfg.connection_window_size)
                     .max_frame_size(self.cfg.frame_size)
                     .serve_connection(
-                        socket,
+                        hyper_util::rt::TokioIo::new(socket),
                         service_fn(move |req| {
                             Self::serve_connect(
                                 state.clone(),

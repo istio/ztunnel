@@ -23,6 +23,7 @@ mod namespaced {
     use std::time::Duration;
 
     use hyper::Method;
+    use hyper_util::rt::TokioIo;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpStream;
     use tokio::time::timeout;
@@ -479,7 +480,8 @@ mod namespaced {
                 let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
                     .await
                     .unwrap();
-                let (mut request_sender, connection) = builder.handshake(tls_stream).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
@@ -538,7 +540,8 @@ mod namespaced {
                 let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
                     .await
                     .unwrap();
-                let (mut request_sender, connection) = builder.handshake(tls_stream).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {

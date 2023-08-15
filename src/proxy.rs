@@ -207,7 +207,7 @@ pub async fn copy_hbone(
     transferred_bytes: BytesTransferred<'_>,
 ) -> Result<(), Error> {
     use tokio::io::AsyncWriteExt;
-    let (mut ri, mut wi) = tokio::io::split(upgraded);
+    let (mut ri, mut wi) = tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
     let (mut ro, mut wo) = stream.split();
 
     let (mut sent, mut received): (u64, u64) = (0, 0);
