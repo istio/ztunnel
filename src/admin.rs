@@ -309,7 +309,9 @@ async fn handle_config_dump(
 //mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
 //NOTE: multiple query parameters is not supported, for example
 //curl -X POST http://127.0.0.1:15000/logging?"tap=debug&router=debug"
+//Also, at a GET endpoint since browsers send GET requests when visiting a site.
 static HELP_STRING: &str = "
+usage: GET /logging\t\t\t\t\t\t(To list current level)
 usage: POST /logging\t\t\t\t\t\t(To list current level)
 usage: POST /logging?level=<level>\t\t\t\t(To change global levels)
 usage: POST /logging?level={mod1}:{level1},{mod2}:{level2}\t(To change specific mods' logging level)
@@ -337,6 +339,7 @@ async fn handle_logging(req: Request<Incoming>) -> Response<Full<Bytes>> {
                 list_loggers()
             }
         }
+        hyper::Method::GET => list_loggers(),
         _ => plaintext_response(
             hyper::StatusCode::METHOD_NOT_ALLOWED,
             format!("Invalid HTTP method\n {HELP_STRING}"),
