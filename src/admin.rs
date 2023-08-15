@@ -309,7 +309,7 @@ async fn handle_config_dump(
 //mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
 //NOTE: multiple query parameters is not supported, for example
 //curl -X POST http://127.0.0.1:15000/logging?"tap=debug&router=debug"
-//Also, at a GET endpoint since browsers send GET requests when visiting a site.
+//Also, add a GET endpoint since browsers send GET requests when visiting a site.
 static HELP_STRING: &str = "
 usage: GET /logging\t\t\t\t\t\t(To list current level)
 usage: POST /logging\t\t\t\t\t\t(To list current level)
