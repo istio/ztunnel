@@ -118,8 +118,8 @@ pub struct ServiceStore {
 
     /// Allows for lookup of services by hostname, and then by namespace. XDS uses a combination
     /// of hostname and namespace as the primary key. In most cases, there will be a single
-    /// service for a given hostname. However, `ServiceEntry` allows hostnames to be overridden
-    /// on a per-namespace basis.
+    /// service for a given hostname. However, `ServiceEntry` is global (the VIPs and hostnames
+    /// are valid for any mesh pod) so if there are several we will return all services.
     by_host: HashMap<String, Vec<Arc<Service>>>,
 }
 
@@ -131,7 +131,8 @@ impl ServiceStore {
 
     /// Returns the list of [Service]s matching the given hostname. Istio `ServiceEntry`
     /// affords the ability to define the same hostname (e.g. `www.google.com`) in different
-    /// namespaces. In most cases, only a single [Service] will be returned.
+    /// namespaces. In most cases, only a single [Service] will be returned. If several are
+    /// returned, most callers will just want to pick one of the services at random.
     ///
     /// # Arguments
     ///

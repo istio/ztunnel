@@ -19,8 +19,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use itertools::Itertools;
 use once_cell::sync::Lazy;
+use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use tokio::net::{TcpListener, UdpSocket};
@@ -310,11 +310,12 @@ impl Store {
                     // We found a match. We always return `Some` result, even if there
                     // are zero records returned.
 
-                    // Get the service matching the client namespace. If no match exists, just
-                    // return the first service.
+                    // Pick any service with the host. We want to round-robin
+                    // the resolved VIP behind any given hostname if there are
+                    // conflicts across namespaces.
                     let service = services
                         .iter()
-                        .find_or_first(|service| service.namespace == client.namespace)
+                        .choose(&mut rand::thread_rng())
                         .cloned()
                         // Should never be empty, since we delete the Vec when it's empty.
                         .unwrap();
@@ -706,6 +707,7 @@ impl Forwarder for SystemForwarder {
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
     use std::cmp::Ordering;
     use std::collections::HashMap;
     use std::net::{SocketAddrV4, SocketAddrV6};
