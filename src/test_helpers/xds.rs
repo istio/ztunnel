@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
 use hyper::server::conn::http2;
+use hyper_util::rt::TokioIo;
 use prometheus_client::registry::Registry;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -74,7 +75,7 @@ impl AdsServer {
                 let srv = srv.clone();
                 if let Err(err) = http2::Builder::new(TokioExecutor)
                     .serve_connection(
-                        socket,
+                        TokioIo::new(socket),
                         tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
                     )
                     .await

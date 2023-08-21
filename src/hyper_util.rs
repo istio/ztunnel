@@ -142,7 +142,7 @@ pub fn http1_server() -> http1::Builder {
     b
 }
 
-pub fn http2_client() -> client::conn::http2::Builder {
+pub fn http2_client() -> client::conn::http2::Builder<TokioExecutor> {
     let mut b = client::conn::http2::Builder::new(TokioExecutor);
     b.timer(TokioTimer);
     b
@@ -231,7 +231,7 @@ impl<S> Server<S> {
                         .header_read_timeout(Duration::from_secs(2))
                         .max_buf_size(8 * 1024)
                         .serve_connection(
-                            socket,
+                            hyper_util::rt::TokioIo::new(socket),
                             hyper::service::service_fn(move |req| {
                                 let state = state.clone();
 

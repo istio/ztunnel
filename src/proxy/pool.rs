@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
-use std::net::SocketAddr;
-use std::time::Duration;
-
 use bytes::Bytes;
 use futures::pin_mut;
 use futures_util::future;
@@ -26,6 +22,9 @@ use hyper::client::conn::http2;
 use hyper::http::{Request, Response};
 use hyper_util::client::pool;
 use hyper_util::client::pool::{Pool as HyperPool, Poolable, Pooled, Reservation};
+use std::future::Future;
+use std::net::SocketAddr;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::identity::Identity;
@@ -50,7 +49,9 @@ impl Pool {
     }
 }
 
+#[derive(Clone)]
 pub struct TokioExec;
+
 impl<F> hyper::rt::Executor<F> for TokioExec
 where
     F: std::future::Future + Send + 'static,
@@ -186,7 +187,10 @@ mod test {
                 tokio::task::spawn(async move {
                     // Finally, we bind the incoming connection to our `hello` service
                     if let Err(err) = crate::hyper_util::http2_server()
-                        .serve_connection(stream, service_fn(hello_world))
+                        .serve_connection(
+                            hyper_util::rt::TokioIo::new(stream),
+                            service_fn(hello_world),
+                        )
                         .await
                     {
                         println!("Error serving connection: {:?}", err);
@@ -204,7 +208,9 @@ mod test {
             let builder = http2::Builder::new(TokioExec);
 
             let tcp_stream = TcpStream::connect(addr).await?;
-            let (request_sender, connection) = builder.handshake(tcp_stream).await?;
+            let (request_sender, connection) = builder
+                .handshake(hyper_util::rt::TokioIo::new(tcp_stream))
+                .await?;
             // spawn a task to poll the connection and drive the HTTP state
             tokio::spawn(async move {
                 if let Err(e) = connection.await {

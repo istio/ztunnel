@@ -37,6 +37,8 @@ use bytes::Bytes;
 use http_body_1::{Body, Frame};
 use hyper::body::Incoming;
 use hyper::{Request, Response, Uri};
+use hyper_boring::HttpsConnector;
+use hyper_util::client::connect::HttpConnector;
 use rand::RngCore;
 use std::str::FromStr;
 use std::task::{Context, Poll};
@@ -287,10 +289,10 @@ pub fn grpc_connector(
 ) -> Result<TlsGrpcChannel, Error> {
     let uri = Uri::try_from(uri)?;
     let is_localhost_call = uri.host() == Some("localhost");
-    let mut http: hyper_util::client::connect::HttpConnector =
-        hyper_util::client::connect::HttpConnector::new();
+    let mut http: HttpConnector = HttpConnector::new();
     http.enforce_http(false);
-    let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
+    let mut https: HttpsConnector<HttpConnector> =
+        hyper_boring::HttpsConnector::with_connector(http, conn)?;
     https.set_callback(move |cc, _| {
         if is_localhost_call {
             // Follow Istio logic to allow localhost calls: https://github.com/istio/istio/blob/373fc89518c986c9f48ed3cd891930da6fdc8628/pkg/istio-agent/xds_proxy.go#L735
@@ -721,8 +723,8 @@ fn generate_test_certs_at(
         .build()
         .unwrap();
     let ext_key_usage = ExtendedKeyUsage::new()
-        .client_auth()
         .server_auth()
+        .client_auth()
         .build()
         .unwrap();
     let authority_key_identifier = AuthorityKeyIdentifier::new()

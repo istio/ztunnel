@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use hyper_util::rt::TokioIo;
 
 use tokio::sync::watch;
 
@@ -64,7 +65,7 @@ impl CaServer {
                 let srv = srv.clone();
                 if let Err(err) = crate::hyper_util::http2_server()
                     .serve_connection(
-                        socket,
+                        TokioIo::new(socket),
                         tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
                     )
                     .await

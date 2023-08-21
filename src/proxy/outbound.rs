@@ -275,7 +275,7 @@ impl OutboundConnection {
                     tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
-                        .handshake(tls_stream)
+                        .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
                         .await
                         .map_err(Error::HttpHandshake)?;
                     // spawn a task to poll the connection and drive the HTTP state
