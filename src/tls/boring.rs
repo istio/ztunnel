@@ -290,6 +290,14 @@ pub fn grpc_connector(
     let uri = Uri::try_from(uri)?;
     let is_localhost_call = uri.host() == Some("localhost");
     let mut http: HttpConnector = HttpConnector::new();
+    // Set keepalives to match istio's Envoy bootstrap configuration:
+    // https://github.com/istio/istio/blob/a29d5c9c27d80bff31f218936f5a96759d8911c8/tools/packaging/common/envoy_bootstrap.json#L322C14-L322C28
+    //
+    // keepalive_interval and keepalive_retries match the linux default per Envoy docs:
+    // https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/core/v3/address.proto#config-core-v3-tcpkeepalive
+    http.set_keepalive(Some(Duration::from_secs(300)));
+    http.set_keepalive_interval(Some(Duration::from_secs(75)));
+    http.set_keepalive_retries(Some(9));
     http.enforce_http(false);
     let mut https: HttpsConnector<HttpConnector> =
         hyper_boring::HttpsConnector::with_connector(http, conn)?;
