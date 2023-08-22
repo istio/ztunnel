@@ -80,3 +80,21 @@ This can be utilized to test different things. For example:
 
 * `LOCAL_XDS_PATH=./examples/localhost.yaml cargo run` - request to localhost will use HBONE
 * `LOCAL_XDS_PATH=./examples/localhost.yaml NODE_NAME=local cargo run` - request to localhost will use in-memory fast path
+
+
+## Remote debugging
+
+Deploy ztunnel in docker, and use CLion on mac for remote debugging:
+
+- Create a remote debug configuration, please refer to [here](https://www.jetbrains.com/help/clion/remote-debug.html#remote-config).
+- For the docker image and how to use it, please refer to [here](./docker/remote-env/Dockerfile).
+
+In docker, launch ztunnel under gdbserver:
+
+```shell
+cargo build
+# This port 1234 was specified when executing "docker run".
+FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml gdbserver :1234 ./out/rust/debug/ztunnel
+```
+
+Next, please refer to [here](#sending-requests) to see how to send the request.

@@ -7,6 +7,7 @@
 #   docker run -d \
 #       --privileged \
 #       -p 127.0.0.1:2222:22 \
+#       -p 127.0.0.1:1234:1234 \
 #       --name ztunnel-dev \
 #       --mount type=bind,source="$PWD",target="/home/user/ztunnel" \
 #       ztunnel/remote-env:0.1
@@ -36,6 +37,7 @@ RUN apt-get update && apt-get install --no-install-recommends -yq \
     git \
     sudo \
     ssh \
+    gdbserver \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/*
 
 # Add the rust source code and set up the environment.
@@ -78,5 +80,5 @@ RUN echo "export RUSTUP_HOME=$RUSTUP_HOME" >> $REMOTE_USER_LOGIN_SCRIPT
 RUN echo "export PATH=$PATH" >> $REMOTE_USER_LOGIN_SCRIPT
 
 ENV BUILD_WITH_CONTAINER=0
-EXPOSE 22
+EXPOSE 22 1234
 CMD ["/usr/sbin/sshd", "-D", "-e", "-f", "/etc/ssh/sshd_remote_dev"]
