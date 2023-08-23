@@ -12,27 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod client;
-pub mod metrics;
-mod types;
-
-pub use metrics::*;
-
-use self::service::discovery::v3::DeltaDiscoveryRequest;
-use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
-use crate::config::ConfigSource;
-use crate::rbac;
-use crate::rbac::Authorization;
-use crate::state::service::{endpoint_uid, Endpoint, Service};
-use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
-use crate::state::ProxyState;
-use crate::{tls, xds};
-pub use client::*;
 use std::collections::HashMap;
+use std::error::Error as StdErr;
+use std::fmt;
+use std::fmt::Formatter;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, trace, warn};
+
+pub use client::*;
+pub use metrics::*;
 pub use types::*;
 use xds::istio::security::Authorization as XdsAuthorization;
 use xds::istio::workload::address::Type as XdsType;
@@ -41,11 +32,44 @@ use xds::istio::workload::PortList;
 use xds::istio::workload::Service as XdsService;
 use xds::istio::workload::Workload as XdsWorkload;
 
+use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
+use crate::config::ConfigSource;
+use crate::rbac;
+use crate::rbac::Authorization;
+use crate::state::service::{endpoint_uid, Endpoint, Service};
+use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
+use crate::state::ProxyState;
+use crate::{tls, xds};
+
+use self::service::discovery::v3::DeltaDiscoveryRequest;
+
+mod client;
+pub mod metrics;
+mod types;
+
+struct DisplayStatus<'a>(&'a tonic::Status);
+
+impl<'a> fmt::Display for DisplayStatus<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = &self.0;
+        write!(f, "status: {:?}, message: {:?}", s.code(), s.message())?;
+        if !s.details().is_empty() {
+            if let Ok(st) = std::str::from_utf8(s.details()) {
+                write!(f, ", details: {st}")?;
+            }
+        }
+        if let Some(src) = s.source().and_then(|s| s.source()) {
+            write!(f, ", source: {src}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("gRPC error ({}): {}", .0.code(), .0.message())]
+    #[error("gRPC error {}", DisplayStatus(.0))]
     GrpcStatus(#[from] tonic::Status),
-    #[error("gRPC connection error ({}): {}", .0.code(), .0.message())]
+    #[error("gRPC connection error:{}", DisplayStatus(.0))]
     Connection(#[source] tonic::Status),
     /// Attempted to send on a MPSC channel which has been canceled
     #[error(transparent)]
