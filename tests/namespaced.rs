@@ -238,6 +238,32 @@ mod namespaced {
     }
 
     #[tokio::test]
+    async fn test_tcp_reject() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!();
+        manager.with_policies(vec![ztunnel::rbac::Authorization {
+            action: ztunnel::rbac::RbacAction::Allow,
+            scope: ztunnel::rbac::RbacScope::Global,
+            name: "deny-all".to_string(),
+            namespace: "default".to_string(),
+            rules: vec![],
+        }]);
+        run_tcp_server(manager.workload_builder("server", REMOTE_NODE).register()?)?;
+        let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()?;
+        let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+        run_tcp_reject(client, manager.resolver(), "server")?;
+        let remote_metrics: [(&str, u64); 1] = [(CONNECTIONS_DENIED, 1)];
+        verify_metrics(&remote, &remote_metrics, &destination_labels()).await;
+
+        let local_metrics: [(&str, u64); 2] = [(CONNECTIONS_OPENED, 1), (CONNECTIONS_CLOSED, 1)];
+        verify_metrics(&local, &local_metrics, &source_labels()).await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_tcp_local_request() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!();
         run_tcp_server(
@@ -265,6 +291,7 @@ mod namespaced {
 
     const CONNECTIONS_OPENED: &str = "istio_tcp_connections_opened_total";
     const CONNECTIONS_CLOSED: &str = "istio_tcp_connections_closed_total";
+    const CONNECTIONS_DENIED: &str = "istio_tcp_connections_denied_total";
     const BYTES_RECV: &str = "istio_tcp_received_bytes_total";
     const BYTES_SENT: &str = "istio_tcp_sent_bytes_total";
     const REQ_SIZE: u64 = b"hello world".len() as u64;
@@ -295,6 +322,37 @@ mod namespaced {
             (BYTES_SENT, REQ_SIZE * 2),
         ];
         verify_local_remote_metrics(&remote, &local, &metrics).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_hbone_reject() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!();
+        manager.with_policies(vec![ztunnel::rbac::Authorization {
+            action: ztunnel::rbac::RbacAction::Allow,
+            scope: ztunnel::rbac::RbacScope::Global,
+            name: "deny-all".to_string(),
+            namespace: "default".to_string(),
+            rules: vec![],
+        }]);
+        run_tcp_server(
+            manager
+                .workload_builder("server", REMOTE_NODE)
+                .hbone()
+                .register()?,
+        )?;
+        let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()?;
+        let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+        run_tcp_reject(client, manager.resolver(), "server")?;
+        let remote_metrics: [(&str, u64); 1] = [(CONNECTIONS_DENIED, 1)];
+        verify_metrics(&remote, &remote_metrics, &destination_labels()).await;
+
+        let local_metrics: [(&str, u64); 2] = [(CONNECTIONS_OPENED, 1), (CONNECTIONS_CLOSED, 1)];
+        verify_metrics(&local, &local_metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -374,6 +432,34 @@ mod namespaced {
             (BYTES_SENT, REQ_SIZE * 2),
         ];
         verify_metrics(&zt, &metrics, &source_labels()).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_hbone_local_reject() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!();
+        manager.with_policies(vec![ztunnel::rbac::Authorization {
+            action: ztunnel::rbac::RbacAction::Allow,
+            scope: ztunnel::rbac::RbacScope::Global,
+            name: "deny-all".to_string(),
+            namespace: "default".to_string(),
+            rules: vec![],
+        }]);
+        run_tcp_server(
+            manager
+                .workload_builder("server", DEFAULT_NODE)
+                .hbone()
+                .register()?,
+        )?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()?;
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+        run_tcp_reject(client, manager.resolver(), "server")?;
+
+        let metrics = [(CONNECTIONS_DENIED, 1)];
+        verify_metrics(&zt, &metrics, &destination_labels()).await;
         Ok(())
     }
 
@@ -591,6 +677,26 @@ mod namespaced {
             .unwrap()
     }
 
+    /// run_tcp_reject runs a simple client that reads and writes some data, asserting it fails
+    fn run_tcp_reject(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
+        let srv = resolve_target(resolver, target);
+        client
+            .run(move || async move {
+                info!("Running client to {srv}");
+                let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                info!("writing to stream");
+                timeout(Duration::from_secs(5), fail_write_stream(&mut stream))
+                    .await
+                    .unwrap();
+                Ok(())
+            })?
+            .join()
+            .unwrap()
+    }
+
     /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
     fn run_tcp_to_hbone_client(
         client: Namespace,
@@ -649,6 +755,13 @@ mod namespaced {
         let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
+    }
+
+    async fn fail_write_stream(stream: &mut TcpStream) -> () {
+        const BODY: &[u8] = b"hello world";
+        stream.write_all(BODY).await.unwrap();
+        let mut buf = [0; BODY.len() * 2];
+        stream.read_exact(&mut buf).await.unwrap_err();
     }
 
     #[tokio::test]

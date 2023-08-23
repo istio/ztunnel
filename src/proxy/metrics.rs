@@ -27,6 +27,7 @@ use crate::state::workload::Workload;
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
+    pub connection_deny: Family<CommonTrafficLabels, Counter>,
     pub received_bytes: Family<CommonTrafficLabels, Counter>,
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
 
@@ -108,6 +109,8 @@ pub struct ConnectionClose<'a>(&'a ConnectionOpen);
 
 pub struct BytesTransferred<'a>(&'a ConnectionOpen);
 
+pub struct ConnectionDenied<'a>(&'a ConnectionOpen);
+
 #[derive(Clone, Debug, Default)]
 pub struct DerivedWorkload {
     pub workload_name: Option<String>,
@@ -137,6 +140,12 @@ impl<'a> From<&'a ConnectionOpen> for ConnectionClose<'a> {
 impl<'a> From<&'a ConnectionOpen> for BytesTransferred<'a> {
     fn from(c: &'a ConnectionOpen) -> Self {
         BytesTransferred(c)
+    }
+}
+
+impl<'a> From<&'a ConnectionOpen> for ConnectionDenied<'a> {
+    fn from(c: &'a ConnectionOpen) -> Self {
+        ConnectionDenied(c)
     }
 }
 
@@ -203,6 +212,12 @@ impl CommonTrafficLabels {
 
 impl From<BytesTransferred<'_>> for CommonTrafficLabels {
     fn from(c: BytesTransferred) -> Self {
+        c.0.into()
+    }
+}
+
+impl From<ConnectionDenied<'_>> for CommonTrafficLabels {
+    fn from(c: ConnectionDenied) -> Self {
         c.0.into()
     }
 }
@@ -309,6 +324,12 @@ impl Metrics {
             "The total number of TCP connections closed",
             connection_close.clone(),
         );
+        let connection_deny = Family::default();
+        registry.register(
+            "tcp_connections_denied",
+            "The total number of TCP connections denied",
+            connection_deny.clone(),
+        );
 
         let received_bytes = Family::default();
         registry.register(
@@ -338,6 +359,7 @@ impl Metrics {
         Self {
             connection_opens,
             connection_close,
+            connection_deny,
             received_bytes,
             sent_bytes,
             on_demand_dns,
@@ -358,6 +380,14 @@ impl Recorder<ConnectionClose<'_>, u64> for Metrics {
     fn record(&self, reason: &ConnectionClose, count: u64) {
         self.connection_close
             .get_or_create(&CommonTrafficLabels::from(reason.0))
+            .inc_by(count);
+    }
+}
+
+impl Recorder<ConnectionDenied<'_>, u64> for Metrics {
+    fn record(&self, event: &ConnectionDenied, count: u64) {
+        self.connection_deny
+            .get_or_create(&CommonTrafficLabels::from(event.0))
             .inc_by(count);
     }
 }

@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 
+use crate::metrics::IncrementRecorder;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, trace, warn, Instrument};
 
@@ -125,10 +126,7 @@ impl InboundPassthrough {
             dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
-        if !pi.state.assert_rbac(&conn).await {
-            info!(%conn, "RBAC rejected");
-            return Ok(());
-        }
+
         let source_ip = super::get_original_src_from_stream(&inbound);
         let orig_src = pi
             .cfg
@@ -136,9 +134,6 @@ impl InboundPassthrough {
             .unwrap_or_default()
             .then_some(source_ip)
             .flatten();
-        trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
-        let mut outbound = super::freebind_connect(orig_src, orig).await?;
-        trace!(%source, destination=%orig, component="inbound plaintext", "connected");
 
         // Find source info. We can lookup by XDS or from connection attributes
         let source_workload = if let Some(source_ip) = source_ip {
@@ -158,6 +153,7 @@ impl InboundPassthrough {
             ..Default::default()
         };
         let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
+
         let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::destination,
             source: source_workload,
@@ -166,6 +162,19 @@ impl InboundPassthrough {
             connection_security_policy: metrics::SecurityPolicy::unknown,
             destination_service: ds,
         };
+
+        if !pi.state.assert_rbac(&conn).await {
+            info!(%conn, "RBAC rejected");
+            let denied_metrics: metrics::ConnectionDenied =
+                metrics::ConnectionDenied::from(&connection_metrics);
+            pi.metrics.increment(&denied_metrics);
+            return Ok(());
+        }
+
+        trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
+        let mut outbound = super::freebind_connect(orig_src, orig).await?;
+        trace!(%source, destination=%orig, component="inbound plaintext", "connected");
+
         let _connection_close = pi
             .metrics
             .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
