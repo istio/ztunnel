@@ -292,13 +292,6 @@ impl Inbound {
                     debug!("request from waypoint, skipping policy");
                 }
 
-                if has_waypoint && !from_waypoint {
-                    info!(%conn, "bypassed waypoint");
-                    return Ok(Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Empty::new())
-                        .unwrap());
-                }
                 let source_ip = if from_waypoint {
                     // If the request is from our waypoint, trust the Forwarded header.
                     // For other request types, we can only trust the source from the connection.
@@ -343,11 +336,19 @@ impl Inbound {
                     destination_service: ds,
                 };
 
-                if !state.assert_rbac(&conn).await {
+                if !from_waypoint && !state.assert_rbac(&conn).await {
                     info!(%conn, "RBAC rejected");
                     let denied_metrics: metrics::ConnectionDenied =
                         metrics::ConnectionDenied::from(&connection_metrics);
                     metrics.as_ref().increment(&denied_metrics);
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Empty::new())
+                        .unwrap());
+                }
+
+                if has_waypoint && !from_waypoint {
+                    info!(%conn, "bypassed waypoint");
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
