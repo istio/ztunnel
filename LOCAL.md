@@ -83,7 +83,7 @@ This can be utilized to test different things. For example:
 
 ## Remote debugging
 
-Deploy ztunnel in docker, and use CLion on mac for remote debugging:
+Deploy ztunnel in docker, and use a development environment with `gdbserver` support (VS Code, CLion, etc or DAP plugins for $EDITOR) for remote debugging:
 
 * Create a remote debug configuration, please refer to [here](https://www.jetbrains.com/help/clion/remote-debug.html#remote-config).
 * For the docker image and how to use it, please refer to [here](./docker/remote-env/Dockerfile).
