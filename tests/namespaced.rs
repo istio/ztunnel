@@ -757,7 +757,7 @@ mod namespaced {
         assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
     }
 
-    async fn fail_write_stream(stream: &mut TcpStream) -> () {
+    async fn fail_write_stream(stream: &mut TcpStream) {
         const BODY: &[u8] = b"hello world";
         stream.write_all(BODY).await.unwrap();
         let mut buf = [0; BODY.len() * 2];
