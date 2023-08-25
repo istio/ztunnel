@@ -327,6 +327,9 @@ impl Demander {
     }
 }
 
+const INITIAL_BACKOFF: Duration = Duration::from_millis(10);
+const MAX_BACKOFF: Duration = Duration::from_secs(15);
+
 impl AdsClient {
     /// demander returns a Demander instance which can be used to request resources on-demand
     pub fn demander(&self) -> Option<Demander> {
@@ -340,7 +343,6 @@ impl AdsClient {
     }
 
     async fn run_loop(&mut self, backoff: Duration) -> Duration {
-        const MAX_BACKOFF: Duration = Duration::from_secs(15);
         match self.run_internal().await {
             Err(e @ Error::Connection(_)) => {
                 // For connection errors, we add backoff
@@ -356,9 +358,7 @@ impl AdsClient {
             }
             Err(ref e @ Error::GrpcStatus(ref status)) => {
                 let err_detail = e.to_string();
-                // For gRPC errors, we add backoff
-                let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
-                if status.code() == tonic::Code::Unknown
+                let backoff = if status.code() == tonic::Code::Unknown
                     || status.code() == tonic::Code::Cancelled
                     || status.code() == tonic::Code::DeadlineExceeded
                     || (status.code() == tonic::Code::Unavailable
@@ -372,13 +372,16 @@ impl AdsClient {
                     );
                     self.metrics
                         .increment(&ConnectionTerminationReason::Reconnect);
+                    INITIAL_BACKOFF
                 } else {
                     warn!(
                         "XDS client error: {}, retrying in {:?}",
                         err_detail, backoff
                     );
                     self.metrics.increment(&ConnectionTerminationReason::Error);
-                }
+                    // For gRPC errors, we add backoff
+                    std::cmp::min(MAX_BACKOFF, backoff * 2)
+                };
                 tokio::time::sleep(backoff).await;
                 backoff
             }
@@ -389,20 +392,20 @@ impl AdsClient {
                 warn!("XDS client error: {}, retrying", e);
                 self.metrics.increment(&ConnectionTerminationReason::Error);
                 // Reset backoff
-                Duration::from_millis(10)
+                INITIAL_BACKOFF
             }
             Ok(_) => {
                 self.metrics
                     .increment(&ConnectionTerminationReason::Complete);
                 warn!("XDS client complete");
                 // Reset backoff
-                Duration::from_millis(10)
+                INITIAL_BACKOFF
             }
         }
     }
 
     pub async fn run(mut self) -> Result<(), Error> {
-        let mut backoff = Duration::from_millis(10);
+        let mut backoff = INITIAL_BACKOFF;
         loop {
             self.connection_id += 1;
             let id = self.connection_id;
