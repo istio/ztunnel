@@ -560,7 +560,7 @@ impl AdsClient {
         send: &mpsc::Sender<DeltaDiscoveryRequest>,
     ) -> Result<XdsSignal, Error> {
         let Some(response) = stream_event else {
-            return Ok( XdsSignal::None);
+            return Ok(XdsSignal::None);
         };
         let type_url = response.type_url.clone();
         let nonce = response.nonce.clone();

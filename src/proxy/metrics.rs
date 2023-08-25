@@ -146,9 +146,7 @@ impl CommonTrafficLabels {
     }
 
     fn with_source(mut self, w: Option<&Workload>) -> Self {
-        let Some(w) = w else {
-            return self
-        };
+        let Some(w) = w else { return self };
         self.source_workload = w.workload_name.clone().into();
         self.source_canonical_service = w.canonical_name.clone().into();
         self.source_canonical_revision = w.canonical_revision.clone().into();
@@ -161,9 +159,7 @@ impl CommonTrafficLabels {
     }
 
     fn with_derived_source(mut self, w: Option<&DerivedWorkload>) -> Self {
-        let Some(w) = w else {
-            return self
-        };
+        let Some(w) = w else { return self };
         self.source_workload = w.workload_name.clone().into();
         self.source_canonical_service = w.app.clone().into();
         self.source_canonical_revision = w.revision.clone().into();
@@ -176,9 +172,7 @@ impl CommonTrafficLabels {
     }
 
     fn with_destination(mut self, w: Option<&Workload>) -> Self {
-        let Some(w) = w else {
-            return self
-        };
+        let Some(w) = w else { return self };
         self.destination_workload = w.workload_name.clone().into();
         self.destination_canonical_service = w.canonical_name.clone().into();
         self.destination_canonical_revision = w.canonical_revision.clone().into();
@@ -191,9 +185,7 @@ impl CommonTrafficLabels {
     }
 
     fn with_destination_service(mut self, w: Option<&ServiceDescription>) -> Self {
-        let Some(w) = w else {
-            return self
-        };
+        let Some(w) = w else { return self };
         self.destination_service = w.hostname.clone().into();
         self.destination_service_name = w.name.clone().into();
         self.destination_service_namespace = w.namespace.clone().into();

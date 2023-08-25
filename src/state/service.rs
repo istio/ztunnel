@@ -167,7 +167,7 @@ impl ServiceStore {
 
     pub fn get_by_workload(&self, workload: &Workload) -> Vec<Service> {
         let Some(svc) = self.workload_to_services.get(&workload.uid) else {
-            return Vec::new()
+            return Vec::new();
         };
         svc.iter()
             .filter_map(|s| self.get_by_namespaced_host(s))

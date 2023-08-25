@@ -113,7 +113,7 @@ impl Pool {
             let Some(connecting) = self.pool.connecting(&key, ver) else {
                 // There is already an existing connection establishment in flight.
                 // Return an error so
-                return Err(Error::PoolAlreadyConnecting)
+                return Err(Error::PoolAlreadyConnecting);
             };
             let pc = Client(connect.await?);
             let pooled = self.pool.pooled(connecting, pc);

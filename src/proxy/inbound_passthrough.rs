@@ -93,8 +93,10 @@ impl InboundPassthrough {
             network: pi.cfg.network.clone(), // inbound request must be on our network
             address: orig.ip(),
         };
-        let Some((upstream, upstream_service)) = pi.state.fetch_workload_services(&network_addr).await else {
-            return Err(Error::UnknownDestination(orig.ip()))
+        let Some((upstream, upstream_service)) =
+            pi.state.fetch_workload_services(&network_addr).await
+        else {
+            return Err(Error::UnknownDestination(orig.ip()));
         };
         if upstream.waypoint.is_some() {
             // This is an inbound request not over HBONE, but we have a waypoint.

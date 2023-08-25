@@ -151,18 +151,22 @@ impl ProxyState {
     pub fn find_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
         if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
-                debug!("found VIP {}, but port {} was unknown", addr.ip(), addr.port());
-                return None
+                debug!(
+                    "found VIP {}, but port {} was unknown",
+                    addr.ip(),
+                    addr.port()
+                );
+                return None;
             };
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
             let Some((_, ep)) = svc.endpoints.iter().choose(&mut rand::thread_rng()) else {
                 debug!("VIP {} has no healthy endpoints", addr);
-                return None
+                return None;
             };
             let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
                 debug!("failed to fetch workload for {}", ep.workload_uid);
-                return None
+                return None;
             };
             // If endpoint overrides the target port, use that instead
             let target_port = ep.port.get(&addr.port()).unwrap_or(target_port);

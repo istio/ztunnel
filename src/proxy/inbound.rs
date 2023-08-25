@@ -274,7 +274,9 @@ impl Inbound {
                     network: conn.dst_network.to_string(), // dst must be on our network
                     address: addr.ip(),
                 };
-                let Some((upstream, upstream_service)) = state.fetch_workload_services(&dst_network_addr).await else {
+                let Some((upstream, upstream_service)) =
+                    state.fetch_workload_services(&dst_network_addr).await
+                else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
