@@ -462,9 +462,9 @@ fn hbone_connections(c: &mut Criterion) {
 
         let echo = tcp::TestServer::new(Mode::ReadWrite, 0).await;
         let echo_addr = echo.address();
-        let _ = tokio::spawn(async move {
+        drop(tokio::spawn(async move {
             let _ = tokio::join!(app.wait_termination(), echo.run());
-        });
+        }));
         (echo_addr, ta)
     });
 

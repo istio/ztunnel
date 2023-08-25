@@ -160,10 +160,7 @@ impl TestApp {
         // Set source IP to TEST_WORKLOAD_SOURCE
         let socket = TcpSocket::new_v4().unwrap();
         socket
-            .bind(SocketAddr::from((
-                source,
-                0,
-            )))
+            .bind(SocketAddr::from((source, 0)))
             .map_err(|e| anyhow!("{:?}. {}", e, localhost_error_message()))
             .unwrap();
 
