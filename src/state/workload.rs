@@ -457,10 +457,16 @@ impl<'de> Deserialize<'de> for NetworkAddress {
                 E: serde::de::Error,
             {
                 let Some((network, address)) = value.split_once('/') else {
-                    return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
+                    return Err(serde::de::Error::invalid_value(
+                        serde::de::Unexpected::Str(value),
+                        &self,
+                    ));
                 };
                 let Ok(ip_addr) = IpAddr::from_str(address) else {
-                    return Err(serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self));
+                    return Err(serde::de::Error::invalid_value(
+                        serde::de::Unexpected::Str(value),
+                        &self,
+                    ));
                 };
                 Ok(NetworkAddress {
                     network: network.to_string(),

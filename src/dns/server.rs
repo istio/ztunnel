@@ -366,9 +366,7 @@ impl Store {
                         .endpoints
                         .iter()
                         .filter_map(|(_, ep)| {
-                            let Some(addr) = &ep.address else {
-                                return None
-                            };
+                            let Some(addr) = &ep.address else { return None };
                             if is_record_type(&addr.address, record_type) {
                                 Some(addr.address)
                             } else {
@@ -1524,7 +1522,7 @@ mod tests {
             let name = request.query().name().into();
             let Some(ips) = self.ips.get(&name) else {
                 // Not found.
-                return Err(LookupError::ResponseCode(ResponseCode::NXDomain))
+                return Err(LookupError::ResponseCode(ResponseCode::NXDomain));
             };
 
             let mut out = Vec::new();
