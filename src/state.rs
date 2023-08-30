@@ -35,8 +35,8 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 use tracing::{debug, trace, warn};
 
@@ -360,19 +360,35 @@ impl DemandProxyState {
                     .inc();
                 // optimize so that if multiple requests to the same hostname come in at the same time,
                 // we don't start more than one background on-demand DNS task
-                if state.get_cached_resolve_dns_for_hostname(&hostname).is_none() {
-                    let cached_resolve_dns =  Arc::new(CachedAtomicBool {
+                if state
+                    .get_cached_resolve_dns_for_hostname(&hostname)
+                    .is_none()
+                {
+                    let cached_resolve_dns = Arc::new(CachedAtomicBool {
                         should_resolved_dns: AtomicBool::new(true),
                         complete_resolved_dns: AtomicBool::new(false),
                     });
                     let cached_resolve_dns_clone = cached_resolve_dns.clone();
-                    state.set_cached_resolve_dns_for_hostname(hostname.to_owned(), cached_resolve_dns_clone);
-                    if cached_resolve_dns.should_resolved_dns.load(Ordering::Relaxed) {
-                        cached_resolve_dns.should_resolved_dns.store(false, Ordering::Relaxed);
+                    state.set_cached_resolve_dns_for_hostname(
+                        hostname.to_owned(),
+                        cached_resolve_dns_clone,
+                    );
+                    if cached_resolve_dns
+                        .should_resolved_dns
+                        .load(Ordering::Relaxed)
+                    {
+                        cached_resolve_dns
+                            .should_resolved_dns
+                            .store(false, Ordering::Relaxed);
                         Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                        cached_resolve_dns.complete_resolved_dns.store(true, Ordering::Relaxed);
+                        cached_resolve_dns
+                            .complete_resolved_dns
+                            .store(true, Ordering::Relaxed);
                     } else {
-                        while !cached_resolve_dns.complete_resolved_dns.load(Ordering::Relaxed) {
+                        while !cached_resolve_dns
+                            .complete_resolved_dns
+                            .load(Ordering::Relaxed)
+                        {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
@@ -490,7 +506,11 @@ impl DemandProxyState {
             .cloned()
     }
 
-    pub fn set_cached_resolve_dns_for_hostname(&mut self, hostname: String, cached_atom_bool:  Arc<CachedAtomicBool>) {
+    pub fn set_cached_resolve_dns_for_hostname(
+        &mut self,
+        hostname: String,
+        cached_atom_bool: Arc<CachedAtomicBool>,
+    ) {
         self.state
             .write()
             .unwrap()
@@ -499,7 +519,10 @@ impl DemandProxyState {
             .insert(hostname, cached_atom_bool);
     }
 
-    pub fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<Arc<CachedAtomicBool>> {
+    pub fn get_cached_resolve_dns_for_hostname(
+        &mut self,
+        hostname: &String,
+    ) -> Option<Arc<CachedAtomicBool>> {
         self.state
             .read()
             .unwrap()
