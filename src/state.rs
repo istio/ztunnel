@@ -36,6 +36,8 @@ use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tracing::{debug, trace, warn};
 
 use trust_dns_resolver::config::*;
@@ -115,7 +117,13 @@ pub struct ResolvedDns {
 /// A CachedResolvedDNSMap contains do dns task for hostname via calling resolve_on_demand_dns
 #[derive(serde::Serialize, Default, Debug, Clone)]
 pub struct CachedResolvedDNSMap {
-    crd_hashmap: HashMap<String, bool>,
+    crd_hashmap: HashMap<String, Arc<CachedAtomicBool>>,
+}
+
+#[derive(serde::Serialize, Default, Debug)]
+pub struct CachedAtomicBool {
+    should_resolved_dns: AtomicBool,
+    complete_resolved_dns: AtomicBool,
 }
 
 impl ProxyState {
@@ -342,7 +350,7 @@ impl DemandProxyState {
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
-        let rdns = match state.get_ips_for_hostname_with_filter(&workload.hostname) {
+        let rdns = match state.get_ips_for_hostname(&workload.hostname) {
             Some(r) => r,
             None => {
                 metrics
@@ -352,22 +360,26 @@ impl DemandProxyState {
                     .inc();
                 // optimize so that if multiple requests to the same hostname come in at the same time,
                 // we don't start more than one background on-demand DNS task
-                let opt_is_cached = state.get_cached_resolve_dns_for_hostname(&hostname);
-                match opt_is_cached {
-                    Some(_is_cached) => {
-                        // if the resolve dns information is expired, need to do the DNS task again
-                        if !_is_cached {
-                            Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                            state.set_cached_resolve_dns_for_hostname(hostname.to_owned(), true);
-                        }
-                    },
-                    None => {
+                if state.get_cached_resolve_dns_for_hostname(&hostname).is_none() {
+                    let cached_resolve_dns =  Arc::new(CachedAtomicBool {
+                        should_resolved_dns: AtomicBool::new(true),
+                        complete_resolved_dns: AtomicBool::new(false),
+                    });
+                    let cached_resolve_dns_clone = cached_resolve_dns.clone();
+                    state.set_cached_resolve_dns_for_hostname(hostname.to_owned(), cached_resolve_dns_clone);
+                    if cached_resolve_dns.should_resolved_dns.load(Ordering::Relaxed) {
+                        cached_resolve_dns.should_resolved_dns.store(false, Ordering::Relaxed);
                         Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                        state.set_cached_resolve_dns_for_hostname(hostname.to_owned(), true);
+                        cached_resolve_dns.complete_resolved_dns.store(true, Ordering::Relaxed);
+                    } else {
+                        while !cached_resolve_dns.complete_resolved_dns.load(Ordering::Relaxed) {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
                     }
                 }
+
                 // try to get it again
-                let updated_rdns = state.get_ips_for_hostname_with_filter(&hostname);
+                let updated_rdns = state.get_ips_for_hostname(&hostname);
                 match updated_rdns {
                     Some(rdns) => rdns,
                     None => {
@@ -464,17 +476,7 @@ impl DemandProxyState {
             .insert(hostname, rdns);
     }
 
-    pub fn get_ips_for_hostname_without_filter(&mut self, hostname: &String) -> Option<ResolvedDns> {
-        self.state
-            .read()
-            .unwrap()
-            .resolved_dns
-            .by_hostname
-            .get(hostname)
-            .cloned()
-    }
-
-    pub fn get_ips_for_hostname_with_filter(&mut self, hostname: &String) -> Option<ResolvedDns> {
+    pub fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
         self.state
             .read()
             .unwrap()
@@ -488,25 +490,16 @@ impl DemandProxyState {
             .cloned()
     }
 
-    pub fn set_cached_resolve_dns_for_hostname(&mut self, hostname: String, is_cached: bool) {
+    pub fn set_cached_resolve_dns_for_hostname(&mut self, hostname: String, cached_atom_bool:  Arc<CachedAtomicBool>) {
         self.state
             .write()
             .unwrap()
             .cached_resolved_dns_map
             .crd_hashmap
-            .insert(hostname, is_cached);
+            .insert(hostname, cached_atom_bool);
     }
 
-    pub fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<bool> {
-        match self.get_ips_for_hostname_without_filter(hostname) {
-            Some(_resolve_dns) => {
-                // the resolve dns information exists but expiration, need to set false in hashmap
-                self.set_cached_resolve_dns_for_hostname((&hostname).to_string(), false)
-            },
-            None => {
-                debug!(%hostname, "no value in resolve dns crd_hashmap at all!");
-            },
-        }
+    pub fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<Arc<CachedAtomicBool>> {
         self.state
             .read()
             .unwrap()
