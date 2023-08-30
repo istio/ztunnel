@@ -85,6 +85,9 @@ pub struct ProxyState {
 
     #[serde(flatten)]
     pub resolved_dns: ResolvedDnsStore,
+
+    #[serde(flatten)]
+    pub cached_resolved_dns_map: CachedResolvedDNSMap,
 }
 
 /// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
@@ -107,6 +110,12 @@ pub struct ResolvedDns {
     // we use the shortest ttl rather than just relying on the older records so we don't
     // load-balance to just the older records as the records with early ttl expire.
     dns_refresh_rate: std::time::Duration,
+}
+
+/// A CachedResolvedDNSMap contains do dns task for hostname via calling resolve_on_demand_dns
+#[derive(serde::Serialize, Default, Debug, Clone)]
+pub struct CachedResolvedDNSMap {
+    crd_hashmap: HashMap<String, bool>,
 }
 
 impl ProxyState {
@@ -333,7 +342,7 @@ impl DemandProxyState {
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
-        let rdns = match state.get_ips_for_hostname(&workload.hostname) {
+        let rdns = match state.get_ips_for_hostname_with_filter(&workload.hostname) {
             Some(r) => r,
             None => {
                 metrics
@@ -341,11 +350,24 @@ impl DemandProxyState {
                     .on_demand_dns_cache_misses
                     .get_or_create(&labels)
                     .inc();
-                // TODO: optimize so that if multiple requests to the same hostname come in at the same time,
+                // optimize so that if multiple requests to the same hostname come in at the same time,
                 // we don't start more than one background on-demand DNS task
-                Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                let opt_is_cached = state.get_cached_resolve_dns_for_hostname(&hostname);
+                match opt_is_cached {
+                    Some(_is_cached) => {
+                        // if the resolve dns information is expired, need to do the DNS task again
+                        if !_is_cached {
+                            Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                            state.set_cached_resolve_dns_for_hostname(hostname.to_owned(), true);
+                        }
+                    },
+                    None => {
+                        Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                        state.set_cached_resolve_dns_for_hostname(hostname.to_owned(), true);
+                    }
+                }
                 // try to get it again
-                let updated_rdns = state.get_ips_for_hostname(&hostname);
+                let updated_rdns = state.get_ips_for_hostname_with_filter(&hostname);
                 match updated_rdns {
                     Some(rdns) => rdns,
                     None => {
@@ -442,7 +464,17 @@ impl DemandProxyState {
             .insert(hostname, rdns);
     }
 
-    pub fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
+    pub fn get_ips_for_hostname_without_filter(&mut self, hostname: &String) -> Option<ResolvedDns> {
+        self.state
+            .read()
+            .unwrap()
+            .resolved_dns
+            .by_hostname
+            .get(hostname)
+            .cloned()
+    }
+
+    pub fn get_ips_for_hostname_with_filter(&mut self, hostname: &String) -> Option<ResolvedDns> {
         self.state
             .read()
             .unwrap()
@@ -453,6 +485,34 @@ impl DemandProxyState {
                 rdns.initial_query.is_some()
                     && rdns.initial_query.unwrap().elapsed() < rdns.dns_refresh_rate
             })
+            .cloned()
+    }
+
+    pub fn set_cached_resolve_dns_for_hostname(&mut self, hostname: String, is_cached: bool) {
+        self.state
+            .write()
+            .unwrap()
+            .cached_resolved_dns_map
+            .crd_hashmap
+            .insert(hostname, is_cached);
+    }
+
+    pub fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<bool> {
+        match self.get_ips_for_hostname_without_filter(hostname) {
+            Some(_resolve_dns) => {
+                // the resolve dns information exists but expiration, need to set false in hashmap
+                self.set_cached_resolve_dns_for_hostname((&hostname).to_string(), false)
+            },
+            None => {
+                debug!(%hostname, "no value in resolve dns crd_hashmap at all!");
+            },
+        }
+        self.state
+            .read()
+            .unwrap()
+            .cached_resolved_dns_map
+            .crd_hashmap
+            .get(hostname)
             .cloned()
     }
 
