@@ -95,8 +95,8 @@ impl CsrOptions {
         let subject_alternative_name = SubjectAlternativeName::new()
             .uri(&self.san)
             .critical()
-            .build(&csr.x509v3_context(None))
-            .unwrap();
+            .build(&csr.x509v3_context(None))?;
+
         extensions.push(subject_alternative_name)?;
         csr.add_extensions(&extensions)?;
         csr.sign(&pkey, MessageDigest::sha256())?;
@@ -245,7 +245,7 @@ impl ClientCertProvider for FileClientCertProviderImpl {
             }
             FileClientCertProviderImpl::ClientBundle(bundle) => {
                 let mut conn: ssl::SslConnectorBuilder =
-                    ssl::SslConnector::builder(ssl::SslMethod::tls_client()).unwrap();
+                    ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
                 match bundle.setup_ctx(&mut conn) {
                     Ok(_) => {
                         return Ok(conn);
