@@ -373,14 +373,18 @@ impl DemandProxyState {
                         hostname.to_owned(),
                         cached_resolve_dns_clone,
                     );
+
+                    // Check if this is the first request of doing DNS task for hostname
                     if cached_resolve_dns
                         .should_resolved_dns
                         .load(Ordering::Relaxed)
                     {
+                        // Set the flag to indicate that the resolve_on_demand_dns is being executed
                         cached_resolve_dns
                             .should_resolved_dns
                             .store(false, Ordering::Relaxed);
                         Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                        // Signal that resolve_on_demand_dns has completed
                         cached_resolve_dns
                             .complete_resolved_dns
                             .store(true, Ordering::Relaxed);
@@ -389,6 +393,8 @@ impl DemandProxyState {
                             .complete_resolved_dns
                             .load(Ordering::Relaxed)
                         {
+                            // To the high concurrency requests, they need to wait for
+                            // resolve_on_demand_dns to be completed by the first request
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
