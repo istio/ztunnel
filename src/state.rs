@@ -37,7 +37,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
 use trust_dns_resolver::config::*;
@@ -117,13 +117,22 @@ pub struct ResolvedDns {
 /// A CachedResolvedDNSMap contains do dns task for hostname via calling resolve_on_demand_dns
 #[derive(serde::Serialize, Default, Debug, Clone)]
 pub struct CachedResolvedDNSMap {
-    crd_hashmap: HashMap<String, Arc<CachedAtomicBool>>,
+    crd_hashmap: HashMap<String, Arc<SingleFlight>>,
 }
 
 #[derive(serde::Serialize, Default, Debug)]
-pub struct CachedAtomicBool {
+pub struct SingleFlight {
     should_resolved_dns: AtomicBool,
     complete_resolved_dns: AtomicBool,
+}
+
+impl SingleFlight {
+    pub fn new() -> Self {
+        SingleFlight {
+            should_resolved_dns: AtomicBool::new(true),
+            complete_resolved_dns: AtomicBool::new(false),
+        }
+    }
 }
 
 impl ProxyState {
@@ -364,10 +373,7 @@ impl DemandProxyState {
                     .get_cached_resolve_dns_for_hostname(&hostname)
                     .is_none()
                 {
-                    let cached_resolve_dns = Arc::new(CachedAtomicBool {
-                        should_resolved_dns: AtomicBool::new(true),
-                        complete_resolved_dns: AtomicBool::new(false),
-                    });
+                    let cached_resolve_dns = Arc::new(SingleFlight::new());
                     let cached_resolve_dns_clone = cached_resolve_dns.clone();
                     state.set_cached_resolve_dns_for_hostname(
                         hostname.to_owned(),
@@ -383,19 +389,32 @@ impl DemandProxyState {
                         cached_resolve_dns
                             .should_resolved_dns
                             .store(false, Ordering::Relaxed);
+                        // doing the dns tasks
                         Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                        // Signal that resolve_on_demand_dns has completed
                         cached_resolve_dns
                             .complete_resolved_dns
                             .store(true, Ordering::Relaxed);
+                        // notify that resolve_on_demand_dns has completed
                     } else {
-                        while !cached_resolve_dns
-                            .complete_resolved_dns
-                            .load(Ordering::Relaxed)
-                        {
-                            // To the high concurrency requests, they need to wait for
-                            // resolve_on_demand_dns to be completed by the first request
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        // To the high concurrency requests, they need to wait for
+                        // resolve_on_demand_dns to be completed by the first request
+                        loop {
+                            // Set the timeout duration for each same hostname
+                            let timeout_duration = Duration::from_millis(100);
+                            // Start the timer
+                            let start_time = Instant::now();
+                            if !cached_resolve_dns
+                                .complete_resolved_dns
+                                .load(Ordering::Relaxed)
+                            {
+                                let elapsed_time = start_time.elapsed();
+                                // Check if the timer is timed out or not
+                                if elapsed_time >= timeout_duration {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
                         }
                     }
                 }
@@ -515,7 +534,7 @@ impl DemandProxyState {
     pub fn set_cached_resolve_dns_for_hostname(
         &mut self,
         hostname: String,
-        cached_atom_bool: Arc<CachedAtomicBool>,
+        cached_atom_bool: Arc<SingleFlight>,
     ) {
         self.state
             .write()
@@ -528,7 +547,7 @@ impl DemandProxyState {
     pub fn get_cached_resolve_dns_for_hostname(
         &mut self,
         hostname: &String,
-    ) -> Option<Arc<CachedAtomicBool>> {
+    ) -> Option<Arc<SingleFlight>> {
         self.state
             .read()
             .unwrap()
