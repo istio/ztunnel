@@ -399,8 +399,8 @@ impl DemandProxyState {
                         // To the high concurrency requests, they need to wait for
                         // resolve_on_demand_dns to be completed by the first request
                         loop {
-                            // Set the timeout duration for each same hostname
-                            let timeout_duration = Duration::from_millis(100);
+                            // Set the timeout duration for each same hostname request
+                            let timeout_duration = Duration::from_secs(10);
                             // Start the timer
                             let start_time = Instant::now();
                             if !cached_resolve_dns
