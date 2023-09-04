@@ -389,33 +389,28 @@ impl DemandProxyState {
                         cached_resolve_dns
                             .should_resolved_dns
                             .store(false, Ordering::Relaxed);
-                        // doing the dns tasks
-                        Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                        cached_resolve_dns
-                            .complete_resolved_dns
-                            .store(true, Ordering::Relaxed);
-                        // notify that resolve_on_demand_dns has completed
+
+                        // Besides the first request, other concurrency requests may also get into
+                        // current branch before atomic bool is setting to false.
+                        if !cached_resolve_dns
+                            .should_resolved_dns
+                            .load(Ordering::Relaxed)
+                        {
+                            // doing the dns tasks
+                            Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                            // notify that resolve_on_demand_dns has completed
+                            cached_resolve_dns
+                                .complete_resolved_dns
+                                .store(true, Ordering::Relaxed);
+                        } else {
+                            // Some requests may get into this branch as well before atomic bool is setting to false,
+                            // they also need to wait for resolve_on_demand_dns to be completed by the first request
+                            state.loop_for_resolve_dns(cached_resolve_dns);
+                        }
                     } else {
                         // To the high concurrency requests, they need to wait for
                         // resolve_on_demand_dns to be completed by the first request
-                        loop {
-                            // Set the timeout duration for each same hostname request
-                            let timeout_duration = Duration::from_secs(10);
-                            // Start the timer
-                            let start_time = Instant::now();
-                            if !cached_resolve_dns
-                                .complete_resolved_dns
-                                .load(Ordering::Relaxed)
-                            {
-                                let elapsed_time = start_time.elapsed();
-                                // Check if the timer is timed out or not
-                                if elapsed_time >= timeout_duration {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
+                        state.loop_for_resolve_dns(cached_resolve_dns);
                     }
                 }
 
@@ -555,6 +550,28 @@ impl DemandProxyState {
             .crd_hashmap
             .get(hostname)
             .cloned()
+    }
+
+    // loop_for_resolve_dns help to implement a duplicate function call suppression mechanism.
+    pub fn loop_for_resolve_dns(&self, cached_atom_bool: Arc<SingleFlight>) {
+        loop {
+            // Set the timeout duration for each same hostname request
+            let timeout_duration = Duration::from_secs(10);
+            // Start the timer
+            let start_time = Instant::now();
+            if !cached_atom_bool
+                .complete_resolved_dns
+                .load(Ordering::Relaxed)
+            {
+                let elapsed_time = start_time.elapsed();
+                // Check if the timer is timed out or not
+                if elapsed_time >= timeout_duration {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
     }
 
     pub async fn fetch_workload_services(
