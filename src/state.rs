@@ -37,7 +37,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tracing::{debug, trace, warn};
 
 use trust_dns_resolver::config::*;
@@ -124,6 +124,8 @@ pub struct CachedResolvedDNSMap {
 pub struct SingleFlight {
     should_resolved_dns: AtomicBool,
     complete_resolved_dns: AtomicBool,
+    #[serde(skip_serializing)]
+    wait_for_notification: Notify,
 }
 
 impl SingleFlight {
@@ -131,6 +133,7 @@ impl SingleFlight {
         SingleFlight {
             should_resolved_dns: AtomicBool::new(true),
             complete_resolved_dns: AtomicBool::new(false),
+            wait_for_notification: Notify::new(),
         }
     }
 }
@@ -398,19 +401,22 @@ impl DemandProxyState {
                         {
                             // doing the dns tasks
                             Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                            // notify that resolve_on_demand_dns has completed
+                            // set complete_resolved_dns to true
+                            // it means that resolve_on_demand_dns has completed
                             cached_resolve_dns
                                 .complete_resolved_dns
                                 .store(true, Ordering::Relaxed);
+                            // notify other requests that the calling is completed
+                            cached_resolve_dns.wait_for_notification.notify_waiters();
                         } else {
                             // Some requests may get into this branch as well before atomic bool is setting to false,
                             // they also need to wait for resolve_on_demand_dns to be completed by the first request
-                            state.loop_for_resolve_dns(cached_resolve_dns);
+                            state.wait_for_resolve_dns(cached_resolve_dns);
                         }
                     } else {
                         // To the high concurrency requests, they need to wait for
                         // resolve_on_demand_dns to be completed by the first request
-                        state.loop_for_resolve_dns(cached_resolve_dns);
+                        state.wait_for_resolve_dns(cached_resolve_dns);
                     }
                 }
 
@@ -552,25 +558,14 @@ impl DemandProxyState {
             .cloned()
     }
 
-    // loop_for_resolve_dns help to implement a duplicate function call suppression mechanism.
-    pub fn loop_for_resolve_dns(&self, cached_atom_bool: Arc<SingleFlight>) {
-        loop {
-            // Set the timeout duration for each same hostname request
-            let timeout_duration = Duration::from_secs(10);
-            // Start the timer
-            let start_time = Instant::now();
-            if !cached_atom_bool
-                .complete_resolved_dns
-                .load(Ordering::Relaxed)
-            {
-                let elapsed_time = start_time.elapsed();
-                // Check if the timer is timed out or not
-                if elapsed_time >= timeout_duration {
-                    break;
-                }
-            } else {
-                break;
-            }
+    // wait_for_resolve_dns help to implement a duplicate function call suppression mechanism.
+    pub fn wait_for_resolve_dns(&self, cached_atom_bool: Arc<SingleFlight>) {
+        if !cached_atom_bool
+            .complete_resolved_dns
+            .load(Ordering::Relaxed)
+        {
+            // Wait for resolve_on_demand_dns calling is completed
+            cached_atom_bool.wait_for_notification.notified();
         }
     }
 
