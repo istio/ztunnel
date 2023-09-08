@@ -542,7 +542,8 @@ impl DemandProxyState {
             .unwrap()
             .cached_resolved_dns_map
             .crd_hashmap
-            .insert(hostname, cached_atom_bool);
+            .entry(hostname)
+            .or_insert(cached_atom_bool);
     }
 
     pub fn get_cached_resolve_dns_for_hostname(
