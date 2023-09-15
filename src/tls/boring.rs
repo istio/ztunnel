@@ -76,7 +76,7 @@ pub fn cert_from(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Certs {
                 _ => false,
             }
         })
-        .map(|pem| ZtunnelCert::new(pem))
+        .map(ZtunnelCert::new)
         .collect();
     Certs {
         cert: ztunnel_cert,
@@ -877,6 +877,8 @@ pub mod tests {
 
     #[test]
     fn test_cert_from() {
+        // note that TEST_CERT contains more than one cert - this is how istiod serves it when
+        // intermediary cert is used..
         let certs = cert_from(TEST_PKEY, TEST_WORKLOAD_CERT, vec![TEST_CERT, TEST_ROOT]);
         // 3 certs that should be here are the istiod cert, intermediary cert and the root cert.
 
