@@ -14,7 +14,7 @@ openssl req -x509 -new -nodes -CA "intermediary-cert.pem" -CAkey "intermediary-k
 
 
 if [ ! -f key.pem ]; then
-    # Only gen if doesn't exist. As some tests depend on the existing content of root cert.
+    # Only gen if doesn't exist. As some tests depend on the existing content of the key.
     openssl ecparam -name prime256v1 -genkey -noout -out key.pem
 fi
 
