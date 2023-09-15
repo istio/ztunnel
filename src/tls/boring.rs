@@ -410,6 +410,9 @@ impl Certs {
             );
         }
 
+        conn.set_alpn_select_callback(|_ssl, client| {
+            ssl::select_next_proto(DEFAULT_ALPN.encode(), client).ok_or(ssl::AlpnError::NOACK)
+        });
         Ok(conn.build())
     }
 
@@ -420,6 +423,10 @@ impl Certs {
         self.setup_ctx(&mut conn)?;
 
         conn.set_verify_callback(ssl::SslVerifyMode::NONE, Verifier::None.callback());
+
+        conn.set_alpn_select_callback(|_ssl, client| {
+            ssl::select_next_proto(DEFAULT_ALPN.encode(), client).ok_or(ssl::AlpnError::NOACK)
+        });
         Ok(conn.build())
     }
 
@@ -435,7 +442,7 @@ impl Certs {
 
     fn setup_ctx(&self, conn: &mut SslContextBuilder) -> Result<(), Error> {
         // general TLS options
-        conn.set_alpn_protos(Alpn::H2.encode())?;
+        conn.set_alpn_protos(DEFAULT_ALPN.encode())?;
         conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_3))?;
         conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
 
@@ -582,14 +589,24 @@ impl SanChecker for x509::X509 {
     }
 }
 
+// Currently we hardcode this. Maybe consider an option in the future.
+const DEFAULT_ALPN: Alpn = Alpn::H2Preferred;
+
+#[allow(dead_code)]
 enum Alpn {
     H2,
+    H1,
+    H2Preferred,
+    H1Preferred,
 }
 
 impl Alpn {
     fn encode(&self) -> &[u8] {
         match self {
             Alpn::H2 => b"\x02h2",
+            Alpn::H1 => b"\x08http/1.1",
+            Alpn::H2Preferred => b"\x02h2\x08http/1.1",
+            Alpn::H1Preferred => b"\x08http/1.1\x02h2",
         }
     }
 }

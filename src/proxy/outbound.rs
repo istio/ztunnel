@@ -14,7 +14,6 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -30,9 +29,8 @@ use crate::config::ProxyMode;
 use crate::identity::Identity;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::metrics::Reporter;
-use crate::proxy::{metrics, pool};
+use crate::proxy::{metrics, pool, Alpn};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-
 use crate::state::service::ServiceDescription;
 use crate::state::set_gateway_address;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
@@ -274,17 +272,35 @@ impl OutboundConnection {
                     let tcp_stream = super::freebind_connect(local, req.gateway).await?;
                     tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
-                    let (request_sender, connection) = builder
-                        .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
-                        .await
-                        .map_err(Error::HttpHandshake)?;
-                    // spawn a task to poll the connection and drive the HTTP state
-                    tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            error!("Error in HBONE connection handshake: {:?}", e);
+                    match proxy::parse_alpn(tls_stream.ssl().selected_alpn_protocol())? {
+                        Alpn::Http11 => {
+                            let builder = hyper::client::conn::http1::Builder::new();
+                            let (request_sender, connection) = builder
+                                .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
+                                .await
+                                .map_err(Error::HttpHandshake)?;
+                            // spawn a task to poll the connection and drive the HTTP state
+                            tokio::spawn(async move {
+                                if let Err(e) = connection.await {
+                                    error!("Error in HBONE connection handshake: {:?}", e);
+                                }
+                            });
+                            Ok(pool::PoolTx::Http1(request_sender))
                         }
-                    });
-                    Ok(request_sender)
+                        Alpn::Http2 => {
+                            let (request_sender, connection) = builder
+                                .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
+                                .await
+                                .map_err(Error::HttpHandshake)?;
+                            // spawn a task to poll the connection and drive the HTTP state
+                            tokio::spawn(async move {
+                                if let Err(e) = connection.await {
+                                    error!("Error in HBONE connection handshake: {:?}", e);
+                                }
+                            });
+                            Ok(pool::PoolTx::Http2(request_sender))
+                        }
+                    }
                 };
                 let mut connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
 
@@ -558,7 +574,6 @@ mod tests {
 
     use bytes::Bytes;
 
-    use super::*;
     use crate::config::Config;
     use crate::test_helpers::helpers::test_proxy_metrics;
     use crate::test_helpers::new_proxy_state;
@@ -566,6 +581,8 @@ mod tests {
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, xds};
+
+    use super::*;
 
     async fn run_build_request(
         from: &str,

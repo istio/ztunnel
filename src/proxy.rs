@@ -127,6 +127,23 @@ pub struct Addresses {
     pub socks5: SocketAddr,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Alpn {
+    Http11,
+    Http2,
+}
+
+pub fn parse_alpn(buf: Option<&[u8]>) -> Result<Alpn, Error> {
+    match buf {
+        Some(b"http/1.1") => Ok(Alpn::Http11),
+        Some(b"h2") => Ok(Alpn::Http2),
+        Some(alpn) => Err(Error::InvalidALPN(
+            String::from_utf8(alpn.into()).unwrap_or_else(|_| format!("{alpn:?}")),
+        )),
+        None => Err(Error::InvalidALPN("<empty>".to_string())),
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("failed to bind to address {0}: {1}")]
@@ -151,6 +168,9 @@ pub enum Error {
 
     #[error("http handshake failed: {0}")]
     HttpHandshake(#[source] hyper::Error),
+
+    #[error("invalid ALPN: {0}")]
+    InvalidALPN(String),
 
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
