@@ -249,7 +249,8 @@ impl<'a> TestWorkloadBuilder<'a> {
                 network: "".to_string(),
                 address: waypoint,
             }),
-            port: 15008,
+            hbone_mtls_port: 15008,
+            hbone_single_tls_port: Some(15006),
         });
         self
     }

@@ -81,7 +81,8 @@ impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GatewayAddress {
     pub destination: gatewayaddress::Destination,
-    pub port: u16,
+    pub hbone_mtls_port: u16,
+    pub hbone_single_tls_port: Option<u16>,
 }
 
 pub mod gatewayaddress {
@@ -251,7 +252,8 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                             &addr.network,
                             byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
                         )),
-                        port: value.port as u16,
+                        hbone_mtls_port: value.hbone_mtls_port as u16,
+                        hbone_single_tls_port: value.hbone_single_tls_port.map(|x| x as u16),
                     }
                 }
                 xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
@@ -260,7 +262,8 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                             namespace: hn.namespace.clone(),
                             hostname: hn.hostname.clone(),
                         }),
-                        port: value.port as u16,
+                        hbone_mtls_port: value.hbone_mtls_port as u16,
+                        hbone_single_tls_port: value.hbone_single_tls_port.map(|x| x as u16),
                     }
                 }
             },

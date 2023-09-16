@@ -646,7 +646,8 @@ mod test {
                 network: "".to_string(),
                 address: IpAddr::V4(mock_default_gateway_ipaddr()),
             }),
-            port: 15006,
+            hbone_mtls_port: 15006,
+            hbone_single_tls_port: Some(15006),
         }
     }
 
@@ -656,7 +657,8 @@ mod test {
                 namespace: "gatewayns".to_string(),
                 hostname: "gateway".to_string(),
             }),
-            port: 15006,
+            hbone_mtls_port: 15006,
+            hbone_single_tls_port: Some(15006),
         }
     }
 

@@ -675,14 +675,16 @@ mod tests {
                     network: "defaultnw".to_string(),
                     address: [127, 0, 0, 10].to_vec(),
                 })),
-                port: 15008,
+                hbone_mtls_port: 15008,
+                hbone_single_tls_port: Some(15006),
             }),
             network_gateway: Some(XdsGatewayAddress {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
                     network: "defaultnw".to_string(),
                     address: [127, 0, 0, 11].to_vec(),
                 })),
-                port: 15008,
+                hbone_mtls_port: 15008,
+                hbone_single_tls_port: Some(15006),
             }),
             tunnel_protocol: Default::default(),
             uid: "uid".to_string(),
@@ -815,7 +817,8 @@ mod tests {
         assert!(resp_str.contains(
             r#"waypoint": {
         "destination": "defaultnw/127.0.0.10",
-        "port": 15008
+        "hboneMtlsPort": 15008,
+        "hboneSingleTlsPort": 15006
       }"#
         ));
     }

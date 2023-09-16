@@ -771,7 +771,8 @@ mod tests {
                             address: [127, 0, 0, 10].to_vec(),
                         },
                     )),
-                    port: 15008,
+                    hbone_mtls_port: 15008,
+                    hbone_single_tls_port: Some(15006),
                 }),
                 ..Default::default()
             },
@@ -800,7 +801,8 @@ mod tests {
                             address: [127, 0, 0, 10].to_vec(),
                         },
                     )),
-                    port: 15008,
+                    hbone_mtls_port: 15008,
+                    hbone_single_tls_port: Some(15006),
                 }),
                 ..Default::default()
             },
