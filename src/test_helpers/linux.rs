@@ -250,7 +250,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                 address: waypoint,
             }),
             hbone_mtls_port: 15008,
-            hbone_single_tls_port: Some(15006),
+            hbone_single_tls_port: Some(15003),
         });
         self
     }

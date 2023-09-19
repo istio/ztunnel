@@ -351,7 +351,7 @@ pub fn local_xds_config(
                         address: waypoint_ip,
                     }),
                     hbone_mtls_port: 15008,
-                    hbone_single_tls_port: Some(15006),
+                    hbone_single_tls_port: Some(15003),
                 }),
                 ..test_default_workload()
             },
