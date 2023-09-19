@@ -1108,8 +1108,7 @@ mod tests {
         let forwarder = forwarder();
         let proxy = Server::new(
             domain,
-            SocketAddr::from_str("127.0.0.1:0")
-                .expect("parsing hardcoded address should never fail"),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
             NW1,
             state,
             forwarder,
@@ -1205,8 +1204,7 @@ mod tests {
         let forwarder = Arc::new(SystemForwarder::new().unwrap());
         let server = Server::new(
             domain,
-            SocketAddr::from_str("127.0.0.1:0")
-                .expect("parsing hardcoded address should never fail"),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
             NW1,
             state,
             forwarder,
