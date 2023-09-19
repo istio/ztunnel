@@ -667,7 +667,7 @@ mod tests {
                         request_type: RequestType::Passthrough,
                     }),
                 )
-                .await;      
+                .await;
             });
             handles.push(build_handle);
         }
