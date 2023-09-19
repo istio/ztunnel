@@ -39,6 +39,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, Uri};
 use hyper_boring::HttpsConnector;
 use hyper_util::client::connect::HttpConnector;
+use itertools::Itertools;
 use rand::RngCore;
 use std::str::FromStr;
 use std::task::{Context, Poll};
@@ -65,7 +66,17 @@ pub fn cert_from(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Certs {
     let ztunnel_cert = ZtunnelCert::new(cert);
     let chain = chain
         .into_iter()
-        .map(|pem| ZtunnelCert::new(x509::X509::from_pem(pem).unwrap()))
+        .flat_map(|pem| x509::X509::stack_from_pem(pem).unwrap())
+        .dedup_by(|x, y| {
+            match (
+                x.digest(MessageDigest::sha256()),
+                y.digest(MessageDigest::sha256()),
+            ) {
+                (Ok(x), Ok(y)) => x.as_ref() == y.as_ref(),
+                _ => false,
+            }
+        })
+        .map(ZtunnelCert::new)
         .collect();
     Certs {
         cert: ztunnel_cert,
@@ -95,8 +106,8 @@ impl CsrOptions {
         let subject_alternative_name = SubjectAlternativeName::new()
             .uri(&self.san)
             .critical()
-            .build(&csr.x509v3_context(None))
-            .unwrap();
+            .build(&csr.x509v3_context(None))?;
+
         extensions.push(subject_alternative_name)?;
         csr.add_extensions(&extensions)?;
         csr.sign(&pkey, MessageDigest::sha256())?;
@@ -245,7 +256,7 @@ impl ClientCertProvider for FileClientCertProviderImpl {
             }
             FileClientCertProviderImpl::ClientBundle(bundle) => {
                 let mut conn: ssl::SslConnectorBuilder =
-                    ssl::SslConnector::builder(ssl::SslMethod::tls_client()).unwrap();
+                    ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
                 match bundle.setup_ctx(&mut conn) {
                     Ok(_) => {
                         return Ok(conn);
@@ -650,6 +661,8 @@ where
 }
 
 const TEST_CERT: &[u8] = include_bytes!("cert-chain.pem");
+#[cfg(test)]
+const TEST_WORKLOAD_CERT: &[u8] = include_bytes!("cert.pem");
 const TEST_PKEY: &[u8] = include_bytes!("key.pem");
 const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
 const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
@@ -836,7 +849,7 @@ pub mod tests {
     use crate::identity::Identity;
     use crate::tls::TestIdentity;
 
-    use super::generate_test_certs;
+    use super::*;
 
     #[test]
     #[cfg(feature = "fips")]
@@ -848,6 +861,63 @@ pub mod tests {
     #[cfg(not(feature = "fips"))]
     fn is_fips_disabled() {
         assert!(!boring::fips::enabled());
+    }
+
+    fn get_subject_entries(x: &x509::X509) -> Vec<(String, String)> {
+        x.subject_name()
+            .entries()
+            .map(|x| {
+                (
+                    x.object().to_string(),
+                    (x.data().as_utf8().unwrap().as_ref() as &str).to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_cert_from() {
+        // note that TEST_CERT contains more than one cert - this is how istiod serves it when
+        // intermediary cert is used..
+        let certs = cert_from(TEST_PKEY, TEST_WORKLOAD_CERT, vec![TEST_CERT, TEST_ROOT]);
+        // 3 certs that should be here are the istiod cert, intermediary cert and the root cert.
+
+        // validate the cert:
+        let entries = get_subject_entries(certs.x509());
+        assert_eq!(
+            entries,
+            vec![(
+                "commonName".to_string(),
+                "default.default.svc.cluster.local".to_string()
+            )]
+        );
+
+        // validate the cert chain:
+        assert_eq!(certs.iter_chain().count(), 3);
+        let mut iter = certs.iter_chain();
+        let entries = get_subject_entries(iter.next().unwrap());
+        assert_eq!(
+            entries,
+            vec![(
+                "organizationName".to_string(),
+                "istiod.cluster.local".to_string()
+            )]
+        );
+
+        let entries = get_subject_entries(iter.next().unwrap());
+        assert_eq!(
+            entries,
+            vec![(
+                "organizationName".to_string(),
+                "intermediary.cluster.local".to_string()
+            )]
+        );
+
+        let entries = get_subject_entries(iter.next().unwrap());
+        assert_eq!(
+            entries,
+            vec![("organizationName".to_string(), "cluster.local".to_string())]
+        );
     }
 
     #[test]
