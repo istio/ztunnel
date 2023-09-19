@@ -122,8 +122,8 @@ pub struct CachedResolvedDNSMap {
 
 #[derive(serde::Serialize, Default, Debug)]
 pub struct SingleFlight {
-    should_resolved_dns: AtomicBool,
-    complete_resolved_dns: AtomicBool,
+    is_resolved_dns_running: AtomicBool,
+    is_resolved_dns_completed: AtomicBool,
     #[serde(skip_serializing)]
     wait_for_notification: Notify,
 }
@@ -131,8 +131,8 @@ pub struct SingleFlight {
 impl SingleFlight {
     pub fn new() -> Self {
         SingleFlight {
-            should_resolved_dns: AtomicBool::new(true),
-            complete_resolved_dns: AtomicBool::new(false),
+            is_resolved_dns_running: AtomicBool::new(true),
+            is_resolved_dns_completed: AtomicBool::new(false),
             wait_for_notification: Notify::new(),
         }
     }
@@ -385,26 +385,26 @@ impl DemandProxyState {
 
                     // Check if this is the first request of doing DNS task for hostname
                     if cached_resolve_dns
-                        .should_resolved_dns
+                        .is_resolved_dns_running
                         .load(Ordering::Relaxed)
                     {
                         // Set the flag to indicate that the resolve_on_demand_dns is being executed
                         cached_resolve_dns
-                            .should_resolved_dns
+                            .is_resolved_dns_running
                             .store(false, Ordering::Relaxed);
 
                         // Besides the first request, other concurrency requests may also get into
                         // current branch before atomic bool is setting to false.
                         if !cached_resolve_dns
-                            .should_resolved_dns
+                            .is_resolved_dns_running
                             .load(Ordering::Relaxed)
                         {
                             // doing the dns tasks
                             Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                            // set complete_resolved_dns to true
+                            // set is_resolved_dns_completed to true
                             // it means that resolve_on_demand_dns has completed
                             cached_resolve_dns
-                                .complete_resolved_dns
+                                .is_resolved_dns_completed
                                 .store(true, Ordering::Relaxed);
                             // notify other requests that the calling is completed
                             cached_resolve_dns.wait_for_notification.notify_waiters();
@@ -562,7 +562,7 @@ impl DemandProxyState {
     // wait_for_resolve_dns help to implement a duplicate function call suppression mechanism.
     pub fn wait_for_resolve_dns(&self, cached_atom_bool: Arc<SingleFlight>) {
         if !cached_atom_bool
-            .complete_resolved_dns
+            .is_resolved_dns_completed
             .load(Ordering::Relaxed)
         {
             // Wait for resolve_on_demand_dns calling is completed

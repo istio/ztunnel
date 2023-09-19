@@ -646,6 +646,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_concurrency_requests_unknown_dest() {
+        let num_tasks = 1000;
+
+        let mut handles = vec![];
+        for _ in 0..num_tasks {
+            let build_handle = tokio::spawn(async move {
+                run_build_request(
+                    "127.0.0.1",
+                    "1.2.3.4:80",
+                    XdsWorkload {
+                        uid: "cluster1//v1/Pod/default/my-pod".to_string(),
+                        addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
+                        ..Default::default()
+                    },
+                    Some(ExpectedRequest {
+                        protocol: Protocol::TCP,
+                        destination: "1.2.3.4:80",
+                        gateway: "1.2.3.4:80",
+                        request_type: RequestType::Passthrough,
+                    }),
+                )
+                .await;      
+            });
+            handles.push(build_handle);
+        }
+
+        for build_handle in handles {
+            if let Err(e) = build_handle.await {
+                eprintln!("Task failed: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn build_request_known_dest_remote_node_tcp() {
         run_build_request(
             "127.0.0.1",
