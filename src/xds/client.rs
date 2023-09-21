@@ -20,6 +20,7 @@ use std::{fmt, mem};
 use prost::{DecodeError, EncodeError};
 use prost_types::value::Kind;
 use prost_types::{Struct, Value};
+use serde_json;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -43,6 +44,7 @@ const NODE_NAME: &str = "NODE_NAME";
 const NAME: &str = "NAME";
 const NAMESPACE: &str = "NAMESPACE";
 const EMPTY_STR: &str = "";
+const ISTIO_METAJSON_PREFIX: &str = "ISTIO_METAJSON_";
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub struct ResourceKey {
@@ -428,6 +430,36 @@ impl AdsClient {
         Struct { fields }
     }
 
+    fn json_to_struct(json: serde_json::Map<String, serde_json::Value>) -> prost_types::Struct {
+        prost_types::Struct {
+            fields: json
+                .into_iter()
+                .map(|(k, v)| (k, Self::json_to_value(v)))
+                .collect(),
+        }
+    }
+
+    fn json_to_value(json: serde_json::Value) -> prost_types::Value {
+        use prost_types::value::Kind::*;
+        use serde_json::Value::*;
+
+        prost_types::Value {
+            kind: Some(match json {
+                Null => NullValue(0),
+                Bool(v) => BoolValue(v),
+                Number(n) => NumberValue(n.as_f64().unwrap_or_else(|| {
+                    error!("error parsing JSON number: {}", n);
+                    0f64
+                })),
+                String(s) => StringValue(s),
+                Array(v) => ListValue(prost_types::ListValue {
+                    values: v.into_iter().map(Self::json_to_value).collect(),
+                }),
+                Object(v) => StructValue(Self::json_to_struct(v)),
+            }),
+        }
+    }
+
     fn node(&self) -> Node {
         let ip = std::env::var(INSTANCE_IP);
         let ip = ip.as_deref().unwrap_or(DEFAULT_IP);
@@ -446,6 +478,19 @@ impl AdsClient {
         metadata
             .fields
             .append(&mut Self::build_struct(self.config.proxy_metadata.clone()).fields);
+
+        // Lookup ISTIO_METAJSON_* environment variables and add them to the node metadata
+        for (key, val) in std::env::vars().filter(|(key, _)| key.starts_with(ISTIO_METAJSON_PREFIX))
+        {
+            if let Ok(v) = serde_json::from_str(&val) {
+                metadata.fields.insert(
+                    key.trim_start_matches(ISTIO_METAJSON_PREFIX).to_string(),
+                    Self::json_to_value(v),
+                );
+            } else {
+                error!("failed to parse {}={}", key, val);
+            }
+        }
 
         Node {
             id: format!("ztunnel~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
@@ -816,5 +861,62 @@ mod tests {
         tx.send(removed_resource_response)
             .expect("failed to send server response");
         verify_address(IpAddr::V4(ip), None, &state).await;
+    }
+
+    #[test]
+    fn test_json_to_value() {
+        use prost_types::value::Kind::*;
+
+        // JSON map
+        let mut v = serde_json::json!({ "app": "foo", "version": "v1" });
+        assert_eq!(
+            AdsClient::json_to_value(v).kind.unwrap(),
+            StructValue(prost_types::Struct {
+                fields: vec![
+                    (
+                        "app".to_string(),
+                        prost_types::Value {
+                            kind: Some(Kind::StringValue("foo".to_string())),
+                        }
+                    ),
+                    (
+                        "version".to_string(),
+                        prost_types::Value {
+                            kind: Some(Kind::StringValue("v1".to_string())),
+                        }
+                    ),
+                ]
+                .into_iter()
+                .collect()
+            }),
+        );
+
+        // JSON array
+        v = serde_json::json!(["foo", "bar"]);
+        assert_eq!(
+            AdsClient::json_to_value(v).kind.unwrap(),
+            ListValue(prost_types::ListValue {
+                values: vec![
+                    prost_types::Value {
+                        kind: Some(Kind::StringValue("foo".to_string())),
+                    },
+                    prost_types::Value {
+                        kind: Some(Kind::StringValue("bar".to_string())),
+                    },
+                ]
+            })
+        );
+
+        // JSON bool
+        v = serde_json::json!(true);
+        assert_eq!(AdsClient::json_to_value(v).kind.unwrap(), BoolValue(true));
+
+        // JSON Number
+        v = serde_json::json!(1);
+        assert_eq!(AdsClient::json_to_value(v).kind.unwrap(), NumberValue(1f64));
+
+        // JSON null
+        v = serde_json::json!(());
+        assert_eq!(AdsClient::json_to_value(v).kind.unwrap(), NullValue(0));
     }
 }
