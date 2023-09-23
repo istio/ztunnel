@@ -490,7 +490,7 @@ impl DemandProxyState {
     // only support workload
     pub async fn fetch_workload_by_uid(&self, uid: &str) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
-        debug!(%uid, "fetch workload");
+        debug!(%uid, "fetch workload by uid");
         if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
             return Some(wl);
         }
@@ -499,7 +499,12 @@ impl DemandProxyState {
     }
 
     pub async fn fetch_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
-        self.fetch_address(&network_addr(network, addr.ip())).await;
+        debug!(%network, %addr, "fetch upstream");
+        if let Some(us) = self.state.read().unwrap().find_upstream(network, addr) {
+            return Some(us);
+        }
+        self.fetch_on_demand(network_addr(network, addr.ip()).to_string())
+            .await;
         self.state.read().unwrap().find_upstream(network, addr)
     }
 
