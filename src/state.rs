@@ -635,14 +635,14 @@ impl DemandProxyState {
                 ));
             }
         };
-        let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.port);
+        let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
         match self
             .fetch_upstream(&wp_nw_addr.network, wp_socket_addr)
             .await
         {
             Some(mut upstream) => {
                 debug!(%wl.name, "found waypoint upstream");
-                match set_gateway_address(&mut upstream, workload_ip, gw_address.port) {
+                match set_gateway_address(&mut upstream, workload_ip, gw_address.hbone_mtls_port) {
                     Ok(_) => Ok(Some(upstream)),
                     Err(e) => {
                         debug!(%wl.name, "failed to set gateway address for upstream: {}", e);

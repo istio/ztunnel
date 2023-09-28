@@ -716,7 +716,7 @@ mod tests {
     use crate::metrics;
     use crate::test_helpers::dns::{
         a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client,
-        send_request, server_request, socket_addr,
+        send_request, server_request,
     };
     use crate::test_helpers::helpers::subscribe;
     use crate::test_helpers::{new_proxy_state, test_default_workload};
@@ -1104,12 +1104,19 @@ mod tests {
 
         // Create and start the proxy.
         let domain = "cluster.local".to_string();
-        let addr = new_socket_addr().await;
         let state = state();
         let forwarder = forwarder();
-        let proxy = Server::new(domain, addr, NW1, state, forwarder, test_metrics())
-            .await
-            .unwrap();
+        let proxy = Server::new(
+            domain,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            NW1,
+            state,
+            forwarder,
+            test_metrics(),
+        )
+        .await
+        .unwrap();
+        let addr = proxy.address();
         tokio::spawn(proxy.run());
 
         let mut tcp_client = new_tcp_client(addr).await;
@@ -1193,12 +1200,19 @@ mod tests {
 
         // Create and start the server.
         let domain = "cluster.local".to_string();
-        let addr = new_socket_addr().await;
         let state = state();
         let forwarder = Arc::new(SystemForwarder::new().unwrap());
-        let server = Server::new(domain, addr, NW1, state, forwarder, test_metrics())
-            .await
-            .unwrap();
+        let server = Server::new(
+            domain,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            NW1,
+            state,
+            forwarder,
+            test_metrics(),
+        )
+        .await
+        .unwrap();
+        let addr = server.address();
         tokio::spawn(server.run());
 
         let mut tcp_client = new_tcp_client(addr).await;
@@ -1322,11 +1336,6 @@ mod tests {
             ],
             ips: HashMap::from([(n("www.bing.com."), vec![ip("1.1.1.1")])]),
         })
-    }
-
-    async fn new_socket_addr() -> SocketAddr {
-        let s = UdpSocket::bind(socket_addr("127.0.0.1:0")).await.unwrap();
-        s.local_addr().unwrap()
     }
 
     fn state() -> DemandProxyState {
