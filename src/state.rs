@@ -35,7 +35,6 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::Notify;
 use tracing::{debug, trace, warn};
@@ -87,9 +86,6 @@ pub struct ProxyState {
 
     #[serde(flatten)]
     pub resolved_dns: ResolvedDnsStore,
-
-    #[serde(flatten)]
-    pub cached_resolved_dns_map: CachedResolvedDNSMap,
 }
 
 /// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
@@ -100,6 +96,9 @@ pub struct ResolvedDnsStore {
     // in a future with support for per-pod DNS resolv.conf settings we may need
     // to change this to a map from source workload uid to resolved IP addresses.
     by_hostname: HashMap<String, ResolvedDns>,
+
+    // crd_hashmap is a map which store IP addresses for unkonwn domain after DNS resolving tasks
+    crd_hashmap: HashMap<String, SingleFlight>,
 }
 
 #[derive(serde::Serialize, Default, Debug, Clone)]
@@ -114,27 +113,29 @@ pub struct ResolvedDns {
     dns_refresh_rate: std::time::Duration,
 }
 
-/// A CachedResolvedDNSMap contains do dns task for hostname via calling resolve_on_demand_dns
 #[derive(serde::Serialize, Default, Debug, Clone)]
-pub struct CachedResolvedDNSMap {
-    crd_hashmap: HashMap<String, Arc<SingleFlight>>,
-}
-
-#[derive(serde::Serialize, Default, Debug)]
 pub struct SingleFlight {
-    is_resolved_dns_running: AtomicBool,
-    is_resolved_dns_completed: AtomicBool,
+    // calling_index can record requests number and it can be used to
+    // check the request number, such as the first request.
+    calling_index: i32,
     #[serde(skip_serializing)]
-    wait_for_notification: Notify,
+    wait_for_notification: Arc<RwLock<Notify>>,
 }
 
 impl SingleFlight {
     pub fn new() -> Self {
         SingleFlight {
-            is_resolved_dns_running: AtomicBool::new(true),
-            is_resolved_dns_completed: AtomicBool::new(false),
-            wait_for_notification: Notify::new(),
+            calling_index: 0,
+            wait_for_notification: Arc::new(RwLock::new(Notify::new())),
         }
+    }
+
+    pub fn wait_for_notifying(&self) {
+        self.wait_for_notification.read().unwrap().notified();
+    }
+
+    pub fn notify_waiters(&self) {
+        self.wait_for_notification.read().unwrap().notify_waiters();
     }
 }
 
@@ -376,47 +377,27 @@ impl DemandProxyState {
                     .get_cached_resolve_dns_for_hostname(&hostname)
                     .is_none()
                 {
-                    let cached_resolve_dns = Arc::new(SingleFlight::new());
-                    let cached_resolve_dns_clone = cached_resolve_dns.clone();
+                    let cached_resolve_dns = SingleFlight::new();
                     state.set_cached_resolve_dns_for_hostname(
                         hostname.to_owned(),
-                        cached_resolve_dns_clone,
+                        cached_resolve_dns,
                     );
 
-                    // Check if this is the first request of doing DNS task for hostname
-                    if cached_resolve_dns
-                        .is_resolved_dns_running
-                        .load(Ordering::Relaxed)
-                    {
-                        // Set the flag to indicate that the resolve_on_demand_dns is being executed
-                        cached_resolve_dns
-                            .is_resolved_dns_running
-                            .store(false, Ordering::Relaxed);
-
-                        // Besides the first request, other concurrency requests may also get into
-                        // current branch before atomic bool is setting to false.
-                        if !cached_resolve_dns
-                            .is_resolved_dns_running
-                            .load(Ordering::Relaxed)
-                        {
-                            // doing the dns tasks
-                            Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                            // set is_resolved_dns_completed to true
-                            // it means that resolve_on_demand_dns has completed
-                            cached_resolve_dns
-                                .is_resolved_dns_completed
-                                .store(true, Ordering::Relaxed);
-                            // notify other requests that the calling is completed
-                            cached_resolve_dns.wait_for_notification.notify_waiters();
-                        } else {
-                            // Some requests may get into this branch as well before atomic bool is setting to false,
-                            // they also need to wait for resolve_on_demand_dns to be completed by the first request
-                            state.wait_for_resolve_dns(cached_resolve_dns);
+                    let element = state.get_cached_resolve_dns_for_hostname(&hostname);
+                    match element {
+                        Some(sf_map_element) => {
+                            // Check if this is the first request of doing DNS task for hostname
+                            if sf_map_element.calling_index == 1 {
+                                // doing the dns tasks
+                                Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                                sf_map_element.notify_waiters();
+                            } else {
+                                sf_map_element.wait_for_notifying();
+                            }
                         }
-                    } else {
-                        // To the high concurrency requests, they need to wait for
-                        // resolve_on_demand_dns to be completed by the first request
-                        state.wait_for_resolve_dns(cached_resolve_dns);
+                        None => {
+                            println!("can not find the element in map based on hostname");
+                        }
                     }
                 }
 
@@ -535,39 +516,29 @@ impl DemandProxyState {
     pub fn set_cached_resolve_dns_for_hostname(
         &mut self,
         hostname: String,
-        cached_atom_bool: Arc<SingleFlight>,
+        cached_atom_bool: SingleFlight,
     ) {
-        self.state
-            .write()
-            .unwrap()
-            .cached_resolved_dns_map
+        let mut binding = self.state.write().unwrap();
+        let sf_map_element = binding
+            .resolved_dns
             .crd_hashmap
             .entry(hostname)
             .or_insert(cached_atom_bool);
+        // increment 1 for every requests in concurrency
+        sf_map_element.calling_index += 1;
     }
 
     pub fn get_cached_resolve_dns_for_hostname(
         &mut self,
         hostname: &String,
-    ) -> Option<Arc<SingleFlight>> {
+    ) -> Option<SingleFlight> {
         self.state
             .read()
             .unwrap()
-            .cached_resolved_dns_map
+            .resolved_dns
             .crd_hashmap
             .get(hostname)
             .cloned()
-    }
-
-    // wait_for_resolve_dns help to implement a duplicate function call suppression mechanism.
-    pub fn wait_for_resolve_dns(&self, cached_atom_bool: Arc<SingleFlight>) {
-        if !cached_atom_bool
-            .is_resolved_dns_completed
-            .load(Ordering::Relaxed)
-        {
-            // Wait for resolve_on_demand_dns calling is completed
-            cached_atom_bool.wait_for_notification.notified();
-        }
     }
 
     pub async fn fetch_workload_services(
