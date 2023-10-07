@@ -97,8 +97,8 @@ pub struct ResolvedDnsStore {
     // to change this to a map from source workload uid to resolved IP addresses.
     by_hostname: HashMap<String, ResolvedDns>,
 
-    // crd_hashmap is a map which store IP addresses for unkonwn domain after DNS resolving tasks
-    crd_hashmap: HashMap<String, SingleFlight>,
+    // sf_by_hostname is a map which store IP addresses for unkonwn domain after DNS resolving tasks
+    sf_by_hostname: HashMap<String, SingleFlight>,
 }
 
 #[derive(serde::Serialize, Default, Debug, Clone)]
@@ -516,14 +516,14 @@ impl DemandProxyState {
     pub fn set_cached_resolve_dns_for_hostname(
         &mut self,
         hostname: String,
-        cached_atom_bool: SingleFlight,
+        cached_by_hostname: SingleFlight,
     ) {
         let mut binding = self.state.write().unwrap();
         let sf_map_element = binding
             .resolved_dns
-            .crd_hashmap
+            .sf_by_hostname
             .entry(hostname)
-            .or_insert(cached_atom_bool);
+            .or_insert(cached_by_hostname);
         // increment 1 for every requests in concurrency
         sf_map_element.calling_index += 1;
     }
@@ -536,7 +536,7 @@ impl DemandProxyState {
             .read()
             .unwrap()
             .resolved_dns
-            .crd_hashmap
+            .sf_by_hostname
             .get(hostname)
             .cloned()
     }
