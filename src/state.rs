@@ -119,13 +119,20 @@ pub struct SingleFlight {
     // check the request number, such as the first request.
     calling_index: i32,
     #[serde(skip_serializing)]
+    initial_query: Option<std::time::Instant>,
+    // different with ResolvedDns, the refresh rate set 3600 by default
+    dns_refresh_rate: std::time::Duration,
+    #[serde(skip_serializing)]
     wait_for_notification: Arc<RwLock<Notify>>,
 }
 
 impl SingleFlight {
     pub fn new() -> Self {
+        let now = std::time::Instant::now();
         SingleFlight {
             calling_index: 0,
+            initial_query: Some(now),
+            dns_refresh_rate: std::time::Duration::from_secs(3600),
             wait_for_notification: Arc::new(RwLock::new(Notify::new())),
         }
     }
@@ -518,14 +525,47 @@ impl DemandProxyState {
         hostname: String,
         cached_by_hostname: SingleFlight,
     ) {
-        let mut binding = self.state.write().unwrap();
-        let sf_map_element = binding
+        if self
+            .get_cached_resolve_dns_for_hostname_nofilter(&hostname)
+            .is_some()
+        {
+            let m_cached_by_hostname = {
+                let now = std::time::Instant::now();
+                SingleFlight {
+                    calling_index: cached_by_hostname.calling_index + 1,
+                    initial_query: Some(now),
+                    dns_refresh_rate: std::time::Duration::from_secs(3600),
+                    wait_for_notification: Arc::new(RwLock::new(Notify::new())),
+                }
+            };
+            let mut binding = self.state.write().unwrap();
+            binding
+                .resolved_dns
+                .sf_by_hostname
+                .insert(hostname, m_cached_by_hostname);
+        } else {
+            let mut binding = self.state.write().unwrap();
+            let sf_map_element = binding
+                .resolved_dns
+                .sf_by_hostname
+                .entry(hostname)
+                .or_insert(cached_by_hostname);
+            // increment 1 for every requests in concurrency
+            sf_map_element.calling_index += 1;
+        }
+    }
+
+    pub fn get_cached_resolve_dns_for_hostname_nofilter(
+        &mut self,
+        hostname: &String,
+    ) -> Option<SingleFlight> {
+        self.state
+            .read()
+            .unwrap()
             .resolved_dns
             .sf_by_hostname
-            .entry(hostname)
-            .or_insert(cached_by_hostname);
-        // increment 1 for every requests in concurrency
-        sf_map_element.calling_index += 1;
+            .get(hostname)
+            .cloned()
     }
 
     pub fn get_cached_resolve_dns_for_hostname(
@@ -538,6 +578,11 @@ impl DemandProxyState {
             .resolved_dns
             .sf_by_hostname
             .get(hostname)
+            .filter(|cached_element| {
+                cached_element.initial_query.is_some()
+                    && cached_element.initial_query.unwrap().elapsed()
+                        < cached_element.dns_refresh_rate
+            })
             .cloned()
     }
 
