@@ -97,7 +97,8 @@ pub struct ResolvedDnsStore {
     // to change this to a map from source workload uid to resolved IP addresses.
     by_hostname: HashMap<String, ResolvedDns>,
 
-    // sf_by_hostname is a map which store IP addresses for unkonwn domain after DNS resolving tasks
+    // sf_by_hostname is a map which store the hostname and its SingleFlight properties to provides
+    // a duplicate function call suppression mechanism for DNS resolving tasks
     sf_by_hostname: HashMap<String, SingleFlight>,
 }
 
