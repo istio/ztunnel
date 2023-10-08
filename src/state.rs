@@ -35,8 +35,7 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tokio::sync::Notify;
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::{debug, trace, warn};
 
 use trust_dns_resolver::config::*;
@@ -114,29 +113,46 @@ pub struct ResolvedDns {
     dns_refresh_rate: std::time::Duration,
 }
 
-#[derive(serde::Serialize, Default, Debug, Clone)]
+#[derive(serde::Serialize, Default, Debug)]
 pub struct SingleFlight {
     // calling_index can record requests number and it can be used to
     // check the request number, such as the first request.
     calling_index: i32,
+    // mutex and condvar can implement the multiple waiters and a single notifier
     #[serde(skip_serializing)]
-    wait_for_notification: Arc<RwLock<Notify>>,
+    mutex: Arc<Mutex<()>>,
+    #[serde(skip_serializing)]
+    condvar: Arc<Condvar>,
+}
+
+impl Clone for SingleFlight {
+    fn clone(&self) -> Self {
+        SingleFlight {
+            calling_index: self.calling_index,
+            mutex: self.mutex.clone(),
+            condvar: self.condvar.clone(),
+        }
+    }
 }
 
 impl SingleFlight {
     pub fn new() -> Self {
         SingleFlight {
             calling_index: 0,
-            wait_for_notification: Arc::new(RwLock::new(Notify::new())),
+            mutex: Arc::new(Mutex::new(())),
+            condvar: Arc::new(Condvar::new()),
         }
     }
 
     pub fn wait_for_notifying(&self) {
-        self.wait_for_notification.read().unwrap().notified();
+        let lock = self.mutex.lock().unwrap();
+        // must define _unused to avoid immediately dropping of the lock
+        let _unused = self.condvar.wait(lock).unwrap();
     }
 
     pub fn notify_waiters(&self) {
-        self.wait_for_notification.read().unwrap().notify_waiters();
+        println!("Notifier notifying...");
+        self.condvar.notify_all();
     }
 }
 
@@ -403,6 +419,16 @@ impl DemandProxyState {
                             println!("can not find the element in map based on hostname");
                         }
                     }
+                } else {
+                    let element = state.get_cached_resolve_dns_for_hostname(&hostname);
+                    match element {
+                        Some(sf_map_element) => {
+                            sf_map_element.wait_for_notifying();
+                        }
+                        None => {
+                            println!("can not find the element in map based on hostname");
+                        }
+                    }
                 }
 
                 // try to get it again
@@ -532,7 +558,10 @@ impl DemandProxyState {
         sf_map_element.calling_index += 1;
     }
 
-    pub fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
+    pub fn remove_cached_resolve_dns_for_hostname(
+        &mut self,
+        hostname: &String,
+    ) {
         self.state
             .write()
             .unwrap()
