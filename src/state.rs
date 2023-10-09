@@ -558,10 +558,7 @@ impl DemandProxyState {
         sf_map_element.calling_index += 1;
     }
 
-    pub fn remove_cached_resolve_dns_for_hostname(
-        &mut self,
-        hostname: &String,
-    ) {
+    pub fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
         self.state
             .write()
             .unwrap()
