@@ -145,9 +145,12 @@ impl SingleFlight {
     }
 
     pub fn wait_for_notifying(&self) {
+        let timeout_millis = std::time::Duration::from_millis(100);
         let lock = self.mutex.lock().unwrap();
-        // must define _unused to avoid immediately dropping of the lock
-        let _unused = self.condvar.wait(lock).unwrap();
+
+        // Must define _unused to avoid immediately dropping of the lock and use wait_timeout with a timeout of 100 milliseconds
+        let (_is_started, _timeout_result) =
+            self.condvar.wait_timeout(lock, timeout_millis).unwrap();
     }
 
     pub fn notify_waiters(&self) {
