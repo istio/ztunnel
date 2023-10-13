@@ -115,9 +115,9 @@ pub struct ResolvedDns {
 
 #[derive(serde::Serialize, Default, Debug)]
 pub struct SingleFlight {
-    // calling_index can record requests number and it can be used to
+    // is_first_req_in can record requests number and it can be used to
     // check the request number, such as the first request.
-    calling_index: i32,
+    is_first_req_in: bool,
     // mutex and condvar can implement the multiple waiters and a single notifier
     #[serde(skip_serializing)]
     mutex: Arc<Mutex<()>>,
@@ -128,7 +128,7 @@ pub struct SingleFlight {
 impl Clone for SingleFlight {
     fn clone(&self) -> Self {
         SingleFlight {
-            calling_index: self.calling_index,
+            is_first_req_in: self.is_first_req_in,
             mutex: self.mutex.clone(),
             condvar: self.condvar.clone(),
         }
@@ -138,7 +138,9 @@ impl Clone for SingleFlight {
 impl SingleFlight {
     pub fn new() -> Self {
         SingleFlight {
-            calling_index: 0,
+            // is_first_req_in is set to true because
+            // there always is the first request
+            is_first_req_in: true,
             mutex: Arc::new(Mutex::new(())),
             condvar: Arc::new(Condvar::new()),
         }
@@ -398,7 +400,7 @@ impl DemandProxyState {
                     .is_none()
                 {
                     let cached_resolve_dns = SingleFlight::new();
-                    state.set_cached_resolve_dns_for_hostname(
+                    let is_the_first_req = state.set_cached_resolve_dns_for_hostname(
                         hostname.to_owned(),
                         cached_resolve_dns,
                     );
@@ -407,7 +409,7 @@ impl DemandProxyState {
                     match element {
                         Some(sf_map_element) => {
                             // Check if this is the first request of doing DNS task for hostname
-                            if sf_map_element.calling_index == 1 {
+                            if is_the_first_req {
                                 // doing the dns tasks
                                 Self::resolve_on_demand_dns(self.to_owned(), workload).await;
                                 // need to remove the element in sf_by_hostname because the DNS resolving task
@@ -550,15 +552,22 @@ impl DemandProxyState {
         &mut self,
         hostname: String,
         cached_by_hostname: SingleFlight,
-    ) {
+    ) -> bool {
         let mut binding = self.state.write().unwrap();
         let sf_map_element = binding
             .resolved_dns
             .sf_by_hostname
             .entry(hostname)
             .or_insert(cached_by_hostname);
-        // increment 1 for every requests in concurrency
-        sf_map_element.calling_index += 1;
+        // check current request is the first request or not
+        if sf_map_element.is_first_req_in {
+            // all the requests later should not be the first one
+            sf_map_element.is_first_req_in = false;
+            // current request is the first request
+            true
+        } else {
+            false
+        }
     }
 
     pub fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
