@@ -33,7 +33,6 @@ fn main() -> Result<(), anyhow::Error> {
     let config = {
         let mut c = prost_build::Config::new();
         c.disable_comments(Some("."));
-        c.protoc_arg("--experimental_allow_proto3_optional");
         c.bytes([
             ".istio.workload.Workload",
             ".istio.workload.Service",
