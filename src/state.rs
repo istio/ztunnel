@@ -97,7 +97,7 @@ pub struct ResolvedDnsStore {
     by_hostname: HashMap<String, ResolvedDns>,
 
     // sf_by_hostname is a map which store the hostname and its SingleFlight properties to provides
-    // a duplicate function call suppression mechanism for DNS resolving tasks
+    // a duplicate function call suppression mechanism for DNS resolving tasks.
     sf_by_hostname: HashMap<String, SingleFlight>,
 }
 
@@ -113,6 +113,8 @@ pub struct ResolvedDns {
     dns_refresh_rate: std::time::Duration,
 }
 
+/// A SingleFlight can make sure that only the first request to really handle DNS resolving task
+/// for specified hostname and other requests in concurrency need to wait for the task completion.
 #[derive(serde::Serialize, Default, Debug)]
 pub struct SingleFlight {
     // is_first_req_in can record requests number and it can be used to
@@ -156,7 +158,6 @@ impl SingleFlight {
     }
 
     pub fn notify_waiters(&self) {
-        println!("Notifier notifying...");
         self.condvar.notify_all();
     }
 }
