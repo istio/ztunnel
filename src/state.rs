@@ -35,7 +35,8 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::Notify;
 use tracing::{debug, trace, warn};
 
 use trust_dns_resolver::config::*;
@@ -120,19 +121,17 @@ pub struct SingleFlight {
     // is_first_req_in can record requests number and it can be used to
     // check the request number, such as the first request.
     is_first_req_in: bool,
-    // mutex and condvar can implement the multiple waiters and a single notifier
+    // wait_for_notification can help to implement the multiple waiters and a single notifier
+    // and it should be in Arc and protected by RWLock because of the concurrency envs.
     #[serde(skip_serializing)]
-    mutex: Arc<Mutex<()>>,
-    #[serde(skip_serializing)]
-    condvar: Arc<Condvar>,
+    wait_for_notification: Arc<RwLock<Notify>>,
 }
 
 impl Clone for SingleFlight {
     fn clone(&self) -> Self {
         SingleFlight {
             is_first_req_in: self.is_first_req_in,
-            mutex: self.mutex.clone(),
-            condvar: self.condvar.clone(),
+            wait_for_notification: self.wait_for_notification.clone(),
         }
     }
 }
@@ -143,22 +142,16 @@ impl SingleFlight {
             // is_first_req_in is set to true because
             // there always is the first request
             is_first_req_in: true,
-            mutex: Arc::new(Mutex::new(())),
-            condvar: Arc::new(Condvar::new()),
+            wait_for_notification: Arc::new(RwLock::new(Notify::new())),
         }
     }
 
     pub fn wait_for_notifying(&self) {
-        let timeout_millis = std::time::Duration::from_millis(100);
-        let lock = self.mutex.lock().unwrap();
-
-        // Must define _unused to avoid immediately dropping of the lock and use wait_timeout with a timeout of 100 milliseconds
-        let (_is_started, _timeout_result) =
-            self.condvar.wait_timeout(lock, timeout_millis).unwrap();
+        self.wait_for_notification.read().unwrap().notified();
     }
 
     pub fn notify_waiters(&self) {
-        self.condvar.notify_all();
+        self.wait_for_notification.read().unwrap().notify_waiters();
     }
 }
 
@@ -413,9 +406,6 @@ impl DemandProxyState {
                             if is_the_first_req {
                                 // doing the dns tasks
                                 Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                                // need to remove the element in sf_by_hostname because the DNS resolving task
-                                // is completed and the IP addresses already are stored in Hashmap of by_hostname
-                                state.remove_cached_resolve_dns_for_hostname(&hostname);
                                 sf_map_element.notify_waiters();
                             } else {
                                 sf_map_element.wait_for_notifying();
@@ -436,6 +426,11 @@ impl DemandProxyState {
                         }
                     }
                 }
+
+                // remove the element in sf_by_hostname because the DNS resolving task is completed
+                // and the IP addresses already are stored in Hashmap of by_hostname, moreover, there
+                // should be no pending notification if the element is removed.
+                state.remove_cached_resolve_dns_for_hostname(&hostname);
 
                 // try to get it again
                 let updated_rdns = state.get_ips_for_hostname(&hostname);
