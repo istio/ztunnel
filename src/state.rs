@@ -124,7 +124,7 @@ pub struct SingleFlight {
     // wait_for_notification can help to implement the multiple waiters and a single notifier
     // and it should be in Arc and protected by RWLock because of the concurrency envs.
     #[serde(skip_serializing)]
-    wait_for_notification: Arc<RwLock<Notify>>,
+    wait_for_notification: Arc<Notify>,
 }
 
 impl Clone for SingleFlight {
@@ -142,16 +142,16 @@ impl SingleFlight {
             // is_first_req_in is set to true because
             // there always is the first request
             is_first_req_in: true,
-            wait_for_notification: Arc::new(RwLock::new(Notify::new())),
+            wait_for_notification: Arc::new(Notify::new()),
         }
     }
 
     pub fn wait_for_notifying(&self) {
-        self.wait_for_notification.read().unwrap().notified();
+        self.wait_for_notification.notified();
     }
 
     pub fn notify_waiters(&self) {
-        self.wait_for_notification.read().unwrap().notify_waiters();
+        self.wait_for_notification.notify_waiters();
     }
 }
 
