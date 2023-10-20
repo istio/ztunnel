@@ -146,8 +146,8 @@ impl SingleFlight {
         }
     }
 
-    pub fn wait_for_notifying(&self) {
-        self.wait_for_notification.notified();
+    pub async fn wait_for_notifying(&self) {
+        self.wait_for_notification.notified().await;
     }
 
     pub fn notify_waiters(&self) {
@@ -408,7 +408,7 @@ impl DemandProxyState {
                                 Self::resolve_on_demand_dns(self.to_owned(), workload).await;
                                 sf_map_element.notify_waiters();
                             } else {
-                                sf_map_element.wait_for_notifying();
+                                sf_map_element.wait_for_notifying().await;
                             }
                         }
                         None => {
@@ -419,7 +419,7 @@ impl DemandProxyState {
                     let element = state.get_cached_resolve_dns_for_hostname(&hostname);
                     match element {
                         Some(sf_map_element) => {
-                            sf_map_element.wait_for_notifying();
+                            sf_map_element.wait_for_notifying().await;
                         }
                         None => {
                             println!("can not find the element in map based on hostname");
