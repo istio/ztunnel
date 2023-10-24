@@ -85,12 +85,12 @@ pub struct ProxyState {
     pub policies: PolicyStore,
 
     #[serde(flatten)]
-    pub resolved_dns: ResolvedDnsStore,
+    resolved_dns: ResolvedDnsStore,
 }
 
 /// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
-pub struct ResolvedDnsStore {
+struct ResolvedDnsStore {
     // by_hostname is a map from hostname to resolved IP addresses for now.
     //
     // in a future with support for per-pod DNS resolv.conf settings we may need
@@ -103,7 +103,7 @@ pub struct ResolvedDnsStore {
 }
 
 #[derive(serde::Serialize, Default, Debug, Clone)]
-pub struct ResolvedDns {
+struct ResolvedDns {
     hostname: String,
     ips: HashSet<IpAddr>,
     #[serde(skip_serializing)]
@@ -117,7 +117,7 @@ pub struct ResolvedDns {
 /// A SingleFlight can make sure that only the first request to really handle DNS resolving task
 /// for specified hostname and other requests in concurrency need to wait for the task completion.
 #[derive(serde::Serialize, Default, Debug)]
-pub struct SingleFlight {
+struct SingleFlight {
     // is_first_req_in can record requests number and it can be used to
     // check the request number, such as the first request.
     is_first_req_in: bool,
@@ -137,7 +137,7 @@ impl Clone for SingleFlight {
 }
 
 impl SingleFlight {
-    pub fn new() -> Self {
+    fn new() -> Self {
         SingleFlight {
             // is_first_req_in is set to true because
             // there always is the first request
@@ -146,11 +146,11 @@ impl SingleFlight {
         }
     }
 
-    pub async fn wait_for_notifying(&self) {
+    async fn wait_for_notifying(&self) {
         self.wait_for_notification.notified().await;
     }
 
-    pub fn notify_waiters(&self) {
+    fn notify_waiters(&self) {
         self.wait_for_notification.notify_waiters();
     }
 }
@@ -521,7 +521,7 @@ impl DemandProxyState {
         state.set_ips_for_hostname(hostname, rdns);
     }
 
-    pub fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
+    fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
         self.state
             .write()
             .unwrap()
@@ -530,7 +530,7 @@ impl DemandProxyState {
             .insert(hostname, rdns);
     }
 
-    pub fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
+    fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
         self.state
             .read()
             .unwrap()
@@ -544,7 +544,7 @@ impl DemandProxyState {
             .cloned()
     }
 
-    pub fn set_cached_resolve_dns_for_hostname(
+    fn set_cached_resolve_dns_for_hostname(
         &mut self,
         hostname: String,
         cached_by_hostname: SingleFlight,
@@ -566,7 +566,7 @@ impl DemandProxyState {
         }
     }
 
-    pub fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
+    fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
         self.state
             .write()
             .unwrap()
@@ -575,10 +575,7 @@ impl DemandProxyState {
             .remove(hostname);
     }
 
-    pub fn get_cached_resolve_dns_for_hostname(
-        &mut self,
-        hostname: &String,
-    ) -> Option<SingleFlight> {
+    fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<SingleFlight> {
         self.state
             .read()
             .unwrap()
