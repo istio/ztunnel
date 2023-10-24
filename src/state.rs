@@ -406,8 +406,11 @@ impl DemandProxyState {
                             if is_the_first_req {
                                 // doing the dns tasks
                                 Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                                // notify all waiters after the dns resolving task completed
                                 sf_map_element.notify_waiters();
                             } else {
+                                // need to wait notification here if the dns resolving is ongoing
+                                //  and the current request is not the first one.
                                 sf_map_element.wait_for_notifying().await;
                             }
                         }
@@ -419,6 +422,8 @@ impl DemandProxyState {
                     let element = state.get_cached_resolve_dns_for_hostname(&hostname);
                     match element {
                         Some(sf_map_element) => {
+                            // need to wait notifiction here if the dns resolving is ongoing
+                            // and the current request is not the first one.
                             sf_map_element.wait_for_notifying().await;
                         }
                         None => {
