@@ -207,7 +207,6 @@ impl HboneTestServer {
                     TokioIo::new(socket),
                     service_fn(move |req| async move {
                         info!("waypoint: received request");
-                        let mode = mode;
                         tokio::task::spawn(async move {
                             match hyper::upgrade::on(req).await {
                                 Ok(upgraded) => {

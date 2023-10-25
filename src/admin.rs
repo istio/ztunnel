@@ -320,7 +320,7 @@ hint: mod_name:\tthe module name, i.e. ztunnel::proxy
 async fn handle_logging(req: Request<Incoming>) -> Response<Full<Bytes>> {
     match *req.method() {
         hyper::Method::POST => {
-            let qp = req
+            let qp: HashMap<String, String> = req
                 .uri()
                 .query()
                 .map(|v| {
@@ -328,7 +328,7 @@ async fn handle_logging(req: Request<Incoming>) -> Response<Full<Bytes>> {
                         .into_owned()
                         .collect()
                 })
-                .unwrap_or_else(HashMap::new);
+                .unwrap_or_default();
             let level = qp.get("level").cloned();
             let reset = qp.get("reset").cloned();
             if level.is_some() || reset.is_some() {

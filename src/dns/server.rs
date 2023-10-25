@@ -365,13 +365,15 @@ impl Store {
                     service
                         .endpoints
                         .iter()
-                        .filter_map(|(_, ep)| {
-                            let Some(addr) = &ep.address else { return None };
-                            if is_record_type(&addr.address, record_type) {
-                                Some(addr.address)
-                            } else {
-                                None
+                        .filter_map(|(_, ep)| match &ep.address {
+                            Some(addr) => {
+                                if is_record_type(&addr.address, record_type) {
+                                    Some(addr.address)
+                                } else {
+                                    None
+                                }
                             }
+                            None => None,
                         })
                         .collect()
                 } else {
