@@ -932,9 +932,9 @@ mod tests {
         for i in 0..4 {
             let id = identity_n("id-", i);
             futs.push(async {
-                let id = id; // Move instead of borrowing.
+                let id2: Identity = id;
                 test.secret_manager
-                    .fetch_certificate_pri(&id, Priority::RealTime)
+                    .fetch_certificate_pri(&id2, Priority::RealTime)
                     .await
             });
         }
