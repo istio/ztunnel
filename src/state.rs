@@ -153,10 +153,7 @@ impl SingleFlight {
 }
 
 impl DnsResolver {
-    pub fn new(
-        dns_resolver_cfg: ResolverConfig,
-        dns_resolver_opts: ResolverOpts,
-    ) -> Self {
+    pub fn new(dns_resolver_cfg: ResolverConfig, dns_resolver_opts: ResolverOpts) -> Self {
         let resolved_dns = Arc::new(RwLock::new(ResolvedDnsStore::default()));
         Self {
             resolved_dns,
@@ -173,18 +170,17 @@ impl DnsResolver {
         self.resolved_dns.write().unwrap()
     }
 
-    async fn resolve_host(&mut self, hostname: &String, workload: &Workload) -> Option<ResolvedDns> {
+    async fn resolve_host(
+        &mut self,
+        hostname: &String,
+        workload: &Workload,
+    ) -> Option<ResolvedDns> {
         // optimize so that if multiple requests to the same hostname come in at the same time,
         // we don't start more than one background on-demand DNS task
-        if self
-            .get_cached_resolve_dns_for_hostname(hostname)
-            .is_none() 
-        {
+        if self.get_cached_resolve_dns_for_hostname(hostname).is_none() {
             let cached_resolve_dns = SingleFlight::new();
-            let is_the_first_req = self.set_cached_resolve_dns_for_hostname(
-                hostname.to_owned(),
-                cached_resolve_dns,
-            );
+            let is_the_first_req =
+                self.set_cached_resolve_dns_for_hostname(hostname.to_owned(), cached_resolve_dns);
 
             let element = self.get_cached_resolve_dns_for_hostname(hostname);
             match element {
@@ -296,9 +292,7 @@ impl DnsResolver {
     }
 
     fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
-        self.write()
-            .by_hostname
-            .insert(hostname, rdns);
+        self.write().by_hostname.insert(hostname, rdns);
     }
 
     fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
@@ -334,16 +328,11 @@ impl DnsResolver {
     }
 
     fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
-        self.write()
-            .sf_by_hostname
-            .remove(hostname);
+        self.write().sf_by_hostname.remove(hostname);
     }
 
     fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<SingleFlight> {
-        self.read()
-            .sf_by_hostname
-            .get(hostname)
-            .cloned()
+        self.read().sf_by_hostname.get(hostname).cloned()
     }
 }
 
@@ -608,7 +597,7 @@ impl DemandProxyState {
             return Err(Error::EmptyResolvedAddresses(workload_uid));
         };
         Ok(*ip)
-    } 
+    }
 
     pub async fn fetch_workload_services(
         &self,
