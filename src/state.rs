@@ -92,11 +92,13 @@ struct ResolvedDnsStore {
     //
     // in a future with support for per-pod DNS resolv.conf settings we may need
     // to change this to a map from source workload uid to resolved IP addresses.
+    #[serde(skip_serializing)]
     by_hostname: HashMap<String, ResolvedDns>,
 
-    // sf_by_hostname is a map which store the hostname and its SingleFlight properties to provides
+    // in_progress is a map which store the hostname and its SingleFlight properties to provides
     // a duplicate function call suppression mechanism for DNS resolving tasks.
-    sf_by_hostname: HashMap<String, SingleFlight>,
+    #[serde(skip_serializing)]
+    in_progress: HashMap<String, Arc<Notify>>,
 }
 
 #[derive(serde::Serialize, Default, Debug, Clone)]
@@ -109,47 +111,6 @@ struct ResolvedDns {
     // we use the shortest ttl rather than just relying on the older records so we don't
     // load-balance to just the older records as the records with early ttl expire.
     dns_refresh_rate: std::time::Duration,
-}
-
-/// A SingleFlight can make sure that only the first request to really handle DNS resolving task
-/// for specified hostname and other requests in concurrency need to wait for the task completion.
-#[derive(serde::Serialize, Default, Debug)]
-struct SingleFlight {
-    // is_first_req_in can record requests number and it can be used to
-    // check the request number, such as the first request.
-    is_first_req_in: bool,
-    // wait_for_notification can help to implement the multiple waiters and a single notifier
-    // and it should be in Arc and protected by RWLock because of the concurrency envs.
-    #[serde(skip_serializing)]
-    wait_for_notification: Arc<Notify>,
-}
-
-impl Clone for SingleFlight {
-    fn clone(&self) -> Self {
-        SingleFlight {
-            is_first_req_in: self.is_first_req_in,
-            wait_for_notification: self.wait_for_notification.clone(),
-        }
-    }
-}
-
-impl SingleFlight {
-    fn new() -> Self {
-        SingleFlight {
-            // is_first_req_in is set to true because
-            // there always is the first request
-            is_first_req_in: true,
-            wait_for_notification: Arc::new(Notify::new()),
-        }
-    }
-
-    async fn wait_for_notifying(&self) {
-        self.wait_for_notification.notified().await;
-    }
-
-    fn notify_waiters(&self) {
-        self.wait_for_notification.notify_waiters();
-    }
 }
 
 impl DnsResolver {
@@ -177,45 +138,29 @@ impl DnsResolver {
     ) -> Option<ResolvedDns> {
         // optimize so that if multiple requests to the same hostname come in at the same time,
         // we don't start more than one background on-demand DNS task
-        if self.get_cached_resolve_dns_for_hostname(hostname).is_none() {
-            let cached_resolve_dns = SingleFlight::new();
-            let is_the_first_req =
-                self.set_cached_resolve_dns_for_hostname(hostname.to_owned(), cached_resolve_dns);
+        let is_the_first_req = self.get_singleflight_by_hostname(hostname.to_owned());
 
-            let element = self.get_cached_resolve_dns_for_hostname(hostname);
-            match element {
-                Some(sf_map_element) => {
-                    // Check if this is the first request of doing DNS task for hostname
-                    if is_the_first_req {
-                        // doing the dns tasks
-                        self.resolve_on_demand_dns(workload).await;
-                        // notify all waiters after the dns resolving task completed
-                        sf_map_element.notify_waiters();
-                    } else {
-                        // need to wait notification here if the dns resolving is ongoing
-                        //  and the current request is not the first one.
-                        sf_map_element.wait_for_notifying().await;
-                    }
-                }
-                None => {
-                    println!("can not find the element in map based on hostname");
+        let element = self.get_cached_resolve_dns_for_hostname(hostname);
+        match element {
+            Some(sf_map_element) => {
+                // Check if this is the first request of doing DNS task for hostname
+                if is_the_first_req {
+                    // doing the dns tasks
+                    self.resolve_on_demand_dns(workload).await;
+                    // notify all waiters after the dns resolving task completed
+                    sf_map_element.notify_waiters();
+                } else {
+                    // need to wait notification here if the dns resolving is ongoing
+                    //  and the current request is not the first one.
+                    sf_map_element.notified().await;
                 }
             }
-        } else {
-            let element = self.get_cached_resolve_dns_for_hostname(hostname);
-            match element {
-                Some(sf_map_element) => {
-                    // need to wait notifiction here if the dns resolving is ongoing
-                    // and the current request is not the first one.
-                    sf_map_element.wait_for_notifying().await;
-                }
-                None => {
-                    println!("can not find the element in map based on hostname");
-                }
+            None => {
+                println!("can not find the element in map based on hostname");
             }
         }
 
-        // remove the element in sf_by_hostname because the DNS resolving task is completed
+        // remove the element in in_progress because the DNS resolving task is completed
         // and the IP addresses already are stored in Hashmap of by_hostname, moreover, there
         // should be no pending notification if the element is removed.
         self.remove_cached_resolve_dns_for_hostname(hostname);
@@ -306,21 +251,12 @@ impl DnsResolver {
             .cloned()
     }
 
-    fn set_cached_resolve_dns_for_hostname(
-        &mut self,
-        hostname: String,
-        cached_by_hostname: SingleFlight,
-    ) -> bool {
+    fn get_singleflight_by_hostname(&mut self, hostname: String) -> bool {
         let mut binding = self.write();
-        let sf_map_element = binding
-            .sf_by_hostname
-            .entry(hostname)
-            .or_insert(cached_by_hostname);
-        // check current request is the first request or not
-        if sf_map_element.is_first_req_in {
-            // all the requests later should not be the first one
-            sf_map_element.is_first_req_in = false;
-            // current request is the first request
+        if binding.in_progress.get(&hostname).is_none() {
+            // this is the first request
+            let my_notify = Arc::new(Notify::new());
+            binding.in_progress.entry(hostname).or_insert(my_notify);
             true
         } else {
             false
@@ -328,11 +264,11 @@ impl DnsResolver {
     }
 
     fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
-        self.write().sf_by_hostname.remove(hostname);
+        self.write().in_progress.remove(hostname);
     }
 
-    fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<SingleFlight> {
-        self.read().sf_by_hostname.get(hostname).cloned()
+    fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<Arc<Notify>> {
+        self.read().in_progress.get(hostname).cloned()
     }
 }
 
