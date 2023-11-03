@@ -153,7 +153,7 @@ impl SingleFlight {
 }
 
 impl DnsResolver {
-    pub fn new(dns_resolver_cfg: ResolverConfig, dns_resolver_opts: ResolverOpts) -> Self {
+    fn new(dns_resolver_cfg: ResolverConfig, dns_resolver_opts: ResolverOpts) -> Self {
         let resolved_dns = Arc::new(RwLock::new(ResolvedDnsStore::default()));
         Self {
             resolved_dns,
@@ -162,11 +162,11 @@ impl DnsResolver {
         }
     }
 
-    pub fn read(&self) -> RwLockReadGuard<'_, ResolvedDnsStore> {
+    fn read(&self) -> RwLockReadGuard<'_, ResolvedDnsStore> {
         self.resolved_dns.read().unwrap()
     }
 
-    pub fn write(&self) -> RwLockWriteGuard<'_, ResolvedDnsStore> {
+    fn write(&self) -> RwLockWriteGuard<'_, ResolvedDnsStore> {
         self.resolved_dns.write().unwrap()
     }
 
