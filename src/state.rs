@@ -72,24 +72,21 @@ impl fmt::Display for Upstream {
     }
 }
 
-/// The current state information for this proxy.
-#[derive(serde::Serialize, Default, Debug)]
-pub struct ProxyState {
+/// A Dns Resolver is responsible for the DNS resolving task for given hostnames
+#[derive(serde::Serialize, Default, Debug, Clone)]
+struct DnsResolver {
     #[serde(flatten)]
-    pub workloads: WorkloadStore,
+    resolved_dns: Arc<RwLock<ResolvedDnsStore>>,
 
-    #[serde(flatten)]
-    pub services: ServiceStore,
+    #[serde(skip_serializing)]
+    dns_resolver_cfg: ResolverConfig,
 
-    #[serde(flatten)]
-    pub policies: PolicyStore,
-
-    #[serde(flatten)]
-    resolved_dns: ResolvedDnsStore,
+    #[serde(skip_serializing)]
+    dns_resolver_opts: ResolverOpts,
 }
 
 /// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
-#[derive(serde::Serialize, Default, Debug)]
+#[derive(serde::Serialize, Default, Debug, Clone)]
 struct ResolvedDnsStore {
     // by_hostname is a map from hostname to resolved IP addresses for now.
     //
@@ -153,6 +150,214 @@ impl SingleFlight {
     fn notify_waiters(&self) {
         self.wait_for_notification.notify_waiters();
     }
+}
+
+impl DnsResolver {
+    pub fn new(
+        dns_resolver_cfg: ResolverConfig,
+        dns_resolver_opts: ResolverOpts,
+    ) -> Self {
+        let resolved_dns = Arc::new(RwLock::new(ResolvedDnsStore::default()));
+        Self {
+            resolved_dns,
+            dns_resolver_cfg,
+            dns_resolver_opts,
+        }
+    }
+
+    pub fn read(&self) -> RwLockReadGuard<'_, ResolvedDnsStore> {
+        self.resolved_dns.read().unwrap()
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<'_, ResolvedDnsStore> {
+        self.resolved_dns.write().unwrap()
+    }
+
+    async fn resolve_host(&mut self, hostname: &String, workload: &Workload) -> Option<ResolvedDns> {
+        // optimize so that if multiple requests to the same hostname come in at the same time,
+        // we don't start more than one background on-demand DNS task
+        if self
+            .get_cached_resolve_dns_for_hostname(hostname)
+            .is_none() 
+        {
+            let cached_resolve_dns = SingleFlight::new();
+            let is_the_first_req = self.set_cached_resolve_dns_for_hostname(
+                hostname.to_owned(),
+                cached_resolve_dns,
+            );
+
+            let element = self.get_cached_resolve_dns_for_hostname(hostname);
+            match element {
+                Some(sf_map_element) => {
+                    // Check if this is the first request of doing DNS task for hostname
+                    if is_the_first_req {
+                        // doing the dns tasks
+                        self.resolve_on_demand_dns(workload).await;
+                        // notify all waiters after the dns resolving task completed
+                        sf_map_element.notify_waiters();
+                    } else {
+                        // need to wait notification here if the dns resolving is ongoing
+                        //  and the current request is not the first one.
+                        sf_map_element.wait_for_notifying().await;
+                    }
+                }
+                None => {
+                    println!("can not find the element in map based on hostname");
+                }
+            }
+        } else {
+            let element = self.get_cached_resolve_dns_for_hostname(hostname);
+            match element {
+                Some(sf_map_element) => {
+                    // need to wait notifiction here if the dns resolving is ongoing
+                    // and the current request is not the first one.
+                    sf_map_element.wait_for_notifying().await;
+                }
+                None => {
+                    println!("can not find the element in map based on hostname");
+                }
+            }
+        }
+
+        // remove the element in sf_by_hostname because the DNS resolving task is completed
+        // and the IP addresses already are stored in Hashmap of by_hostname, moreover, there
+        // should be no pending notification if the element is removed.
+        self.remove_cached_resolve_dns_for_hostname(hostname);
+        // try to get it again
+        self.get_ips_for_hostname(hostname)
+    }
+
+    async fn resolve_on_demand_dns(&mut self, workload: &Workload) {
+        let workload_uid = workload.uid.to_owned();
+        let hostname = workload.hostname.to_owned();
+        trace!("dns workload async task started for {:?}", &hostname);
+
+        let resolver_result = TokioAsyncResolver::new(
+            self.dns_resolver_cfg.to_owned(),
+            self.dns_resolver_opts,
+            TokioHandle,
+        );
+        if resolver_result.is_err() {
+            warn!(
+                "system dns async resolution: error creating resolver for workload {} is: {:?}",
+                &workload_uid, resolver_result
+            );
+            return;
+        }
+        let r = resolver_result.unwrap();
+
+        let resp = r.lookup_ip(&hostname).await;
+        if resp.is_err() {
+            warn!(
+                "system dns async resolution: error response for workload {} is: {:?}",
+                &workload_uid, resp
+            );
+            return;
+        } else {
+            trace!(
+                "system dns async resolution: response for workload {} is: {:?}",
+                &workload_uid,
+                resp
+            );
+        }
+        let resp = resp.unwrap();
+        let mut dns_refresh_rate = std::time::Duration::from_secs(u64::MAX);
+        let ips = HashSet::from_iter(resp.as_lookup().record_iter().filter_map(|record| {
+            if record.rr_type().is_ip_addr() {
+                let record_ttl = u64::from(record.ttl());
+                if let Some(ipv4) = record.data().unwrap().as_a() {
+                    if record_ttl < dns_refresh_rate.as_secs() {
+                        dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
+                    }
+                    return Some(IpAddr::V4(*ipv4));
+                }
+                if let Some(ipv6) = record.data().unwrap().as_aaaa() {
+                    if record_ttl < dns_refresh_rate.as_secs() {
+                        dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
+                    }
+                    return Some(IpAddr::V6(*ipv6));
+                }
+                return None;
+            }
+            None
+        }));
+        if ips.is_empty() {
+            // if we have no DNS records with a TTL to lean on; lets try to refresh again in 60s
+            dns_refresh_rate = std::time::Duration::from_secs(60);
+        }
+        let now = std::time::Instant::now();
+        let rdns = ResolvedDns {
+            hostname: hostname.to_owned(),
+            ips,
+            initial_query: Some(now),
+            dns_refresh_rate,
+        };
+        self.set_ips_for_hostname(hostname, rdns);
+    }
+
+    fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
+        self.write()
+            .by_hostname
+            .insert(hostname, rdns);
+    }
+
+    fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
+        self.read()
+            .by_hostname
+            .get(hostname)
+            .filter(|rdns| {
+                rdns.initial_query.is_some()
+                    && rdns.initial_query.unwrap().elapsed() < rdns.dns_refresh_rate
+            })
+            .cloned()
+    }
+
+    fn set_cached_resolve_dns_for_hostname(
+        &mut self,
+        hostname: String,
+        cached_by_hostname: SingleFlight,
+    ) -> bool {
+        let mut binding = self.write();
+        let sf_map_element = binding
+            .sf_by_hostname
+            .entry(hostname)
+            .or_insert(cached_by_hostname);
+        // check current request is the first request or not
+        if sf_map_element.is_first_req_in {
+            // all the requests later should not be the first one
+            sf_map_element.is_first_req_in = false;
+            // current request is the first request
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
+        self.write()
+            .sf_by_hostname
+            .remove(hostname);
+    }
+
+    fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<SingleFlight> {
+        self.read()
+            .sf_by_hostname
+            .get(hostname)
+            .cloned()
+    }
+}
+
+/// The current state information for this proxy.
+#[derive(serde::Serialize, Default, Debug)]
+pub struct ProxyState {
+    #[serde(flatten)]
+    pub workloads: WorkloadStore,
+
+    #[serde(flatten)]
+    pub services: ServiceStore,
+
+    #[serde(flatten)]
+    pub policies: PolicyStore,
 }
 
 impl ProxyState {
@@ -252,10 +457,7 @@ pub struct DemandProxyState {
     demand: Option<Demander>,
 
     #[serde(skip_serializing)]
-    pub dns_resolver_cfg: ResolverConfig,
-
-    #[serde(skip_serializing)]
-    pub dns_resolver_opts: ResolverOpts,
+    dns_resolver: DnsResolver,
 }
 
 impl DemandProxyState {
@@ -265,11 +467,11 @@ impl DemandProxyState {
         dns_resolver_cfg: ResolverConfig,
         dns_resolver_opts: ResolverOpts,
     ) -> Self {
+        let dns_resolver = DnsResolver::new(dns_resolver_cfg, dns_resolver_opts);
         Self {
             state,
             demand,
-            dns_resolver_cfg,
-            dns_resolver_opts,
+            dns_resolver,
         }
     }
 
@@ -379,7 +581,7 @@ impl DemandProxyState {
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
-        let rdns = match state.get_ips_for_hostname(&workload.hostname) {
+        let rdns = match state.dns_resolver.get_ips_for_hostname(&hostname) {
             Some(r) => r,
             None => {
                 metrics
@@ -387,59 +589,9 @@ impl DemandProxyState {
                     .on_demand_dns_cache_misses
                     .get_or_create(&labels)
                     .inc();
-                // optimize so that if multiple requests to the same hostname come in at the same time,
-                // we don't start more than one background on-demand DNS task
-                if state
-                    .get_cached_resolve_dns_for_hostname(&hostname)
-                    .is_none()
-                {
-                    let cached_resolve_dns = SingleFlight::new();
-                    let is_the_first_req = state.set_cached_resolve_dns_for_hostname(
-                        hostname.to_owned(),
-                        cached_resolve_dns,
-                    );
 
-                    let element = state.get_cached_resolve_dns_for_hostname(&hostname);
-                    match element {
-                        Some(sf_map_element) => {
-                            // Check if this is the first request of doing DNS task for hostname
-                            if is_the_first_req {
-                                // doing the dns tasks
-                                Self::resolve_on_demand_dns(self.to_owned(), workload).await;
-                                // notify all waiters after the dns resolving task completed
-                                sf_map_element.notify_waiters();
-                            } else {
-                                // need to wait notification here if the dns resolving is ongoing
-                                //  and the current request is not the first one.
-                                sf_map_element.wait_for_notifying().await;
-                            }
-                        }
-                        None => {
-                            println!("can not find the element in map based on hostname");
-                        }
-                    }
-                } else {
-                    let element = state.get_cached_resolve_dns_for_hostname(&hostname);
-                    match element {
-                        Some(sf_map_element) => {
-                            // need to wait notifiction here if the dns resolving is ongoing
-                            // and the current request is not the first one.
-                            sf_map_element.wait_for_notifying().await;
-                        }
-                        None => {
-                            println!("can not find the element in map based on hostname");
-                        }
-                    }
-                }
-
-                // remove the element in sf_by_hostname because the DNS resolving task is completed
-                // and the IP addresses already are stored in Hashmap of by_hostname, moreover, there
-                // should be no pending notification if the element is removed.
-                state.remove_cached_resolve_dns_for_hostname(&hostname);
-
-                // try to get it again
-                let updated_rdns = state.get_ips_for_hostname(&hostname);
-                match updated_rdns {
+                let updated_rdns = state.dns_resolver.resolve_host(&hostname, workload);
+                match updated_rdns.await {
                     Some(rdns) => rdns,
                     None => {
                         return Err(Error::NoResolvedAddresses(workload_uid));
@@ -456,139 +608,7 @@ impl DemandProxyState {
             return Err(Error::EmptyResolvedAddresses(workload_uid));
         };
         Ok(*ip)
-    }
-
-    async fn resolve_on_demand_dns(mut state: DemandProxyState, workload: &Workload) {
-        let workload_uid = workload.uid.to_owned();
-        let hostname = workload.hostname.to_owned();
-        trace!("dns workload async task started for {:?}", &hostname);
-
-        let resolver_result = TokioAsyncResolver::new(
-            state.dns_resolver_cfg.to_owned(),
-            state.dns_resolver_opts,
-            TokioHandle,
-        );
-        if resolver_result.is_err() {
-            warn!(
-                "system dns async resolution: error creating resolver for workload {} is: {:?}",
-                &workload_uid, resolver_result
-            );
-            return;
-        }
-        let r = resolver_result.unwrap();
-
-        let resp = r.lookup_ip(&hostname).await;
-        if resp.is_err() {
-            warn!(
-                "system dns async resolution: error response for workload {} is: {:?}",
-                &workload_uid, resp
-            );
-            return;
-        } else {
-            trace!(
-                "system dns async resolution: response for workload {} is: {:?}",
-                &workload_uid,
-                resp
-            );
-        }
-        let resp = resp.unwrap();
-        let mut dns_refresh_rate = std::time::Duration::from_secs(u64::MAX);
-        let ips = HashSet::from_iter(resp.as_lookup().record_iter().filter_map(|record| {
-            if record.rr_type().is_ip_addr() {
-                let record_ttl = u64::from(record.ttl());
-                if let Some(ipv4) = record.data().unwrap().as_a() {
-                    if record_ttl < dns_refresh_rate.as_secs() {
-                        dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
-                    }
-                    return Some(IpAddr::V4(*ipv4));
-                }
-                if let Some(ipv6) = record.data().unwrap().as_aaaa() {
-                    if record_ttl < dns_refresh_rate.as_secs() {
-                        dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
-                    }
-                    return Some(IpAddr::V6(*ipv6));
-                }
-                return None;
-            }
-            None
-        }));
-        if ips.is_empty() {
-            // if we have no DNS records with a TTL to lean on; lets try to refresh again in 60s
-            dns_refresh_rate = std::time::Duration::from_secs(60);
-        }
-        let now = std::time::Instant::now();
-        let rdns = ResolvedDns {
-            hostname: hostname.to_owned(),
-            ips,
-            initial_query: Some(now),
-            dns_refresh_rate,
-        };
-        state.set_ips_for_hostname(hostname, rdns);
-    }
-
-    fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
-        self.state
-            .write()
-            .unwrap()
-            .resolved_dns
-            .by_hostname
-            .insert(hostname, rdns);
-    }
-
-    fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
-        self.state
-            .read()
-            .unwrap()
-            .resolved_dns
-            .by_hostname
-            .get(hostname)
-            .filter(|rdns| {
-                rdns.initial_query.is_some()
-                    && rdns.initial_query.unwrap().elapsed() < rdns.dns_refresh_rate
-            })
-            .cloned()
-    }
-
-    fn set_cached_resolve_dns_for_hostname(
-        &mut self,
-        hostname: String,
-        cached_by_hostname: SingleFlight,
-    ) -> bool {
-        let mut binding = self.state.write().unwrap();
-        let sf_map_element = binding
-            .resolved_dns
-            .sf_by_hostname
-            .entry(hostname)
-            .or_insert(cached_by_hostname);
-        // check current request is the first request or not
-        if sf_map_element.is_first_req_in {
-            // all the requests later should not be the first one
-            sf_map_element.is_first_req_in = false;
-            // current request is the first request
-            true
-        } else {
-            false
-        }
-    }
-
-    fn remove_cached_resolve_dns_for_hostname(&mut self, hostname: &String) {
-        self.state
-            .write()
-            .unwrap()
-            .resolved_dns
-            .sf_by_hostname
-            .remove(hostname);
-    }
-
-    fn get_cached_resolve_dns_for_hostname(&mut self, hostname: &String) -> Option<SingleFlight> {
-        self.state
-            .read()
-            .unwrap()
-            .resolved_dns
-            .sf_by_hostname
-            .get(hostname)
-            .cloned()
-    }
+    } 
 
     pub async fn fetch_workload_services(
         &self,
@@ -786,13 +806,13 @@ impl ProxyStateManager {
             local_client.run().await?;
         }
         let demand = xds_client.as_ref().and_then(AdsClient::demander);
+        let dns_resolver = DnsResolver::new(config.dns_resolver_cfg, config.dns_resolver_opts);
         Ok(ProxyStateManager {
             xds_client,
             state: DemandProxyState {
                 state,
                 demand,
-                dns_resolver_cfg: config.dns_resolver_cfg,
-                dns_resolver_opts: config.dns_resolver_opts,
+                dns_resolver,
             },
         })
     }
