@@ -138,7 +138,7 @@ impl DnsResolver {
     ) -> Option<ResolvedDns> {
         // optimize so that if multiple requests to the same hostname come in at the same time,
         // we don't start more than one background on-demand DNS task
-        let is_the_first_req = self.get_singleflight_by_hostname(hostname.to_owned());
+        let is_the_first_req = self.get_or_create_notify(hostname.to_owned());
 
         let element = self.get_cached_resolve_dns_for_hostname(hostname);
         match element {
@@ -251,7 +251,7 @@ impl DnsResolver {
             .cloned()
     }
 
-    fn get_singleflight_by_hostname(&mut self, hostname: String) -> bool {
+    fn get_or_create_notify(&mut self, hostname: String) -> bool {
         let mut binding = self.write();
         if binding.in_progress.get(&hostname).is_none() {
             // this is the first request
