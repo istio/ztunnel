@@ -88,12 +88,12 @@ struct DnsResolver {
 /// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
 #[derive(serde::Serialize, Default, Debug, Clone)]
 struct ResolvedDnsStore {
-    // by_hostname is a map from hostname to resolved IP addresses for now.
+    // resolved_hostname is a map from hostname to resolved IP addresses for now.
     //
     // in a future with support for per-pod DNS resolv.conf settings we may need
     // to change this to a map from source workload uid to resolved IP addresses.
     #[serde(skip_serializing)]
-    by_hostname: HashMap<String, ResolvedDns>,
+    resolved_hostname: HashMap<String, ResolvedDns>,
 
     // in_progress is a map which store the hostname and its SingleFlight properties to provides
     // a duplicate function call suppression mechanism for DNS resolving tasks.
@@ -161,7 +161,7 @@ impl DnsResolver {
         }
 
         // remove the element in in_progress because the DNS resolving task is completed
-        // and the IP addresses already are stored in Hashmap of by_hostname, moreover, there
+        // and the IP addresses already are stored in Hashmap of resolved_hostname, moreover, there
         // should be no pending notification if the element is removed.
         self.remove_cached_resolve_dns_for_hostname(hostname);
         // try to get it again
@@ -237,12 +237,12 @@ impl DnsResolver {
     }
 
     fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
-        self.write().by_hostname.insert(hostname, rdns);
+        self.write().resolved_hostname.insert(hostname, rdns);
     }
 
     fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
         self.read()
-            .by_hostname
+            .resolved_hostname
             .get(hostname)
             .filter(|rdns| {
                 rdns.initial_query.is_some()
