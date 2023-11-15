@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use ipnet::IpNet;
-use std::convert::Into;
+
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
@@ -25,7 +25,7 @@ use xds::istio::security::Match;
 use xds::istio::security::StringMatch as XdsStringMatch;
 
 use crate::identity::Identity;
-use crate::state::workload::WorkloadError::EnumParse;
+
 use crate::state::workload::{byte_to_ip, WorkloadError};
 use crate::xds;
 
@@ -269,15 +269,12 @@ pub enum RbacScope {
     WorkloadSelector,
 }
 
-impl TryFrom<Option<xds::istio::security::Scope>> for RbacScope {
-    type Error = WorkloadError;
-
-    fn try_from(value: Option<xds::istio::security::Scope>) -> Result<Self, Self::Error> {
+impl From<xds::istio::security::Scope> for RbacScope {
+    fn from(value: xds::istio::security::Scope) -> Self {
         match value {
-            Some(xds::istio::security::Scope::WorkloadSelector) => Ok(RbacScope::WorkloadSelector),
-            Some(xds::istio::security::Scope::Namespace) => Ok(RbacScope::Namespace),
-            Some(xds::istio::security::Scope::Global) => Ok(RbacScope::Global),
-            None => Err(EnumParse("unknown type".into())),
+            xds::istio::security::Scope::WorkloadSelector => RbacScope::WorkloadSelector,
+            xds::istio::security::Scope::Namespace => RbacScope::Namespace,
+            xds::istio::security::Scope::Global => RbacScope::Global,
         }
     }
 }
@@ -288,14 +285,11 @@ pub enum RbacAction {
     Deny,
 }
 
-impl TryFrom<Option<xds::istio::security::Action>> for RbacAction {
-    type Error = WorkloadError;
-
-    fn try_from(value: Option<xds::istio::security::Action>) -> Result<Self, Self::Error> {
+impl From<xds::istio::security::Action> for RbacAction {
+    fn from(value: xds::istio::security::Action) -> Self {
         match value {
-            Some(xds::istio::security::Action::Allow) => Ok(RbacAction::Allow),
-            Some(xds::istio::security::Action::Deny) => Ok(RbacAction::Deny),
-            None => Err(EnumParse("unknown type".into())),
+            xds::istio::security::Action::Allow => RbacAction::Allow,
+            xds::istio::security::Action::Deny => RbacAction::Deny,
         }
     }
 }
@@ -323,8 +317,8 @@ impl TryFrom<&XdsRbac> for Authorization {
         Ok(Authorization {
             name: resource.name,
             namespace: resource.namespace,
-            scope: RbacScope::try_from(xds::istio::security::Scope::from_i32(resource.scope))?,
-            action: RbacAction::try_from(xds::istio::security::Action::from_i32(resource.action))?,
+            scope: RbacScope::from(xds::istio::security::Scope::try_from(resource.scope)?),
+            action: RbacAction::from(xds::istio::security::Action::try_from(resource.action)?),
             rules,
         })
     }

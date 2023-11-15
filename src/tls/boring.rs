@@ -32,11 +32,11 @@ use boring::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
 };
 use boring::x509::verify::X509CheckFlags;
-use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyResult};
+use boring::x509::{self, X509StoreContext, X509StoreContextRef, X509VerifyError};
 use bytes::Bytes;
 use http_body_1::{Body, Frame};
 use hyper::body::Incoming;
-use hyper::{Request, Response, Uri};
+use hyper::Uri;
 use hyper_boring::HttpsConnector;
 use hyper_util::client::connect::HttpConnector;
 use itertools::Itertools;
@@ -46,6 +46,8 @@ use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tonic::body::BoxBody;
+use tower_hyper_http_body_compat::http02_request_to_http1;
+use tower_hyper_http_body_compat::http1_response_to_http02;
 use tower_hyper_http_body_compat::{HttpBody04ToHttpBody1, HttpBody1ToHttpBody04};
 use tracing::{error, info};
 
@@ -362,8 +364,8 @@ impl Body for DefaultIncoming {
     }
 }
 
-impl tower::Service<Request<BoxBody>> for TlsGrpcChannel {
-    type Response = Response<HttpBody1ToHttpBody04<DefaultIncoming>>;
+impl tower::Service<http_02::Request<BoxBody>> for TlsGrpcChannel {
+    type Response = http_02::Response<HttpBody1ToHttpBody04<DefaultIncoming>>;
     type Error = hyper_util::client::legacy::Error;
     // type Error = hyper::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
@@ -372,9 +374,8 @@ impl tower::Service<Request<BoxBody>> for TlsGrpcChannel {
         Ok(()).into()
     }
 
-    fn call(&mut self, req: Request<BoxBody>) -> Self::Future {
-        let mut req = req.map(HttpBody04ToHttpBody1::new);
-
+    fn call(&mut self, req: http_02::Request<BoxBody>) -> Self::Future {
+        let mut req = http02_request_to_http1(req.map(HttpBody04ToHttpBody1::new));
         let uri = Uri::builder()
             .scheme(self.uri.scheme().unwrap().to_owned())
             .authority(self.uri.authority().unwrap().to_owned())
@@ -385,9 +386,10 @@ impl tower::Service<Request<BoxBody>> for TlsGrpcChannel {
         let future = self.client.request(req);
         Box::pin(async move {
             let res = future.await?;
-            Ok(res
-                .map(DefaultIncoming::Some)
-                .map(HttpBody1ToHttpBody04::new))
+            Ok(http1_response_to_http02(
+                res.map(DefaultIncoming::Some)
+                    .map(HttpBody1ToHttpBody04::new),
+            ))
         })
     }
 }
@@ -475,7 +477,7 @@ enum Verifier {
 impl Verifier {
     fn base_verifier(verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         if !verified {
-            return Err(TlsError::Verification(ctx.error()));
+            ctx.verify_result()?;
         };
         Ok(())
     }
@@ -623,7 +625,7 @@ pub enum TlsError {
     #[error("tls handshake error: {0:?}")]
     Handshake(#[from] tokio_boring::HandshakeError<TcpStream>),
     #[error("tls verification error: {0}")]
-    Verification(X509VerifyResult),
+    Verification(#[from] X509VerifyError),
     #[error("certificate lookup error: {0} is not a known destination")]
     CertificateLookup(NetworkAddress),
     #[error("signing error: {0}")]

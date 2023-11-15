@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::identity::Identity;
-use crate::state::workload::WorkloadError::EnumParse;
+
 use crate::xds;
 use crate::xds::istio::workload::{Port, PortList};
 use bytes::Bytes;
@@ -44,14 +44,11 @@ pub enum Protocol {
     HBONE,
 }
 
-impl TryFrom<Option<xds::istio::workload::TunnelProtocol>> for Protocol {
-    type Error = WorkloadError;
-
-    fn try_from(value: Option<xds::istio::workload::TunnelProtocol>) -> Result<Self, Self::Error> {
+impl From<xds::istio::workload::TunnelProtocol> for Protocol {
+    fn from(value: xds::istio::workload::TunnelProtocol) -> Self {
         match value {
-            Some(xds::istio::workload::TunnelProtocol::Hbone) => Ok(Protocol::HBONE),
-            Some(xds::istio::workload::TunnelProtocol::None) => Ok(Protocol::TCP),
-            None => Err(EnumParse("unknown type".into())),
+            xds::istio::workload::TunnelProtocol::Hbone => Protocol::HBONE,
+            xds::istio::workload::TunnelProtocol::None => Protocol::TCP,
         }
     }
 }
@@ -65,14 +62,11 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
-impl TryFrom<Option<xds::istio::workload::WorkloadStatus>> for HealthStatus {
-    type Error = WorkloadError;
-
-    fn try_from(value: Option<xds::istio::workload::WorkloadStatus>) -> Result<Self, Self::Error> {
+impl From<xds::istio::workload::WorkloadStatus> for HealthStatus {
+    fn from(value: xds::istio::workload::WorkloadStatus) -> Self {
         match value {
-            Some(xds::istio::workload::WorkloadStatus::Healthy) => Ok(HealthStatus::Healthy),
-            Some(xds::istio::workload::WorkloadStatus::Unhealthy) => Ok(HealthStatus::Unhealthy),
-            None => Err(EnumParse("unknown type".into())),
+            xds::istio::workload::WorkloadStatus::Healthy => HealthStatus::Healthy,
+            xds::istio::workload::WorkloadStatus::Unhealthy => HealthStatus::Unhealthy,
         }
     }
 }
@@ -309,9 +303,9 @@ impl TryFrom<&XdsWorkload> for Workload {
             network_gateway: network_gw,
             gateway_address: None,
 
-            protocol: Protocol::try_from(xds::istio::workload::TunnelProtocol::from_i32(
+            protocol: Protocol::from(xds::istio::workload::TunnelProtocol::try_from(
                 resource.tunnel_protocol,
-            ))?,
+            )?),
 
             uid: resource.uid,
             name: resource.name,
@@ -340,9 +334,9 @@ impl TryFrom<&XdsWorkload> for Workload {
             canonical_name: resource.canonical_name,
             canonical_revision: resource.canonical_revision,
 
-            status: HealthStatus::try_from(xds::istio::workload::WorkloadStatus::from_i32(
+            status: HealthStatus::from(xds::istio::workload::WorkloadStatus::try_from(
                 resource.status,
-            ))?,
+            )?),
 
             native_tunnel: resource.native_tunnel,
             authorization_policies: resource.authorization_policies,
@@ -579,6 +573,8 @@ pub enum WorkloadError {
     EnumParse(String),
     #[error("nonempty gateway address is missing address")]
     MissingGatewayAddress,
+    #[error("decode error: {0}")]
+    DecodeError(#[from] prost::DecodeError),
 }
 
 #[cfg(test)]

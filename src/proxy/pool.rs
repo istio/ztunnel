@@ -43,7 +43,7 @@ impl Pool {
                     idle_timeout: Some(Duration::from_secs(90)),
                     max_idle_per_host: std::usize::MAX,
                 },
-                &hyper_util::Exec::Default,
+                TokioExec,
             ),
         }
     }
