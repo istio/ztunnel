@@ -365,7 +365,7 @@ async fn maybe_sleep_until(till: Option<Instant>) -> bool {
     }
 }
 
-enum Request {
+pub enum Request {
     Fetch(Identity, Priority),
     Forget(Identity),
 }

@@ -150,6 +150,9 @@ impl ProxyStateUpdater {
                     .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, None));
             }
 
+            // clear the corresponding identity from SecretManager
+            self.cert_fetcher.clear_cert(&prev.identity());
+
             // We removed a workload, no reason to attempt to remove a service with the same name
             return;
         }
