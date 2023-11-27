@@ -268,7 +268,6 @@ checksum = "b4682ae6287fcf752ecaabbfcc7b6f9b72aa33933dc23a554d853aea8eea8635"
 [[package]]
 name = "boring"
 version = "5.0.0"
-source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#2579aaaff331f4bb9e6c50706e5ed7563deb60fc"
 dependencies = [
  "bitflags 2.4.0",
  "boring-sys",
@@ -280,7 +279,6 @@ dependencies = [
 [[package]]
 name = "boring-sys"
 version = "5.0.0"
-source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#2579aaaff331f4bb9e6c50706e5ed7563deb60fc"
 dependencies = [
  "bindgen",
  "cmake",
@@ -1269,13 +1267,12 @@ dependencies = [
 [[package]]
 name = "hyper-boring"
 version = "5.0.0"
-source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#2579aaaff331f4bb9e6c50706e5ed7563deb60fc"
 dependencies = [
  "antidote",
  "boring",
  "http 1.0.0",
  "hyper 1.0.0",
- "hyper-util",
+ "hyper-util 0.1.0",
  "linked_hash_set",
  "once_cell",
  "tokio",
@@ -1299,7 +1296,26 @@ dependencies = [
 [[package]]
 name = "hyper-util"
 version = "0.0.0"
-source = "git+https://github.com/hyperium/hyper-util#e91fba80ac00464caea786be743274c4b7e958a0"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "http 1.0.0",
+ "http-body 1.0.0",
+ "hyper 1.0.0",
+ "pin-project-lite",
+ "socket2 0.5.3",
+ "tokio",
+ "tower",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "hyper-util"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61cec7646c446f27ed929e7bf1feace8c7d5e248109ba7fc716d846b27081fac"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -2771,7 +2787,6 @@ dependencies = [
 [[package]]
 name = "tokio-boring"
 version = "5.0.0"
-source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#2579aaaff331f4bb9e6c50706e5ed7563deb60fc"
 dependencies = [
  "boring",
  "boring-sys",
@@ -3357,7 +3372,7 @@ dependencies = [
  "http-types",
  "hyper 1.0.0",
  "hyper-boring",
- "hyper-util",
+ "hyper-util 0.0.0",
  "ipnet",
  "itertools 0.11.0",
  "libc",

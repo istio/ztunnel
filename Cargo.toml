@@ -41,7 +41,7 @@ drain = "0.1.1"
 futures = "0.3.12"
 gperftools = { version = "0.2.0", features = ["heap"], optional = true }
 hyper = { version = "1.0", features = ["full"] }
-hyper-util = { git = "https://github.com/hyperium/hyper-util", features = ["full"] }
+hyper-util = { git = "https://github.com/hyperium/hyper-util", branch = "features-cleanup", features = ["full"] }
 libc = "0.2.126"
 log = "0.4"
 once_cell = "1.16.0"
@@ -121,3 +121,11 @@ local-ip-address = "0.5.3"
 matches = "0.1.9"
 test-case = "3.0.0"
 #debug = true
+[patch."https://github.com/hyperium/hyper-util"]
+hyper-util = { path = "../../../../git/hyper-util" }
+
+[patch."https://github.com/howardjohn/boring"]
+hyper-boring = { path = "../../../../git/boring/hyper-boring" }
+boring = { path = "../../../../git/boring/boring" }
+tokio-boring = { path = "../../../../git/boring/tokio-boring" }
+boring-sys = { path = "../../../../git/boring/boring-sys" }

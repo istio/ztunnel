@@ -28,7 +28,7 @@ use hyper::client;
 use hyper::rt::Sleep;
 use hyper::server::conn::{http1, http2};
 use hyper::{Request, Response};
-use hyper_util::client::connect::HttpConnector;
+use hyper_util::client::legacy::connect::HttpConnector;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
 use tracing::{debug, info, warn};

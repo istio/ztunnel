@@ -1005,13 +1005,32 @@ dependencies = [
  "boring",
  "http 1.0.0",
  "hyper 1.0.0",
- "hyper-util",
+ "hyper-util 0.0.0 (git+https://github.com/hyperium/hyper-util)",
  "linked_hash_set",
  "once_cell",
  "tokio",
  "tokio-boring",
  "tower-layer",
  "tower-service",
+]
+
+[[package]]
+name = "hyper-util"
+version = "0.0.0"
+source = "git+https://github.com/hyperium/hyper-util?branch=features-cleanup#9514b49fea3aa0ad7c444953db798d0bd8b07cd8"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "http 1.0.0",
+ "http-body 1.0.0",
+ "hyper 1.0.0",
+ "pin-project-lite",
+ "socket2 0.5.3",
+ "tokio",
+ "tower",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -2960,7 +2979,7 @@ dependencies = [
  "http-types",
  "hyper 1.0.0",
  "hyper-boring",
- "hyper-util",
+ "hyper-util 0.0.0 (git+https://github.com/hyperium/hyper-util?branch=features-cleanup)",
  "ipnet",
  "itertools 0.11.0",
  "libc",

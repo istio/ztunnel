@@ -38,7 +38,7 @@ use http_body_1::{Body, Frame};
 use hyper::body::Incoming;
 use hyper::Uri;
 use hyper_boring::HttpsConnector;
-use hyper_util::client::connect::HttpConnector;
+use hyper_util::client::legacy::connect::HttpConnector;
 use itertools::Itertools;
 use rand::RngCore;
 use std::str::FromStr;
@@ -216,7 +216,7 @@ impl Certs {
 pub struct TlsGrpcChannel {
     uri: Uri,
     client: hyper_util::client::legacy::Client<
-        hyper_boring::HttpsConnector<hyper_util::client::connect::HttpConnector>,
+        hyper_boring::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
         BoxBody1,
     >,
 }

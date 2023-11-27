@@ -211,7 +211,7 @@ pub enum Error {
     PoolAlreadyConnecting,
 
     #[error("pool: {0}")]
-    Pool(#[from] hyper_util::client::pool::Error),
+    Pool(#[from] hyper_util::client::legacy::pool::Error),
 
     #[error("{0}")]
     Generic(Box<dyn std::error::Error + Send + Sync>),
