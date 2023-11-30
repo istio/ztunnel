@@ -21,6 +21,7 @@ use crate::version::BuildInfo;
 use crate::xds::LocalConfig;
 use crate::{signal, telemetry};
 use boring::asn1::Asn1TimeRef;
+use boring::base64;
 use boring::x509::X509;
 use bytes::Bytes;
 use drain::Watch;
@@ -186,10 +187,7 @@ async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 fn x509_to_pem(x509: &X509) -> String {
     match x509.to_pem() {
         Err(e) => format!("<pem construction error: {e}>"),
-        Ok(vec) => match String::from_utf8(vec) {
-            Err(e) => format!("<utf8 decode error: {e}>"),
-            Ok(s) => s,
-        },
+        Ok(vec) => base64::encode_block(&vec),
     }
 }
 
