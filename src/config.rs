@@ -40,6 +40,7 @@ const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
 const CA_ADDRESS: &str = "CA_ADDRESS";
+const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
@@ -53,6 +54,7 @@ const DEFAULT_DNS_PORT: u16 = 15053;
 const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
+const DEFAULT_TTL: i64 = 60 * 60 * 24; // 24 hours
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
@@ -139,6 +141,8 @@ pub struct Config {
     pub xds_address: Option<String>,
     /// Root cert for XDS TLS verification.
     pub xds_root_cert: RootCert,
+    /// TTL for CSR requests
+    pub secret_ttl: i64,
     /// YAML config for local XDS workloads
     #[serde(skip_serializing)]
     pub local_xds_config: Option<ConfigSource>,
@@ -335,6 +339,10 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         xds_root_cert,
         ca_address,
         ca_root_cert,
+        secret_ttl: match parse::<i64>(SECRET_TTL)? {
+            Some(ttl) => ttl,
+            _ => DEFAULT_TTL,
+        },
         local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
         proxy_metadata: pc.proxy_metadata,

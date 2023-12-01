@@ -31,6 +31,7 @@ use crate::xds::istio::ca::IstioCertificateRequest;
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
     pub enable_impersonated_identity: bool,
+    pub secret_ttl: i64,
 }
 
 impl CaClient {
@@ -39,6 +40,7 @@ impl CaClient {
         cert_provider: Box<dyn tls::ClientCertProvider>,
         auth: AuthSource,
         enable_impersonated_identity: bool,
+        secret_ttl: i64,
     ) -> Result<CaClient, Error> {
         let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?)?;
         // let client = IstioCertificateServiceClient::new(svc);
@@ -48,6 +50,7 @@ impl CaClient {
         Ok(CaClient {
             client,
             enable_impersonated_identity,
+            secret_ttl,
         })
     }
 }
@@ -65,7 +68,7 @@ impl CaClient {
         let csr = std::str::from_utf8(&csr).map_err(Error::Utf8)?.to_string();
         let req = IstioCertificateRequest {
             csr,
-            validity_duration: 60 * 60 * 24, // 24 hours
+            validity_duration: self.secret_ttl,
             metadata: {
                 if self.enable_impersonated_identity {
                     Some(Struct {
