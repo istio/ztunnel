@@ -12,20 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Error;
-use crate::baggage::parse_baggage_header;
-use crate::config::Config;
-use crate::identity::SecretManager;
-use crate::metrics::traffic::{ConnectionOpen, Reporter};
-use crate::metrics::{traffic, Metrics, Recorder};
-use crate::proxy;
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
-use crate::proxy::{ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
-use crate::rbac::Connection;
-use crate::socket::to_canonical;
-use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
-use crate::state::DemandProxyState;
-use crate::tls::TlsError;
+use std::fmt;
+use std::fmt::{Display, Formatter};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Instant;
+
 use bytes::Bytes;
 use drain::Watch;
 use futures::stream::StreamExt;
@@ -33,13 +25,25 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use std::fmt;
-use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Instant;
+
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
+
+use super::Error;
+use crate::baggage::parse_baggage_header;
+use crate::config::Config;
+use crate::identity::SecretManager;
+use crate::metrics::Recorder;
+use crate::proxy;
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
+use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::rbac::Connection;
+use crate::socket::to_canonical;
+
+use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
+use crate::state::DemandProxyState;
+use crate::tls::TlsError;
 
 pub(super) struct Inbound {
     cfg: Config,
@@ -111,7 +115,7 @@ impl Inbound {
                     .initial_connection_window_size(self.cfg.connection_window_size)
                     .max_frame_size(self.cfg.frame_size)
                     .serve_connection(
-                        socket,
+                        hyper_util::rt::TokioIo::new(socket),
                         service_fn(move |req| {
                             Self::serve_connect(
                                 state.clone(),
@@ -161,14 +165,14 @@ impl Inbound {
                 tokio::task::spawn(
                     (async move {
                         let _connection_close = metrics
-                            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+                            .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
 
                         let _extra_conn_close = extra_connection_metrics
                             .as_ref()
-                            .map(|co| metrics.increment_defer::<_, traffic::ConnectionClose>(co));
+                            .map(|co| metrics.increment_defer::<_, metrics::ConnectionClose>(co));
 
                         let transferred_bytes =
-                            traffic::BytesTransferred::from(&connection_metrics);
+                            metrics::BytesTransferred::from(&connection_metrics);
                         match request_type {
                             DirectPath(mut incoming) => {
                                 match proxy::relay(
@@ -182,7 +186,7 @@ impl Inbound {
                                     Ok(transferred) => {
                                         if let Some(co) = extra_connection_metrics.as_ref() {
                                             metrics.record(
-                                                &traffic::BytesTransferred::from(co),
+                                                &metrics::BytesTransferred::from(co),
                                                 transferred,
                                             );
                                         }
@@ -270,7 +274,9 @@ impl Inbound {
                     network: conn.dst_network.to_string(), // dst must be on our network
                     address: addr.ip(),
                 };
-                let Some(upstream) = state.fetch_workload(&dst_network_addr).await else {
+                let Some((upstream, upstream_service)) =
+                    state.fetch_workload_services(&dst_network_addr).await
+                else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
                         .status(StatusCode::NOT_FOUND)
@@ -326,23 +332,22 @@ impl Inbound {
                     }
                 };
 
-                let derived_source = traffic::DerivedWorkload {
-                    identity: conn.src_identity,
+                let derived_source = metrics::DerivedWorkload {
+                    identity: conn.src_identity.clone(),
                     cluster_id: baggage.cluster_id,
                     namespace: baggage.namespace,
                     workload_name: baggage.workload_name,
                     revision: baggage.revision,
                     ..Default::default()
                 };
+                let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
                 let connection_metrics = ConnectionOpen {
                     reporter: Reporter::destination,
                     source,
                     derived_source: Some(derived_source),
                     destination: Some(upstream),
-                    connection_security_policy: traffic::SecurityPolicy::mutual_tls,
-                    destination_service: None,
-                    destination_service_namespace: None,
-                    destination_service_name: None,
+                    connection_security_policy: metrics::SecurityPolicy::mutual_tls,
+                    destination_service: ds,
                 };
                 let status_code = match Self::handle_inbound(
                     Hbone(req),
@@ -397,11 +402,16 @@ impl Inbound {
         gateway_address: Option<&GatewayAddress>,
     ) -> bool {
         if let Some(gateway_address) = gateway_address {
-            let from_gateway = match state.lookup_address(&gateway_address.destination).await {
+            let from_gateway = match state.fetch_destination(&gateway_address.destination).await {
                 Some(address::Address::Workload(wl)) => Some(wl.identity()) == conn.src_identity,
                 Some(address::Address::Service(svc)) => {
-                    for (ip, _ep) in svc.endpoints.iter() {
-                        if state.fetch_workload(ip).await.map(|w| w.identity()) == conn.src_identity
+                    for (_ep_uid, ep) in svc.endpoints.iter() {
+                        // fetch workloads by workload UID since we may not have an IP for an endpoint (e.g., endpoint is just a hostname)
+                        if state
+                            .fetch_workload_by_uid(&ep.workload_uid)
+                            .await
+                            .map(|w| w.identity())
+                            == conn.src_identity
                         {
                             return true;
                         }
@@ -444,7 +454,7 @@ struct InboundCertProvider {
 }
 
 #[async_trait::async_trait]
-impl crate::tls::CertProvider for InboundCertProvider {
+impl crate::tls::ServerCertProvider for InboundCertProvider {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
@@ -471,7 +481,11 @@ impl crate::tls::CertProvider for InboundCertProvider {
 
 #[cfg(test)]
 mod test {
+    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+
     use super::*;
+    use crate::state::service::endpoint_uid;
+    use crate::state::workload::NamespacedHostname;
     use crate::{
         identity::Identity,
         state::{
@@ -491,11 +505,16 @@ mod test {
         let w = mock_default_gateway_workload();
         let s = mock_default_gateway_service();
         let mut state = state::ProxyState::default();
-        if let Err(err) = state.workloads.insert_workload(w) {
+        if let Err(err) = state.workloads.insert(w) {
             panic!("received error inserting workload: {}", err);
         }
         state.services.insert(s);
-        let state = state::DemandProxyState::new(Arc::new(RwLock::new(state)), None);
+        let state = state::DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
 
         let gateawy_id = Identity::Spiffe {
             trust_domain: "cluster.local".to_string(),
@@ -548,6 +567,7 @@ mod test {
             workload_type: "deployment".to_string(),
             canonical_name: "app".to_string(),
             canonical_revision: "".to_string(),
+            hostname: "".to_string(),
             node: "".to_string(),
             status: Default::default(),
             cluster_id: "Kubernetes".to_string(),
@@ -574,6 +594,7 @@ mod test {
             workload_type: "deployment".to_string(),
             canonical_name: "".to_string(),
             canonical_revision: "".to_string(),
+            hostname: "".to_string(),
             node: "".to_string(),
             status: Default::default(),
             cluster_id: "Kubernetes".to_string(),
@@ -592,20 +613,19 @@ mod test {
         let mut ports = HashMap::new();
         ports.insert(8080, 80);
         let mut endpoints = HashMap::new();
+        let addr = Some(NetworkAddress {
+            network: "".to_string(),
+            address: IpAddr::V4(mock_default_gateway_ipaddr()),
+        });
         endpoints.insert(
-            NetworkAddress {
-                network: "".to_string(),
-                address: IpAddr::V4(mock_default_gateway_ipaddr()),
-            },
+            endpoint_uid(&mock_default_gateway_workload().uid, addr.as_ref()),
             Endpoint {
-                vip: NetworkAddress {
-                    network: "".to_string(),
-                    address: IpAddr::V4(mock_default_gateway_ipaddr()),
+                workload_uid: mock_default_gateway_workload().uid,
+                service: NamespacedHostname {
+                    namespace: "gatewayns".to_string(),
+                    hostname: "gateway".to_string(),
                 },
-                address: NetworkAddress {
-                    network: "".to_string(),
-                    address: IpAddr::V4(mock_default_gateway_ipaddr()),
-                },
+                address: addr,
                 port: ports.clone(),
             },
         );
@@ -616,6 +636,7 @@ mod test {
             vips,
             ports,
             endpoints,
+            subject_alt_names: vec![],
         }
     }
 
@@ -625,7 +646,8 @@ mod test {
                 network: "".to_string(),
                 address: IpAddr::V4(mock_default_gateway_ipaddr()),
             }),
-            port: 15006,
+            hbone_mtls_port: 15008,
+            hbone_single_tls_port: Some(15003),
         }
     }
 
@@ -635,7 +657,8 @@ mod test {
                 namespace: "gatewayns".to_string(),
                 hostname: "gateway".to_string(),
             }),
-            port: 15006,
+            hbone_mtls_port: 15008,
+            hbone_single_tls_port: Some(15003),
         }
     }
 

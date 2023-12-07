@@ -27,8 +27,8 @@ use tokio::time::timeout;
 
 use ztunnel::config;
 use ztunnel::identity::mock::new_secret_manager;
-use ztunnel::test_helpers::app as testapp;
 use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
 use ztunnel::test_helpers::assert_eventually;
 use ztunnel::test_helpers::*;
 
@@ -105,7 +105,9 @@ async fn test_shutdown_drain() {
     // we shouldn't be shutdown yet
     assert!(shutdown_rx.try_recv().is_err());
     let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
-    let mut stream = ta.socks5_connect(dst).await;
+    let mut stream = ta
+        .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+        .await;
     read_write_stream(&mut stream).await;
     // Since we are connected, the app shouldn't shutdown
     shutdown.shutdown_now().await;
@@ -146,7 +148,9 @@ async fn test_shutdown_forced_drain() {
     // we shouldn't be shutdown yet
     assert!(shutdown_rx.try_recv().is_err());
     let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
-    let mut stream = ta.socks5_connect(dst).await;
+    let mut stream = ta
+        .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+        .await;
     const BODY: &[u8] = "hello world".as_bytes();
     stream.write_all(BODY).await.unwrap();
 
@@ -175,19 +179,37 @@ async fn test_quit_lifecycle() {
 }
 
 async fn run_request_test(target: &str, node: &str) {
+    run_requests_test(target, node, 1, None).await
+}
+
+async fn run_requests_test(
+    target: &str,
+    node: &str,
+    num_queries: u8,
+    metrics_assertions: Option<fn(metrics: ParsedMetrics)>,
+) {
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
-    let cfg = config::Config {
+    let cfg = add_nip_io_nameserver(config::Config {
         local_node: (!node.is_empty()).then(|| node.to_string()),
         ..test_config_with_port(echo_addr.port())
-    };
+    })
+    .await;
     tokio::spawn(echo.run());
     testapp::with_app(cfg, |app| async move {
         let dst = SocketAddr::from_str(target)
             .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
-        let mut stream = app.socks5_connect(dst).await;
-        read_write_stream(&mut stream).await;
+        for _ in 0..num_queries {
+            let mut stream = app
+                .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+                .await;
+            read_write_stream(&mut stream).await;
+        }
+        if let Some(assertions) = metrics_assertions {
+            let metrics = app.metrics().await.unwrap();
+            assertions(metrics);
+        }
     })
     .await;
 }
@@ -205,6 +227,47 @@ async fn test_tcp_request() {
 #[tokio::test]
 async fn test_vip_request() {
     run_request_test(&format!("{TEST_VIP}:80"), "").await;
+}
+
+fn on_demand_dns_assertions(metrics: ParsedMetrics) {
+    for metric in &[
+        ("istio_on_demand_dns_total"),
+        ("istio_on_demand_dns_cache_misses_total"),
+    ] {
+        let m = metrics.query(metric, &Default::default());
+        assert!(m.is_some(), "expected metric {metric}");
+        // expecting one cache hit and one cache miss
+        assert!(
+            m.to_owned().unwrap().len() == 1,
+            "expected metric {metric} to have len(1)"
+        );
+        let value = m.unwrap()[0].value.clone();
+        let expected = match *metric {
+            "istio_on_demand_dns_total" => prometheus_parse::Value::Untyped(2.0),
+            "istio_on_demand_dns_cache_misses_total" => prometheus_parse::Value::Untyped(1.0),
+            &_ => {
+                panic!("dev error; unexpected metric");
+            }
+        };
+        assert!(
+            value == expected,
+            "expected metric {metric} to be 1, was {:?}",
+            value
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_on_demand_dns_request() {
+    // first request should trigger on-demand DNS resolution
+    // second request should use cached DNS response
+    run_requests_test(
+        &format!("{TEST_VIP_DNS}:80"),
+        "",
+        2,
+        Some(on_demand_dns_assertions),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -231,12 +294,55 @@ async fn test_stats_exist() {
             ("istio_connection_terminations"),
             ("istio_tcp_connections_opened"),
             ("istio_tcp_connections_closed"),
+            // DNS.
+            ("istio_dns_requests"),
+            ("istio_dns_upstream_requests"),
+            ("istio_dns_upstream_failures"),
+            ("istio_dns_upstream_request_duration_seconds"),
         ] {
             assert!(
                 metrics.query(metric, &Default::default()).is_some(),
                 "expected metric {metric}"
             );
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_dns_metrics() {
+    let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
+    tokio::spawn(echo.run());
+    testapp::with_app(test_config(), |app| async move {
+        // Make a valid request that will be forwarded to the upstream resolver.
+        _ = app.dns_request("www.google.com.", true, false).await;
+
+        let metrics = app.metrics().await.unwrap();
+        assert_eq!(
+            metrics.query_sum("istio_dns_requests_total", &Default::default()),
+            1,
+            "metrics: {}",
+            metrics.dump()
+        );
+
+        // TODO(nmittler): Remaining require adding a workload for this client (127.0.0.1).
+        /*assert_eq!(
+            metrics.query_sum("istio_dns_upstream_requests_total", &Default::default()),
+            1,
+            "metrics: {}",
+            metrics.dump()
+        );
+        assert_eq!(
+            metrics.query_sum("istio_dns_upstream_failures_total", &Default::default()),
+            0,
+            "metrics: {}",
+            metrics.dump()
+        );
+        assert!(
+            !metrics.query("istio_dns_upstream_request_duration_seconds", &Default::default()).unwrap().is_empty(),
+            "metrics: {}",
+            metrics.dump()
+        );*/
     })
     .await;
 }
@@ -249,7 +355,9 @@ async fn test_tcp_connections_metrics() {
     tokio::spawn(echo.run());
     testapp::with_app(test_config(), |app| async move {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
-        let mut stream = app.socks5_connect(dst).await;
+        let mut stream = app
+            .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+            .await;
         read_write_stream(&mut stream).await;
 
         // We should have 1 open connection but 0 closed connections
@@ -305,7 +413,9 @@ async fn test_tcp_bytes_metrics() {
     let cfg = test_config();
     testapp::with_app(cfg, |app| async move {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
-        let mut stream = app.socks5_connect(dst).await;
+        let mut stream = app
+            .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+            .await;
         let size = read_write_stream(&mut stream).await as u64;
         drop(stream);
 

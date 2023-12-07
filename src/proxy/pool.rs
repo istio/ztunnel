@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
-use std::net::SocketAddr;
-use std::time::Duration;
-
 use bytes::Bytes;
 use futures::pin_mut;
 use futures_util::future;
@@ -26,6 +22,9 @@ use hyper::client::conn::http2;
 use hyper::http::{Request, Response};
 use hyper_util::client::pool;
 use hyper_util::client::pool::{Pool as HyperPool, Poolable, Pooled, Reservation};
+use std::future::Future;
+use std::net::SocketAddr;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::identity::Identity;
@@ -50,7 +49,9 @@ impl Pool {
     }
 }
 
+#[derive(Clone)]
 pub struct TokioExec;
+
 impl<F> hyper::rt::Executor<F> for TokioExec
 where
     F: std::future::Future + Send + 'static,
@@ -83,7 +84,7 @@ impl Poolable for Client {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct Key {
     pub src_id: Identity,
-    pub dst_id: Identity,
+    pub dst_id: Vec<Identity>,
     // In theory we can just use src,dst,node. However, the dst has a check that
     // the L3 destination IP matches the HBONE IP. This could be loosened to just assert they are the same identity maybe.
     pub dst: SocketAddr,
@@ -113,7 +114,7 @@ impl Pool {
             let Some(connecting) = self.pool.connecting(&key, ver) else {
                 // There is already an existing connection establishment in flight.
                 // Return an error so
-                return Err(Error::PoolAlreadyConnecting)
+                return Err(Error::PoolAlreadyConnecting);
             };
             let pc = Client(connect.await?);
             let pooled = self.pool.pooled(connecting, pc);
@@ -186,7 +187,10 @@ mod test {
                 tokio::task::spawn(async move {
                     // Finally, we bind the incoming connection to our `hello` service
                     if let Err(err) = crate::hyper_util::http2_server()
-                        .serve_connection(stream, service_fn(hello_world))
+                        .serve_connection(
+                            hyper_util::rt::TokioIo::new(stream),
+                            service_fn(hello_world),
+                        )
                         .await
                     {
                         println!("Error serving connection: {:?}", err);
@@ -197,14 +201,16 @@ mod test {
         let pool = Pool::new();
         let key = Key {
             src_id: Identity::default(),
-            dst_id: Identity::default(),
+            dst_id: vec![Identity::default()],
             dst: addr,
         };
         let connect = || async {
             let builder = http2::Builder::new(TokioExec);
 
             let tcp_stream = TcpStream::connect(addr).await?;
-            let (request_sender, connection) = builder.handshake(tcp_stream).await?;
+            let (request_sender, connection) = builder
+                .handshake(hyper_util::rt::TokioIo::new(tcp_stream))
+                .await?;
             // spawn a task to poll the connection and drive the HTTP state
             tokio::spawn(async move {
                 if let Err(e) = connection.await {

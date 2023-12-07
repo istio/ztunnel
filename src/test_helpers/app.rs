@@ -33,7 +33,7 @@ use tokio::net::{TcpSocket, TcpStream};
 
 use crate::app::Bound;
 use crate::identity::SecretManager;
-use crate::test_helpers::{localhost_error_message, TEST_WORKLOAD_SOURCE};
+use crate::test_helpers::localhost_error_message;
 use crate::*;
 
 use super::helpers::*;
@@ -41,9 +41,10 @@ use super::helpers::*;
 #[derive(Clone)]
 pub struct TestApp {
     pub admin_address: SocketAddr,
-    pub stats_address: SocketAddr,
+    pub metrics_address: SocketAddr,
     pub readiness_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
+    pub dns_proxy_address: Option<SocketAddr>,
     pub cert_manager: Arc<SecretManager>,
 }
 
@@ -51,9 +52,10 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
     fn from((app, cert_manager): (&Bound, Arc<SecretManager>)) -> Self {
         Self {
             admin_address: app.admin_address,
-            stats_address: app.stats_address,
-            proxy_addresses: app.proxy_addresses,
+            metrics_address: app.metrics_address,
+            proxy_addresses: app.proxy_addresses.unwrap(),
             readiness_address: app.readiness_address,
+            dns_proxy_address: app.dns_proxy_address,
             cert_manager,
         }
     }
@@ -99,7 +101,7 @@ impl TestApp {
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!("http://{}/metrics", self.stats_address))
+            .uri(format!("http://{}/metrics", self.metrics_address))
             .header("content-type", "application/json")
             .body(Empty::<Bytes>::new())
             .unwrap();
@@ -148,7 +150,7 @@ impl TestApp {
         panic!("failed to get ready (last: {last_err:?})");
     }
 
-    pub async fn socks5_connect(&self, addr: SocketAddr) -> TcpStream {
+    pub async fn socks5_connect(&self, addr: SocketAddr, source: IpAddr) -> TcpStream {
         // Always use IPv4 address. In theory, we can resolve `localhost` to pick to support any machine
         // However, we need to make sure the WorkloadStore knows about both families then.
         let socks_addr = with_ip(
@@ -158,10 +160,7 @@ impl TestApp {
         // Set source IP to TEST_WORKLOAD_SOURCE
         let socket = TcpSocket::new_v4().unwrap();
         socket
-            .bind(SocketAddr::from((
-                TEST_WORKLOAD_SOURCE.parse::<IpAddr>().unwrap(),
-                0,
-            )))
+            .bind(SocketAddr::from((source, 0)))
             .map_err(|e| anyhow!("{:?}. {}", e, localhost_error_message()))
             .unwrap();
 
@@ -169,6 +168,42 @@ impl TestApp {
         stream.set_nodelay(true).unwrap();
         socks5_connect(stream, addr).await.unwrap()
     }
+
+    pub async fn dns_request(
+        &self,
+        hostname: &str,
+        udp: bool,
+        ipv6: bool,
+    ) -> trust_dns_proto::xfer::DnsResponse {
+        let addr = self.dns_proxy_address.unwrap();
+        dns_request(addr, hostname, udp, ipv6).await
+    }
+}
+
+pub async fn dns_request(
+    addr: SocketAddr,
+    hostname: &str,
+    udp: bool,
+    ipv6: bool,
+) -> trust_dns_proto::xfer::DnsResponse {
+    use crate::test_helpers::dns::n;
+    use crate::test_helpers::dns::send_request;
+    use crate::test_helpers::dns::{new_tcp_client, new_udp_client};
+    use trust_dns_proto::rr::RecordType;
+
+    let mut client = if udp {
+        new_udp_client(addr).await
+    } else {
+        new_tcp_client(addr).await
+    };
+
+    let query_type = if ipv6 {
+        RecordType::AAAA
+    } else {
+        RecordType::A
+    };
+
+    send_request(&mut client, n(hostname), query_type).await
 }
 
 pub async fn socks5_connect(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Result<TcpStream> {

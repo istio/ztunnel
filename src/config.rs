@@ -24,16 +24,18 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
-use tokio::time;
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 use crate::identity;
 
+const ENABLE_PROXY: &str = "ENABLE_PROXY";
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
 const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
+const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
@@ -47,15 +49,19 @@ const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
+const DEFAULT_DNS_PORT: u16 = 15053;
 const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
+const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
+const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
 
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
+const DEFAULT_TOKEN_PROVIDER: &str = "./var/run/secrets/tokens/istio-token";
 const CERT_SYSTEM: &str = "SYSTEM";
 
 const PROXY_MODE_DEDICATED: &str = "dedicated";
@@ -92,6 +98,11 @@ pub enum ProxyMode {
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// If true, the HBONE proxy will be used.
+    pub proxy: bool,
+    /// If true, a DNS proxy will be used.
+    pub dns_proxy: bool,
+
     pub window_size: u32,
     pub connection_window_size: u32,
     pub frame_size: u32,
@@ -103,6 +114,8 @@ pub struct Config {
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
+    /// The socket address for the DNS proxy. Only applies if `dns_proxy` is true.
+    pub dns_proxy_addr: SocketAddr,
 
     /// The network of the node this ztunnel is running on.
     pub network: String,
@@ -114,6 +127,8 @@ pub struct Config {
     pub local_ip: Option<IpAddr>,
     /// The Cluster ID of the cluster that his ztunnel belongs to
     pub cluster_id: String,
+    /// The domain of the cluster that this ztunnel belongs to
+    pub cluster_domain: String,
 
     /// CA address to use. If fake_ca is set, this will be None.
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
@@ -136,7 +151,7 @@ pub struct Config {
     pub auth: identity::AuthSource,
     // How long ztunnel should wait for in-flight requesthandlers to finish processing
     // before giving up when ztunnel is self-terminating (when instructed via the Admin API)
-    pub self_termination_deadline: time::Duration,
+    pub self_termination_deadline: Duration,
 
     pub proxy_metadata: HashMap<String, String>,
 
@@ -148,6 +163,12 @@ pub struct Config {
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
+
+    // System dns resolver config used for on-demand ztunnel dns resolution
+    pub dns_resolver_cfg: ResolverConfig,
+
+    // System dns resolver opts used for on-demand ztunnel dns resolution
+    pub dns_resolver_opts: ResolverOpts,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -178,7 +199,7 @@ impl FromStr for GoDuration {
 }
 
 fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
-    match std::env::var(env) {
+    match env::var(env) {
         Ok(val) => val
             .parse()
             .map(|v| Some(v))
@@ -192,7 +213,7 @@ fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
 }
 
 fn parse_args() -> String {
-    let cli_args: Vec<String> = std::env::args().collect();
+    let cli_args: Vec<String> = env::args().collect();
     cli_args[1..].join(" ")
 }
 
@@ -209,7 +230,7 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
 }
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
-    let default_istiod_address = if std::env::var(KUBERNETES_SERVICE_HOST).is_ok() {
+    let default_istiod_address = if env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {
         "https://localhost:15012".to_string()
@@ -225,6 +246,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(id) => id,
         None => parse_default::<String>(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?,
     };
+    let cluster_domain = parse_default(CLUSTER_DOMAIN, DEFAULT_CLUSTER_DOMAIN.to_string())?;
 
     let fake_ca = parse_default(FAKE_CA, false)?;
     let ca_address = validate_uri(empty_to_none(if fake_ca {
@@ -255,7 +277,23 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
 
-    Ok(Config {
+    let auth = match std::fs::read(DEFAULT_TOKEN_PROVIDER) {
+        Ok(_) => {
+            identity::AuthSource::Token(PathBuf::from(DEFAULT_TOKEN_PROVIDER), cluster_id.clone())
+        }
+        Err(_) => identity::AuthSource::None,
+    };
+
+    use trust_dns_resolver::system_conf::read_system_conf;
+    let (dns_resolver_cfg, dns_resolver_opts) = read_system_conf().unwrap();
+
+    validate_config(Config {
+        proxy: parse_default(ENABLE_PROXY, true)?,
+        dns_proxy: pc
+            .proxy_metadata
+            .get(DNS_CAPTURE_METADATA)
+            .map_or(false, |value| value.to_lowercase() == "true"),
+
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
@@ -281,6 +319,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
+        dns_proxy_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
 
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
@@ -293,7 +332,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             None => ProxyMode::Shared,
         },
         local_ip: parse(INSTANCE_IP)?,
-        cluster_id: cluster_id.clone(),
+        cluster_id,
+        cluster_domain,
 
         xds_address,
         xds_root_cert,
@@ -304,10 +344,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         proxy_metadata: pc.proxy_metadata,
 
         fake_ca,
-        auth: identity::AuthSource::Token(
-            PathBuf::from(r"./var/run/secrets/tokens/istio-token"),
-            cluster_id,
-        ),
+        auth,
 
         num_worker_threads: parse_default(
             ZTUNNEL_WORKER_THREADS,
@@ -319,7 +356,25 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
+        dns_resolver_cfg,
+        dns_resolver_opts,
     })
+}
+
+fn validate_config(cfg: Config) -> Result<Config, Error> {
+    if cfg.dns_proxy && cfg.xds_on_demand {
+        return Err(Error::ProxyConfig(anyhow!(
+            "DNS proxy does not currently support on-demand mode"
+        )));
+    }
+
+    if !cfg.proxy && !cfg.dns_proxy {
+        return Err(Error::ProxyConfig(anyhow!(
+            "ztunnel run without any servers enabled"
+        )));
+    }
+
+    Ok(cfg)
 }
 
 // tries to parse the URI so we can fail early

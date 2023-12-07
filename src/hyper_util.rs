@@ -33,9 +33,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
 use tracing::{debug, info, warn};
 
-use crate::tls::{BoringTlsAcceptor, CertProvider};
+use crate::tls::{BoringTlsAcceptor, ServerCertProvider};
 
-pub fn tls_server<T: CertProvider + Clone + 'static>(
+pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
     acceptor: T,
     listener: TcpListener,
 ) -> impl Stream<Item = tokio_boring::SslStream<TcpStream>> {
@@ -56,6 +56,10 @@ pub fn tls_server<T: CertProvider + Clone + 'static>(
                     Some(s)
                 }
             }
+        })
+        .map(|conn| {
+            conn.get_ref().set_nodelay(true).unwrap();
+            conn
         })
 }
 
@@ -138,7 +142,7 @@ pub fn http1_server() -> http1::Builder {
     b
 }
 
-pub fn http2_client() -> client::conn::http2::Builder {
+pub fn http2_client() -> client::conn::http2::Builder<TokioExecutor> {
     let mut b = client::conn::http2::Builder::new(TokioExecutor);
     b.timer(TokioTimer);
     b
@@ -227,7 +231,7 @@ impl<S> Server<S> {
                         .header_read_timeout(Duration::from_secs(2))
                         .max_buf_size(8 * 1024)
                         .serve_connection(
-                            socket,
+                            hyper_util::rt::TokioIo::new(socket),
                             hyper::service::service_fn(move |req| {
                                 let state = state.clone();
 

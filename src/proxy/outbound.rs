@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
+
 use std::time::Instant;
 
 use boring::ssl::ConnectConfiguration;
@@ -26,11 +28,13 @@ use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
-use crate::metrics::traffic;
-use crate::metrics::traffic::Reporter;
 use crate::proxy::inbound::{Inbound, InboundConnect};
-use crate::proxy::pool;
+use crate::proxy::metrics::Reporter;
+use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+
+use crate::state::service::ServiceDescription;
+use crate::state::set_gateway_address;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 
@@ -153,19 +157,17 @@ impl OutboundConnection {
                 .as_ref()
                 .map(|w| w.native_tunnel)
                 .unwrap_or(false);
-        let connection_metrics = traffic::ConnectionOpen {
+        let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::source,
             derived_source: None,
             source: Some(req.source.clone()),
             destination: req.destination_workload.clone(),
             connection_security_policy: if req.protocol == Protocol::HBONE {
-                traffic::SecurityPolicy::mutual_tls
+                metrics::SecurityPolicy::mutual_tls
             } else {
-                traffic::SecurityPolicy::unknown
+                metrics::SecurityPolicy::unknown
             },
-            destination_service: None,
-            destination_service_namespace: None,
-            destination_service_name: None,
+            destination_service: req.destination_service.clone(),
         };
 
         if req.request_type == RequestType::DirectLocal && can_fastpath {
@@ -190,19 +192,17 @@ impl OutboundConnection {
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
             // same as above but inverted, this is the "inbound" metric
-            let inbound_connection_metrics = traffic::ConnectionOpen {
+            let inbound_connection_metrics = metrics::ConnectionOpen {
                 reporter: Reporter::destination,
                 derived_source: None,
                 source: Some(req.source.clone()),
                 destination: req.destination_workload.clone(),
                 connection_security_policy: if req.protocol == Protocol::HBONE {
-                    traffic::SecurityPolicy::mutual_tls
+                    metrics::SecurityPolicy::mutual_tls
                 } else {
-                    traffic::SecurityPolicy::unknown
+                    metrics::SecurityPolicy::unknown
                 },
-                destination_service: None,
-                destination_service_namespace: None,
-                destination_service_name: None,
+                destination_service: req.destination_service,
             };
             return Inbound::handle_inbound(
                 InboundConnect::DirectPath(stream),
@@ -216,13 +216,13 @@ impl OutboundConnection {
             .map_err(Error::Io);
         }
 
-        let transferred_bytes = traffic::BytesTransferred::from(&connection_metrics);
+        let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
 
         // _connection_close will record once dropped
         let _connection_close = self
             .pi
             .metrics
-            .increment_defer::<_, traffic::ConnectionClose>(&connection_metrics);
+            .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
         match req.protocol {
             Protocol::HBONE => {
                 info!(
@@ -230,10 +230,18 @@ impl OutboundConnection {
                     req.destination, req.gateway, req.request_type
                 );
 
-                let dst_identity = req
-                    .expected_identity
-                    .as_ref()
-                    .expect("hbone requires destination workload");
+                let mut allowed_sans: Vec<Identity> = Vec::new();
+                for san in req.upstream_sans.iter() {
+                    match Identity::from_str(san) {
+                        Ok(ident) => allowed_sans.push(ident.clone()),
+                        Err(err) => {
+                            warn!("error parsing SAN {}: {}", san, err)
+                        }
+                    }
+                }
+
+                allowed_sans.push(req.expected_identity.clone().unwrap());
+                let dst_identity = allowed_sans;
 
                 let pool_key = pool::Key {
                     src_id: req.source.identity(),
@@ -267,7 +275,7 @@ impl OutboundConnection {
                     tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
-                        .handshake(tls_stream)
+                        .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
                         .await
                         .map_err(Error::HttpHandshake)?;
                     // spawn a task to poll the connection and drive the HTTP state
@@ -356,7 +364,7 @@ impl OutboundConnection {
         let us = self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, target, self.pi.hbone_port)
+            .fetch_upstream(&source_workload.network, target)
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
@@ -365,43 +373,78 @@ impl OutboundConnection {
                 source: source_workload,
                 destination: target,
                 destination_workload: None,
+                destination_service: None,
                 expected_identity: None,
                 gateway: target,
                 direction: Direction::Outbound,
                 request_type: RequestType::Passthrough,
+                upstream_sans: vec![],
             });
         }
 
-        let us = us.unwrap();
+        let mut mutable_us = us.unwrap();
+        let workload_ip = self
+            .pi
+            .state
+            .load_balance(
+                &mutable_us.workload,
+                &source_workload,
+                self.pi.metrics.clone(),
+            )
+            .await?;
+
         // For case upstream server has enabled waypoint
-        match self.pi.state.find_waypoint(us.workload.clone()).await {
+        match self
+            .pi
+            .state
+            .fetch_waypoint(&mutable_us.workload, workload_ip)
+            .await
+        {
             Ok(None) => {} // workload doesn't have a waypoint; this is fine
             Ok(Some(waypoint_us)) => {
                 let waypoint_workload = waypoint_us.workload;
-                let wp_socket_addr = SocketAddr::new(
-                    self.pi.state.choose_workload_ip(&waypoint_workload)?,
-                    waypoint_us.port,
-                );
+                let waypoint_ip = self
+                    .pi
+                    .state
+                    .load_balance(
+                        &waypoint_workload,
+                        &source_workload,
+                        self.pi.metrics.clone(),
+                    )
+                    .await?;
+                let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     // Use the original VIP, not translated
                     destination: target,
-                    destination_workload: Some(us.workload),
+                    destination_workload: Some(mutable_us.workload),
+                    destination_service: mutable_us.destination_service.clone(),
                     expected_identity: Some(waypoint_workload.identity()),
                     gateway: wp_socket_addr,
                     // Let the client remote know we are on the inbound path.
                     direction: Direction::Inbound,
                     request_type: RequestType::ToServerWaypoint,
+                    upstream_sans: mutable_us.sans,
                 });
             }
             // we expected the workload to have a waypoint, but could not find one
             Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
         }
+
+        let us = match set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port) {
+            Ok(_) => mutable_us,
+            Err(e) => {
+                debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
+                return Err(Error::UnknownWaypoint(mutable_us.workload.workload_name));
+            }
+        };
+
         if us.workload.gateway_address.is_none() {
-            return Err(Error::NoGatewayAddress(Box::new(us.workload.clone())));
+            return Err(Error::NoGatewayAddress(Box::new(us.workload)));
         }
+
         // For case source client and upstream server are on the same node
         if !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
@@ -416,34 +459,31 @@ impl OutboundConnection {
             return Ok(Request {
                 protocol: Protocol::HBONE,
                 source: source_workload,
-                destination: SocketAddr::from((
-                    self.pi.state.choose_workload_ip(&us.workload)?,
-                    us.port,
-                )),
+                destination: SocketAddr::from((workload_ip, us.port)),
                 destination_workload: Some(us.workload.clone()),
+                destination_service: us.destination_service.clone(),
                 expected_identity: Some(us.workload.identity()),
                 gateway: SocketAddr::from((
                     us.workload
                         .gateway_address
                         .expect("gateway address confirmed")
                         .ip(),
-                    15008,
+                    self.pi.hbone_port,
                 )),
                 direction: Direction::Outbound,
                 // Sending to a node on the same node (ourselves).
                 // In the future this could be optimized to avoid a full network traversal.
                 request_type: RequestType::DirectLocal,
+                upstream_sans: us.sans,
             });
         }
         // For case no waypoint for both side and direct to remote node proxy
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
-            destination: SocketAddr::from((
-                self.pi.state.choose_workload_ip(&us.workload)?,
-                us.port,
-            )),
+            destination: SocketAddr::from((workload_ip, us.port)),
             destination_workload: Some(us.workload.clone()),
+            destination_service: us.destination_service.clone(),
             expected_identity: Some(us.workload.identity()),
             gateway: us
                 .workload
@@ -451,6 +491,7 @@ impl OutboundConnection {
                 .expect("gateway address confirmed"),
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
+            upstream_sans: us.sans,
         })
     }
 }
@@ -474,11 +515,14 @@ struct Request {
     // The intended destination workload. This is always the original intended target, even in the case
     // of other proxies along the path.
     destination_workload: Option<Workload>,
+    destination_service: Option<ServiceDescription>,
     // The identity we will assert for the next hop; this may not be the same as destination_workload
     // in the case of proxies along the path.
     expected_identity: Option<Identity>,
     gateway: SocketAddr,
     request_type: RequestType,
+
+    upstream_sans: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -510,16 +554,18 @@ pub async fn connect_tls(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+
     use super::*;
     use crate::config::Config;
+    use crate::test_helpers::helpers::test_proxy_metrics;
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, xds};
-    use bytes::Bytes;
-    use std::sync::Arc;
-    use std::time::Duration;
 
     async fn run_build_request(
         from: &str,
@@ -547,14 +593,14 @@ mod tests {
             node: "local-node".to_string(),
             ..Default::default()
         };
-        let state = new_proxy_state(vec![source, waypoint, xds], vec![], vec![]).unwrap();
+        let state = new_proxy_state(&[source, waypoint, xds], &[], &[]);
         let outbound = OutboundConnection {
             pi: ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
                 state,
                 hbone_port: 15008,
                 cfg,
-                metrics: Arc::new(Default::default()),
+                metrics: test_proxy_metrics(),
                 pool: pool::Pool::new(),
             },
             id: TraceParent::new(),
@@ -725,7 +771,8 @@ mod tests {
                             address: [127, 0, 0, 10].to_vec(),
                         },
                     )),
-                    port: 15008,
+                    hbone_mtls_port: 15008,
+                    hbone_single_tls_port: 15003,
                 }),
                 ..Default::default()
             },
@@ -754,7 +801,8 @@ mod tests {
                             address: [127, 0, 0, 10].to_vec(),
                         },
                     )),
-                    port: 15008,
+                    hbone_mtls_port: 15008,
+                    hbone_single_tls_port: 15003,
                 }),
                 ..Default::default()
             },

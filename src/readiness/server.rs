@@ -21,22 +21,32 @@ use hyper::body::Incoming;
 use hyper::{Request, Response};
 use itertools::Itertools;
 
-use crate::hyper_util::{empty_response, plaintext_response, Server};
+use crate::hyper_util;
 use crate::{config, readiness};
 
-pub struct Service {
-    s: Server<readiness::Ready>,
+pub struct Server {
+    s: hyper_util::Server<readiness::Ready>,
+    ready: readiness::Ready,
 }
 
-impl Service {
+impl Server {
     pub async fn new(
         config: config::Config,
-        ready: readiness::Ready,
         drain_rx: Watch,
+        ready: readiness::Ready,
     ) -> anyhow::Result<Self> {
-        Server::<readiness::Ready>::bind("readiness", config.readiness_addr, drain_rx, ready)
-            .await
-            .map(|s| Service { s })
+        hyper_util::Server::<readiness::Ready>::bind(
+            "readiness",
+            config.readiness_addr,
+            drain_rx,
+            ready.clone(),
+        )
+        .await
+        .map(|s| Server { s, ready })
+    }
+
+    pub fn ready(&self) -> readiness::Ready {
+        self.ready.clone()
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -47,7 +57,7 @@ impl Service {
         self.s.spawn(|ready, req| async move {
             match req.uri().path() {
                 "/healthz/ready" => Ok(handle_ready(&ready, req).await),
-                _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
+                _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
     }
@@ -58,9 +68,9 @@ async fn handle_ready(ready: &readiness::Ready, req: Request<Incoming>) -> Respo
         hyper::Method::GET => {
             let pending = ready.pending();
             if pending.is_empty() {
-                return plaintext_response(hyper::StatusCode::OK, "ready\n".into());
+                return hyper_util::plaintext_response(hyper::StatusCode::OK, "ready\n".into());
             }
-            plaintext_response(
+            hyper_util::plaintext_response(
                 hyper::StatusCode::INTERNAL_SERVER_ERROR,
                 format!(
                     "not ready, pending: {}\n",
@@ -68,6 +78,6 @@ async fn handle_ready(ready: &readiness::Ready, req: Request<Incoming>) -> Respo
                 ),
             )
         }
-        _ => empty_response(hyper::StatusCode::METHOD_NOT_ALLOWED),
+        _ => hyper_util::empty_response(hyper::StatusCode::METHOD_NOT_ALLOWED),
     }
 }

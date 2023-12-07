@@ -37,6 +37,9 @@ use bytes::Bytes;
 use http_body_1::{Body, Frame};
 use hyper::body::Incoming;
 use hyper::{Request, Response, Uri};
+use hyper_boring::HttpsConnector;
+use hyper_util::client::connect::HttpConnector;
+use itertools::Itertools;
 use rand::RngCore;
 use std::str::FromStr;
 use std::task::{Context, Poll};
@@ -63,7 +66,17 @@ pub fn cert_from(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Certs {
     let ztunnel_cert = ZtunnelCert::new(cert);
     let chain = chain
         .into_iter()
-        .map(|pem| ZtunnelCert::new(x509::X509::from_pem(pem).unwrap()))
+        .flat_map(|pem| x509::X509::stack_from_pem(pem).unwrap())
+        .dedup_by(|x, y| {
+            match (
+                x.digest(MessageDigest::sha256()),
+                y.digest(MessageDigest::sha256()),
+            ) {
+                (Ok(x), Ok(y)) => x.as_ref() == y.as_ref(),
+                _ => false,
+            }
+        })
+        .map(ZtunnelCert::new)
         .collect();
     Certs {
         cert: ztunnel_cert,
@@ -93,8 +106,8 @@ impl CsrOptions {
         let subject_alternative_name = SubjectAlternativeName::new()
             .uri(&self.san)
             .critical()
-            .build(&csr.x509v3_context(None))
-            .unwrap();
+            .build(&csr.x509v3_context(None))?;
+
         extensions.push(subject_alternative_name)?;
         csr.add_extensions(&extensions)?;
         csr.sign(&pkey, MessageDigest::sha256())?;
@@ -206,12 +219,61 @@ pub struct TlsGrpcChannel {
     >,
 }
 
+#[async_trait::async_trait]
+pub trait ClientCertProvider: Send + Sync {
+    async fn fetch_cert(&self) -> Result<ssl::SslConnectorBuilder, Error>;
+}
+
+#[derive(Clone, Debug)]
+pub enum FileClientCertProviderImpl {
+    RootCert(RootCert),
+    ClientBundle(Certs),
+}
+
+#[async_trait::async_trait]
+impl ClientCertProvider for FileClientCertProviderImpl {
+    async fn fetch_cert(&self) -> Result<ssl::SslConnectorBuilder, Error> {
+        match self {
+            FileClientCertProviderImpl::RootCert(root_cert) => {
+                let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+
+                conn.set_verify(ssl::SslVerifyMode::PEER);
+                conn.set_alpn_protos(Alpn::H2.encode())?;
+                conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
+                conn.set_max_proto_version(Some(ssl::SslVersion::TLS1_3))?;
+                match root_cert {
+                    RootCert::File(f) => {
+                        conn.set_ca_file(f).map_err(Error::InvalidRootCert)?;
+                    }
+                    RootCert::Static(b) => {
+                        conn.cert_store_mut()
+                            .add_cert(x509::X509::from_pem(b).map_err(Error::InvalidRootCert)?)
+                            .map_err(Error::InvalidRootCert)?;
+                    }
+                    RootCert::Default => {} // Already configured to use system root certs
+                }
+                return Ok(conn);
+            }
+            FileClientCertProviderImpl::ClientBundle(bundle) => {
+                let mut conn: ssl::SslConnectorBuilder =
+                    ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
+                match bundle.setup_ctx(&mut conn) {
+                    Ok(_) => {
+                        return Ok(conn);
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_tls_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
     let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
 
-    let uri = Uri::try_from(uri)?;
-    let is_localhost_call = uri.host() == Some("localhost");
     conn.set_verify(ssl::SslVerifyMode::PEER);
     conn.set_alpn_protos(Alpn::H2.encode())?;
     conn.set_min_proto_version(Some(ssl::SslVersion::TLS1_2))?;
@@ -227,9 +289,29 @@ pub fn grpc_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel
         }
         RootCert::Default => {} // Already configured to use system root certs
     }
-    let mut http = hyper_util::client::connect::HttpConnector::new();
+
+    grpc_connector(uri, conn)
+}
+
+/// grpc_connector provides a client TLS channel for gRPC requests.
+pub fn grpc_connector(
+    uri: String,
+    conn: ssl::SslConnectorBuilder,
+) -> Result<TlsGrpcChannel, Error> {
+    let uri = Uri::try_from(uri)?;
+    let is_localhost_call = uri.host() == Some("localhost");
+    let mut http: HttpConnector = HttpConnector::new();
+    // Set keepalives to match istio's Envoy bootstrap configuration:
+    // https://github.com/istio/istio/blob/a29d5c9c27d80bff31f218936f5a96759d8911c8/tools/packaging/common/envoy_bootstrap.json#L322C14-L322C28
+    //
+    // keepalive_interval and keepalive_retries match the linux default per Envoy docs:
+    // https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/core/v3/address.proto#config-core-v3-tcpkeepalive
+    http.set_keepalive(Some(Duration::from_secs(300)));
+    http.set_keepalive_interval(Some(Duration::from_secs(75)));
+    http.set_keepalive_retries(Some(9));
     http.enforce_http(false);
-    let mut https = hyper_boring::HttpsConnector::with_connector(http, conn)?;
+    let mut https: HttpsConnector<HttpConnector> =
+        hyper_boring::HttpsConnector::with_connector(http, conn)?;
     https.set_callback(move |cc, _| {
         if is_localhost_call {
             // Follow Istio logic to allow localhost calls: https://github.com/istio/istio/blob/373fc89518c986c9f48ed3cd891930da6fdc8628/pkg/istio-agent/xds_proxy.go#L735
@@ -341,15 +423,12 @@ impl Certs {
         Ok(conn.build())
     }
 
-    pub fn connector(&self, dest_id: &Identity) -> Result<ssl::SslConnector, Error> {
+    pub fn connector(&self, dest_id: Vec<Identity>) -> Result<ssl::SslConnector, Error> {
         let mut conn = ssl::SslConnector::builder(ssl::SslMethod::tls_client())?;
         self.setup_ctx(&mut conn)?;
 
         // client verifies SAN
-        conn.set_verify_callback(
-            Self::verify_mode(),
-            Verifier::San(dest_id.clone()).callback(),
-        );
+        conn.set_verify_callback(Self::verify_mode(), Verifier::San(dest_id).callback());
 
         Ok(conn.build())
     }
@@ -385,8 +464,8 @@ enum Verifier {
     // Does not verify an individual identity.
     None,
 
-    // Allows exactly one identity, making sure at least one of the presented certs matches that identity
-    San(Identity),
+    // Allows a list of accepted identities, making sure at least one of the presented certs matches one in the list
+    San(Vec<Identity>),
 
     // Allows all identities that share the same trust domain
     SanTrustDomain(Identity),
@@ -400,7 +479,7 @@ impl Verifier {
         Ok(())
     }
 
-    fn verifiy_san(identity: &Identity, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
+    fn verifiy_san(identities: &[Identity], ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         // internally, openssl tends to .expect the results of these methods.
         // TODO bubble up better error message
         let ssl_idx = X509StoreContext::ssl_idx().map_err(Error::SslError)?;
@@ -410,7 +489,7 @@ impl Verifier {
             .peer_certificate()
             .ok_or(TlsError::PeerCertError)?;
 
-        cert.verify_san(identity)
+        cert.verify_san(identities)
     }
 
     fn verifiy_san_trust_domain(
@@ -432,7 +511,7 @@ impl Verifier {
     fn verify(&self, verified: bool, ctx: &mut X509StoreContextRef) -> Result<(), TlsError> {
         Self::base_verifier(verified, ctx)?;
         match self {
-            Self::San(identity) => Verifier::verifiy_san(identity, ctx)?,
+            Self::San(identities) => Verifier::verifiy_san(identities, ctx)?,
             Self::SanTrustDomain(identity) => Verifier::verifiy_san_trust_domain(identity, ctx)?,
             Self::None => (),
         };
@@ -452,13 +531,13 @@ impl Verifier {
 }
 
 pub trait SanChecker {
-    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError>;
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError>;
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError>;
 }
 
 impl SanChecker for Certs {
-    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
-        self.cert.x509.verify_san(identity)
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError> {
+        self.cert.x509.verify_san(identities)
     }
 
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
@@ -477,12 +556,14 @@ pub fn extract_sans(cert: &x509::X509) -> Vec<Identity> {
 }
 
 impl SanChecker for x509::X509 {
-    fn verify_san(&self, identity: &Identity) -> Result<(), TlsError> {
+    fn verify_san(&self, identities: &[Identity]) -> Result<(), TlsError> {
         let sans = extract_sans(self);
-        sans.iter()
-            .find(|id| id == &identity)
-            .ok_or_else(|| TlsError::SanError(identity.to_owned(), sans.clone()))
-            .map(|_| ())
+        for ident in identities.iter() {
+            if let Some(_i) = sans.iter().find(|id| id == &ident) {
+                return Ok(());
+            }
+        }
+        Err(TlsError::SanError(identities.to_vec(), sans))
     }
 
     fn verify_san_trust_domain(&self, identity: &Identity) -> Result<(), TlsError> {
@@ -514,7 +595,7 @@ impl Alpn {
 }
 
 #[async_trait::async_trait]
-pub trait CertProvider: Send + Sync {
+pub trait ServerCertProvider: Send + Sync {
     async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<ssl::SslAcceptor, TlsError>;
 }
 
@@ -522,7 +603,7 @@ pub trait CertProvider: Send + Sync {
 pub struct ControlPlaneCertProvider(pub Certs);
 
 #[async_trait::async_trait]
-impl CertProvider for ControlPlaneCertProvider {
+impl ServerCertProvider for ControlPlaneCertProvider {
     async fn fetch_cert(&mut self, _: &TcpStream) -> Result<ssl::SslAcceptor, TlsError> {
         let acc = self.0.acceptor()?;
         Ok(acc)
@@ -530,7 +611,7 @@ impl CertProvider for ControlPlaneCertProvider {
 }
 
 #[derive(Clone)]
-pub struct BoringTlsAcceptor<F: CertProvider> {
+pub struct BoringTlsAcceptor<F: ServerCertProvider> {
     /// Acceptor is a function that determines the TLS context to use. As input, the FD of the client
     /// connection is provided.
     pub acceptor: F,
@@ -546,8 +627,8 @@ pub enum TlsError {
     CertificateLookup(NetworkAddress),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
-    #[error("san verification error: remote did not present the expected SAN ({0}), got {1:?}")]
-    SanError(Identity, Vec<Identity>),
+    #[error("san verification error: remote did not present the expected SAN ({0:?}), got {1:?}")]
+    SanError(Vec<Identity>, Vec<Identity>),
     #[error(
         "san verification error: remote did not present the expected trustdomain ({0}), got {1:?}"
     )]
@@ -562,7 +643,7 @@ pub enum TlsError {
 
 impl<F> tls_listener::AsyncTls<TcpStream> for BoringTlsAcceptor<F>
 where
-    F: CertProvider + Clone + 'static,
+    F: ServerCertProvider + Clone + 'static,
 {
     type Stream = tokio_boring::SslStream<TcpStream>;
     type Error = TlsError;
@@ -580,6 +661,8 @@ where
 }
 
 const TEST_CERT: &[u8] = include_bytes!("cert-chain.pem");
+#[cfg(test)]
+const TEST_WORKLOAD_CERT: &[u8] = include_bytes!("cert.pem");
 const TEST_PKEY: &[u8] = include_bytes!("key.pem");
 const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
 const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
@@ -661,8 +744,8 @@ fn generate_test_certs_at(
         .build()
         .unwrap();
     let ext_key_usage = ExtendedKeyUsage::new()
-        .client_auth()
         .server_auth()
+        .client_auth()
         .build()
         .unwrap();
     let authority_key_identifier = AuthorityKeyIdentifier::new()
@@ -766,7 +849,7 @@ pub mod tests {
     use crate::identity::Identity;
     use crate::tls::TestIdentity;
 
-    use super::generate_test_certs;
+    use super::*;
 
     #[test]
     #[cfg(feature = "fips")]
@@ -778,6 +861,63 @@ pub mod tests {
     #[cfg(not(feature = "fips"))]
     fn is_fips_disabled() {
         assert!(!boring::fips::enabled());
+    }
+
+    fn get_subject_entries(x: &x509::X509) -> Vec<(String, String)> {
+        x.subject_name()
+            .entries()
+            .map(|x| {
+                (
+                    x.object().to_string(),
+                    (x.data().as_utf8().unwrap().as_ref() as &str).to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_cert_from() {
+        // note that TEST_CERT contains more than one cert - this is how istiod serves it when
+        // intermediary cert is used..
+        let certs = cert_from(TEST_PKEY, TEST_WORKLOAD_CERT, vec![TEST_CERT, TEST_ROOT]);
+        // 3 certs that should be here are the istiod cert, intermediary cert and the root cert.
+
+        // validate the cert:
+        let entries = get_subject_entries(certs.x509());
+        assert_eq!(
+            entries,
+            vec![(
+                "commonName".to_string(),
+                "default.default.svc.cluster.local".to_string()
+            )]
+        );
+
+        // validate the cert chain:
+        assert_eq!(certs.iter_chain().count(), 3);
+        let mut iter = certs.iter_chain();
+        let entries = get_subject_entries(iter.next().unwrap());
+        assert_eq!(
+            entries,
+            vec![(
+                "organizationName".to_string(),
+                "istiod.cluster.local".to_string()
+            )]
+        );
+
+        let entries = get_subject_entries(iter.next().unwrap());
+        assert_eq!(
+            entries,
+            vec![(
+                "organizationName".to_string(),
+                "intermediary.cluster.local".to_string()
+            )]
+        );
+
+        let entries = get_subject_entries(iter.next().unwrap());
+        assert_eq!(
+            entries,
+            vec![("organizationName".to_string(), "cluster.local".to_string())]
+        );
     }
 
     #[test]

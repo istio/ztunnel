@@ -21,6 +21,7 @@ use crate::version::BuildInfo;
 use crate::xds::LocalConfig;
 use crate::{signal, telemetry};
 use boring::asn1::Asn1TimeRef;
+use boring::base64;
 use boring::x509::X509;
 use bytes::Bytes;
 use drain::Watch;
@@ -186,10 +187,7 @@ async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 fn x509_to_pem(x509: &X509) -> String {
     match x509.to_pem() {
         Err(e) => format!("<pem construction error: {e}>"),
-        Ok(vec) => match String::from_utf8(vec) {
-            Err(e) => format!("<utf8 decode error: {e}>"),
-            Ok(s) => s,
-        },
+        Ok(vec) => base64::encode_block(&vec),
     }
 }
 
@@ -299,10 +297,10 @@ async fn handle_config_dump(
         }
     }
 
-    let vec = serde_json::to_vec(&dump).unwrap();
+    let body = serde_json::to_string_pretty(&dump).unwrap();
     Response::builder()
         .status(hyper::StatusCode::OK)
-        .body(vec.into())
+        .body(body.into())
         .unwrap()
 }
 
@@ -320,7 +318,7 @@ hint: mod_name:\tthe module name, i.e. ztunnel::proxy
 async fn handle_logging(req: Request<Incoming>) -> Response<Full<Bytes>> {
     match *req.method() {
         hyper::Method::POST => {
-            let qp = req
+            let qp: HashMap<String, String> = req
                 .uri()
                 .query()
                 .map(|v| {
@@ -328,7 +326,7 @@ async fn handle_logging(req: Request<Incoming>) -> Response<Full<Bytes>> {
                         .into_owned()
                         .collect()
                 })
-                .unwrap_or_else(HashMap::new);
+                .unwrap_or_default();
             let level = qp.get("level").cloned();
             let reset = qp.get("reset").cloned();
             if level.is_some() || reset.is_some() {
@@ -365,7 +363,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
             match telemetry::set_level(reset, level) {
                 Ok(_) => list_loggers(),
                 Err(e) => plaintext_response(
-                    hyper::StatusCode::METHOD_NOT_ALLOWED,
+                    hyper::StatusCode::BAD_REQUEST,
                     format!("Failed to set new level: {}\n{}", e, HELP_STRING),
                 ),
             }
@@ -440,13 +438,15 @@ async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
+    use super::change_log_level;
     use super::dump_certs;
     use super::handle_config_dump;
     use super::ConfigDump;
+    use crate::admin::HELP_STRING;
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
     use crate::identity;
-    use crate::test_helpers::new_proxy_state;
+    use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
@@ -547,46 +547,53 @@ mod tests {
           {
             "ca_cert": [{
               "expiration_time": "2023-03-11T12:57:26Z",
-              "pem": "-----BEGIN CERTIFICATE-----\n\
-                      MIICdzCCAV+gAwIBAgIUZyT929swtB8OHmjRaTEaD6yjqg4wDQYJKoZIhvcNAQEL\n\
-                      BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAeFw0yMzAzMTEwNTU3MjZaFw0y\n\
-                      MzAzMTExMjU3MjZaMAAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARar2BmIYAg\n\
-                      vJmOrSpCeFQ79JPy8cw4+zEE8fqr57k/umMp5jXZEGBpedBIY+qfmJPXEira9E92\n\
-                      dSmkfK5AKMWxo4GbMIGYMA4GA1UdDwEB/wQEAwIFoDAdBgNVHSUEFjAUBggrBgEF\n\
-                      BQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADAfBgNVHSMEGDAWgBQ/JOH9Wq5L\n\
-                      sEflEYSgHtiE2Sme1TA4BgNVHREBAf8ELjAshipzcGlmZmU6Ly90cnVzdF9kb21h\n\
-                      aW4vbnMvbmFtZXNwYWNlL3NhL3NhLTAwDQYJKoZIhvcNAQELBQADggEBAGdXco2B\n\
-                      7kNK35Q20OsF0f26nJWLWzxjXWqs5LtuxgEnTF3IstnQgfp5R0K3Exl+U8fXcnV2\n\
-                      SO8GPNGqH/6ILlC9vkPXyOtZBC0FRFgUj4v6VajiTFmQc2gKY8cFIKhF0thqnM7r\n\
-                      L07C+KQI1EolGcfGpdO/49MhPC/F/LnqgKps9K4vXuAfKYmUmsPAeQvutre6gvIu\n\
-                      s0wHYfpHdHjHOuHnIaNl93uZny0CCz/gl1+9ptr3/fEGCOdVDIJy0nSrl0wDicpX\n\
-                      O0WeAc1UeK/LYBGeyfekZRxstll33TlIRI5qKyJqmv8xj8TdWcQzbM6iFGInGtaQ\n\
-                      AJauM4JePEb8Fqw=\n\
-                      -----END CERTIFICATE-----\n",
+              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNkekNDQVYrZ0F3SUJBZ0lVWn\
+                      lUOTI5c3d0QjhPSG1qUmFURWFENnlqcWc0d0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dE\
+                      RVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVT\
+                      NNalphRncweQpNekF6TVRFeE1qVTNNalphTUFBd1dUQVRCZ2NxaGtqT1BRSUJCZ2dx\
+                      aGtqT1BRTUJCd05DQUFSYXIyQm1JWUFnCnZKbU9yU3BDZUZRNzlKUHk4Y3c0K3pFRT\
+                      hmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTIKZFNta2ZLNUFL\
+                      TVd4bzRHYk1JR1lNQTRHQTFVZER3RUIvd1FFQXdJRm9EQWRCZ05WSFNVRUZqQVVCZ2\
+                      dyQmdFRgpCUWNEQVFZSUt3WUJCUVVIQXdJd0RBWURWUjBUQVFIL0JBSXdBREFmQmdO\
+                      VkhTTUVHREFXZ0JRL0pPSDlXcTVMCnNFZmxFWVNnSHRpRTJTbWUxVEE0QmdOVkhSRU\
+                      JBZjhFTGpBc2hpcHpjR2xtWm1VNkx5OTBjblZ6ZEY5a2IyMWgKYVc0dmJuTXZibUZ0\
+                      WlhOd1lXTmxMM05oTDNOaExUQXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBR2RYY2\
+                      8yQgo3a05LMzVRMjBPc0YwZjI2bkpXTFd6eGpYV3FzNUx0dXhnRW5URjNJc3RuUWdm\
+                      cDVSMEszRXhsK1U4ZlhjblYyClNPOEdQTkdxSC82SUxsQzl2a1BYeU90WkJDMEZSRm\
+                      dVajR2NlZhamlURm1RYzJnS1k4Y0ZJS2hGMHRocW5NN3IKTDA3QytLUUkxRW9sR2Nm\
+                      R3BkTy80OU1oUEMvRi9MbnFnS3BzOUs0dlh1QWZLWW1VbXNQQWVRdnV0cmU2Z3ZJdQ\
+                      pzMHdIWWZwSGRIakhPdUhuSWFObDkzdVpueTBDQ3ovZ2wxKzlwdHIzL2ZFR0NPZFZE\
+                      SUp5MG5Tcmwwd0RpY3BYCk8wV2VBYzFVZUsvTFlCR2V5ZmVrWlJ4c3RsbDMzVGxJUk\
+                      k1cUt5SnFtdjh4ajhUZFdjUXpiTTZpRkdJbkd0YVEKQUphdU00SmVQRWI4RnF3PQot\
+                      LS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
               "serial_number": "588850990443535479077311695632745359443207891470",
               "valid_from": "2023-03-11T05:57:26Z"
             }],
             "cert_chain": [{
               "expiration_time": "2296-12-24T18:31:28Z",
-              "pem": "-----BEGIN CERTIFICATE-----\n\
-                     MIIDEzCCAfugAwIBAgIUC+c/60e+F1eE+7VqxnaWcOOZnmEwDQYJKoZIhvcNAQEL\n\
-                     BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAgFw0yMzAzMTExODMxMjhaGA8y\n\
-                     Mjk2MTIyNDE4MzEyOFowGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDCCASIwDQYJ\n\
-                     KoZIhvcNAQEBBQADggEPADCCAQoCggEBAMeCTxPJtud0Uxw+CaaddWD7a+QEuQY+\n\
-                     BPTKJdnMej0sBMfUMbT16JLkYNFgrj1UVHHcpSoIHocp2sd32SY4bdbokQcop+Bj\n\
-                     tk55jQ46KLYsJgb2NwvYo1t8E1aetJqFGV7rmeZbFYeai+6q7iMjlbCGAu7/UnKJ\n\
-                     sdGnaJQgN8du0T1KDgjqKPyHqdsu9kbpCqiEXMRmw4/BEhFGzmID2oUDKB36duVb\n\
-                     dzSEm51QvgU5ILXIgyVrejN5CFsC+W+xjeOXLEztfHFUoqb3wWhkBuExmr81J2hG\n\
-                     W9pULJ2wkQgdfXP7gtMkB6EyKw/xIeaNmLzPIGrX01zQYIdZTuDwMY0CAwEAAaNT\n\
-                     MFEwHQYDVR0OBBYEFD8k4f1arkuwR+URhKAe2ITZKZ7VMB8GA1UdIwQYMBaAFD8k\n\
-                     4f1arkuwR+URhKAe2ITZKZ7VMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL\n\
-                     BQADggEBAKrnAeSsSSK3/8zx+hzj6SFXdJA9CQ02GEJ7hHrKijGWVYddal9dAbS5\n\
-                     tLd//qKO9uIsGety/Ok2bRQ6cqqMlgdNz3jmmrbSlYWmIXI0yHGmCiSazHsXVbEF\n\
-                     6Iwy3tcR4voXWKICWPh+C2cTgLmeZ0EuzFxq4wZnCf40wKoAJ9i1awSrBnE9jWtn\n\
-                     p4F4hWnJTpGky5dRALE0l/2Abrl38wgfM8r4IotmPThFKnFeIHU7bQ1rYAoqpbAh\n\
-                     Cv0BN5PjAQRWMk6boo3f0akS07nlYIVqXhxqcYnOgwkdlTtX9MqGIq26n8n1NWWw\n\
-                     nmKOjNsk6qRmulEgeGO4vxTvSJYb+hU=\n\
-                     -----END CERTIFICATE-----\n",
+              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQyt\
+                      jLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dERV\
+                      dNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXhNa\
+                      mhhR0E4eQpNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNS\
+                      bGNpNXNiMk5oYkRDQ0FTSXdEUVlKCktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0N\
+                      nZ0VCQU1lQ1R4UEp0dWQwVXh3K0NhYWRkV0Q3YStRRXVRWSsKQlBUS0pkbk1lajBzQk\
+                      1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3Ayc2QzMlNZNGJkYm9rUWNvcCtCa\
+                      gp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiRlllYWkrNnE3\
+                      aU1qbGJDR0F1Ny9VbktKCnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3F\
+                      pRVhNUm13NC9CRWhGR3ptSUQyb1VES0IzNmR1VmIKZHpTRW01MVF2Z1U1SUxYSWd5Vn\
+                      Jlak41Q0ZzQytXK3hqZU9YTEV6dGZIRlVvcWIzd1doa0J1RXhtcjgxSjJoRwpXOXBVT\
+                      Eoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94SWVhTm1MelBJR3JYMDF6UVlJZFpUdUR3TVkw\
+                      Q0F3RUFBYU5UCk1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFp\
+                      LWjdWTUI4R0ExVWRJd1FZTUJhQUZEOGsKNGYxYXJrdXdSK1VSaEtBZTJJVFpLWjdWTU\
+                      E4R0ExVWRFd0VCL3dRRk1BTUJBZjh3RFFZSktvWklodmNOQVFFTApCUUFEZ2dFQkFLc\
+                      m5BZVNzU1NLMy84engraHpqNlNGWGRKQTlDUTAyR0VKN2hIcktpakdXVllkZGFsOWRB\
+                      YlM1CnRMZC8vcUtPOXVJc0dldHkvT2syYlJRNmNxcU1sZ2ROejNqbW1yYlNsWVdtSVh\
+                      JMHlIR21DaVNhekhzWFZiRUYKNkl3eTN0Y1I0dm9YV0tJQ1dQaCtDMmNUZ0xtZVowRX\
+                      V6RnhxNHdabkNmNDB3S29BSjlpMWF3U3JCbkU5ald0bgpwNEY0aFduSlRwR2t5NWRSQ\
+                      UxFMGwvMkFicmwzOHdnZk04cjRJb3RtUFRoRktuRmVJSFU3YlExcllBb3FwYkFoCkN2\
+                      MEJONVBqQVFSV01rNmJvbzNmMGFrUzA3bmxZSVZxWGh4cWNZbk9nd2tkbFR0WDlNcUd\
+                      JcTI2bjhuMU5XV3cKbm1LT2pOc2s2cVJtdWxFZ2VHTzR2eFR2U0pZYitoVT0KLS0tLS\
+                      1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=",
               "serial_number": "67955938755654933561614970125599055831405010529",
               "valid_from": "2023-03-11T18:31:28Z"
             }],
@@ -596,46 +603,53 @@ mod tests {
           {
             "ca_cert": [{
               "expiration_time": "2023-03-11T13:57:26Z",
-              "pem": "-----BEGIN CERTIFICATE-----\n\
-                      MIICdzCCAV+gAwIBAgIUXIP+orIQwt6EPdKHWQSEL934n7EwDQYJKoZIhvcNAQEL\n\
-                      BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAeFw0yMzAzMTEwNjU3MjZaFw0y\n\
-                      MzAzMTExMzU3MjZaMAAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARar2BmIYAg\n\
-                      vJmOrSpCeFQ79JPy8cw4+zEE8fqr57k/umMp5jXZEGBpedBIY+qfmJPXEira9E92\n\
-                      dSmkfK5AKMWxo4GbMIGYMA4GA1UdDwEB/wQEAwIFoDAdBgNVHSUEFjAUBggrBgEF\n\
-                      BQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADAfBgNVHSMEGDAWgBQ/JOH9Wq5L\n\
-                      sEflEYSgHtiE2Sme1TA4BgNVHREBAf8ELjAshipzcGlmZmU6Ly90cnVzdF9kb21h\n\
-                      aW4vbnMvbmFtZXNwYWNlL3NhL3NhLTEwDQYJKoZIhvcNAQELBQADggEBACynE+zR\n\
-                      H+Ktsys58NP67DGeh+D2/uxn3vG4SVCOThMM7DTwqfPUQqP4qJUqSx/rtXP2peN4\n\
-                      daI+G1PZQ3a6hWdYdMCa2+qftf4VCaYYFF9V51z8MqXjrOh9yXYxOXL+z3gzglio\n\
-                      buGLo7ou7T3SCCdQfPDOw3vSQWedPW9M2zEVOuuD2ZNGyDF3pC+4Jq31n0N9SL62\n\
-                      NZ5BtZK4tJbAuXbsfrGBTfFLMwG5K9DKqzqoaZ4Iqr6iGc7cjxbw3nlRUpXe8732\n\
-                      JOJf2IvOU6z4LO7YntAaSFohhYXMpCFjQkJFiX6voNoSfnfLN8sSqRIDpuBZ9G8R\n\
-                      hozHmFldMalh6Ss=\n\
-                      -----END CERTIFICATE-----\n",
+              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNkekNDQVYrZ0F3SUJBZ0lVWEl\
+                      QK29ySVF3dDZFUGRLSFdRU0VMOTM0bjdFd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dERV\
+                      dNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTNNa\
+                      lphRncweQpNekF6TVRFeE16VTNNalphTUFBd1dUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtq\
+                      T1BRTUJCd05DQUFSYXIyQm1JWUFnCnZKbU9yU3BDZUZRNzlKUHk4Y3c0K3pFRThmcXI\
+                      1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTIKZFNta2ZLNUFLTVd4bz\
+                      RHYk1JR1lNQTRHQTFVZER3RUIvd1FFQXdJRm9EQWRCZ05WSFNVRUZqQVVCZ2dyQmdFR\
+                      gpCUWNEQVFZSUt3WUJCUVVIQXdJd0RBWURWUjBUQVFIL0JBSXdBREFmQmdOVkhTTUVH\
+                      REFXZ0JRL0pPSDlXcTVMCnNFZmxFWVNnSHRpRTJTbWUxVEE0QmdOVkhSRUJBZjhFTGp\
+                      Bc2hpcHpjR2xtWm1VNkx5OTBjblZ6ZEY5a2IyMWgKYVc0dmJuTXZibUZ0WlhOd1lXTm\
+                      xMM05oTDNOaExURXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBQ3luRSt6UgpIK0t0c\
+                      3lzNThOUDY3REdlaCtEMi91eG4zdkc0U1ZDT1RoTU03RFR3cWZQVVFxUDRxSlVxU3gv\
+                      cnRYUDJwZU40CmRhSStHMVBaUTNhNmhXZFlkTUNhMitxZnRmNFZDYVlZRkY5VjUxejh\
+                      NcVhqck9oOXlYWXhPWEwrejNnemdsaW8KYnVHTG83b3U3VDNTQ0NkUWZQRE93M3ZTUV\
+                      dlZFBXOU0yekVWT3V1RDJaTkd5REYzcEMrNEpxMzFuME45U0w2MgpOWjVCdFpLNHRKY\
+                      kF1WGJzZnJHQlRmRkxNd0c1SzlES3F6cW9hWjRJcXI2aUdjN2NqeGJ3M25sUlVwWGU4\
+                      NzMyCkpPSmYySXZPVTZ6NExPN1ludEFhU0ZvaGhZWE1wQ0ZqUWtKRmlYNnZvTm9TZm5\
+                      mTE44c1NxUklEcHVCWjlHOFIKaG96SG1GbGRNYWxoNlNzPQotLS0tLUVORCBDRVJUSU\
+                      ZJQ0FURS0tLS0tCg==",
               "serial_number": "528170730419860468572163268563070820131458817969",
               "valid_from": "2023-03-11T06:57:26Z"
             }],
             "cert_chain": [{
               "expiration_time": "2296-12-24T18:31:28Z",
-              "pem": "-----BEGIN CERTIFICATE-----\n\
-                      MIIDEzCCAfugAwIBAgIUC+c/60e+F1eE+7VqxnaWcOOZnmEwDQYJKoZIhvcNAQEL\n\
-                      BQAwGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDAgFw0yMzAzMTExODMxMjhaGA8y\n\
-                      Mjk2MTIyNDE4MzEyOFowGDEWMBQGA1UECgwNY2x1c3Rlci5sb2NhbDCCASIwDQYJ\n\
-                      KoZIhvcNAQEBBQADggEPADCCAQoCggEBAMeCTxPJtud0Uxw+CaaddWD7a+QEuQY+\n\
-                      BPTKJdnMej0sBMfUMbT16JLkYNFgrj1UVHHcpSoIHocp2sd32SY4bdbokQcop+Bj\n\
-                      tk55jQ46KLYsJgb2NwvYo1t8E1aetJqFGV7rmeZbFYeai+6q7iMjlbCGAu7/UnKJ\n\
-                      sdGnaJQgN8du0T1KDgjqKPyHqdsu9kbpCqiEXMRmw4/BEhFGzmID2oUDKB36duVb\n\
-                      dzSEm51QvgU5ILXIgyVrejN5CFsC+W+xjeOXLEztfHFUoqb3wWhkBuExmr81J2hG\n\
-                      W9pULJ2wkQgdfXP7gtMkB6EyKw/xIeaNmLzPIGrX01zQYIdZTuDwMY0CAwEAAaNT\n\
-                      MFEwHQYDVR0OBBYEFD8k4f1arkuwR+URhKAe2ITZKZ7VMB8GA1UdIwQYMBaAFD8k\n\
-                      4f1arkuwR+URhKAe2ITZKZ7VMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL\n\
-                      BQADggEBAKrnAeSsSSK3/8zx+hzj6SFXdJA9CQ02GEJ7hHrKijGWVYddal9dAbS5\n\
-                      tLd//qKO9uIsGety/Ok2bRQ6cqqMlgdNz3jmmrbSlYWmIXI0yHGmCiSazHsXVbEF\n\
-                      6Iwy3tcR4voXWKICWPh+C2cTgLmeZ0EuzFxq4wZnCf40wKoAJ9i1awSrBnE9jWtn\n\
-                      p4F4hWnJTpGky5dRALE0l/2Abrl38wgfM8r4IotmPThFKnFeIHU7bQ1rYAoqpbAh\n\
-                      Cv0BN5PjAQRWMk6boo3f0akS07nlYIVqXhxqcYnOgwkdlTtX9MqGIq26n8n1NWWw\n\
-                      nmKOjNsk6qRmulEgeGO4vxTvSJYb+hU=\n\
-                      -----END CERTIFICATE-----\n",
+              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQyt\
+                      jLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dERV\
+                      dNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXhNa\
+                      mhhR0E4eQpNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNS\
+                      bGNpNXNiMk5oYkRDQ0FTSXdEUVlKCktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0N\
+                      nZ0VCQU1lQ1R4UEp0dWQwVXh3K0NhYWRkV0Q3YStRRXVRWSsKQlBUS0pkbk1lajBzQk\
+                      1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3Ayc2QzMlNZNGJkYm9rUWNvcCtCa\
+                      gp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiRlllYWkrNnE3\
+                      aU1qbGJDR0F1Ny9VbktKCnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3F\
+                      pRVhNUm13NC9CRWhGR3ptSUQyb1VES0IzNmR1VmIKZHpTRW01MVF2Z1U1SUxYSWd5Vn\
+                      Jlak41Q0ZzQytXK3hqZU9YTEV6dGZIRlVvcWIzd1doa0J1RXhtcjgxSjJoRwpXOXBVT\
+                      Eoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94SWVhTm1MelBJR3JYMDF6UVlJZFpUdUR3TVkw\
+                      Q0F3RUFBYU5UCk1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFp\
+                      LWjdWTUI4R0ExVWRJd1FZTUJhQUZEOGsKNGYxYXJrdXdSK1VSaEtBZTJJVFpLWjdWTU\
+                      E4R0ExVWRFd0VCL3dRRk1BTUJBZjh3RFFZSktvWklodmNOQVFFTApCUUFEZ2dFQkFLc\
+                      m5BZVNzU1NLMy84engraHpqNlNGWGRKQTlDUTAyR0VKN2hIcktpakdXVllkZGFsOWRB\
+                      YlM1CnRMZC8vcUtPOXVJc0dldHkvT2syYlJRNmNxcU1sZ2ROejNqbW1yYlNsWVdtSVh\
+                      JMHlIR21DaVNhekhzWFZiRUYKNkl3eTN0Y1I0dm9YV0tJQ1dQaCtDMmNUZ0xtZVowRX\
+                      V6RnhxNHdabkNmNDB3S29BSjlpMWF3U3JCbkU5ald0bgpwNEY0aFduSlRwR2t5NWRSQ\
+                      UxFMGwvMkFicmwzOHdnZk04cjRJb3RtUFRoRktuRmVJSFU3YlExcllBb3FwYkFoCkN2\
+                      MEJONVBqQVFSV01rNmJvbzNmMGFrUzA3bmxZSVZxWGh4cWNZbk9nd2tkbFR0WDlNcUd\
+                      JcTI2bjhuMU5XV3cKbm1LT2pOc2s2cVJtdWxFZ2VHTzR2eFR2U0pZYitoVT0KLS0tLS\
+                      1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=",
               "serial_number": "67955938755654933561614970125599055831405010529",
               "valid_from": "2023-03-11T18:31:28Z"
             }],
@@ -667,20 +681,22 @@ mod tests {
 
         let wl = XdsWorkload {
             addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
-            hostname: "".to_string(), // must be omitted since we have an address
+            hostname: "".to_string(),
             waypoint: Some(XdsGatewayAddress {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
                     network: "defaultnw".to_string(),
                     address: [127, 0, 0, 10].to_vec(),
                 })),
-                port: 15008,
+                hbone_mtls_port: 15008,
+                hbone_single_tls_port: 15003,
             }),
             network_gateway: Some(XdsGatewayAddress {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
                     network: "defaultnw".to_string(),
                     address: [127, 0, 0, 11].to_vec(),
                 })),
-                port: 15008,
+                hbone_mtls_port: 15008,
+                hbone_single_tls_port: 15003,
             }),
             tunnel_protocol: Default::default(),
             uid: "uid".to_string(),
@@ -698,8 +714,8 @@ mod tests {
             authorization_policies: Vec::new(),
             native_tunnel: false,
             workload_type: XdsWorkloadType::Deployment.into(),
-            virtual_ips: HashMap::from([(
-                "127.0.1.1".to_string(),
+            services: HashMap::from([(
+                "ns/svc1.ns.svc.cluster.local".to_string(),
                 XdsPortList {
                     ports: vec![XdsPort {
                         service_port: 80,
@@ -774,7 +790,7 @@ mod tests {
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
-        let proxy_state = new_proxy_state(vec![wl], vec![svc], vec![auth]).unwrap();
+        let proxy_state = new_proxy_state(&[wl], &[svc], &[auth]);
 
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
@@ -810,8 +826,55 @@ mod tests {
         // the config dump at all from our internal types
         assert!(resp_str.contains("defaultnw/127.0.0.2"));
         // Check a waypoint
-        assert!(
-            resp_str.contains(r#"waypoint":{"destination":"defaultnw/127.0.0.10","port":15008}"#)
-        );
+        assert!(resp_str.contains(
+            r#"waypoint": {
+        "destination": "defaultnw/127.0.0.10",
+        "hboneMtlsPort": 15008,
+        "hboneSingleTlsPort": 15003
+      }"#
+        ));
+    }
+
+    // each of these tests assert that we can change the log level and the
+    // appropriate response string is returned.
+    //
+    // Note: tests need to be combined into one test function to be sure that
+    // individual tests don't affect each other by asynchronously changing
+    // the log level before the matching assert is called.
+    #[tokio::test(start_paused = true)]
+    async fn test_change_log_level() {
+        helpers::initialize_telemetry();
+
+        let resp = change_log_level(true, "");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is info\n");
+
+        let resp = change_log_level(true, "invalid_level");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains(HELP_STRING));
+
+        let resp = change_log_level(true, "debug");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is debug\n");
+
+        let resp = change_log_level(true, "warn");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is warn\n");
+
+        let resp = change_log_level(true, "error");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(resp_str, "current log level is error\n");
+
+        let resp = change_log_level(true, "trace");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is trace\n"));
+
+        let resp = change_log_level(true, "info");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is info\n"));
+
+        let resp = change_log_level(true, "off");
+        let resp_str = get_response_str(resp).await;
+        assert!(resp_str.contains("current log level is off\n"));
     }
 }

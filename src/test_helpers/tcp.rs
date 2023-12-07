@@ -23,6 +23,7 @@ use std::{cmp, io};
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper::Response;
+use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
@@ -203,14 +204,13 @@ impl HboneTestServer {
         while let Some(socket) = tls_stream.next().await {
             if let Err(err) = http2::Builder::new(TokioExecutor)
                 .serve_connection(
-                    socket,
+                    TokioIo::new(socket),
                     service_fn(move |req| async move {
                         info!("waypoint: received request");
-                        let mode = mode;
                         tokio::task::spawn(async move {
                             match hyper::upgrade::on(req).await {
                                 Ok(upgraded) => {
-                                    let (mut ri, mut wi) = tokio::io::split(upgraded);
+                                    let (mut ri, mut wi) = tokio::io::split(TokioIo::new(upgraded));
                                     // Signal we are the waypoint so tests can validate this
                                     wi.write_all(b"waypoint\n").await.unwrap();
                                     handle_stream(mode, &mut ri, &mut wi).await;

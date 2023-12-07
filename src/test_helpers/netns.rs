@@ -173,7 +173,7 @@ impl Drop for NamespaceManager {
         let Ok(state) = self.state.lock() else {
             // Panic in Drop is not good... so just skip
             error!("lock poisoned!");
-            return
+            return;
         };
         for (name, ns) in state.pods.iter() {
             drop_namespace(&format!("{}~{}~{name}", self.prefix, &ns.node));

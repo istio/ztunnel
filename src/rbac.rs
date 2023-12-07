@@ -247,7 +247,7 @@ impl StringMatch {
         // A prefix match for "*foo" means "spiffe://*foo".
         // So we strip it, and fail if it isn't present.
         let Some(check) = check.strip_prefix("spiffe://") else {
-            return false
+            return false;
         };
         self.matches(check)
     }

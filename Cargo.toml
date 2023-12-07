@@ -9,6 +9,7 @@ default = ["fips"]
 gperftools = ["dep:gperftools"]
 console = ["dep:console-subscriber"]
 fips = ["boring/fips", "hyper-boring/fips", "tokio-boring/fips"]
+testing = [] # Enables utilites supporting tests.
 
 [lib]
 path = "src/lib.rs"
@@ -30,17 +31,17 @@ async-stream = "0.3.3"
 async-trait = "0.1.58"
 atty = "0.2"
 # Fork will be dropped once Hyper goes 1.0.0
-hyper-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0" }
-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0" }
-tokio-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0" }
+hyper-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0-rc4" }
+boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0-rc4" }
+tokio-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0-rc4" }
 bytes = { version = "1", features = ["serde"] }
 console-subscriber = { version = "0.1.6", optional = true }
 drain = "0.1.1"
 futures = "0.3.12"
 gperftools = { version = "0.2.0", features = ["heap"], optional = true }
-hyper = { version = "1.0.0-rc.3", features = ["full"] }
+hyper = { version = "1.0.0-rc.4", features = ["full"] }
 # Pending https://github.com/hyperium/hyper-util/pull/25, https://github.com/hyperium/hyper-util/pull/24
-hyper-util = { git = "https://github.com/howardjohn/hyper-util", branch = "h2-timer-expose-exec", features = ["full"] }
+hyper-util = { git = "https://github.com/howardjohn/hyper-util", branch = "h2-timer-expose-exec-rc4", features = ["full"] }
 libc = "0.2.126"
 log = "0.4"
 once_cell = "1.16.0"
@@ -74,9 +75,15 @@ priority-queue = "1.3.0"
 http-body-util = "0.1.0-rc.2"
 http-body-04 = { package = "http-body", version = "0.4" }
 http-body-1 = { package = "http-body", version = "1.0.0-rc.2" }
-tower-hyper-http-body-compat = { version = "0", features = ["server", "http2"] }
+tower-hyper-http-body-compat = { version = "0.2" , features = ["server", "http2"] }
 futures-util = "0.3.26"
 chrono = "0.4.23"
+
+# DNS
+trust-dns-client = "0.22.0"
+trust-dns-proto = "0.22.0"
+trust-dns-resolver = "0.22.0"
+trust-dns-server = { version = "0.22.1", features = [ "trust-dns-resolver" ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1.0"
@@ -100,8 +107,12 @@ lto = false
 incremental = true
 
 [dev-dependencies]
+# Enable testing utils on this crate.
+ztunnel = { version = "0.0.0", path = ".", features = [ "testing" ] }
+
 criterion = { version = "0.4.0", features = ["async_tokio", "html_reports"] }
 diff = "0.1.13"
+local-ip-address = "0.5.3"
 matches = "0.1.9"
 test-case = "3.0.0"
 #debug = true

@@ -12,10 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use crate::xds::istio::security::Authorization as XdsAuthorization;
+use crate::xds::istio::workload::Address as XdsAddress;
+use async_trait::async_trait;
+use futures::Stream;
+use futures::StreamExt;
+use hyper::server::conn::http2;
+use hyper_util::rt::TokioIo;
+use prometheus_client::registry::Registry;
+use tokio::sync::{mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Response, Status, Streaming};
+use tracing::{error, info, warn};
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+
 use super::test_config_with_port_xds_addr_and_root_cert;
 use crate::config::RootCert;
 use crate::hyper_util::TokioExecutor;
-use crate::metrics::Metrics;
+use crate::metrics::sub_registry;
 use crate::readiness::Ready;
 use crate::state::{DemandProxyState, ProxyState};
 use crate::tls;
@@ -26,19 +44,6 @@ use crate::xds::service::discovery::v3::{
     DeltaDiscoveryRequest, DeltaDiscoveryResponse, DiscoveryRequest, DiscoveryResponse,
 };
 use crate::xds::{self, AdsClient, ProxyStateUpdater};
-use async_trait::async_trait;
-use futures::Stream;
-use futures::StreamExt;
-use hyper::server::conn::http2;
-use log::info;
-use prometheus_client::registry::Registry;
-use std::pin::Pin;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
-use tokio::sync::{mpsc, watch};
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Response, Status, Streaming};
-use tracing::{error, warn};
 
 pub struct AdsServer {
     rx: watch::Receiver<Result<DeltaDiscoveryResponse, tonic::Status>>,
@@ -70,7 +75,7 @@ impl AdsServer {
                 let srv = srv.clone();
                 if let Err(err) = http2::Builder::new(TokioExecutor)
                     .serve_connection(
-                        socket,
+                        TokioIo::new(socket),
                         tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
                     )
                     .await
@@ -80,24 +85,32 @@ impl AdsServer {
             }
         });
 
-        let ready = Ready::new();
         let mut registry = Registry::default();
-        let metrics = Arc::new(Metrics::from(&mut registry));
+        let istio_registry = sub_registry(&mut registry);
+        let metrics = xds::metrics::Metrics::new(istio_registry);
+
+        let ready = Ready::new();
         let cfg = test_config_with_port_xds_addr_and_root_cert(
             80,
             Some(listener_addr_string),
             Some(root_cert),
+            None,
         );
 
         let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
-        let dstate = DemandProxyState::new(state.clone(), None);
+        let dstate = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         let store_updater = ProxyStateUpdater::new_no_fetch(state);
-
-        let xds_client = xds::Config::new(cfg)
-            .with_address_handler(store_updater.clone())
-            .with_authorization_handler(store_updater)
-            .watch(xds::ADDRESS_TYPE.into())
-            .watch(xds::AUTHORIZATION_TYPE.into())
+        let tls_client_fetcher = Box::new(tls::FileClientCertProviderImpl::RootCert(
+            cfg.xds_root_cert.clone(),
+        ));
+        let xds_client = xds::Config::new(cfg, tls_client_fetcher)
+            .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, store_updater.clone())
+            .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, store_updater)
             .build(metrics, ready.register_task("ads client"));
 
         (tx, xds_client, dstate)

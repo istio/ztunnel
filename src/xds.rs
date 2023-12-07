@@ -12,23 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod client;
-mod types;
-
-use self::service::discovery::v3::DeltaDiscoveryRequest;
-use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
-use crate::config::ConfigSource;
-use crate::rbac;
-use crate::rbac::Authorization;
-use crate::state::service::{Endpoint, Service};
-use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
-use crate::state::ProxyState;
-use crate::xds;
-pub use client::*;
 use std::collections::HashMap;
+use std::error::Error as StdErr;
+use std::fmt;
+use std::fmt::Formatter;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, trace, warn};
+
+pub use client::*;
+pub use metrics::*;
 pub use types::*;
 use xds::istio::security::Authorization as XdsAuthorization;
 use xds::istio::workload::address::Type as XdsType;
@@ -37,17 +32,52 @@ use xds::istio::workload::PortList;
 use xds::istio::workload::Service as XdsService;
 use xds::istio::workload::Workload as XdsWorkload;
 
+use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
+use crate::config::ConfigSource;
+use crate::rbac;
+use crate::rbac::Authorization;
+use crate::state::service::{endpoint_uid, Endpoint, Service};
+use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
+use crate::state::ProxyState;
+use crate::{tls, xds};
+
+use self::service::discovery::v3::DeltaDiscoveryRequest;
+
+mod client;
+pub mod metrics;
+mod types;
+
+struct DisplayStatus<'a>(&'a tonic::Status);
+
+impl<'a> fmt::Display for DisplayStatus<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = &self.0;
+        write!(f, "status: {:?}, message: {:?}", s.code(), s.message())?;
+        if !s.details().is_empty() {
+            if let Ok(st) = std::str::from_utf8(s.details()) {
+                write!(f, ", details: {st}")?;
+            }
+        }
+        if let Some(src) = s.source().and_then(|s| s.source()) {
+            write!(f, ", source: {src}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("gRPC error ({}): {}", .0.code(), .0.message())]
+    #[error("gRPC error {}", DisplayStatus(.0))]
     GrpcStatus(#[from] tonic::Status),
-    #[error("gRPC connection error ({}): {}", .0.code(), .0.message())]
+    #[error("gRPC connection error:{}", DisplayStatus(.0))]
     Connection(#[source] tonic::Status),
     /// Attempted to send on a MPSC channel which has been canceled
     #[error(transparent)]
     RequestFailure(#[from] Box<mpsc::error::SendError<DeltaDiscoveryRequest>>),
     #[error("failed to send on demand resource")]
     OnDemandSend(),
+    #[error("TLS Error: {0}")]
+    TLSError(#[from] tls::Error),
 }
 
 /// Updates the [ProxyState] from XDS.
@@ -72,6 +102,8 @@ impl ProxyStateUpdater {
     }
 
     pub fn insert_workload(&self, w: XdsWorkload) -> anyhow::Result<()> {
+        debug!("handling insert {}", w.uid);
+
         // Convert the workload.
         let workload = Workload::try_from(&w)?;
 
@@ -81,7 +113,7 @@ impl ProxyStateUpdater {
         // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
         // But we shouldn't include them in load balancing we do to Services.
         let mut endpoints = if workload.status == HealthStatus::Healthy {
-            service_endpoints(&workload, &w.virtual_ips)?
+            service_endpoints(&workload, &w.services)?
         } else {
             Vec::new()
         };
@@ -91,7 +123,7 @@ impl ProxyStateUpdater {
 
         // Lock and upstate the stores.
         let mut state = self.state.write().unwrap();
-        state.workloads.insert_workload(workload)?;
+        state.workloads.insert(workload)?;
         while let Some(endpoint) = endpoints.pop() {
             state.services.insert_endpoint(endpoint);
         }
@@ -100,22 +132,29 @@ impl ProxyStateUpdater {
     }
 
     pub fn remove(&self, xds_name: &String) {
-        info!("handling delete {}", xds_name);
+        debug!("handling delete {}", xds_name);
         let mut state = self.state.write().unwrap();
 
         // remove workload by UID; if xds_name is a service then this will no-op
-        if let Some(prev) = state.workloads.remove_workload(xds_name) {
+        if let Some(prev) = state.workloads.remove(xds_name) {
             // Also remove service endpoints for the workload.
             for wip in prev.workload_ips.iter() {
                 let prev_addr = &network_addr(&prev.network, *wip);
-                state.services.remove_endpoint(prev_addr);
+                state
+                    .services
+                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, Some(prev_addr)));
+            }
+            if prev.workload_ips.is_empty() {
+                state
+                    .services
+                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, None));
             }
 
             // We removed a workload, no reason to attempt to remove a service with the same name
             return;
         }
 
-        let Some((namespace, hostname)) = xds_name.split_once('/') else {
+        let Ok(name) = NamespacedHostname::from_str(xds_name) else {
             // we don't have namespace/hostname xds primary key for service
             warn!(
                 "tried to remove service keyed by {} but it did not have the expected namespace/hostname format",
@@ -124,7 +163,7 @@ impl ProxyStateUpdater {
             return;
         };
 
-        if hostname.split_once('/').is_some() {
+        if name.hostname.contains('/') {
             // avoid trying to delete obvious workload UIDs as a service,
             // which can result in noisy logs when new workloads are added
             // (we remove then add workloads on initial update)
@@ -136,10 +175,6 @@ impl ProxyStateUpdater {
             );
             return;
         }
-        let name = NamespacedHostname {
-            namespace: namespace.to_string(),
-            hostname: hostname.to_string(),
-        };
         if state.services.remove(&name).is_none() {
             warn!("tried to remove service keyed by {name}, but it was not found");
         }
@@ -159,12 +194,13 @@ impl ProxyStateUpdater {
         // Lock the store.
         let mut state = self.state.write().unwrap();
 
-        // If the service already exists, add old endpoints into the new service.
-        for vip in &service.vips {
-            if let Some(prev) = state.services.get_by_vip(vip) {
-                for (wip, ep) in prev.endpoints.iter() {
-                    service.endpoints.insert(wip.clone(), ep.clone());
-                }
+        // If the service already exists, add existing endpoints into the new service.
+        if let Some(prev) = state
+            .services
+            .get_by_namespaced_host(&service.namespaced_hostname())
+        {
+            for (wip, ep) in prev.endpoints.iter() {
+                service.endpoints.insert(wip.clone(), ep.clone());
             }
         }
 
@@ -178,14 +214,14 @@ impl ProxyStateUpdater {
         let rbac = rbac::Authorization::try_from(&r)?;
         trace!("insert policy {}", serde_json::to_string(&rbac)?);
         let mut state = self.state.write().unwrap();
-        state.workloads.insert_authorization(rbac);
+        state.policies.insert(rbac);
         Ok(())
     }
 
     pub fn remove_authorization(&self, name: String) {
         info!("handling RBAC delete {}", name);
         let mut state = self.state.write().unwrap();
-        state.workloads.remove_rbac(name);
+        state.policies.remove(name);
     }
 }
 
@@ -217,25 +253,37 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
 
 fn service_endpoints(
     workload: &Workload,
-    virtual_ips: &HashMap<String, PortList>,
+    services: &HashMap<String, PortList>,
 ) -> anyhow::Result<Vec<Endpoint>> {
     let mut out = Vec::new();
-    for (vip, ports) in virtual_ips {
-        let parts = vip.split_once('/');
-        let vip = match parts.is_some() {
-            true => parts.unwrap().1.to_string(),
-            false => vip.clone(),
-        };
-        let svc_network = match parts.is_some() {
-            true => parts.unwrap().0,
-            false => &workload.network,
+    for (namespaced_host, ports) in services {
+        // Parse the namespaced hostname for the service.
+        let namespaced_host = match namespaced_host.split_once('/') {
+            Some((namespace, hostname)) => NamespacedHostname {
+                namespace: namespace.to_string(),
+                hostname: hostname.to_string(),
+            },
+            None => {
+                return Err(anyhow::anyhow!(
+                    "failed parsing service name: {namespaced_host}"
+                ));
+            }
         };
 
-        let vip = network_addr(svc_network, vip.parse()?);
+        // Create service endpoints for all the workload IPs.
         for wip in &workload.workload_ips {
             out.push(Endpoint {
-                vip: vip.clone(),
-                address: network_addr(&workload.network, *wip),
+                workload_uid: workload.uid.clone(),
+                service: namespaced_host.clone(),
+                address: Some(network_addr(&workload.network, *wip)),
+                port: ports.into(),
+            })
+        }
+        if workload.workload_ips.is_empty() {
+            out.push(Endpoint {
+                workload_uid: workload.uid.clone(),
+                service: namespaced_host.clone(),
+                address: None,
                 port: ports.into(),
             })
         }
@@ -268,7 +316,7 @@ pub struct LocalClient {
 pub struct LocalWorkload {
     #[serde(flatten)]
     pub workload: Workload,
-    pub vips: HashMap<String, HashMap<u16, u16>>,
+    pub services: HashMap<String, HashMap<u16, u16>>,
 }
 
 #[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -287,29 +335,29 @@ impl LocalClient {
     pub async fn run(self) -> Result<(), anyhow::Error> {
         // Currently, we just load the file once. In the future, we could dynamically reload.
         let data = self.cfg.read_to_string().await?;
-        trace!("local config: {data}");
+        debug!("local config: {data}");
         let r: LocalConfig = serde_yaml::from_str(&data)?;
         let mut state = self.state.write().unwrap();
         let num_workloads = r.workloads.len();
         let num_policies = r.policies.len();
         for wl in r.workloads {
-            debug!("inserting local workload {}", &wl.workload.uid);
-            state.workloads.insert_workload(wl.workload.clone())?;
+            trace!("inserting local workload {}", &wl.workload.uid);
+            state.workloads.insert(wl.workload.clone())?;
             self.cert_fetcher.prefetch_cert(&wl.workload);
 
-            let vips: HashMap<String, PortList> = wl
-                .vips
+            let services: HashMap<String, PortList> = wl
+                .services
                 .into_iter()
                 .map(|(k, v)| (k, PortList::from(v)))
                 .collect();
 
-            let mut endpoints = service_endpoints(&wl.workload, &vips)?;
+            let mut endpoints = service_endpoints(&wl.workload, &services)?;
             while let Some(ep) = endpoints.pop() {
                 state.services.insert_endpoint(ep)
             }
         }
         for rbac in r.policies {
-            state.workloads.insert_authorization(rbac);
+            state.policies.insert(rbac);
         }
         for svc in r.services {
             state.services.insert(svc);

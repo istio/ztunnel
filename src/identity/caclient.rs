@@ -21,7 +21,6 @@ use tonic::codegen::InterceptedService;
 
 use tracing::{instrument, warn};
 
-use crate::config::RootCert;
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
 use crate::identity::Error;
@@ -35,13 +34,13 @@ pub struct CaClient {
 }
 
 impl CaClient {
-    pub fn new(
+    pub async fn new(
         address: String,
-        root_cert: RootCert,
+        cert_provider: Box<dyn tls::ClientCertProvider>,
         auth: AuthSource,
         enable_impersonated_identity: bool,
     ) -> Result<CaClient, Error> {
-        let svc = tls::grpc_connector(address, root_cert)?;
+        let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?)?;
         // let client = IstioCertificateServiceClient::new(svc);
         // let svc =
         //     tower_hyper_http_body_compat::Hyper1HttpServiceAsTowerService03HttpService::new(svc);
@@ -102,7 +101,7 @@ impl CaClient {
         let certs = tls::cert_from(&pkey, leaf, chain);
         if self.enable_impersonated_identity {
             certs
-                .verify_san(id)
+                .verify_san(&[id.clone()])
                 .map_err(|_| Error::SanError(id.to_owned()))?;
         }
         Ok(certs)

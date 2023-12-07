@@ -23,6 +23,7 @@ mod namespaced {
     use std::time::Duration;
 
     use hyper::Method;
+    use hyper_util::rt::TokioIo;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpStream;
     use tokio::time::timeout;
@@ -92,14 +93,14 @@ mod namespaced {
         run_tcp_server(
             manager
                 .workload_builder("server1", REMOTE_NODE)
-                .vip(TEST_VIP, 80, SERVER_PORT)
+                .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
                 .register()?,
         )?;
         run_tcp_server(
             manager
                 .workload_builder("server2", REMOTE_NODE)
                 .hbone()
-                .vip(TEST_VIP, 80, SERVER_PORT)
+                .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
                 .register()?,
         )?;
         let client = manager
@@ -132,24 +133,70 @@ mod namespaced {
         // Proxying to 10.0.2.3:8080 using HBONE via 10.0.2.3:15008 type Direct
         // Proxying to 10.0.2.2:8080 using TCP via 10.0.2.2:8080 type Direct
         let (_remote_metrics, local_metrics) =
-            verify_local_remote_metrics(remote, local.clone(), &metrics).await;
+            verify_local_remote_metrics(&remote, &local, &metrics).await;
 
         // ensure the service is load-balancing across endpoints
-        let local_metrics_dump = local_metrics.dump();
-        let lb_to_nodelocal =
-            local_metrics_dump.contains("\"connection_security_policy\": \"unknown\"");
-        let lb_to_remote =
-            local_metrics_dump.contains("\"connection_security_policy\": \"mutual_tls\"");
+        let lb_to_nodelocal = local_metrics.query_sum(
+            CONNECTIONS_OPENED,
+            &HashMap::from([("connection_security_policy".into(), "unknown".into())]),
+        ) > 0;
+        let lb_to_remote = local_metrics.query_sum(
+            CONNECTIONS_OPENED,
+            &HashMap::from([("connection_security_policy".into(), "mutual_tls".into())]),
+        ) > 0;
         // ensure we hit one endpoint or the other, not both somehow
         assert!(lb_to_nodelocal || lb_to_remote);
         if lb_to_nodelocal {
             assert!(!lb_to_remote);
         }
 
+        // Currently we do not do destination-reported service. Maybe we should
+        verify_metrics(
+            &remote,
+            &metrics,
+            &HashMap::from([
+                ("reporter".to_string(), "destination".to_string()),
+                (
+                    "destination_service".to_string(),
+                    "server1.default.svc.cluster.local".to_string(),
+                ),
+                (
+                    "destination_service_name".to_string(),
+                    "server1".to_string(),
+                ),
+                (
+                    "destination_service_namespace".to_string(),
+                    "default".to_string(),
+                ),
+            ]),
+        )
+        .await;
+
+        verify_metrics(
+            &local,
+            &metrics,
+            &HashMap::from([
+                ("reporter".to_string(), "source".to_string()),
+                (
+                    "destination_service".to_string(),
+                    "server1.default.svc.cluster.local".to_string(),
+                ),
+                (
+                    "destination_service_name".to_string(),
+                    "server1".to_string(),
+                ),
+                (
+                    "destination_service_namespace".to_string(),
+                    "default".to_string(),
+                ),
+            ]),
+        )
+        .await;
+
         // response needed is opposite of what we got before
         let needed_response = match lb_to_nodelocal {
-            true => "\"connection_security_policy\": \"mutual_tls\"", // we got node local so need remote
-            false => "\"connection_security_policy\": \"unknown\"", // we got remote so need node local
+            true => "mutual_tls".to_string(), // we got node local so need remote
+            false => "unknown".to_string(),   // we got remote so need node local
         };
 
         // run 15 requests so chance of flake here is 1/2^15 = ~0.003%
@@ -157,8 +204,13 @@ mod namespaced {
             run_tcp_client(lb_client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
         }
 
-        let updated_local_metrics = local.metrics().await.unwrap().dump();
-        assert!(updated_local_metrics.contains(needed_response));
+        let updated_local_metrics = local.metrics().await.unwrap();
+        assert!(
+            updated_local_metrics.query_sum(
+                CONNECTIONS_OPENED,
+                &HashMap::from([("connection_security_policy".into(), needed_response)])
+            ) > 0
+        );
 
         Ok(())
     }
@@ -181,7 +233,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_local_remote_metrics(remote, local, &metrics).await;
+        verify_local_remote_metrics(&remote, &local, &metrics).await;
         Ok(())
     }
 
@@ -207,7 +259,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -242,7 +294,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_local_remote_metrics(remote, local, &metrics).await;
+        verify_local_remote_metrics(&remote, &local, &metrics).await;
         Ok(())
     }
 
@@ -255,7 +307,7 @@ mod namespaced {
     }
 
     async fn verify_metrics(
-        ztunnel: TestApp,
+        ztunnel: &TestApp,
         assertions: &[(&str, u64)],
         labels: &HashMap<String, String>,
     ) -> ParsedMetrics {
@@ -290,8 +342,8 @@ mod namespaced {
     }
 
     async fn verify_local_remote_metrics(
-        remote: TestApp,
-        local: TestApp,
+        remote: &TestApp,
+        local: &TestApp,
         metrics: &[(&str, u64)],
     ) -> (ParsedMetrics, ParsedMetrics) {
         let remote_metrics = verify_metrics(remote, metrics, &destination_labels()).await;
@@ -321,7 +373,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -349,7 +401,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, HBONE_REQ_SIZE),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -378,7 +430,7 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, HBONE_REQ_SIZE),
         ];
-        verify_metrics(zt, &metrics, &source_labels()).await;
+        verify_metrics(&zt, &metrics, &source_labels()).await;
         Ok(())
     }
 
@@ -417,7 +469,7 @@ mod namespaced {
                         .unwrap();
                 let cert = app.cert_manager.fetch_certificate(id).await?;
                 let mut connector = cert
-                    .connector(&dst_id)
+                    .connector(vec![dst_id])
                     .unwrap()
                     .configure()
                     .expect("configure");
@@ -428,7 +480,8 @@ mod namespaced {
                 let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
                     .await
                     .unwrap();
-                let (mut request_sender, connection) = builder.handshake(tls_stream).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
@@ -475,7 +528,7 @@ mod namespaced {
                         .unwrap();
                 let cert = app.cert_manager.fetch_certificate(id).await?;
                 let mut connector = cert
-                    .connector(&dst_id)
+                    .connector(vec![dst_id])
                     .unwrap()
                     .configure()
                     .expect("configure");
@@ -487,7 +540,8 @@ mod namespaced {
                 let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
                     .await
                     .unwrap();
-                let (mut request_sender, connection) = builder.handshake(tls_stream).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
@@ -692,7 +746,7 @@ mod namespaced {
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
-                .vip(TEST_VIP, 80, SERVER_PORT)
+                .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
                 .hbone()
                 .register()?,
         )?;

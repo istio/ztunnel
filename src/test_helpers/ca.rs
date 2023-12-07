@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use hyper_util::rt::TokioIo;
 
 use tokio::sync::watch;
 
@@ -64,7 +65,7 @@ impl CaServer {
                 let srv = srv.clone();
                 if let Err(err) = crate::hyper_util::http2_server()
                     .serve_connection(
-                        socket,
+                        TokioIo::new(socket),
                         tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
                     )
                     .await
@@ -75,13 +76,14 @@ impl CaServer {
         });
         let client = CaClient::new(
             "https://".to_string() + &server_addr.to_string(),
-            root_cert,
+            Box::new(tls::FileClientCertProviderImpl::RootCert(root_cert)),
             AuthSource::Token(
                 PathBuf::from(r"src/test_helpers/fake-jwt"),
                 "Kubernetes".to_string(),
             ),
             true,
         )
+        .await
         .unwrap();
         (tx, client)
     }

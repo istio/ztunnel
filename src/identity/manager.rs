@@ -385,13 +385,16 @@ pub struct SecretManager {
 }
 
 impl SecretManager {
-    pub fn new(cfg: crate::config::Config) -> Result<Self, Error> {
+    pub async fn new(cfg: crate::config::Config) -> Result<Self, Error> {
         let caclient = CaClient::new(
             cfg.ca_address.unwrap(),
-            cfg.ca_root_cert,
+            Box::new(tls::FileClientCertProviderImpl::RootCert(
+                cfg.ca_root_cert.clone(),
+            )),
             cfg.auth,
             cfg.proxy_mode == ProxyMode::Shared,
-        )?;
+        )
+        .await?;
         Ok(Self::new_with_client(caclient))
     }
 
@@ -929,9 +932,9 @@ mod tests {
         for i in 0..4 {
             let id = identity_n("id-", i);
             futs.push(async {
-                let id = id; // Move instead of borrowing.
+                let id2: Identity = id;
                 test.secret_manager
-                    .fetch_certificate_pri(&id, Priority::RealTime)
+                    .fetch_certificate_pri(&id2, Priority::RealTime)
                     .await
             });
         }
