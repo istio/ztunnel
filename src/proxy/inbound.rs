@@ -25,11 +25,10 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
-use super::Error;
+use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::config::Config;
 use crate::identity::SecretManager;
@@ -52,12 +51,14 @@ pub(super) struct Inbound {
     state: DemandProxyState,
     drain: Watch,
     metrics: Arc<Metrics>,
+    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
 }
 
 impl Inbound {
     pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
-        let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_addr)
-            .await
+        let listener: TcpListener = pi
+            .socket_factory
+            .tcp_bind(pi.cfg.inbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
@@ -75,6 +76,7 @@ impl Inbound {
             cert_manager: pi.cert_manager,
             metrics: pi.metrics,
             drain,
+            socket_factory: pi.socket_factory.clone(),
         })
     }
 
@@ -89,13 +91,15 @@ impl Inbound {
             cert_manager: self.cert_manager.clone(),
             network: self.cfg.network.clone(),
         };
-        let drain_stream = self.drain.clone();
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
-        let mut stream = stream.take_until(Box::pin(drain_stream.signaled()));
+        let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
+
+        let (sub_drain_signal, sub_drain) = drain::channel();
         while let Some(socket) = stream.next().await {
             let state = self.state.clone();
             let metrics = self.metrics.clone();
-            let drain = self.drain.clone();
+            let socket_factory = self.socket_factory.clone();
+            let drain = sub_drain.clone();
             let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
@@ -123,6 +127,7 @@ impl Inbound {
                                 enable_original_source.unwrap_or_default(),
                                 req,
                                 metrics.clone(),
+                                socket_factory.clone(),
                             )
                         }),
                     );
@@ -139,10 +144,14 @@ impl Inbound {
                 }
             });
         }
+        std::mem::drop(sub_drain);
+        info!("draining connections");
+        sub_drain_signal.drain().await;
         info!("all inbound connections drained");
     }
 
     /// handle_inbound serves an inbound connection with a target address `addr`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_inbound(
         request_type: InboundConnect,
         orig_src: Option<IpAddr>,
@@ -150,9 +159,10 @@ impl Inbound {
         metrics: Arc<Metrics>,
         connection_metrics: ConnectionOpen,
         extra_connection_metrics: Option<ConnectionOpen>,
+        socket_factory: &(dyn SocketFactory + Send + Sync),
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = super::freebind_connect(orig_src, addr).await;
+        let stream = super::freebind_connect(orig_src, addr, socket_factory).await;
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -235,6 +245,7 @@ impl Inbound {
             .unwrap_or_else(TraceParent::new)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[instrument(name="inbound", skip_all, fields(
         id=%Self::extract_traceparent(&req),
         peer_ip=%conn.src_ip,
@@ -246,6 +257,7 @@ impl Inbound {
         enable_original_source: bool,
         req: Request<Incoming>,
         metrics: Arc<Metrics>,
+        socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
@@ -356,6 +368,7 @@ impl Inbound {
                     metrics,
                     connection_metrics,
                     None,
+                    socket_factory.as_ref(),
                 )
                 .in_current_span()
                 .await

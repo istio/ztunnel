@@ -69,13 +69,13 @@ impl Resolver {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Namespace {
     id: u8,
     node_id: u8,
     name: String,
     node_name: String,
-    netns: NetNs,
+    netns: Arc<NetNs>,
 }
 
 pub struct Ready(SyncSender<()>);
@@ -91,15 +91,20 @@ impl Namespace {
         id_to_ip(self.node_id, self.id)
     }
 
+    pub fn netns(&self) -> Arc<NetNs> {
+        self.netns.clone()
+    }
+
     pub fn interface(&self) -> String {
         format!("veth{}", self.id)
     }
 
     // A small helper around run_ready that marks as "ready" immediately.
-    pub fn run<F, Fut>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
+    pub fn run<F, Fut, R>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<R>>>
     where
         F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = anyhow::Result<()>>,
+        Fut: Future<Output = anyhow::Result<R>>,
+        R: Send + 'static,
     {
         self.run_ready(|ready| async move {
             ready.set_ready();
@@ -112,10 +117,11 @@ impl Namespace {
     /// Because network namespaces are bound to a thread, this function spins up a new thread for the closure and
     /// spawns a single-threaded tokio runtime.
     /// To await the closure, be sure to call join().
-    pub fn run_ready<F, Fut>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
+    pub fn run_ready<F, Fut, R>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<R>>>
     where
         F: FnOnce(Ready) -> Fut + Send + 'static,
-        Fut: Future<Output = anyhow::Result<()>>,
+        Fut: Future<Output = anyhow::Result<R>>,
+        R: Send + 'static,
     {
         let name = self.name.clone();
         let node_name = self.node_name.clone();
@@ -303,7 +309,7 @@ ip -n {other_net} route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev eth0
         let ns = Namespace {
             id,
             node_id,
-            netns,
+            netns: Arc::new(netns),
             node_name: node.to_string(),
             name: name.to_string(),
         };

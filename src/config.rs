@@ -33,6 +33,8 @@ const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
+const INPOD_ENABLED: &str = "INPOD_ENABLED";
+const INPOD_UDS: &str = "INPOD_UDS";
 const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
 const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
@@ -55,6 +57,8 @@ const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
+
+const DEFAULT_INPOD_MARK: u32 = 0b11;
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
@@ -91,14 +95,14 @@ impl ConfigSource {
     }
 }
 
-#[derive(serde::Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
 }
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct Config {
     /// If true, the HBONE proxy will be used.
     pub proxy: bool,
@@ -173,6 +177,10 @@ pub struct Config {
 
     // System dns resolver opts used for on-demand ztunnel dns resolution
     pub dns_resolver_opts: ResolverOpts,
+
+    pub inpod_enabled: bool,
+    pub inpod_uds: PathBuf,
+    pub inpod_mark: u32,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -362,6 +370,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         proxy_args: parse_args(),
         dns_resolver_cfg,
         dns_resolver_opts,
+        inpod_enabled: parse_default(INPOD_ENABLED, false)?,
+        inpod_uds: parse_default(INPOD_UDS, PathBuf::from("/var/run/ztunnel/ztunnel.sock"))?,
+        inpod_mark: DEFAULT_INPOD_MARK,
     })
 }
 

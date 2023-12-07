@@ -57,15 +57,22 @@ if [ "${num_legacy_lines}" -ge 10 ]; then
   mode=legacy
 else
   num_nft_lines=$( (timeout 5 sh -c "iptables-nft-save; ip6tables-nft-save" || true) 2>/dev/null | grep -c '^-')
-  if [ "${num_legacy_lines}" -ge "${num_nft_lines}" ]; then
+  if [ "${num_legacy_lines}" -gt "${num_nft_lines}" ]; then
     mode=legacy
   else
-    mode=nft
+    if [ "${num_nft_lines}" -eq "0" ]; then
+      mode=none
+    else
+      mode=nft
+    fi
   fi
 fi
 IPTABLES=iptables-legacy
 if [ "${mode}" = "nft" ]; then
   IPTABLES=iptables-nft
+fi
+if [ "${mode}" = "none" ]; then
+  IPTABLES=iptables
 fi
 set -e
 

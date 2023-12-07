@@ -46,11 +46,24 @@ use tokio::fs::File;
 #[cfg(feature = "gperftools")]
 use tokio::io::AsyncReadExt;
 
+pub trait AdminHandler: Sync + Send {
+    fn path(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    // sadly can't use async trait because no Sync
+    // see: https://github.com/dtolnay/async-trait/issues/248, https://github.com/dtolnay/async-trait/issues/142
+    // we can't use FutureExt::shared because our result is not clonable
+    fn handle(
+        &self,
+        req: Request<Incoming>,
+    ) -> std::pin::Pin<Box<dyn futures_util::Future<Output = Response<Full<Bytes>>> + Sync + Send>>;
+}
+
 struct State {
     proxy_state: DemandProxyState,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
     cert_manager: Arc<SecretManager>,
+    handlers: Vec<Arc<dyn AdminHandler>>,
 }
 
 pub struct Service {
@@ -101,6 +114,7 @@ impl Service {
                 proxy_state,
                 shutdown_trigger,
                 cert_manager,
+                handlers: vec![],
             },
         )
         .await
@@ -109,6 +123,10 @@ impl Service {
 
     pub fn address(&self) -> SocketAddr {
         self.s.address()
+    }
+
+    pub fn add_handler(&mut self, handler: Arc<dyn AdminHandler>) {
+        self.s.state_mut().handlers.push(handler);
     }
 
     pub fn spawn(self) {
@@ -135,14 +153,29 @@ impl Service {
                 )
                 .await),
                 "/logging" => Ok(handle_logging(req).await),
-                "/" => Ok(handle_dashboard(req).await),
-                _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
+                "/" => Ok(handle_dashboard(req, &state.handlers).await),
+                _ => match Self::find_handler(state.as_ref(), req.uri().path()) {
+                    Some(handler) => Ok(handler.handle(req).await),
+                    None => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
+                },
             }
         })
     }
+
+    fn find_handler(state: &State, path: &str) -> Option<Arc<dyn AdminHandler>> {
+        for handler in state.handlers.iter() {
+            if handler.path() == path {
+                return Some(handler.clone());
+            }
+        }
+        None
+    }
 }
 
-async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
+async fn handle_dashboard(
+    _req: Request<Incoming>,
+    handlers: &[Arc<dyn AdminHandler>],
+) -> Response<Full<Bytes>> {
     let apis = &[
         (
             "debug/pprof/profile",
@@ -160,10 +193,11 @@ async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
         ("config_dump", "dump the current Ztunnel configuration"),
         ("logging", "query/changing logging levels"),
     ];
+    let handlers_api = handlers.iter().map(|h| (h.path(), h.description()));
 
     let mut api_rows = String::new();
 
-    for (index, (path, description)) in apis.iter().enumerate() {
+    for (index, (path, description)) in apis.iter().copied().chain(handlers_api).enumerate() {
         api_rows.push_str(&format!(
             "<tr class=\"{row_class}\"><td class=\"home-data\"><a href=\"{path}\">{path}</a></td><td class=\"home-data\">{description}</td></tr>\n",
             row_class = if index % 2 == 1 { "gray" } else { "vert-space" },

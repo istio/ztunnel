@@ -13,6 +13,10 @@
 // limitations under the License.
 
 use std::future::Future;
+
+#[mockall_double::double]
+use crate::proxyfactory::ProxyFactory;
+
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,14 +93,6 @@ pub async fn build_with_cert(
         None
     };
 
-    // Create and start the metrics server.
-    let metrics_server = metrics::Server::new(config.clone(), drain_rx.clone(), registry)
-        .await
-        .context("stats server starts")?;
-    let metrics_address = metrics_server.address();
-    // Run the metrics sever in the current tokio worker pool.
-    metrics_server.spawn();
-
     // Create the manager that updates proxy state from XDS.
     let state_mgr = ProxyStateManager::new(
         config.clone(),
@@ -107,8 +103,11 @@ pub async fn build_with_cert(
     .await?;
     let state = state_mgr.state();
 
+    // Run the XDS state manager in the current tokio worker pool.
+    tokio::spawn(state_mgr.run());
+
     // Create and start the admin server.
-    let admin_server = admin::Service::new(
+    let mut admin_server = admin::Service::new(
         config.clone(),
         state.clone(),
         shutdown.trigger(),
@@ -118,66 +117,94 @@ pub async fn build_with_cert(
     .await
     .context("admin server starts")?;
     let admin_address = admin_server.address();
+
+    // Optionally create the HBONE proxy.
+    let mut proxy_addresses = None;
+    let mut dns_proxy_address: Option<SocketAddr> = None;
+
+    let proxy_gen = ProxyFactory::new(
+        config.clone(),
+        state.clone(),
+        cert_manager.clone(),
+        proxy_metrics,
+        dns_metrics,
+        drain_rx.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("failed to start proxy factory {:?}", e))?;
+
+    if config.inpod_enabled {
+        tracing::info!("in-pod mode enabled");
+        let run_future = init_inpod_proxy_mgr(
+            &mut registry,
+            &mut admin_server,
+            &config,
+            proxy_gen,
+            ready.clone(),
+            drain_rx.clone(),
+        )?;
+
+        data_plane_pool.send(DataPlaneTask {
+            block_shutdown: true,
+            fut: Box::pin(async move {
+                run_future.in_current_span().await;
+                Ok(())
+            }),
+        })?;
+    } else {
+        tracing::info!("proxy mode enabled");
+        let proxies = proxy_gen.new_proxies().await?;
+        match proxies.proxy {
+            Some(proxy) => {
+                proxy_addresses = Some(proxy.addresses());
+
+                // Run the HBONE proxy in the data plane worker pool.
+                data_plane_pool.send(DataPlaneTask {
+                    block_shutdown: true,
+                    fut: Box::pin(async move {
+                        proxy.run().in_current_span().await;
+                        Ok(())
+                    }),
+                })?;
+
+                drop(proxy_task);
+            }
+            None => {
+                tracing::info!("no proxy created");
+            }
+        }
+
+        match proxies.dns_proxy {
+            Some(dns_proxy) => {
+                // Optional
+                dns_proxy_address = Some(dns_proxy.address());
+
+                // Run the DNS proxy in the data plane worker pool.
+                data_plane_pool.send(DataPlaneTask {
+                    block_shutdown: true,
+                    fut: Box::pin(async move {
+                        dns_proxy.run().in_current_span().await;
+                        Ok(())
+                    }),
+                })?;
+
+                drop(dns_task);
+            }
+            None => {
+                tracing::info!("no proxy created");
+            }
+        }
+    }
+
     // Run the admin server in the current tokio worker pool.
     admin_server.spawn();
 
-    // Run the XDS state manager in the current tokio worker pool.
-    tokio::spawn(state_mgr.run());
-
-    // Optionally create the HBONE proxy.
-    let proxy_addresses = if config.proxy {
-        let proxy = proxy::Proxy::new(
-            config.clone(),
-            state.clone(),
-            cert_manager.clone(),
-            proxy_metrics.unwrap(),
-            drain_rx.clone(),
-        )
-        .await?;
-        let addresses = proxy.addresses();
-
-        // Run the HBONE proxy in the data plane worker pool.
-        data_plane_pool.send(DataPlaneTask {
-            block_shutdown: true,
-            fut: Box::pin(async move {
-                proxy.run().in_current_span().await;
-                Ok(())
-            }),
-        })?;
-
-        drop(proxy_task);
-        Some(addresses)
-    } else {
-        None
-    };
-
-    // Optionally create the DNS proxy.
-    let dns_proxy_address = if config.dns_proxy {
-        let dns_proxy = dns::Server::new(
-            config.cluster_domain.clone(),
-            config.dns_proxy_addr,
-            config.network,
-            state.clone(),
-            dns::forwarder_for_mode(config.proxy_mode)?,
-            dns_metrics.unwrap(),
-        )
-        .await?;
-        let address = dns_proxy.address();
-
-        // Run the DNS proxy in the data plane worker pool.
-        data_plane_pool.send(DataPlaneTask {
-            block_shutdown: true,
-            fut: Box::pin(async move {
-                dns_proxy.run().in_current_span().await;
-                Ok(())
-            }),
-        })?;
-
-        drop(dns_task);
-        Some(address)
-    } else {
-        None
-    };
+    // Create and start the metrics server.
+    let metrics_server = metrics::Server::new(config.clone(), drain_rx.clone(), registry)
+        .await
+        .context("stats server starts")?;
+    let metrics_address = metrics_server.address();
+    // Run the metrics sever in the current tokio worker pool.
+    metrics_server.spawn();
 
     Ok(Bound {
         drain_tx,
@@ -252,6 +279,47 @@ pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
         Arc::new(SecretManager::new(config.clone()).await?)
     };
     build_with_cert(config, cert_manager).await
+}
+
+#[cfg(not(target_os = "linux"))]
+fn init_inpod_proxy_mgr(
+    _registry: &mut Registry,
+    _admin_server: &mut crate::admin::Service,
+    _config: &config::Config,
+    _proxy_gen: ProxyFactory,
+    _ready: readiness::Ready,
+    _drain_rx: drain::Watch,
+) -> anyhow::Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
+    anyhow::bail!("in-pod mode is not supported on non-linux platforms")
+}
+
+#[cfg(target_os = "linux")]
+fn init_inpod_proxy_mgr(
+    registry: &mut Registry,
+    admin_server: &mut crate::admin::Service,
+    config: &config::Config,
+    proxy_gen: ProxyFactory,
+    ready: readiness::Ready,
+    drain_rx: drain::Watch,
+) -> anyhow::Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
+    let proxy_mgr = crate::inpod::init_and_new(
+        registry.sub_registry_with_prefix("workload_manager"),
+        admin_server,
+        config,
+        proxy_gen,
+        ready,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
+
+    Ok(Box::pin(async move {
+        match proxy_mgr.run(drain_rx).await {
+            Ok(()) => (),
+            Err(e) => {
+                tracing::error!("WorkloadProxyManager run error: {:?}", e);
+                std::process::exit(1);
+            }
+        }
+    }))
 }
 
 pub struct Bound {

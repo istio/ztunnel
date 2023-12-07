@@ -119,6 +119,20 @@ pub fn set_transparent(_: &TcpListener) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+pub fn set_mark<S: std::os::unix::io::AsFd>(socket: &S, mark: u32) -> io::Result<()> {
+    let socket = SockRef::from(socket);
+    socket.set_mark(mark)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_mark(_socket: &TcpSocket, _mark: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "SO_MARK not supported on this operating system",
+    ))
+}
+
+#[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod linux {
     use std::os::unix::io::AsRawFd;

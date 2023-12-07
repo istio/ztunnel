@@ -46,8 +46,9 @@ pub struct Outbound {
 
 impl Outbound {
     pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
-        let listener: TcpListener = TcpListener::bind(pi.cfg.outbound_addr)
-            .await
+        let listener: TcpListener = pi
+            .socket_factory
+            .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
@@ -211,6 +212,7 @@ impl OutboundConnection {
                 self.pi.metrics.to_owned(), // self is a borrow so this clone is to return an owned
                 connection_metrics,
                 Some(inbound_connection_metrics),
+                self.pi.socket_factory.as_ref(),
             )
             .await
             .map_err(Error::Io);
@@ -271,7 +273,12 @@ impl OutboundConnection {
                         .connector(dst_identity)?
                         .configure()
                         .expect("configure");
-                    let tcp_stream = super::freebind_connect(local, req.gateway).await?;
+                    let tcp_stream = super::freebind_connect(
+                        local,
+                        req.gateway,
+                        self.pi.socket_factory.as_ref(),
+                    )
+                    .await?;
                     tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
                     let tls_stream = connect_tls(connector, tcp_stream).await?;
                     let (request_sender, connection) = builder
@@ -332,7 +339,9 @@ impl OutboundConnection {
                 } else {
                     None
                 };
-                let mut outbound = super::freebind_connect(local, req.gateway).await?;
+                let mut outbound =
+                    super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref())
+                        .await?;
                 // Proxying data between downstrean and upstream
                 proxy::relay(
                     &mut stream,
@@ -444,9 +453,12 @@ impl OutboundConnection {
         if us.workload.gateway_address.is_none() {
             return Err(Error::NoGatewayAddress(Box::new(us.workload)));
         }
-
-        // For case source client and upstream server are on the same node
-        if !us.workload.node.is_empty()
+        // For case source client and upstream server are on the same node.
+        // This is disabled in inpod mode, as each pod processes connections in its own netns.
+        // so if we use direct local here, the destination pod will see the connection as inbound
+        // plain text and may wrongly reject it depending on policy.
+        if !self.pi.cfg.inpod_enabled
+            && !us.workload.node.is_empty()
             && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
             && us.workload.protocol == Protocol::HBONE
         {
@@ -602,6 +614,7 @@ mod tests {
                 cfg,
                 metrics: test_proxy_metrics(),
                 pool: pool::Pool::new(),
+                socket_factory: std::sync::Arc::new(crate::proxy::DefaultSocketFactory),
             },
             id: TraceParent::new(),
         };
