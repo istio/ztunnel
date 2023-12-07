@@ -82,6 +82,7 @@ impl CaServer {
                 "Kubernetes".to_string(),
             ),
             true,
+            60 * 60 * 24,
         )
         .await
         .unwrap();

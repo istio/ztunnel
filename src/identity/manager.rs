@@ -393,6 +393,7 @@ impl SecretManager {
             )),
             cfg.auth,
             cfg.proxy_mode == ProxyMode::Shared,
+            cfg.secret_ttl.as_secs().try_into().unwrap_or(60 * 60 * 24),
         )
         .await?;
         Ok(Self::new_with_client(caclient))
