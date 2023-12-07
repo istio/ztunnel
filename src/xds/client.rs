@@ -46,7 +46,6 @@ const POD_NAMESPACE: &str = "POD_NAMESPACE";
 const NODE_NAME: &str = "NODE_NAME";
 const NAME: &str = "NAME";
 const NAMESPACE: &str = "NAMESPACE";
-const CLUSTER_ID: &str = "CLUSTER_ID";
 const EMPTY_STR: &str = "";
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
@@ -348,14 +347,11 @@ impl AdsClient {
         let ns = ns.as_deref().unwrap_or(EMPTY_STR);
         let node_name = std::env::var(NODE_NAME);
         let node_name = node_name.as_deref().unwrap_or(EMPTY_STR);
-        let cluster_id = std::env::var(CLUSTER_ID);
-        let cluster_id = cluster_id.as_deref().unwrap_or(EMPTY_STR);
         let mut metadata = Self::build_struct([
             (NAME, pod_name),
             (NAMESPACE, ns),
             (INSTANCE_IPS, ip),
             (NODE_NAME, node_name),
-            (CLUSTER_ID, cluster_id),
         ]);
         metadata
             .fields
