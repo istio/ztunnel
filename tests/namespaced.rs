@@ -310,9 +310,9 @@ mod namespaced {
         default_node_server.send(-1).await.unwrap();
         default_node_server_ack.recv().await.unwrap();
         let remote_state = remote.inpod_state().await?;
-        
+
         info!("verifying remote state {:?}", remote_state);
-        assert_eq!(remote.inpod_state().await?.len(),0);
+        assert_eq!(remote.inpod_state().await?.len(), 0);
         assert_eq!(local.inpod_state().await?.len(), 0);
 
         std::fs::remove_file(&uds_remote_node).unwrap();

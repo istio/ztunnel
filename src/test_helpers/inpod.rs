@@ -81,7 +81,7 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             // Now await for FDs
             while let Some(fd) = rx.recv().await {
                 let fds = [fd];
-                let mut cmsgs = vec![];    
+                let mut cmsgs = vec![];
                 let r = if fd >= 0 {
                     let cmsg = nix::sys::socket::ControlMessage::ScmRights(&fds);
                     cmsgs.push(cmsg);

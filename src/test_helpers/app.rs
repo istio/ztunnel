@@ -87,10 +87,7 @@ where
 }
 
 impl TestApp {
-    pub async fn admin_request(
-        &self,
-        path: &str,
-    ) -> anyhow::Result<Response<Incoming>> {
+    pub async fn admin_request(&self, path: &str) -> anyhow::Result<Response<Incoming>> {
         let port = self.admin_address.port();
         let path = path.to_string();
 

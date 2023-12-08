@@ -134,7 +134,7 @@ impl WorkloadManager {
                 )),
                 cert_manager,
 
-                namespace: Some(cloned_ns)
+                namespace: Some(cloned_ns),
             };
             ta.ready().await;
             info!("ready");

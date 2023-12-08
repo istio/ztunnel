@@ -212,7 +212,7 @@ mod workload_processor_helpers {
 
         // make sure that we got a netns FD.
         if let Some(our_netns) = &our_netns {
-            // validate that the fd we got is a netns. This should never happen, and is here 
+            // validate that the fd we got is a netns. This should never happen, and is here
             // to catch potential bugs in the node agent during development.
             debug!(
                 "Validating netns FD: {:?}",
@@ -225,8 +225,6 @@ mod workload_processor_helpers {
 }
 
 fn validate_ns(fd: std::os::fd::RawFd) -> anyhow::Result<()> {
-
-
     // on newer kernels we can get the ns type! note that this doesn't work on older kernels.
     // so an error doesn't mean its not a netns.
     // #define NSIO	0xb7
