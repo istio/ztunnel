@@ -9,7 +9,7 @@ package istio.workload.zds;
 
 option go_package="pkg/zdsapi";
 
-// Add a workload to the zutnnel. this will be accompanied by ancillary data contianing
+// Add a workload to the ztunnel. this will be accompanied by ancillary data contianing
 // the workload's netns file descriptor.
 message AddWorkload {
   string uid = 2;

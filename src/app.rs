@@ -190,7 +190,7 @@ pub async fn build_with_cert(
                 drop(dns_task);
             }
             None => {
-                tracing::info!("no proxy created");
+                tracing::info!("no dns proxy created");
             }
         }
     }
