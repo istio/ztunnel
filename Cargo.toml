@@ -9,7 +9,7 @@ default = ["fips"]
 gperftools = ["dep:gperftools"]
 console = ["dep:console-subscriber"]
 fips = ["boring/fips", "hyper-boring/fips", "tokio-boring/fips"]
-testing = [] # Enables utilites supporting tests.
+testing = [] # Enables utilities supporting tests.
 
 [lib]
 path = "src/lib.rs"

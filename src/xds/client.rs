@@ -263,7 +263,7 @@ impl Config {
 ///
 /// The client works by accepting arbitrary handlers for types, configured by user.
 /// These handlers can do whatever they want with incoming responses, but are responsible for maintaining their own state.
-/// For example, if a usage wants to keep track of all Foo resources recieved, it needs to handle the add/removes in the configured handler.
+/// For example, if a usage wants to keep track of all Foo resources received, it needs to handle the add/removes in the configured handler.
 ///
 /// The client also supports on-demand lookup of resources; see demander() for more information.
 ///
