@@ -29,7 +29,7 @@ message Authorization {
   // The action to take if the request is matched with the rules.
   // Default is ALLOW if not specified.
   Action action = 4;
-  // Set of RBAC policy rules each containing its cluases (To, From, When).
+  // Set of RBAC policy rules each containing its clauses (To, From, When).
   // If at least one of the rules is matched the policy action will
   // take place.
   // Rules are OR-ed.

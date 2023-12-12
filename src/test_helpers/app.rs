@@ -274,7 +274,7 @@ impl ParsedMetrics {
                 .map(|sample| {
                     match sample.value {
                         prometheus_parse::Value::Counter(f) => f,
-                        // TOOD(https://github.com/ccakes/prometheus-parse-rs/issues/5) remove this
+                        // TODO(https://github.com/ccakes/prometheus-parse-rs/issues/5) remove this
                         prometheus_parse::Value::Untyped(f) => f,
                         _ => panic!("query_sum({metric}) must be a counter"),
                     }
