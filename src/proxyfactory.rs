@@ -54,7 +54,7 @@ impl ProxyFactory {
             Some(metrics) => Some(Arc::new(metrics)),
             None => {
                 if config.proxy {
-                    error!("dns proxy configured but no dns metrics provided")
+                    error!("proxy configured but no metrics provided")
                 }
                 None
             }

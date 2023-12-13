@@ -49,12 +49,12 @@ impl Metrics {
         );
         registry.register(
             "inpod_proxies_started",
-            "The current number of active inpod proxies",
+            "The total number of inpod proxies that were started",
             m.proxies_started.clone(),
         );
         registry.register(
             "inpod_proxies_stopped",
-            "The current number of active inpod proxies",
+            "The total number of inpod proxies that were stopped",
             m.proxies_stopped.clone(),
         );
         m

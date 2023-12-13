@@ -34,7 +34,7 @@ pub struct ProxyState {
 
     // using refernce counts to account for possible race between the proxy task that notifies us
     // that a proxy is down, and the proxy factory task that notifies us when it is up.
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip)]
     count: usize,
 }
 
