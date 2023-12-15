@@ -195,7 +195,9 @@ impl State {
                     type_url: resp.type_url.clone(),
                 };
                 debug!("received delete resource {k}");
-                self.known_resources.remove(res);
+                if let Some(rm) = self.known_resources.get_mut(&resp.type_url) {
+                    rm.remove(&k.name);
+                }
                 self.notify_on_demand(&k);
                 k.name
             })
@@ -615,6 +617,7 @@ impl AdsClient {
         info!(
             type_url = type_url, // this is a borrow, it's OK
             size = response.resources.len(),
+            removes = response.removed_resources.len(),
             "received response"
         );
         let handler_response: Result<(), Vec<RejectedConfig>> =

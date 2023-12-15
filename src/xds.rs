@@ -132,7 +132,6 @@ impl ProxyStateUpdater {
     }
 
     pub fn remove(&self, xds_name: &String) {
-        debug!("handling delete {}", xds_name);
         let mut state = self.state.write().unwrap();
 
         // remove workload by UID; if xds_name is a service then this will no-op
@@ -230,7 +229,10 @@ impl Handler<XdsWorkload> for ProxyStateUpdater {
         let handle = |res: XdsUpdate<XdsWorkload>| {
             match res {
                 XdsUpdate::Update(w) => self.insert_workload(w.resource)?,
-                XdsUpdate::Remove(name) => self.remove(&name),
+                XdsUpdate::Remove(name) => {
+                    debug!("handling delete {}", name);
+                    self.remove(&name)
+                }
             }
             Ok(())
         };
@@ -243,7 +245,10 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
         let handle = |res: XdsUpdate<XdsAddress>| {
             match res {
                 XdsUpdate::Update(w) => self.insert_address(w.resource)?,
-                XdsUpdate::Remove(name) => self.remove(&name),
+                XdsUpdate::Remove(name) => {
+                    debug!("handling delete {}", name);
+                    self.remove(&name)
+                }
             }
             Ok(())
         };
