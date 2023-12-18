@@ -297,6 +297,10 @@ fn service_endpoints(
 }
 
 impl Handler<XdsAuthorization> for ProxyStateUpdater {
+    fn no_on_demand(&self) -> bool {
+        true
+    }
+
     fn handle(&self, updates: Vec<XdsUpdate<XdsAuthorization>>) -> Result<(), Vec<RejectedConfig>> {
         let handle = |res: XdsUpdate<XdsAuthorization>| {
             match res {
