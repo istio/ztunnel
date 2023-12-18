@@ -60,7 +60,7 @@ impl AdsServer {
     ) -> (mpsc::Receiver<AdsConnection>, AdsClient, DemandProxyState) {
         let (tx, rx) = mpsc::channel(100);
 
-        let server = AdsServer { tx: tx };
+        let server = AdsServer { tx };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
         let certs = tls::generate_test_certs(
