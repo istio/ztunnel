@@ -144,7 +144,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
                 state.add_resource(key.type_url, key.name);
                 r
             })
-            .map(|raw| decode_proto::<T>(&raw).unwrap())
+            .map(|raw| decode_proto::<T>(raw).unwrap())
             .map(XdsUpdate::Update)
             .chain(removes.into_iter().map(XdsUpdate::Remove))
             .collect();
@@ -715,14 +715,13 @@ impl<T: prost::Message> XdsUpdate<T> {
 }
 
 fn decode_proto<T: prost::Message + Default>(
-    resource: &ProtoResource,
+    resource: ProtoResource,
 ) -> Result<XdsResource<T>, AdsError> {
-    let name = resource.name.clone();
+    let name = resource.name;
     resource
         .resource
-        .as_ref()
         .ok_or(AdsError::MissingResource())
-        .and_then(|res| <T>::decode(&res.value[..]).map_err(AdsError::Decode))
+        .and_then(|res| <T>::decode(&*res.value).map_err(AdsError::Decode))
         .map(|r| XdsResource { name, resource: r })
 }
 
