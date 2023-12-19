@@ -184,7 +184,7 @@ pub async fn build_with_cert(
                 dns_proxy_address = Some(dns_proxy.address());
 
                 // Run the DNS proxy in the data plane worker pool.
-        let mut xds_rx_for_dns_proxy = xds_rx.clone();
+                let mut xds_rx_for_dns_proxy = xds_rx.clone();
                 data_plane_pool.send(DataPlaneTask {
                     block_shutdown: true,
                     fut: Box::pin(async move {
