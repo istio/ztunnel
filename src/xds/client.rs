@@ -31,7 +31,7 @@ use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{identity, readiness, tls};
+use crate::{identity, tls};
 
 use super::Error;
 
@@ -354,21 +354,8 @@ impl Config {
         }
     }
 
-    pub fn build(self, metrics: Metrics, block_ready: readiness::BlockReady) -> AdsClient {
-        let (tx, rx) = mpsc::channel(100);
-        let state = State {
-            known_resources: Default::default(),
-            pending: Default::default(),
-            demand: rx,
-            demand_tx: tx,
-        };
-        AdsClient {
-            config: self,
-            metrics,
-            state,
-            block_ready: Some(block_ready),
-            connection_id: 0,
-        }
+    pub fn build(self, metrics: Metrics, block_ready: tokio::sync::watch::Sender<()>) -> AdsClient {
+        AdsClient::new(self, metrics, block_ready)
     }
 }
 
@@ -388,9 +375,10 @@ pub struct AdsClient {
     state: State,
 
     pub(crate) metrics: Metrics,
-    block_ready: Option<readiness::BlockReady>,
+    block_ready: Option<tokio::sync::watch::Sender<()>>,
 
     connection_id: u32,
+    types_to_expect: HashSet<String>,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
@@ -446,6 +434,34 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 
 impl AdsClient {
+    fn is_initial_request_on_demand(r: &DeltaDiscoveryRequest) -> bool {
+        !r.resource_names_subscribe.is_empty()
+    }
+
+    fn new(config: Config, metrics: Metrics, block_ready: tokio::sync::watch::Sender<()>) -> Self {
+        let (tx, rx) = mpsc::channel(100);
+        let state = State {
+            known_resources: Default::default(),
+            pending: Default::default(),
+            demand: rx,
+            demand_tx: tx,
+        };
+        let types_to_expect: HashSet<String> = config
+            .initial_requests
+            .iter()
+            .filter(|e| !Self::is_initial_request_on_demand(e)) // is_empty implies not ondemand
+            .map(|e| e.type_url.clone())
+            .collect();
+        AdsClient {
+            config,
+            state,
+            metrics,
+            block_ready: Some(block_ready),
+            connection_id: 0,
+            types_to_expect,
+        }
+    }
+
     /// demander returns a Demander instance which can be used to request resources on-demand
     pub fn demander(&self) -> Option<Demander> {
         if self.config.on_demand {
@@ -582,32 +598,22 @@ impl AdsClient {
         debug!("connected established");
 
         info!("Stream established");
-        // Create a oneshot channel to be notified as soon as we ACK the first XDS response
-        let (tx, initial_xds_rx) = oneshot::channel();
-        let mut initial_xds_tx = Some(tx);
-        let ready = mem::take(&mut self.block_ready);
-        tokio::spawn(async move {
-            match initial_xds_rx.await {
-                Ok(_) => drop(ready),
-                Err(_) => {
-                    debug!("sender was dropped before initial xds sync event was received");
-                }
-            }
-        });
-
         loop {
             tokio::select! {
                 _demand_event = self.state.demand.recv() => {
                     self.handle_demand_event(_demand_event, &discovery_req_tx).await?;
                 }
                 msg = response_stream.message() => {
-                    // TODO: If we have responses of different types (e.g. RBAC), we'll want to wait for
-                    // each type to receive a response before marking ready
-                    if let XdsSignal::Ack = self.handle_stream_event(msg?, &discovery_req_tx).await? {
-                        let val = mem::take(&mut initial_xds_tx);
-                        if let Some(tx) = val {
-                            if let Err(err) = tx.send(()) {
-                                warn!("initial xds sync signal send failed: {:?}", err)
+                    let msg = msg?;
+                    let mut received_type = None;
+                    if !self.types_to_expect.is_empty() {
+                        received_type = msg.as_ref().map(|e| e.type_url.clone());
+                    }
+                    if let XdsSignal::Ack = self.handle_stream_event(msg, &discovery_req_tx).await? {
+                        if let Some(received_type) = received_type {
+                            self.types_to_expect.remove(&received_type);
+                            if self.types_to_expect.is_empty() {
+                                mem::drop(mem::take(&mut self.block_ready));
                             }
                         }
                     };
@@ -755,6 +761,7 @@ mod tests {
     use textnonce::TextNonce;
     use tokio::time::sleep;
 
+    use crate::xds::istio::security::Authorization as XdsAuthorization;
     use crate::xds::istio::workload::Address as XdsAddress;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType;
@@ -801,12 +808,156 @@ mod tests {
         }
     }
 
+    fn get_auth(i: usize) -> ProtoResource {
+        let addr = XdsAuthorization {
+            name: format!("foo{}", i),
+            namespace: "default".to_string(),
+            scope: crate::xds::istio::security::Scope::Global as i32,
+            action: crate::xds::istio::security::Action::Deny as i32,
+            rules: vec![crate::xds::istio::security::Rule {
+                clauses: vec![crate::xds::istio::security::Clause {
+                    matches: vec![crate::xds::istio::security::Match {
+                        destination_ports: vec![80],
+                        ..Default::default()
+                    }],
+                }],
+            }],
+        };
+        ProtoResource {
+            name: format!("foo{}", i),
+            aliases: vec![],
+            version: "0.0.1".to_string(),
+            resource: Some(Any {
+                type_url: AUTHORIZATION_TYPE.to_string(),
+                value: addr.encode_to_vec(),
+            }),
+            ttl: None,
+            cache_control: None,
+        }
+    }
+    fn get_address(i: usize, addr: std::net::IpAddr) -> ProtoResource {
+        let octets = match addr {
+            IpAddr::V4(v4) => v4.octets().to_vec(),
+            IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+        let addr = XdsAddress {
+            r#type: Some(XdsType::Workload(XdsWorkload {
+                name: format!("foo{}", i),
+                uid: format!("default/foo{}", i),
+                namespace: "default".to_string(),
+                addresses: vec![octets.into()],
+                tunnel_protocol: 0,
+                trust_domain: "local".to_string(),
+                service_account: "default".to_string(),
+                node: "default".to_string(),
+                workload_type: WorkloadType::Deployment.into(),
+                workload_name: "".to_string(),
+                native_tunnel: true,
+                ..Default::default()
+            })),
+        };
+
+        ProtoResource {
+            name: format!("foo{}", i),
+            aliases: vec![],
+            version: "0.0.1".to_string(),
+            resource: Some(Any {
+                type_url: ADDRESS_TYPE.to_string(),
+                value: addr.encode_to_vec(),
+            }),
+            ttl: None,
+            cache_control: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_that_caches_are_warm_before_unblocked() {
+        helpers::initialize_telemetry();
+
+        // Setup fake xds server
+        let (mut conn_receiver, client, state, mut block) = AdsServer::spawn(false).await;
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                info!("workload manager: {}", e);
+            }
+        });
+
+        let mut conn = conn_receiver.recv().await.unwrap();
+
+        let mut auth_seen = false;
+        let mut addr_seen = false;
+
+        let timer = tokio::time::sleep(std::time::Duration::from_secs(1));
+        futures::pin_mut!(timer);
+
+        loop {
+            let req = tokio::select! {
+                _ = &mut timer => {
+                    panic!("expected requests were not received");
+                }
+                _ = block.changed() => {
+                    // make sure our cache is warm by using our resources
+                    state.read()
+                    .find_address(&NetworkAddress {
+                        network: "".to_string(),
+                        address: std::net::Ipv4Addr::new(1, 2, 3, 4).into(),
+                    })
+                    .expect("address not in cache");
+                    let conn = crate::rbac::Connection{
+                        dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 80),
+                        src_identity: None,
+                        src_ip: std::net::Ipv4Addr::new(1, 2,3, 5).into(),
+                        dst_network: "".to_string(),
+                    };
+                    // rbac should reject port 80
+                    let rbac_res = state.assert_rbac(&conn).await;
+                    assert!(!rbac_res);
+                    let conn = crate::rbac::Connection{
+                        dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 81),
+                        ..conn
+                    };
+                    // but allow port 81
+                    let rbac_res = state.assert_rbac(&conn).await;
+                    assert!(rbac_res);
+                    return;
+                }
+                req = conn.rx.recv() => {
+                    req.unwrap()
+                }
+            };
+
+            info!("received request: {:?}", req);
+            if req.type_url == AUTHORIZATION_TYPE && !auth_seen {
+                let response = Ok(DeltaDiscoveryResponse {
+                    resources: vec![get_auth(0)],
+                    nonce: TextNonce::new().to_string(),
+                    system_version_info: "1.0.0".to_string(),
+                    type_url: AUTHORIZATION_TYPE.to_string(),
+                    removed_resources: vec![],
+                });
+                conn.tx.send(response).await.unwrap();
+                auth_seen = true;
+            } else if req.type_url == ADDRESS_TYPE && !addr_seen {
+                let response = Ok(DeltaDiscoveryResponse {
+                    resources: vec![get_address(0, "1.2.3.4".parse().unwrap())],
+                    nonce: TextNonce::new().to_string(),
+                    system_version_info: "1.0.0".to_string(),
+                    type_url: ADDRESS_TYPE.to_string(),
+                    removed_resources: vec![],
+                });
+                conn.tx.send(response).await.unwrap();
+                addr_seen = true;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_on_demand_handling() {
         helpers::initialize_telemetry();
 
         // Setup fake xds server
-        let (mut conn_receiver, client, _) = AdsServer::spawn(true).await;
+        let (mut conn_receiver, client, _, _) = AdsServer::spawn(true).await;
 
         tokio::spawn(async move {
             if let Err(e) = client.run().await {
@@ -856,7 +1007,7 @@ mod tests {
         helpers::initialize_telemetry();
 
         // Setup fake xds server
-        let (mut conn_receiver, client, state) = AdsServer::spawn(true).await;
+        let (mut conn_receiver, client, state, _) = AdsServer::spawn(true).await;
 
         let demander = client.demander().unwrap();
 
@@ -893,34 +1044,7 @@ mod tests {
                     .unwrap()
                     .hosts();
                 for i in 0..10_000 {
-                    let addr = XdsAddress {
-                        r#type: Some(XdsType::Workload(XdsWorkload {
-                            name: format!("foo{}", i),
-                            uid: format!("default/foo{}", i),
-                            namespace: "default".to_string(),
-                            addresses: vec![addr_range.next().unwrap().octets().to_vec().into()],
-                            tunnel_protocol: 0,
-                            trust_domain: "local".to_string(),
-                            service_account: "default".to_string(),
-                            node: "default".to_string(),
-                            workload_type: WorkloadType::Deployment.into(),
-                            workload_name: "".to_string(),
-                            native_tunnel: true,
-                            ..Default::default()
-                        })),
-                    };
-
-                    resources.push(ProtoResource {
-                        name: format!("foo{}", i),
-                        aliases: vec![],
-                        version: "0.0.1".to_string(),
-                        resource: Some(Any {
-                            type_url: ADDRESS_TYPE.to_string(),
-                            value: addr.encode_to_vec(),
-                        }),
-                        ttl: None,
-                        cache_control: None,
-                    });
+                    resources.push(get_address(i, addr_range.next().unwrap().into()));
                 }
 
                 let response = Ok(DeltaDiscoveryResponse {
@@ -1009,7 +1133,7 @@ mod tests {
             });
 
         // Setup fake xds server
-        let (mut conn_receiver, client, state) = AdsServer::spawn(false).await;
+        let (mut conn_receiver, client, state, _) = AdsServer::spawn(false).await;
 
         tokio::spawn(async move {
             if let Err(e) = client.run().await {
