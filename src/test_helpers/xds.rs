@@ -34,7 +34,6 @@ use super::test_config_with_port_xds_addr_and_root_cert;
 use crate::config::RootCert;
 use crate::hyper_util::TokioExecutor;
 use crate::metrics::sub_registry;
-use crate::readiness::Ready;
 use crate::state::{DemandProxyState, ProxyState};
 use crate::tls;
 use crate::xds::service::discovery::v3::aggregated_discovery_service_server::{
@@ -57,7 +56,7 @@ pub struct AdsConnection {
 impl AdsServer {
     pub async fn spawn(
         xds_on_demand: bool,
-    ) -> (mpsc::Receiver<AdsConnection>, AdsClient, DemandProxyState) {
+    ) -> (mpsc::Receiver<AdsConnection>, AdsClient, DemandProxyState, tokio::sync::watch::Receiver<()>) {
         let (tx, rx) = mpsc::channel(100);
 
         let server = AdsServer { tx };
@@ -92,7 +91,8 @@ impl AdsServer {
         let istio_registry = sub_registry(&mut registry);
         let metrics = xds::metrics::Metrics::new(istio_registry);
 
-        let ready = Ready::new();
+        let (block_tx, block_rx ) = tokio::sync::watch::channel(());
+
         let mut cfg = test_config_with_port_xds_addr_and_root_cert(
             80,
             Some(listener_addr_string),
@@ -115,9 +115,9 @@ impl AdsServer {
         let xds_client = xds::Config::new(cfg, tls_client_fetcher)
             .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, store_updater.clone())
             .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, store_updater)
-            .build(metrics, ready.register_task("ads client"));
+            .build(metrics, block_tx);
 
-        (rx, xds_client, dstate)
+        (rx, xds_client, dstate, block_rx)
     }
 }
 
