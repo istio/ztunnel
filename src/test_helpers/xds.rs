@@ -27,7 +27,7 @@ use prometheus_client::registry::Registry;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Status, Streaming};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 use super::test_config_with_port_xds_addr_and_root_cert;
@@ -152,34 +152,46 @@ impl AggregatedDiscoveryService for AdsServer {
         self.tx.send(conn).await.unwrap();
 
         tokio::spawn(async move {
-            while let Ok(result) = in_stream.message().await {
-                match result {
-                    Some(req) => {
-                        req_tx.send(req).await.unwrap();
-                        match resp_rx.recv().await {
+            loop {
+                tokio::select! {
+                    req = in_stream.next() => {
+                        match req {
+                            Some(Ok(req)) => {
+                                info!("received request...",);
+                                debug!(" request {:?}...", req);
+                                req_tx.send(req).await.unwrap();
+                            }
+                            Some(Err(e)) => {
+                                info!("ads_server: stream over - {:?}", e);
+                                return;
+                            }
+                            None => {
+                                info!("ads_server: stream over");
+                                return;
+                            }
+                        }
+                    }
+                    response = resp_rx.recv() => {
+                        match response{
                             Some(response) => {
-                                info!("sending response...");
+                                info!("sending response... ");
+                                debug!(" response... {:?}", response);
                                 match tx.send(response).await {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        warn!("ads_server: send failed - {:?} ", e);
-                                        break;
+                                        info!("ads_server: send terminated - {:?} ", e);
+                                        return;
                                     }
                                 }
                             }
                             None => {
-                                warn!("ads_server: config update failed");
-                                break;
+                                info!("ads_server: response channel closed");
+                                return;
                             }
-                        };
-                    }
-                    None => {
-                        warn!("ads_server: stream failed");
-                        break;
+                        }
                     }
                 }
             }
-            info!("stream ended");
         });
 
         let output_stream = ReceiverStream::new(rx);
