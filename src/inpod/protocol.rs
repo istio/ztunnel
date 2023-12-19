@@ -158,6 +158,7 @@ fn get_workload_data(
                 netns: our_netns,
                 info: WorkloadInfo {
                     workload_uid: super::WorkloadUid::new(uid),
+                    pod_info: a.pod_info,
                 },
             }))
         }

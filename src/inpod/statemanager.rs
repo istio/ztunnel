@@ -69,11 +69,14 @@ pub struct WorkloadProxyManagerState {
     snapshot_names: std::collections::HashSet<WorkloadUid>,
 
     inpod_config: InPodConfig,
+
+    cluster_id: String,
 }
 
 impl WorkloadProxyManagerState {
     pub fn new(
         proxy_gen: ProxyFactory,
+        cluster_id: String,
         inpod_config: InPodConfig,
         metrics: Arc<Metrics>,
         admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
@@ -89,6 +92,7 @@ impl WorkloadProxyManagerState {
             snapshot_received: false,
             snapshot_names: Default::default(),
             inpod_config,
+            cluster_id,
         }
     }
 
@@ -233,10 +237,18 @@ impl WorkloadProxyManagerState {
         let workload_netns_inode = netns.workload_inode();
         let (drain_tx, drain_rx) = drain::channel();
 
+        // this matches istio's generatePodUID
+        // TODO: we may want to use the pod's UUID here instead. if we want to do so we need to add it to WDS.
+        let workload_uid = workload_info
+            .pod_info
+            .as_ref()
+            .map(|pi| format!("{}//Pod/{}/{}", self.cluster_id, pi.namespace, pi.name));
+
         let proxies = self
             .proxy_gen
             .new_proxies_from_factory(
                 Some(drain_rx),
+                workload_uid,
                 Arc::from(self.inpod_config.socket_factory(netns)),
             )
             .await?;

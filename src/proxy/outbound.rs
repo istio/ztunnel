@@ -188,6 +188,8 @@ impl OutboundConnection {
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
+            // Note: here we can't use `pi.assert_rbac_inbound` as the proxy instance presents the source and not the dest
+            // so we call the one in the state instead
             if !self.pi.state.assert_rbac(&conn).await {
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));

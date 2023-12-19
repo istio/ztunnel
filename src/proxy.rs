@@ -25,7 +25,7 @@ use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
-use tracing::{error, trace, warn, Instrument};
+use tracing::{debug, error, trace, warn, Instrument};
 
 use inbound::Inbound;
 pub use metrics::*;
@@ -101,6 +101,7 @@ pub(super) struct ProxyInputs {
     metrics: Arc<Metrics>,
     pool: pool::Pool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    proxy_workload_uid: Option<String>,
 }
 
 impl ProxyInputs {
@@ -110,6 +111,7 @@ impl ProxyInputs {
         state: DemandProxyState,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+        proxy_workload_uid: Option<String>,
     ) -> Self {
         Self {
             cfg,
@@ -119,6 +121,20 @@ impl ProxyInputs {
             pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory,
+            proxy_workload_uid,
+        }
+    }
+
+    pub async fn assert_rbac_inbound(&self, conn: &crate::rbac::Connection) -> bool {
+        match self.proxy_workload_uid {
+            Some(ref uid) => match self.state.fetch_workload_by_uid(&uid).await {
+                Some(wl) => self.state.assert_rbac_for_destination(conn, &wl).await,
+                None => {
+                    debug!("proxy workload not found {}", uid);
+                    false
+                }
+            },
+            None => self.state.assert_rbac(conn).await,
         }
     }
 }
@@ -140,6 +156,7 @@ impl Proxy {
             pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory: Arc::new(DefaultSocketFactory),
+            proxy_workload_uid: None,
         };
         Self::from_inputs(pi, drain).await
     }

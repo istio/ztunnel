@@ -150,7 +150,7 @@ impl InboundPassthrough {
             dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
-        if !pi.state.assert_rbac(&conn).await {
+        if !pi.assert_rbac_inbound(&conn).await {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }

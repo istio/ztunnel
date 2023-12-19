@@ -30,7 +30,6 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
-use crate::config::Config;
 use crate::identity::SecretManager;
 use crate::metrics::Recorder;
 use crate::proxy;
@@ -45,13 +44,9 @@ use crate::state::DemandProxyState;
 use crate::tls::TlsError;
 
 pub(super) struct Inbound {
-    cfg: Config,
     listener: TcpListener,
-    cert_manager: Arc<SecretManager>,
-    state: DemandProxyState,
     drain: Watch,
-    metrics: Arc<Metrics>,
-    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    pi: ProxyInputs,
 }
 
 impl Inbound {
@@ -70,13 +65,9 @@ impl Inbound {
             "listener established",
         );
         Ok(Inbound {
-            cfg: pi.cfg,
-            state: pi.state,
             listener,
-            cert_manager: pi.cert_manager,
-            metrics: pi.metrics,
             drain,
-            socket_factory: pi.socket_factory.clone(),
+            pi,
         })
     }
 
@@ -87,20 +78,18 @@ impl Inbound {
     pub(super) async fn run(self) {
         // let (tx, rx) = oneshot::channel();
         let acceptor = InboundCertProvider {
-            state: self.state.clone(),
-            cert_manager: self.cert_manager.clone(),
-            network: self.cfg.network.clone(),
+            state: self.pi.state.clone(),
+            cert_manager: self.pi.cert_manager.clone(),
+            network: self.pi.cfg.network.clone(),
         };
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
 
         let (sub_drain_signal, sub_drain) = drain::channel();
         while let Some(socket) = stream.next().await {
-            let state = self.state.clone();
-            let metrics = self.metrics.clone();
-            let socket_factory = self.socket_factory.clone();
+            let pi = self.pi.clone();
             let drain = sub_drain.clone();
-            let network = self.cfg.network.clone();
+            let network = self.pi.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
                 let conn = Connection {
@@ -113,21 +102,19 @@ impl Inbound {
                     dst,
                 };
                 debug!(%conn, "accepted connection");
-                let enable_original_source = self.cfg.enable_original_source;
+                let enable_original_source = self.pi.cfg.enable_original_source;
                 let serve = crate::hyper_util::http2_server()
-                    .initial_stream_window_size(self.cfg.window_size)
-                    .initial_connection_window_size(self.cfg.connection_window_size)
-                    .max_frame_size(self.cfg.frame_size)
+                    .initial_stream_window_size(self.pi.cfg.window_size)
+                    .initial_connection_window_size(self.pi.cfg.connection_window_size)
+                    .max_frame_size(self.pi.cfg.frame_size)
                     .serve_connection(
                         hyper_util::rt::TokioIo::new(socket),
                         service_fn(move |req| {
                             Self::serve_connect(
-                                state.clone(),
+                                pi.clone(),
                                 conn.clone(),
                                 enable_original_source.unwrap_or_default(),
                                 req,
-                                metrics.clone(),
-                                socket_factory.clone(),
                             )
                         }),
                     );
@@ -252,12 +239,10 @@ impl Inbound {
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
-        state: DemandProxyState,
+        pi: ProxyInputs,
         conn: Connection,
         enable_original_source: bool,
         req: Request<Incoming>,
-        metrics: Arc<Metrics>,
-        socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
@@ -287,7 +272,7 @@ impl Inbound {
                     address: addr.ip(),
                 };
                 let Some((upstream, upstream_service)) =
-                    state.fetch_workload_services(&dst_network_addr).await
+                    pi.state.fetch_workload_services(&dst_network_addr).await
                 else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
@@ -296,15 +281,15 @@ impl Inbound {
                         .unwrap());
                 };
                 let has_waypoint = upstream.waypoint.is_some();
-                let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn).await;
-                let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn).await;
+                let from_waypoint = Self::check_waypoint(pi.state.clone(), &upstream, &conn).await;
+                let from_gateway = Self::check_gateway(pi.state.clone(), &upstream, &conn).await;
 
                 if from_gateway {
                     debug!("request from gateway");
                 }
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
-                } else if !state.assert_rbac(&conn).await {
+                } else if !pi.assert_rbac_inbound(&conn).await {
                     info!(%conn, "RBAC rejected");
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
@@ -340,7 +325,7 @@ impl Inbound {
                             address: source_ip,
                         };
                         // Find source info. We can lookup by XDS or from connection attributes
-                        state.fetch_workload(&src_network_addr).await
+                        pi.state.fetch_workload(&src_network_addr).await
                     }
                 };
 
@@ -365,10 +350,10 @@ impl Inbound {
                     Hbone(req),
                     enable_original_source.then_some(source_ip),
                     addr,
-                    metrics,
+                    pi.metrics,
                     connection_metrics,
                     None,
-                    socket_factory.as_ref(),
+                    pi.socket_factory.as_ref(),
                 )
                 .in_current_span()
                 .await
