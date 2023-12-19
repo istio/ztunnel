@@ -27,7 +27,7 @@ use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
-use crate::{cert_fetcher, config, rbac, readiness, xds};
+use crate::{cert_fetcher, config, rbac, xds};
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
@@ -35,7 +35,7 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, trace, warn};
 
 use trust_dns_resolver::config::*;
@@ -199,17 +199,17 @@ impl ProxyState {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct DemandProxyState {
     #[serde(flatten)]
-    pub state: Arc<RwLock<ProxyState>>,
+    state: Arc<RwLock<ProxyState>>,
 
     /// If present, used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
     demand: Option<Demander>,
 
     #[serde(skip_serializing)]
-    pub dns_resolver_cfg: ResolverConfig,
+    dns_resolver_cfg: ResolverConfig,
 
     #[serde(skip_serializing)]
-    pub dns_resolver_opts: ResolverOpts,
+    dns_resolver_opts: ResolverOpts,
 }
 
 impl DemandProxyState {
@@ -229,10 +229,6 @@ impl DemandProxyState {
 
     pub fn read(&self) -> RwLockReadGuard<'_, ProxyState> {
         self.state.read().unwrap()
-    }
-
-    pub fn write(&self) -> RwLockWriteGuard<'_, ProxyState> {
-        self.state.write().unwrap()
     }
 
     pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {
@@ -624,7 +620,7 @@ impl ProxyStateManager {
     pub async fn new(
         config: config::Config,
         metrics: Metrics,
-        awaiting_ready: readiness::BlockReady,
+        awaiting_ready: tokio::sync::watch::Sender<()>,
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<ProxyStateManager> {
         let cert_fetcher = cert_fetcher::new(&config, cert_manager);

@@ -93,7 +93,7 @@ impl Socks5 {
     }
 }
 
-// hande will process a SOCKS5 connection. This supports a minimal subset of the protocol,
+// handle will process a SOCKS5 connection. This supports a minimal subset of the protocol,
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6

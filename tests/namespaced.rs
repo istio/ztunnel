@@ -852,7 +852,7 @@ mod namespaced {
                 let mut buf = ReadBuf::new(&mut buf);
 
                 let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
-                assert!(result.is_err()); // exepct a connection reset due to TLS SAN mismatch
+                assert!(result.is_err()); // expect a connection reset due to TLS SAN mismatch
                 assert_eq!(
                     result.err().unwrap().kind(),
                     std::io::ErrorKind::ConnectionReset

@@ -22,9 +22,11 @@ use crate::state::workload::{
 };
 use crate::state::{DemandProxyState, ProxyState};
 use crate::xds::istio::security::Authorization as XdsAuthorization;
+use crate::xds::istio::workload::address;
+use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::istio::workload::Service as XdsService;
 use crate::xds::istio::workload::Workload as XdsWorkload;
-use crate::xds::{LocalConfig, LocalWorkload, ProxyStateUpdater};
+use crate::xds::{Handler, LocalConfig, LocalWorkload, ProxyStateUpdater, XdsResource, XdsUpdate};
 use bytes::{BufMut, Bytes};
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
@@ -405,13 +407,32 @@ pub fn new_proxy_state(
     let updater = ProxyStateUpdater::new_no_fetch(state.clone());
 
     for w in xds_workloads {
-        updater.insert_workload(w.clone()).unwrap();
+        let res = XdsResource {
+            name: w.name.clone(),
+            resource: XdsAddress {
+                r#type: Some(address::Type::Workload(w.clone())),
+            },
+        };
+        let handler = &updater as &dyn Handler<XdsAddress>;
+        handler.handle(vec![XdsUpdate::Update(res)]).unwrap();
     }
     for s in xds_services {
-        updater.insert_service(s.clone()).unwrap();
+        let res = XdsResource {
+            name: s.name.clone(),
+            resource: XdsAddress {
+                r#type: Some(address::Type::Service(s.clone())),
+            },
+        };
+        let handler = &updater as &dyn Handler<XdsAddress>;
+        handler.handle(vec![XdsUpdate::Update(res)]).unwrap();
     }
     for a in xds_authorizations {
-        updater.insert_authorization(a.clone()).unwrap();
+        let res = XdsResource {
+            name: a.name.clone(),
+            resource: a.clone(),
+        };
+        let handler = &updater as &dyn Handler<XdsAuthorization>;
+        handler.handle(vec![XdsUpdate::Update(res)]).unwrap();
     }
     DemandProxyState::new(
         state,

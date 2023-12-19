@@ -31,7 +31,7 @@ use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{identity, readiness, tls};
+use crate::{identity, tls};
 
 use super::Error;
 
@@ -58,6 +58,7 @@ impl Display for ResourceKey {
     }
 }
 
+#[derive(Debug)]
 pub struct RejectedConfig {
     name: String,
     reason: anyhow::Error,
@@ -102,6 +103,9 @@ pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyho
 // Handler is responsible for handling a discovery response.
 // Handlers can mutate state and return a list of rejected configurations (if there are any).
 pub trait Handler<T: prost::Message>: Send + Sync + 'static {
+    fn no_on_demand(&self) -> bool {
+        false
+    }
     fn handle(&self, res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>>;
 }
 
@@ -128,25 +132,45 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         res: DeltaDiscoveryResponse,
     ) -> Result<(), Vec<RejectedConfig>> {
         let type_url = res.type_url.clone();
-        let removes = state.handle_removes(&res);
+        let removes = &res.removed_resources;
+
         let updates: Vec<XdsUpdate<T>> = res
             .resources
-            .into_iter()
-            .map(|r| {
-                let key = ResourceKey {
-                    name: r.name.clone(),
-                    type_url: type_url.clone(),
-                };
-                state.notify_on_demand(&key);
-                state.add_resource(key.type_url, key.name);
-                r
-            })
+            .iter()
             .map(|raw| decode_proto::<T>(raw).unwrap())
             .map(XdsUpdate::Update)
-            .chain(removes.into_iter().map(XdsUpdate::Remove))
+            .chain(removes.iter().cloned().map(XdsUpdate::Remove))
             .collect();
 
-        self.h.handle(updates)
+        // First, call handlers that update the proxy state.
+        // other wise on-demand notifications might observe a cache without their resource
+        let result = self.h.handle(updates);
+
+        // after we update the proxy cache, we can update our xds cache. it's important that we do this after
+        // as we make on demand notifications here, so the proxy cache must be updated first.
+
+        for name in res.removed_resources {
+            let k = ResourceKey {
+                name,
+                type_url: res.type_url.clone(),
+            };
+            debug!("received delete resource {k}");
+            if let Some(rm) = state.known_resources.get_mut(&res.type_url) {
+                rm.remove(&k.name);
+            }
+            state.notify_on_demand(&k);
+        }
+
+        for r in res.resources {
+            let key = ResourceKey {
+                name: r.name,
+                type_url: type_url.clone(),
+            };
+            state.notify_on_demand(&key);
+            state.add_resource(key.type_url, key.name);
+        }
+
+        result
     }
 }
 
@@ -156,7 +180,7 @@ pub struct Config {
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
     handlers: HashMap<String, Box<dyn RawHandler>>,
-    initial_watches: Vec<String>,
+    initial_requests: Vec<DeltaDiscoveryRequest>,
     on_demand: bool,
 }
 
@@ -186,21 +210,6 @@ impl State {
             .or_default()
             .insert(name.clone());
     }
-    fn handle_removes(&mut self, resp: &DeltaDiscoveryResponse) -> Vec<String> {
-        resp.removed_resources
-            .iter()
-            .map(|res| {
-                let k = ResourceKey {
-                    name: res.to_owned(),
-                    type_url: resp.type_url.clone(),
-                };
-                debug!("received delete resource {k}");
-                self.known_resources.remove(res);
-                self.notify_on_demand(&k);
-                k.name
-            })
-            .collect()
-    }
 }
 
 impl Config {
@@ -213,7 +222,7 @@ impl Config {
             tls_builder,
             auth: config.auth,
             handlers: HashMap::new(),
-            initial_watches: Vec::new(),
+            initial_requests: Vec::new(),
             on_demand: config.xds_on_demand,
             proxy_metadata: config.proxy_metadata,
         }
@@ -224,10 +233,12 @@ impl Config {
         F: 'static + prost::Message + Default,
     {
         let type_url = type_url.into();
-        self.with_handler(type_url.clone(), f).watch(type_url)
+        let no_on_demand = f.no_on_demand();
+        self.with_handler(type_url.clone(), f)
+            .watch(type_url, no_on_demand)
     }
 
-    pub fn with_handler<F>(mut self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
+    fn with_handler<F>(mut self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
     where
         F: 'static + prost::Message + Default,
     {
@@ -236,26 +247,116 @@ impl Config {
         self
     }
 
-    pub fn watch(mut self, type_url: impl Into<String>) -> Config {
-        self.initial_watches.push(type_url.into());
+    fn watch(mut self, type_url: impl Into<String>, no_on_demand: bool) -> Config {
+        self.initial_requests
+            .push(self.construct_initial_request(&type_url.into(), no_on_demand));
         self
     }
 
-    pub fn build(self, metrics: Metrics, block_ready: readiness::BlockReady) -> AdsClient {
-        let (tx, rx) = mpsc::channel(100);
-        let state = State {
-            known_resources: Default::default(),
-            pending: Default::default(),
-            demand: rx,
-            demand_tx: tx,
-        };
-        AdsClient {
-            config: self,
-            metrics,
-            state,
-            block_ready: Some(block_ready),
-            connection_id: 0,
+    fn build_struct<T: IntoIterator<Item = (S, S)>, S: ToString>(a: T) -> Struct {
+        let fields = BTreeMap::from_iter(a.into_iter().map(|(k, v)| {
+            (
+                k.to_string(),
+                Value {
+                    kind: Some(Kind::StringValue(v.to_string())),
+                },
+            )
+        }));
+        Struct { fields }
+    }
+
+    fn json_to_struct(json: serde_json::Map<String, serde_json::Value>) -> prost_types::Struct {
+        prost_types::Struct {
+            fields: json
+                .into_iter()
+                .map(|(k, v)| (k, Self::json_to_value(v)))
+                .collect(),
         }
+    }
+
+    fn json_to_value(json: serde_json::Value) -> prost_types::Value {
+        use prost_types::value::Kind::*;
+        use serde_json::Value::*;
+
+        prost_types::Value {
+            kind: Some(match json {
+                Null => NullValue(0),
+                Bool(v) => BoolValue(v),
+                Number(n) => NumberValue(n.as_f64().unwrap_or_else(|| {
+                    error!("error parsing JSON number: {}", n);
+                    0f64
+                })),
+                String(s) => StringValue(s),
+                Array(v) => ListValue(prost_types::ListValue {
+                    values: v.into_iter().map(Self::json_to_value).collect(),
+                }),
+                Object(v) => StructValue(Self::json_to_struct(v)),
+            }),
+        }
+    }
+    fn node(&self) -> Node {
+        let ip = std::env::var(INSTANCE_IP);
+        let ip = ip.as_deref().unwrap_or(DEFAULT_IP);
+        let pod_name = std::env::var(POD_NAME);
+        let pod_name = pod_name.as_deref().unwrap_or(EMPTY_STR);
+        let ns = std::env::var(POD_NAMESPACE);
+        let ns = ns.as_deref().unwrap_or(EMPTY_STR);
+        let node_name = std::env::var(NODE_NAME);
+        let node_name = node_name.as_deref().unwrap_or(EMPTY_STR);
+        let mut metadata = Self::build_struct([
+            (NAME, pod_name),
+            (NAMESPACE, ns),
+            (INSTANCE_IPS, ip),
+            (NODE_NAME, node_name),
+        ]);
+        metadata
+            .fields
+            .append(&mut Self::build_struct(self.proxy_metadata.clone()).fields);
+
+        // Lookup ISTIO_METAJSON_* environment variables and add them to the node metadata
+        for (key, val) in std::env::vars().filter(|(key, _)| key.starts_with(ISTIO_METAJSON_PREFIX))
+        {
+            if let Ok(v) = serde_json::from_str(&val) {
+                metadata.fields.insert(
+                    key.trim_start_matches(ISTIO_METAJSON_PREFIX).to_string(),
+                    Self::json_to_value(v),
+                );
+            } else {
+                error!("failed to parse {}={}", key, val);
+            }
+        }
+
+        Node {
+            id: format!("ztunnel~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
+            metadata: Some(metadata),
+            ..Default::default()
+        }
+    }
+    fn construct_initial_request(
+        &self,
+        request_type: &str,
+        no_on_demand: bool,
+    ) -> DeltaDiscoveryRequest {
+        let node = self.node();
+
+        let (sub, unsub) = if (!no_on_demand) && self.on_demand {
+            // XDS doesn't have a way to subscribe to zero resources. We workaround this by subscribing and unsubscribing
+            // in one event, effectively giving us "subscribe to nothing".
+            (vec!["*".to_string()], vec!["*".to_string()])
+        } else {
+            (vec![], vec![])
+        };
+        DeltaDiscoveryRequest {
+            type_url: request_type.to_owned(),
+            node: Some(node.clone()),
+            resource_names_subscribe: sub,
+            resource_names_unsubscribe: unsub,
+            ..Default::default()
+        }
+    }
+
+    pub fn build(self, metrics: Metrics, block_ready: tokio::sync::watch::Sender<()>) -> AdsClient {
+        AdsClient::new(self, metrics, block_ready)
     }
 }
 
@@ -263,7 +364,7 @@ impl Config {
 ///
 /// The client works by accepting arbitrary handlers for types, configured by user.
 /// These handlers can do whatever they want with incoming responses, but are responsible for maintaining their own state.
-/// For example, if a usage wants to keep track of all Foo resources recieved, it needs to handle the add/removes in the configured handler.
+/// For example, if a usage wants to keep track of all Foo resources received, it needs to handle the add/removes in the configured handler.
 ///
 /// The client also supports on-demand lookup of resources; see demander() for more information.
 ///
@@ -275,9 +376,10 @@ pub struct AdsClient {
     state: State,
 
     pub(crate) metrics: Metrics,
-    block_ready: Option<readiness::BlockReady>,
+    block_ready: Option<tokio::sync::watch::Sender<()>>,
 
     connection_id: u32,
+    types_to_expect: HashSet<String>,
 }
 
 /// Demanded allows awaiting for an on-demand XDS resource
@@ -333,6 +435,34 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 
 impl AdsClient {
+    fn is_initial_request_on_demand(r: &DeltaDiscoveryRequest) -> bool {
+        !r.resource_names_subscribe.is_empty()
+    }
+
+    fn new(config: Config, metrics: Metrics, block_ready: tokio::sync::watch::Sender<()>) -> Self {
+        let (tx, rx) = mpsc::channel(100);
+        let state = State {
+            known_resources: Default::default(),
+            pending: Default::default(),
+            demand: rx,
+            demand_tx: tx,
+        };
+        let types_to_expect: HashSet<String> = config
+            .initial_requests
+            .iter()
+            .filter(|e| !Self::is_initial_request_on_demand(e)) // is_empty implies not ondemand
+            .map(|e| e.type_url.clone())
+            .collect();
+        AdsClient {
+            config,
+            state,
+            metrics,
+            block_ready: Some(block_ready),
+            connection_id: 0,
+            types_to_expect,
+        }
+    }
+
     /// demander returns a Demander instance which can be used to request resources on-demand
     pub fn demander(&self) -> Option<Demander> {
         if self.config.on_demand {
@@ -418,91 +548,29 @@ impl AdsClient {
         }
     }
 
-    fn build_struct<T: IntoIterator<Item = (S, S)>, S: ToString>(a: T) -> Struct {
-        let fields = BTreeMap::from_iter(a.into_iter().map(|(k, v)| {
-            (
-                k.to_string(),
-                Value {
-                    kind: Some(Kind::StringValue(v.to_string())),
-                },
-            )
-        }));
-        Struct { fields }
-    }
-
-    fn json_to_struct(json: serde_json::Map<String, serde_json::Value>) -> prost_types::Struct {
-        prost_types::Struct {
-            fields: json
-                .into_iter()
-                .map(|(k, v)| (k, Self::json_to_value(v)))
-                .collect(),
-        }
-    }
-
-    fn json_to_value(json: serde_json::Value) -> prost_types::Value {
-        use prost_types::value::Kind::*;
-        use serde_json::Value::*;
-
-        prost_types::Value {
-            kind: Some(match json {
-                Null => NullValue(0),
-                Bool(v) => BoolValue(v),
-                Number(n) => NumberValue(n.as_f64().unwrap_or_else(|| {
-                    error!("error parsing JSON number: {}", n);
-                    0f64
-                })),
-                String(s) => StringValue(s),
-                Array(v) => ListValue(prost_types::ListValue {
-                    values: v.into_iter().map(Self::json_to_value).collect(),
-                }),
-                Object(v) => StructValue(Self::json_to_struct(v)),
-            }),
-        }
-    }
-
-    fn node(&self) -> Node {
-        let ip = std::env::var(INSTANCE_IP);
-        let ip = ip.as_deref().unwrap_or(DEFAULT_IP);
-        let pod_name = std::env::var(POD_NAME);
-        let pod_name = pod_name.as_deref().unwrap_or(EMPTY_STR);
-        let ns = std::env::var(POD_NAMESPACE);
-        let ns = ns.as_deref().unwrap_or(EMPTY_STR);
-        let node_name = std::env::var(NODE_NAME);
-        let node_name = node_name.as_deref().unwrap_or(EMPTY_STR);
-        let mut metadata = Self::build_struct([
-            (NAME, pod_name),
-            (NAMESPACE, ns),
-            (INSTANCE_IPS, ip),
-            (NODE_NAME, node_name),
-        ]);
-        metadata
-            .fields
-            .append(&mut Self::build_struct(self.config.proxy_metadata.clone()).fields);
-
-        // Lookup ISTIO_METAJSON_* environment variables and add them to the node metadata
-        for (key, val) in std::env::vars().filter(|(key, _)| key.starts_with(ISTIO_METAJSON_PREFIX))
-        {
-            if let Ok(v) = serde_json::from_str(&val) {
-                metadata.fields.insert(
-                    key.trim_start_matches(ISTIO_METAJSON_PREFIX).to_string(),
-                    Self::json_to_value(v),
-                );
-            } else {
-                error!("failed to parse {}={}", key, val);
-            }
-        }
-
-        Node {
-            id: format!("ztunnel~{ip}~{pod_name}.{ns}~{ns}.svc.cluster.local"),
-            metadata: Some(metadata),
-            ..Default::default()
-        }
-    }
-
     async fn run_internal(&mut self) -> Result<(), Error> {
         let (discovery_req_tx, mut discovery_req_rx) = mpsc::channel::<DeltaDiscoveryRequest>(100);
         // For each type in initial_watches we will send a request on connection to subscribe
-        let initial_requests = self.construct_initial_requests();
+        let initial_requests: Vec<DeltaDiscoveryRequest> = self
+            .config
+            .initial_requests
+            .iter()
+            .map(|e| {
+                let mut req = e.clone();
+                req.initial_resource_versions = self
+                    .state
+                    .known_resources
+                    .get(req.type_url.as_str())
+                    .map(|hs| {
+                        hs.iter()
+                            .map(|n| (n.to_owned(), "".to_string())) // Proto expects Name -> Version. We don't care about version
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                req
+            })
+            .collect();
+
         let outbound = async_stream::stream! {
             for initial in initial_requests {
                 info!(resources=initial.initial_resource_versions.len(), type_url=initial.type_url, "sending initial request");
@@ -531,75 +599,28 @@ impl AdsClient {
         debug!("connected established");
 
         info!("Stream established");
-        // Create a oneshot channel to be notified as soon as we ACK the first XDS response
-        let (tx, initial_xds_rx) = oneshot::channel();
-        let mut initial_xds_tx = Some(tx);
-        let ready = mem::take(&mut self.block_ready);
-        tokio::spawn(async move {
-            match initial_xds_rx.await {
-                Ok(_) => drop(ready),
-                Err(_) => {
-                    debug!("sender was dropped before initial xds sync event was received");
-                }
-            }
-        });
-
         loop {
             tokio::select! {
                 _demand_event = self.state.demand.recv() => {
                     self.handle_demand_event(_demand_event, &discovery_req_tx).await?;
                 }
                 msg = response_stream.message() => {
-                    // TODO: If we have responses of different types (e.g. RBAC), we'll want to wait for
-                    // each type to receive a response before marking ready
-                    if let XdsSignal::Ack = self.handle_stream_event(msg?, &discovery_req_tx).await? {
-                        let val = mem::take(&mut initial_xds_tx);
-                        if let Some(tx) = val {
-                            if let Err(err) = tx.send(()) {
-                                warn!("initial xds sync signal send failed: {:?}", err)
+                    let msg = msg?;
+                    let mut received_type = None;
+                    if !self.types_to_expect.is_empty() {
+                        received_type = msg.as_ref().map(|e| e.type_url.clone());
+                    }
+                    if let XdsSignal::Ack = self.handle_stream_event(msg, &discovery_req_tx).await? {
+                        if let Some(received_type) = received_type {
+                            self.types_to_expect.remove(&received_type);
+                            if self.types_to_expect.is_empty() {
+                                mem::drop(mem::take(&mut self.block_ready));
                             }
                         }
                     };
                 }
             }
         }
-    }
-
-    fn construct_initial_requests(&mut self) -> Vec<DeltaDiscoveryRequest> {
-        let node = self.node();
-        let initial_requests: Vec<DeltaDiscoveryRequest> = self
-            .config
-            .initial_watches
-            .iter()
-            .map(|request_type| {
-                let irv: HashMap<String, String> = self
-                    .state
-                    .known_resources
-                    .get(request_type)
-                    .map(|hs| {
-                        hs.iter()
-                            .map(|n| (n.to_owned(), "".to_string())) // Proto expects Name -> Version. We don't care about version
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let (sub, unsub) = if self.config.on_demand {
-                    // XDS doesn't have a way to subscribe to zero resources. We workaround this by subscribing and unsubscribing
-                    // in one event, effectively giving us "subscribe to nothing".
-                    (vec!["*".to_string()], vec!["*".to_string()])
-                } else {
-                    (vec![], vec![])
-                };
-                DeltaDiscoveryRequest {
-                    type_url: request_type.to_owned(),
-                    node: Some(node.clone()),
-                    initial_resource_versions: irv,
-                    resource_names_subscribe: sub,
-                    resource_names_unsubscribe: unsub,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        initial_requests
     }
 
     async fn handle_stream_event(
@@ -615,6 +636,7 @@ impl AdsClient {
         info!(
             type_url = type_url, // this is a borrow, it's OK
             size = response.resources.len(),
+            removes = response.removed_resources.len(),
             "received response"
         );
         let handler_response: Result<(), Vec<RejectedConfig>> =
@@ -622,6 +644,8 @@ impl AdsClient {
                 Some(h) => h.handle(&mut self.state, response),
                 None => {
                     error!(%type_url, "unknown type");
+                    // TODO: this will just send another discovery request, to server. We should
+                    // either send one with an error or not send one at all.
                     Ok(())
                 }
             };
@@ -703,13 +727,14 @@ impl<T: prost::Message> XdsUpdate<T> {
 }
 
 fn decode_proto<T: prost::Message + Default>(
-    resource: ProtoResource,
+    resource: &ProtoResource,
 ) -> Result<XdsResource<T>, AdsError> {
-    let name = resource.name;
+    let name = resource.name.clone();
     resource
         .resource
+        .as_ref()
         .ok_or(AdsError::MissingResource())
-        .and_then(|res| <T>::decode(&*res.value).map_err(AdsError::Decode))
+        .and_then(|res| <T>::decode(&res.value[..]).map_err(AdsError::Decode))
         .map(|r| XdsResource { name, resource: r })
 }
 
@@ -737,11 +762,12 @@ mod tests {
     use textnonce::TextNonce;
     use tokio::time::sleep;
 
-    use crate::xds::istio::workload::address::Type as XdsType;
+    use crate::xds::istio::security::Authorization as XdsAuthorization;
     use crate::xds::istio::workload::Address as XdsAddress;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType;
     use crate::xds::ADDRESS_TYPE;
+    use crate::xds::{istio::workload::address::Type as XdsType, AUTHORIZATION_TYPE};
     use workload::Workload;
 
     use crate::state::workload::NetworkAddress;
@@ -780,6 +806,271 @@ mod tests {
             sleep(POLL_RATE).await;
             let wl = source.fetch_workload(&ip_network_addr).await;
             matched = wl == converted; // Option<Workload> is Ok to compare without needing to unwrap
+        }
+    }
+
+    fn get_auth(i: usize) -> ProtoResource {
+        let addr = XdsAuthorization {
+            name: format!("foo{}", i),
+            namespace: "default".to_string(),
+            scope: crate::xds::istio::security::Scope::Global as i32,
+            action: crate::xds::istio::security::Action::Deny as i32,
+            rules: vec![crate::xds::istio::security::Rule {
+                clauses: vec![crate::xds::istio::security::Clause {
+                    matches: vec![crate::xds::istio::security::Match {
+                        destination_ports: vec![80],
+                        ..Default::default()
+                    }],
+                }],
+            }],
+        };
+        ProtoResource {
+            name: format!("foo{}", i),
+            aliases: vec![],
+            version: "0.0.1".to_string(),
+            resource: Some(Any {
+                type_url: AUTHORIZATION_TYPE.to_string(),
+                value: addr.encode_to_vec(),
+            }),
+            ttl: None,
+            cache_control: None,
+        }
+    }
+    fn get_address(i: usize, addr: std::net::IpAddr) -> ProtoResource {
+        let octets = match addr {
+            IpAddr::V4(v4) => v4.octets().to_vec(),
+            IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+        let addr = XdsAddress {
+            r#type: Some(XdsType::Workload(XdsWorkload {
+                name: format!("foo{}", i),
+                uid: format!("default/foo{}", i),
+                namespace: "default".to_string(),
+                addresses: vec![octets.into()],
+                tunnel_protocol: 0,
+                trust_domain: "local".to_string(),
+                service_account: "default".to_string(),
+                node: "default".to_string(),
+                workload_type: WorkloadType::Deployment.into(),
+                workload_name: "".to_string(),
+                native_tunnel: true,
+                ..Default::default()
+            })),
+        };
+
+        ProtoResource {
+            name: format!("foo{}", i),
+            aliases: vec![],
+            version: "0.0.1".to_string(),
+            resource: Some(Any {
+                type_url: ADDRESS_TYPE.to_string(),
+                value: addr.encode_to_vec(),
+            }),
+            ttl: None,
+            cache_control: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_that_caches_are_warm_before_unblocked() {
+        helpers::initialize_telemetry();
+
+        // Setup fake xds server
+        let (mut conn_receiver, client, state, mut block) = AdsServer::spawn(false).await;
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                info!("workload manager: {}", e);
+            }
+        });
+
+        let mut conn = conn_receiver.recv().await.unwrap();
+
+        let mut auth_seen = false;
+        let mut addr_seen = false;
+
+        let timer = tokio::time::sleep(std::time::Duration::from_secs(1));
+        futures::pin_mut!(timer);
+
+        loop {
+            let req = tokio::select! {
+                _ = &mut timer => {
+                    panic!("expected requests were not received");
+                }
+                _ = block.changed() => {
+                    // make sure our cache is warm by using our resources
+                    state.read()
+                    .find_address(&NetworkAddress {
+                        network: "".to_string(),
+                        address: std::net::Ipv4Addr::new(1, 2, 3, 4).into(),
+                    })
+                    .expect("address not in cache");
+                    let conn = crate::rbac::Connection{
+                        dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 80),
+                        src_identity: None,
+                        src_ip: std::net::Ipv4Addr::new(1, 2,3, 5).into(),
+                        dst_network: "".to_string(),
+                    };
+                    // rbac should reject port 80
+                    let rbac_res = state.assert_rbac(&conn).await;
+                    assert!(!rbac_res);
+                    let conn = crate::rbac::Connection{
+                        dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 81),
+                        ..conn
+                    };
+                    // but allow port 81
+                    let rbac_res = state.assert_rbac(&conn).await;
+                    assert!(rbac_res);
+                    return;
+                }
+                req = conn.rx.recv() => {
+                    req.unwrap()
+                }
+            };
+
+            info!("received request: {:?}", req);
+            if req.type_url == AUTHORIZATION_TYPE && !auth_seen {
+                let response = Ok(DeltaDiscoveryResponse {
+                    resources: vec![get_auth(0)],
+                    nonce: TextNonce::new().to_string(),
+                    system_version_info: "1.0.0".to_string(),
+                    type_url: AUTHORIZATION_TYPE.to_string(),
+                    removed_resources: vec![],
+                });
+                conn.tx.send(response).await.unwrap();
+                auth_seen = true;
+            } else if req.type_url == ADDRESS_TYPE && !addr_seen {
+                let response = Ok(DeltaDiscoveryResponse {
+                    resources: vec![get_address(0, "1.2.3.4".parse().unwrap())],
+                    nonce: TextNonce::new().to_string(),
+                    system_version_info: "1.0.0".to_string(),
+                    type_url: ADDRESS_TYPE.to_string(),
+                    removed_resources: vec![],
+                });
+                conn.tx.send(response).await.unwrap();
+                addr_seen = true;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_on_demand_handling() {
+        helpers::initialize_telemetry();
+
+        // Setup fake xds server
+        let (mut conn_receiver, client, _, _) = AdsServer::spawn(true).await;
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                info!("workload manager: {}", e);
+            }
+        });
+
+        let mut conn = conn_receiver.recv().await.unwrap();
+
+        let mut auth_seen = false;
+        let mut addr_seen = false;
+
+        let timer = tokio::time::sleep(std::time::Duration::from_secs(1));
+        futures::pin_mut!(timer);
+
+        loop {
+            let req = tokio::select! {
+                _ = &mut timer => {
+                    panic!("expected requests were not received");
+                }
+                req = conn.rx.recv() => {
+                    req.unwrap()
+                }
+            };
+
+            info!("received request: {:?}", req);
+            if req.type_url == AUTHORIZATION_TYPE {
+                assert_eq!(req.resource_names_subscribe, Vec::<String>::new());
+                assert_eq!(req.resource_names_unsubscribe, Vec::<String>::new());
+                auth_seen = true;
+            } else if req.type_url == ADDRESS_TYPE {
+                assert_eq!(req.resource_names_subscribe, vec!["*"]);
+                assert_eq!(req.resource_names_unsubscribe, vec!["*"]);
+                addr_seen = true;
+            }
+
+            if auth_seen && addr_seen {
+                return;
+            }
+        }
+    }
+
+    // Tests that when the client processes a large response, the on-demand clients are notified
+    // after contents of the cache were updated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_on_demand_cache_coherency() {
+        helpers::initialize_telemetry();
+
+        // Setup fake xds server
+        let (mut conn_receiver, client, state, _) = AdsServer::spawn(true).await;
+
+        let demander = client.demander().unwrap();
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                info!("workload manager: {}", e);
+            }
+        });
+        let result = demander
+            .demand(ADDRESS_TYPE.to_string(), "foo0".to_string())
+            .await;
+
+        let mut conn = conn_receiver.recv().await.unwrap();
+
+        let timer = tokio::time::sleep(std::time::Duration::from_secs(5));
+        futures::pin_mut!(timer);
+
+        loop {
+            let req = tokio::select! {
+                _ = &mut timer => {
+                    panic!("expected requests were not received");
+                }
+                req = conn.rx.recv() => {
+                    req.unwrap()
+                }
+            };
+
+            info!("received request: {:?}", req);
+            if req.type_url == ADDRESS_TYPE && req.resource_names_subscribe == vec!["foo0"] {
+                let mut resources = vec![];
+
+                // send back a big response, to expose the timing issue.
+                let mut addr_range = ipnet::Ipv4Net::new(Ipv4Addr::new(1, 0, 0, 0), 8)
+                    .unwrap()
+                    .hosts();
+                for i in 0..10_000 {
+                    resources.push(get_address(i, addr_range.next().unwrap().into()));
+                }
+
+                let response = Ok(DeltaDiscoveryResponse {
+                    resources,
+                    nonce: TextNonce::new().to_string(),
+                    system_version_info: "1.0.0".to_string(),
+                    type_url: ADDRESS_TYPE.to_string(),
+                    removed_resources: vec![],
+                });
+
+                tokio::spawn(async move { conn.tx.send(response).await });
+
+                // wait for on demand to be notified. this means that the cache was updated with
+                // our resource if it exists (and in our case we know it exists).
+                result.recv().await;
+
+                state
+                    .read()
+                    .find_address(&NetworkAddress {
+                        network: "".to_string(),
+                        address: std::net::Ipv4Addr::new(1, 0, 0, 1).into(),
+                    })
+                    .expect("demander return but resource not in cache");
+                return;
+            }
         }
     }
 
@@ -843,7 +1134,7 @@ mod tests {
             });
 
         // Setup fake xds server
-        let (tx, client, state) = AdsServer::spawn().await;
+        let (mut conn_receiver, client, state, _) = AdsServer::spawn(false).await;
 
         tokio::spawn(async move {
             if let Err(e) = client.run().await {
@@ -851,15 +1142,28 @@ mod tests {
             }
         });
 
-        tx.send(initial_response)
-            .expect("failed to send server response");
-        verify_address(IpAddr::V4(ip), Some(addresses[0].clone()), &state).await;
-        tx.send(abort_response)
+        let conn = conn_receiver.recv().await.unwrap();
+
+        conn.tx
+            .send(initial_response)
+            .await
             .expect("failed to send server response");
         sleep(Duration::from_millis(50)).await;
         verify_address(IpAddr::V4(ip), Some(addresses[0].clone()), &state).await;
-        tx.send(removed_resource_response)
+        conn.tx
+            .send(abort_response)
+            .await
             .expect("failed to send server response");
+        sleep(Duration::from_millis(50)).await;
+        verify_address(IpAddr::V4(ip), Some(addresses[0].clone()), &state).await;
+
+        // original connection should close and client re-connect
+        let conn = conn_receiver.recv().await.unwrap();
+        conn.tx
+            .send(removed_resource_response)
+            .await
+            .expect("failed to send server response");
+        sleep(Duration::from_millis(50)).await;
         verify_address(IpAddr::V4(ip), None, &state).await;
     }
 
@@ -870,7 +1174,7 @@ mod tests {
         // JSON map
         let mut v = serde_json::json!({ "app": "foo", "version": "v1" });
         assert_eq!(
-            AdsClient::json_to_value(v).kind.unwrap(),
+            Config::json_to_value(v).kind.unwrap(),
             StructValue(prost_types::Struct {
                 fields: vec![
                     (
@@ -894,7 +1198,7 @@ mod tests {
         // JSON array
         v = serde_json::json!(["foo", "bar"]);
         assert_eq!(
-            AdsClient::json_to_value(v).kind.unwrap(),
+            Config::json_to_value(v).kind.unwrap(),
             ListValue(prost_types::ListValue {
                 values: vec![
                     prost_types::Value {
@@ -909,14 +1213,14 @@ mod tests {
 
         // JSON bool
         v = serde_json::json!(true);
-        assert_eq!(AdsClient::json_to_value(v).kind.unwrap(), BoolValue(true));
+        assert_eq!(Config::json_to_value(v).kind.unwrap(), BoolValue(true));
 
         // JSON Number
         v = serde_json::json!(1);
-        assert_eq!(AdsClient::json_to_value(v).kind.unwrap(), NumberValue(1f64));
+        assert_eq!(Config::json_to_value(v).kind.unwrap(), NumberValue(1f64));
 
         // JSON null
         v = serde_json::json!(());
-        assert_eq!(AdsClient::json_to_value(v).kind.unwrap(), NullValue(0));
+        assert_eq!(Config::json_to_value(v).kind.unwrap(), NullValue(0));
     }
 }
