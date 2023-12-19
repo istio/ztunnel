@@ -35,7 +35,7 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, trace, warn};
 
 use trust_dns_resolver::config::*;
@@ -199,17 +199,17 @@ impl ProxyState {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct DemandProxyState {
     #[serde(flatten)]
-    pub state: Arc<RwLock<ProxyState>>,
+    state: Arc<RwLock<ProxyState>>,
 
     /// If present, used to request on-demand updates for workloads.
     #[serde(skip_serializing)]
     demand: Option<Demander>,
 
     #[serde(skip_serializing)]
-    pub dns_resolver_cfg: ResolverConfig,
+    dns_resolver_cfg: ResolverConfig,
 
     #[serde(skip_serializing)]
-    pub dns_resolver_opts: ResolverOpts,
+    dns_resolver_opts: ResolverOpts,
 }
 
 impl DemandProxyState {
@@ -229,10 +229,6 @@ impl DemandProxyState {
 
     pub fn read(&self) -> RwLockReadGuard<'_, ProxyState> {
         self.state.read().unwrap()
-    }
-
-    pub fn write(&self) -> RwLockWriteGuard<'_, ProxyState> {
-        self.state.write().unwrap()
     }
 
     pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {

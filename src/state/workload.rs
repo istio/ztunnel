@@ -591,7 +591,7 @@ mod tests {
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::WorkloadStatus as XdsStatus;
-    use crate::xds::{LocalClient, ProxyStateUpdater};
+    use crate::xds::{LocalClient, ProxyStateUpdateMutator};
     use crate::{cert_fetcher, test_helpers};
     use bytes::Bytes;
     use std::collections::HashSet;
@@ -689,7 +689,7 @@ mod tests {
             ResolverConfig::default(),
             ResolverOpts::default(),
         );
-        let updater = ProxyStateUpdater::new_no_fetch(state.clone());
+        let updater = ProxyStateUpdateMutator::new_no_fetch();
 
         let ip1 = Ipv4Addr::new(127, 0, 0, 1);
         let ip2 = Ipv4Addr::new(127, 0, 0, 2);
@@ -716,12 +716,15 @@ mod tests {
         let uid2 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip2);
 
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid1.to_owned(),
-                addresses: vec![xds_ip1.clone()],
-                name: "some name".to_string(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some name".to_string(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(state.read().unwrap().workloads.by_addr.len(), 1);
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 1);
@@ -738,7 +741,7 @@ mod tests {
         assert_eq!(state.read().unwrap().services.num_services(), 0);
         assert_eq!(state.read().unwrap().services.num_staged_services(), 0);
 
-        updater.remove(&"/invalid".to_string());
+        updater.remove(&mut state.write().unwrap(), &"/invalid".to_string());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
@@ -749,7 +752,7 @@ mod tests {
             })
         );
 
-        updater.remove(&uid2);
+        updater.remove(&mut state.write().unwrap(), &uid2);
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
@@ -760,7 +763,7 @@ mod tests {
             })
         );
 
-        updater.remove(&uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1);
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             None
@@ -770,33 +773,39 @@ mod tests {
 
         // Add two workloads into the VIP. Add out of order to further test
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid1.to_owned(),
-                addresses: vec![xds_ip1.clone()],
-                name: "some name".to_string(),
-                services: service1.clone(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some name".to_string(),
+                    services: service1.clone(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(state.read().unwrap().services.num_vips(), 0);
         assert_eq!(state.read().unwrap().services.num_services(), 0);
         assert_eq!(state.read().unwrap().services.num_staged_services(), 1);
 
         updater
-            .insert_service(XdsService {
-                name: "svc1".to_string(),
-                namespace: "ns".to_string(),
-                hostname: "svc1.ns.svc.cluster.local".to_string(),
-                addresses: vec![XdsNetworkAddress {
-                    network: "".to_string(),
-                    address: vip1.octets().to_vec(),
-                }],
-                ports: vec![XdsPort {
-                    service_port: 80,
-                    target_port: 80,
-                }],
-                subject_alt_names: vec![],
-            })
+            .insert_service(
+                &mut state.write().unwrap(),
+                XdsService {
+                    name: "svc1".to_string(),
+                    namespace: "ns".to_string(),
+                    hostname: "svc1.ns.svc.cluster.local".to_string(),
+                    addresses: vec![XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vip1.octets().to_vec(),
+                    }],
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 80,
+                    }],
+                    subject_alt_names: vec![],
+                },
+            )
             .unwrap();
         assert_eq!((state.read().unwrap().services.num_vips()), 1);
         assert_eq!((state.read().unwrap().services.num_services()), 1);
@@ -804,26 +813,29 @@ mod tests {
 
         // upsert the service to ensure the old endpoints (no longer staged) are carried over
         updater
-            .insert_service(XdsService {
-                name: "svc1".to_string(),
-                namespace: "ns".to_string(),
-                hostname: "svc1.ns.svc.cluster.local".to_string(),
-                addresses: vec![
-                    XdsNetworkAddress {
-                        network: "".to_string(),
-                        address: vip1.octets().to_vec(), // old endpoints associated with this address should be carried over
-                    },
-                    XdsNetworkAddress {
-                        network: "".to_string(),
-                        address: vip2.octets().to_vec(), // new address just to test upsert
-                    },
-                ],
-                ports: vec![XdsPort {
-                    service_port: 80,
-                    target_port: 80,
-                }],
-                subject_alt_names: vec![],
-            })
+            .insert_service(
+                &mut state.write().unwrap(),
+                XdsService {
+                    name: "svc1".to_string(),
+                    namespace: "ns".to_string(),
+                    hostname: "svc1.ns.svc.cluster.local".to_string(),
+                    addresses: vec![
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: vip1.octets().to_vec(), // old endpoints associated with this address should be carried over
+                        },
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: vip2.octets().to_vec(), // new address just to test upsert
+                        },
+                    ],
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 80,
+                    }],
+                    subject_alt_names: vec![],
+                },
+            )
             .unwrap();
 
         assert_eq!((state.read().unwrap().services.num_vips()), 2); // there are now two addresses on the same service
@@ -860,20 +872,23 @@ mod tests {
 
         // upsert the service to remove an address and ensure services_by_ip map is properly cleaned up
         updater
-            .insert_service(XdsService {
-                name: "svc1".to_string(),
-                namespace: "ns".to_string(),
-                hostname: "svc1.ns.svc.cluster.local".to_string(),
-                addresses: vec![XdsNetworkAddress {
-                    network: "".to_string(),
-                    address: vip1.octets().to_vec(),
-                }],
-                ports: vec![XdsPort {
-                    service_port: 80,
-                    target_port: 80,
-                }],
-                subject_alt_names: vec![],
-            })
+            .insert_service(
+                &mut state.write().unwrap(),
+                XdsService {
+                    name: "svc1".to_string(),
+                    namespace: "ns".to_string(),
+                    hostname: "svc1.ns.svc.cluster.local".to_string(),
+                    addresses: vec![XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vip1.octets().to_vec(),
+                    }],
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 80,
+                    }],
+                    subject_alt_names: vec![],
+                },
+            )
             .unwrap();
 
         assert_eq!(state.read().unwrap().services.num_vips(), 1); // we removed an address in upsert
@@ -881,13 +896,16 @@ mod tests {
         assert_eq!(state.read().unwrap().services.num_staged_services(), 0);
 
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid2.to_owned(),
-                addresses: vec![xds_ip2.clone()],
-                name: "some name2".to_string(),
-                services: service1.clone(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid2.to_owned(),
+                    addresses: vec![xds_ip2.clone()],
+                    name: "some name2".to_string(),
+                    services: service1.clone(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(state.read().unwrap().services.num_vips(), 1);
         assert_eq!(state.read().unwrap().services.num_services(), 1);
@@ -918,7 +936,7 @@ mod tests {
         );
 
         assert_vips(&demand, vec!["some name", "some name2"]);
-        updater.remove(&uid2);
+        updater.remove(&mut state.write().unwrap(), &uid2);
 
         // we need to ensure both copies of the service stored are the same.
         // this is important because we mutate the service endpoints in place
@@ -945,56 +963,71 @@ mod tests {
         );
 
         assert_vips(&demand, vec!["some name"]);
-        updater.remove(&uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1);
         assert_vips(&demand, vec![]);
 
         // Add 2 workload with VIP
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid1.to_owned(),
-                addresses: vec![xds_ip1.clone()],
-                name: "some name".to_string(),
-                services: service1.clone(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some name".to_string(),
+                    services: service1.clone(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid2.to_owned(),
-                addresses: vec![xds_ip2.clone()],
-                name: "some name2".to_string(),
-                services: service1.clone(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid2.to_owned(),
+                    addresses: vec![xds_ip2.clone()],
+                    name: "some name2".to_string(),
+                    services: service1.clone(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_vips(&demand, vec!["some name", "some name2"]);
         // now update it without the VIP
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid1,
-                addresses: vec![xds_ip1],
-                name: "some name".to_string(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1,
+                    addresses: vec![xds_ip1],
+                    name: "some name".to_string(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         // Should be remove
         assert_vips(&demand, vec!["some name2"]);
         // now update it with unhealthy
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid2,
-                addresses: vec![xds_ip2],
-                name: "some name2".to_string(),
-                services: service1,
-                status: XdsStatus::Unhealthy as i32,
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid2,
+                    addresses: vec![xds_ip2],
+                    name: "some name2".to_string(),
+                    services: service1,
+                    status: XdsStatus::Unhealthy as i32,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         // Should be removed
         assert_vips(&demand, vec![]);
 
         // Remove the VIP entirely
-        updater.remove(&"ns/svc1.ns.svc.cluster.local".to_string());
+        updater.remove(
+            &mut state.write().unwrap(),
+            &"ns/svc1.ns.svc.cluster.local".to_string(),
+        );
         assert_eq!(state.read().unwrap().services.num_vips(), 0);
         assert_eq!((state.read().unwrap().services.num_services()), 0);
     }
@@ -1009,7 +1042,7 @@ mod tests {
             ResolverConfig::default(),
             ResolverOpts::default(),
         );
-        let updater = ProxyStateUpdater::new_no_fetch(state.clone());
+        let updater = ProxyStateUpdateMutator::new_no_fetch();
         assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
         assert_eq!((state.read().unwrap().workloads.by_uid.len()), 0);
         assert_eq!((state.read().unwrap().services.num_vips()), 0);
@@ -1033,40 +1066,49 @@ mod tests {
 
         // Add 2 workload with service
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid1.to_owned(),
-                addresses: vec![xds_ip1.clone()],
-                name: "some name".to_string(),
-                services: services.clone(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some name".to_string(),
+                    services: services.clone(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!((state.read().unwrap().services.num_staged_services()), 1);
 
         // now update it without the service
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid1.to_owned(),
-                addresses: vec![xds_ip1.clone()],
-                name: "some name".to_string(),
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some name".to_string(),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!((state.read().unwrap().services.num_staged_services()), 0); // should remove the VIP if no longer needed
 
         // Add 2 workload with service again
         updater
-            .insert_workload(XdsWorkload {
-                uid: uid1.to_owned(),
-                addresses: vec![xds_ip1],
-                name: "some name".to_string(),
-                services,
-                ..Default::default()
-            })
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1],
+                    name: "some name".to_string(),
+                    services,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!((state.read().unwrap().services.num_staged_services()), 1); // VIP should be staged again
 
-        updater.remove(&uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1);
         assert_eq!((state.read().unwrap().services.num_staged_services()), 0); // should remove the VIP if no longer needed
     }
 

@@ -58,6 +58,7 @@ impl Display for ResourceKey {
     }
 }
 
+#[derive(Debug)]
 pub struct RejectedConfig {
     name: String,
     reason: anyhow::Error,
