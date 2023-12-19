@@ -133,12 +133,12 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         let type_url = res.type_url.clone();
         let removes = &res.removed_resources;
 
-        let resources = &res.resources;
-        let updates: Vec<XdsUpdate<T>> = resources
-            .into_iter()
+        let updates: Vec<XdsUpdate<T>> = res
+            .resources
+            .iter()
             .map(|raw| decode_proto::<T>(raw).unwrap())
             .map(XdsUpdate::Update)
-            .chain(removes.iter().map(|e| e.clone()).map(XdsUpdate::Remove))
+            .chain(removes.iter().cloned().map(XdsUpdate::Remove))
             .collect();
 
         // First, call handlers that update the proxy state.
@@ -150,7 +150,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
 
         for name in res.removed_resources {
             let k = ResourceKey {
-                name: name,
+                name,
                 type_url: res.type_url.clone(),
             };
             debug!("received delete resource {k}");
