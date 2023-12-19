@@ -56,7 +56,12 @@ pub struct AdsConnection {
 impl AdsServer {
     pub async fn spawn(
         xds_on_demand: bool,
-    ) -> (mpsc::Receiver<AdsConnection>, AdsClient, DemandProxyState, tokio::sync::watch::Receiver<()>) {
+    ) -> (
+        mpsc::Receiver<AdsConnection>,
+        AdsClient,
+        DemandProxyState,
+        tokio::sync::watch::Receiver<()>,
+    ) {
         let (tx, rx) = mpsc::channel(100);
 
         let server = AdsServer { tx };
@@ -91,7 +96,7 @@ impl AdsServer {
         let istio_registry = sub_registry(&mut registry);
         let metrics = xds::metrics::Metrics::new(istio_registry);
 
-        let (block_tx, block_rx ) = tokio::sync::watch::channel(());
+        let (block_tx, block_rx) = tokio::sync::watch::channel(());
 
         let mut cfg = test_config_with_port_xds_addr_and_root_cert(
             80,

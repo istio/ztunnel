@@ -435,7 +435,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(15);
 
 impl AdsClient {
     fn is_initial_request_on_demand(r: &DeltaDiscoveryRequest) -> bool {
-        return !r.resource_names_subscribe.is_empty();
+        !r.resource_names_subscribe.is_empty()
     }
 
     fn new(config: Config, metrics: Metrics, block_ready: tokio::sync::watch::Sender<()>) -> Self {
@@ -453,12 +453,12 @@ impl AdsClient {
             .map(|e| e.type_url.clone())
             .collect();
         AdsClient {
-            config: config,
-            state: state,
-            metrics: metrics,
+            config,
+            state,
+            metrics,
             block_ready: Some(block_ready),
             connection_id: 0,
-            types_to_expect: types_to_expect,
+            types_to_expect,
         }
     }
 
@@ -912,7 +912,7 @@ mod tests {
                     };
                     // rbac should reject port 80
                     let rbac_res = state.assert_rbac(&conn).await;
-                    assert!(rbac_res == false);
+                    assert!(!rbac_res);
                     let conn = crate::rbac::Connection{
                         dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 81),
                         ..conn
