@@ -131,25 +131,45 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         res: DeltaDiscoveryResponse,
     ) -> Result<(), Vec<RejectedConfig>> {
         let type_url = res.type_url.clone();
-        let removes = state.handle_removes(&res);
+        let removes = &res.removed_resources;
+
         let updates: Vec<XdsUpdate<T>> = res
             .resources
-            .into_iter()
-            .map(|r| {
-                let key = ResourceKey {
-                    name: r.name.clone(),
-                    type_url: type_url.clone(),
-                };
-                state.notify_on_demand(&key);
-                state.add_resource(key.type_url, key.name);
-                r
-            })
+            .iter()
             .map(|raw| decode_proto::<T>(raw).unwrap())
             .map(XdsUpdate::Update)
-            .chain(removes.into_iter().map(XdsUpdate::Remove))
+            .chain(removes.iter().cloned().map(XdsUpdate::Remove))
             .collect();
 
-        self.h.handle(updates)
+        // First, call handlers that update the proxy state.
+        // other wise on-demand notifications might observe a cache without their resource
+        let result = self.h.handle(updates);
+
+        // after we update the proxy cache, we can update our xds cache. it's important that we do this after
+        // as we make on demand notifications here, so the proxy cache must be updated first.
+
+        for name in res.removed_resources {
+            let k = ResourceKey {
+                name,
+                type_url: res.type_url.clone(),
+            };
+            debug!("received delete resource {k}");
+            if let Some(rm) = state.known_resources.get_mut(&res.type_url) {
+                rm.remove(&k.name);
+            }
+            state.notify_on_demand(&k);
+        }
+
+        for r in res.resources {
+            let key = ResourceKey {
+                name: r.name,
+                type_url: type_url.clone(),
+            };
+            state.notify_on_demand(&key);
+            state.add_resource(key.type_url, key.name);
+        }
+
+        result
     }
 }
 
@@ -188,23 +208,6 @@ impl State {
             .entry(type_url)
             .or_default()
             .insert(name.clone());
-    }
-    fn handle_removes(&mut self, resp: &DeltaDiscoveryResponse) -> Vec<String> {
-        resp.removed_resources
-            .iter()
-            .map(|res| {
-                let k = ResourceKey {
-                    name: res.to_owned(),
-                    type_url: resp.type_url.clone(),
-                };
-                debug!("received delete resource {k}");
-                if let Some(rm) = self.known_resources.get_mut(&resp.type_url) {
-                    rm.remove(&k.name);
-                }
-                self.notify_on_demand(&k);
-                k.name
-            })
-            .collect()
     }
 }
 
@@ -634,6 +637,8 @@ impl AdsClient {
                 Some(h) => h.handle(&mut self.state, response),
                 None => {
                     error!(%type_url, "unknown type");
+                    // TODO: this will just send another discovery request, to server. We should
+                    // either send one with an error or not send one at all.
                     Ok(())
                 }
             };
@@ -715,13 +720,14 @@ impl<T: prost::Message> XdsUpdate<T> {
 }
 
 fn decode_proto<T: prost::Message + Default>(
-    resource: ProtoResource,
+    resource: &ProtoResource,
 ) -> Result<XdsResource<T>, AdsError> {
-    let name = resource.name;
+    let name = resource.name.clone();
     resource
         .resource
+        .as_ref()
         .ok_or(AdsError::MissingResource())
-        .and_then(|res| <T>::decode(&*res.value).map_err(AdsError::Decode))
+        .and_then(|res| <T>::decode(&res.value[..]).map_err(AdsError::Decode))
         .map(|r| XdsResource { name, resource: r })
 }
 
@@ -840,9 +846,106 @@ mod tests {
             if auth_seen && addr_seen {
                 return;
             }
+        }
+    }
 
-            // return some response so we get the next request
-            let _ = conn.tx.send(Ok(Default::default())).await;
+    // Tests that when the client processes a large response, the on-demand clients are notified
+    // after contents of the cache were updated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_on_demand_cache_coherency() {
+        helpers::initialize_telemetry();
+
+        // Setup fake xds server
+        let (mut conn_receiver, client, state) = AdsServer::spawn(true).await;
+
+        let demander = client.demander().unwrap();
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                info!("workload manager: {}", e);
+            }
+        });
+        let result = demander
+            .demand(ADDRESS_TYPE.to_string(), "foo0".to_string())
+            .await;
+
+        let mut conn = conn_receiver.recv().await.unwrap();
+
+        let timer = tokio::time::sleep(std::time::Duration::from_secs(5));
+        futures::pin_mut!(timer);
+
+        loop {
+            let req = tokio::select! {
+                _ = &mut timer => {
+                    panic!("expected requests were not received");
+                }
+                req = conn.rx.recv() => {
+                    req.unwrap()
+                }
+            };
+
+            info!("received request: {:?}", req);
+            if req.type_url == ADDRESS_TYPE && req.resource_names_subscribe == vec!["foo0"] {
+                let mut resources = vec![];
+
+                // send back a big response, to expose the timing issue.
+                let mut addr_range = ipnet::Ipv4Net::new(Ipv4Addr::new(1, 0, 0, 0), 8)
+                    .unwrap()
+                    .hosts();
+                for i in 0..10_000 {
+                    let addr = XdsAddress {
+                        r#type: Some(XdsType::Workload(XdsWorkload {
+                            name: format!("foo{}", i),
+                            uid: format!("default/foo{}", i),
+                            namespace: "default".to_string(),
+                            addresses: vec![addr_range.next().unwrap().octets().to_vec().into()],
+                            tunnel_protocol: 0,
+                            trust_domain: "local".to_string(),
+                            service_account: "default".to_string(),
+                            node: "default".to_string(),
+                            workload_type: WorkloadType::Deployment.into(),
+                            workload_name: "".to_string(),
+                            native_tunnel: true,
+                            ..Default::default()
+                        })),
+                    };
+
+                    resources.push(ProtoResource {
+                        name: format!("foo{}", i),
+                        aliases: vec![],
+                        version: "0.0.1".to_string(),
+                        resource: Some(Any {
+                            type_url: ADDRESS_TYPE.to_string(),
+                            value: addr.encode_to_vec(),
+                        }),
+                        ttl: None,
+                        cache_control: None,
+                    });
+                }
+
+                let response = Ok(DeltaDiscoveryResponse {
+                    resources,
+                    nonce: TextNonce::new().to_string(),
+                    system_version_info: "1.0.0".to_string(),
+                    type_url: ADDRESS_TYPE.to_string(),
+                    removed_resources: vec![],
+                });
+
+                tokio::spawn(async move { conn.tx.send(response).await });
+
+                // wait for on demand to be notified. this means that the cache was updated with
+                // our resource if it exists (and in our case we know it exists).
+                result.recv().await;
+
+                state
+                    .read()
+                    .find_address(&NetworkAddress {
+                        network: "".to_string(),
+                        address: std::net::Ipv4Addr::new(1, 0, 0, 1).into(),
+                    })
+                    .expect("demander return but resource not in cache");
+                return;
+            }
         }
     }
 
@@ -920,6 +1023,7 @@ mod tests {
             .send(initial_response)
             .await
             .expect("failed to send server response");
+        sleep(Duration::from_millis(50)).await;
         verify_address(IpAddr::V4(ip), Some(addresses[0].clone()), &state).await;
         conn.tx
             .send(abort_response)
@@ -927,10 +1031,14 @@ mod tests {
             .expect("failed to send server response");
         sleep(Duration::from_millis(50)).await;
         verify_address(IpAddr::V4(ip), Some(addresses[0].clone()), &state).await;
+
+        // original connection should close and client re-connect
+        let conn = conn_receiver.recv().await.unwrap();
         conn.tx
             .send(removed_resource_response)
             .await
             .expect("failed to send server response");
+        sleep(Duration::from_millis(50)).await;
         verify_address(IpAddr::V4(ip), None, &state).await;
     }
 
