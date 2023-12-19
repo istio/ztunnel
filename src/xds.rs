@@ -198,10 +198,8 @@ impl ProxyStateUpdateMutator {
             );
             return;
         }
-        if state.services.remove(&name).is_none() {
-            if expected {
-                warn!("tried to remove service keyed by {name}, but it was not found");
-            }
+        if state.services.remove(&name).is_none() && expected {
+            warn!("tried to remove service keyed by {name}, but it was not found");
         }
     }
 
