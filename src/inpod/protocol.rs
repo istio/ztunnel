@@ -169,7 +169,6 @@ mod workload_processor_helpers {
             (Payload::Keep(k), None) => Ok(WorkloadMessage::KeepWorkload(k.uid)),
             (Payload::Del(d), None) => Ok(WorkloadMessage::DelWorkload(d.uid)),
             (Payload::SnapshotSent(_), None) => Ok(WorkloadMessage::WorkloadSnapshotSent),
-            (Payload::NoSnapshotPresent(_), None) => Ok(WorkloadMessage::NoWorkloadSnapshot),
         }
     }
 

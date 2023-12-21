@@ -12,7 +12,7 @@ option go_package="pkg/zdsapi";
 // Add a workload to the ztunnel. this will be accompanied by ancillary data contianing
 // the workload's netns file descriptor.
 message AddWorkload {
-  string uid = 2;
+  string uid = 1;
 }
 
 // Keep workload that we can't find in the fd cache. This can only be sent before SnapshotSent is sent
@@ -29,11 +29,6 @@ message DelWorkload {
 // Let ztunnel know that a full snapshot was sent. Ztunnel should reconcile its internal state
 // and remove internal entries that were not sent.
 message SnapshotSent {
-}
-
-// Let ztunnel know that no snapshot will be sent, and no reconciliation is needed.
-// will be removed once we wrap up the CNI, here for now to help with testing.
-message NoSnapshotPresent {
 }
 
 // Ztunnel ack message. If error is not empty, this is an error message.
@@ -59,7 +54,6 @@ message WorkloadRequest {
     KeepWorkload keep = 5;
     DelWorkload del = 2;
     SnapshotSent snapshot_sent = 3;
-    NoSnapshotPresent no_snapshot_present = 4;
   }
 }
 

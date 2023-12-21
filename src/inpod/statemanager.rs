@@ -133,15 +133,6 @@ impl WorkloadProxyManagerState {
                 self.del_workload(&workload_uid);
                 Ok(())
             }
-            WorkloadMessage::NoWorkloadSnapshot => {
-                if !self.snapshot_names.is_empty() {
-                    return Err(Error::ProtocolError);
-                }
-                // no reconile here, as we have no snapshot.
-                // mark ready
-                self.snapshot_received = true;
-                Ok(())
-            }
             WorkloadMessage::WorkloadSnapshotSent => {
                 info!("pod received snapshot sent");
                 if self.snapshot_received {
@@ -447,7 +438,7 @@ mod tests {
         let msg3 = WorkloadMessage::AddWorkload(WorkloadData { netns: fd2, info });
 
         state
-            .process_msg(WorkloadMessage::NoWorkloadSnapshot)
+            .process_msg(WorkloadMessage::WorkloadSnapshotSent)
             .await
             .unwrap();
         state.process_msg(msg1).await.unwrap();

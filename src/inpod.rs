@@ -70,7 +70,6 @@ pub struct WorkloadData {
 pub enum WorkloadMessage {
     AddWorkload(WorkloadData),
     KeepWorkload(String),
-    NoWorkloadSnapshot,
     WorkloadSnapshotSent,
     DelWorkload(String),
 }
