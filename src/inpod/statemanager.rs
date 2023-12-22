@@ -101,7 +101,10 @@ impl WorkloadProxyManagerState {
     pub async fn process_msg(&mut self, msg: WorkloadMessage) -> Result<(), Error> {
         match msg {
             WorkloadMessage::AddWorkload(poddata) => {
-                info!("pod {} received netns, starting proxy", poddata.info.workload_uid);
+                info!(
+                    "pod {} received netns, starting proxy",
+                    poddata.info.workload_uid
+                );
                 if !self.snapshot_received {
                     self.snapshot_names
                         .insert(poddata.info.workload_uid.clone());
