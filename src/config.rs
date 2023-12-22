@@ -62,6 +62,7 @@ const DEFAULT_INPOD_MARK: u32 = 0b11;
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
+const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
@@ -299,6 +300,13 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     use trust_dns_resolver::system_conf::read_system_conf;
     let (dns_resolver_cfg, dns_resolver_opts) = read_system_conf().unwrap();
 
+    let dns_proxy_addr = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
+        Some(dns_addr) => dns_addr
+            .parse()
+            .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
+        None => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
+    };
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         dns_proxy: pc
@@ -331,7 +339,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
-        dns_proxy_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
+        dns_proxy_addr,
 
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
