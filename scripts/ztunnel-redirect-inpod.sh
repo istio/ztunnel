@@ -21,10 +21,10 @@ iptables-restore --wait 10 <<EOF
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
 
--A PREROUTING -m mark --mark 0x3/0xfff -j CONNMARK --set-xmark 0x111/0xfff
--A PREROUTING -p tcp -m tcp --dport $POD_INBOUND -m mark ! --mark 0x3/0xfff -j TPROXY --on-port $POD_INBOUND --on-ip 127.0.0.1 --tproxy-mark 0x111/0xfff
+-A PREROUTING -m mark --mark 0x1/0xfff -j CONNMARK --set-xmark 0x111/0xfff
+-A PREROUTING -p tcp -m tcp --dport $POD_INBOUND -m mark ! --mark 0x1/0xfff -j TPROXY --on-port $POD_INBOUND --on-ip 127.0.0.1 --tproxy-mark 0x111/0xfff
 -A PREROUTING -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A PREROUTING ! -d 127.0.0.1/32 -p tcp -m mark ! --mark 0x3/0xfff -j TPROXY --on-port $POD_INBOUND_PLAINTEXT --on-ip 127.0.0.1 --tproxy-mark 0x111/0xfff
+-A PREROUTING ! -d 127.0.0.1/32 -p tcp -m mark ! --mark 0x1/0xfff -j TPROXY --on-port $POD_INBOUND_PLAINTEXT --on-ip 127.0.0.1 --tproxy-mark 0x111/0xfff
 -A OUTPUT -m connmark --mark 0x111/0xfff -j CONNMARK --restore-mark --nfmask 0xffffffff --ctmask 0xffffffff
 COMMIT
 # Completed on Thu Jun 22 11:52:46 2023
@@ -37,7 +37,7 @@ COMMIT
 :ISTIO_REDIRECT - [0:0]
 -A OUTPUT -p tcp -j ISTIO_REDIRECT
 -A ISTIO_REDIRECT -p tcp -m mark --mark 0x111/0xfff -j ACCEPT
--A ISTIO_REDIRECT -p tcp -m mark ! --mark 0x3/0xfff -j REDIRECT --to-ports $POD_OUTBOUND
+-A ISTIO_REDIRECT -p tcp -m mark ! --mark 0x1/0xfff -j REDIRECT --to-ports $POD_OUTBOUND
 COMMIT
 # Completed on Thu Jun 22 11:52:46 2023
 EOF

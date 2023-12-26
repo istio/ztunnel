@@ -34,6 +34,7 @@ const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
 const INPOD_ENABLED: &str = "INPOD_ENABLED";
+const INPOD_MARK: &str = "INPOD_MARK";
 const INPOD_UDS: &str = "INPOD_UDS";
 const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
@@ -58,7 +59,7 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 
-const DEFAULT_INPOD_MARK: u32 = 0b11;
+const DEFAULT_INPOD_MARK: u32 = 0b1;
 
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
@@ -384,7 +385,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         dns_resolver_opts,
         inpod_enabled: parse_default(INPOD_ENABLED, false)?,
         inpod_uds: parse_default(INPOD_UDS, PathBuf::from("/var/run/ztunnel/ztunnel.sock"))?,
-        inpod_mark: DEFAULT_INPOD_MARK,
+        inpod_mark: parse_default(INPOD_MARK, DEFAULT_INPOD_MARK)?,
     })
 }
 
