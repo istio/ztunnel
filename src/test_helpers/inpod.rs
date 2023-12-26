@@ -58,6 +58,11 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
                 bind_path.as_ref().display()
             );
 
+            // read the hello message:
+            let mut buf: [u8; 100] = [0u8; 100];
+            let read_amount = ztun_sock.read(&mut buf).await.unwrap();
+            info!("hello received, len {}", read_amount);
+
             // send snapshot done msg:
             let r = crate::inpod::istio::zds::WorkloadRequest {
                 payload: Some(

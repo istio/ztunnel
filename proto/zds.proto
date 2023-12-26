@@ -1,6 +1,3 @@
-
-
-
 syntax = "proto3";
 
 // GRPC package - part of the URL. Service is added.
@@ -8,6 +5,15 @@ syntax = "proto3";
 package istio.workload.zds;
 
 option go_package="pkg/zdsapi";
+
+enum Version {
+  NOT_USED = 0;
+  V1 = 1;
+}
+
+message ZdsHello {
+  Version version = 1;
+}
 
 // Add a workload to the ztunnel. this will be accompanied by ancillary data contianing
 // the workload's netns file descriptor.

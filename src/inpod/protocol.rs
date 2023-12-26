@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::istio::zds::{self, Ack, WorkloadRequest, WorkloadResponse};
+use super::istio::zds::{self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello};
 use super::{WorkloadData, WorkloadInfo, WorkloadMessage};
 use nix::sys::socket::{recvmsg, sendmsg, MsgFlags};
 use prost::Message;
@@ -39,13 +39,21 @@ impl WorkloadStreamProcessor {
     pub fn new(stream: UnixStream, drain: Watch) -> Self {
         WorkloadStreamProcessor { stream, drain }
     }
+
+    pub async fn send_hello(&mut self) -> std::io::Result<()> {
+        let r = ZdsHello {
+            version: Version::V1 as i32,
+        };
+        self.send_msg(r).await
+    }
+
     pub async fn send_ack(&mut self) -> std::io::Result<()> {
         let r = WorkloadResponse {
             payload: Some(zds::workload_response::Payload::Ack(Ack {
                 error: String::new(),
             })),
         };
-        self.send_response(r).await
+        self.send_msg(r).await
     }
     pub async fn send_nack(&mut self, e: anyhow::Error) -> std::io::Result<()> {
         let r = WorkloadResponse {
@@ -53,10 +61,10 @@ impl WorkloadStreamProcessor {
                 error: e.to_string(),
             })),
         };
-        self.send_response(r).await
+        self.send_msg(r).await
     }
 
-    async fn send_response(&mut self, r: WorkloadResponse) -> std::io::Result<()> {
+    async fn send_msg<T: prost::Message + 'static>(&mut self, r: T) -> std::io::Result<()> {
         let mut buf = Vec::new();
         r.encode(&mut buf).unwrap();
 

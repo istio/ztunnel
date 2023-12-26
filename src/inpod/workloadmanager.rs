@@ -99,7 +99,7 @@ impl WorkloadProxyNetworkHandler {
                 Err(e) => {
                     backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
                     warn!(
-                        "failed to connect to pod server: {:?}. retrying in {:?}",
+                        "failed to connect to server: {:?}. retrying in {:?}",
                         e, backoff
                     );
                     tokio::time::sleep(backoff).await;
@@ -208,6 +208,8 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
         processor: &mut WorkloadStreamProcessor,
     ) -> anyhow::Result<Option<crate::inpod::WorkloadMessage>> {
         let readmsg = processor.read_message();
+        // Note: readmsg future is NOT cancel safe, so we want to make sure this function doesn't exit
+        // return without completing it.
         futures::pin_mut!(readmsg);
         loop {
             match self.next_pending_retry.take() {
@@ -246,6 +248,11 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
     }
 
     pub async fn process(&mut self, mut processor: WorkloadStreamProcessor) -> Result<(), Error> {
+        processor
+            .send_hello()
+            .await
+            .map_err(|_| Error::ProtocolError)?;
+
         loop {
             let msg = match self.read_message_and_retry_proxies(&mut processor).await {
                 Ok(Some(msg)) => Ok(msg),
@@ -372,6 +379,12 @@ pub(crate) mod tests {
             .returning(move || Ok(Some(WorkloadMessage::AddWorkload(workload_data(i)))));
         expect_ack(mock_processor);
     }
+    fn expect_hello(mock_processor: &mut MockWorkloadStreamProcessor) {
+        mock_processor
+            .expect_send_hello()
+            .times(1)
+            .returning(move || Ok(()));
+    }
     fn expect_fail_add(mock_processor: &mut MockWorkloadStreamProcessor, i: usize) {
         mock_processor
             .expect_read_message()
@@ -412,6 +425,7 @@ pub(crate) mod tests {
 
         default_cur_netns(&mut mock_ipc);
 
+        expect_hello(&mut mock_processor);
         expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
         expect_add(&mut mock_processor, 0);
 
@@ -435,6 +449,7 @@ pub(crate) mod tests {
 
         default_cur_netns(&mut mock_ipc);
 
+        expect_hello(&mut mock_processor);
         expect_fail_add(&mut mock_processor, 0);
         expect_error_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
         expect_snap_sent(&mut mock_processor);
@@ -472,6 +487,7 @@ pub(crate) mod tests {
 
         default_cur_netns(&mut mock_ipc);
 
+        expect_hello(&mut mock_processor);
         expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
         expect_add(&mut mock_processor, 0);
         expect_snap_sent(&mut mock_processor);
@@ -504,6 +520,7 @@ pub(crate) mod tests {
 
         default_cur_netns(&mut mock_ipc);
 
+        expect_hello(&mut mock_processor);
         expect_no_snap_sent(&mut mock_processor);
         expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
         expect_add(&mut mock_processor, 0);
@@ -536,6 +553,7 @@ pub(crate) mod tests {
 
         default_cur_netns(&mut mock_ipc);
 
+        expect_hello(&mut mock_processor);
         expect_add(&mut mock_processor, 0);
         expect_add(&mut mock_processor, 1);
         expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
@@ -543,10 +561,6 @@ pub(crate) mod tests {
         expect_snap_sent(&mut mock_processor);
         expect_end_stream(&mut mock_processor);
 
-        // second connection - note that workload zero is not here
-        expect_add(&mut second_mock_processor, 1);
-        expect_snap_sent(&mut second_mock_processor);
-        expect_end_stream(&mut second_mock_processor);
         let m = metrics();
         let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
 
@@ -566,6 +580,12 @@ pub(crate) mod tests {
         let expected_key_set: HashSet<String> = [0, 1].into_iter().map(uid).collect();
         assert_eq!(key_set, expected_key_set);
         assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 2);
+
+        // second connection - note that workload zero is not here
+        expect_hello(&mut second_mock_processor);
+        expect_add(&mut second_mock_processor, 1);
+        expect_snap_sent(&mut second_mock_processor);
+        expect_end_stream(&mut second_mock_processor);
 
         // run second stream:
         let res = {
