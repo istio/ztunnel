@@ -135,7 +135,7 @@ mod tests {
 
         // start with new netns to not impact the current netns
         unshare(CloneFlags::CLONE_NEWNET).unwrap();
-        let cur_netns = cur_netns();
+let cur_netns = InpodNetns::current().unwrap();
         helpers::run_command("ip link add name dummy1 type dummy").unwrap();
 
         let other_netns = new_netns();

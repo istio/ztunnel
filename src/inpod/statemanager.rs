@@ -27,7 +27,7 @@ use super::config::InPodConfig;
 use super::netns::InpodNetns;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
-pub(super) struct WorkloadState {
+struct WorkloadState {
     drain: Signal,
     workload_netns_inode: libc::ino_t,
 }
@@ -211,7 +211,7 @@ impl WorkloadProxyManagerState {
                 // idempotency - no error if we already have a proxy for the workload
                 // check if the inodes match. if they don't, we have a new netns
                 // we need to drain the previous proxy and add this one.
-                return Ok(()); // Err(Error::ProxyExists(workload_info.workload_uid));
+                return Ok(());
             }
         }
         self.metrics
@@ -219,9 +219,9 @@ impl WorkloadProxyManagerState {
             .proxy_pending(&workload_info.workload_uid);
 
         debug!(
-            "starting proxy for workload {:?}. ns inode is {:?}",
-            workload_info,
-            netns.workload_inode()
+            workload=?workload_info,
+            inode=?netns.workload_inode(),
+            "starting proxy",
         );
 
         // We create a per workload drain here. If the main loop in WorkloadProxyManager::run drains,
@@ -299,14 +299,9 @@ impl WorkloadProxyManagerState {
     fn del_workload(&mut self, workload_uid: &str) {
         // for idempotency, we ignore errors here (maybe just log / metric them)
         self.pending_workloads.remove(workload_uid);
-        let workload_state = self.workload_states.remove(workload_uid);
-
-        let workload_state = match workload_state {
-            Some(workload_state) => workload_state,
-            None => {
-                // TODO: add metrics
-                return;
-            }
+        let Some(workload_state) = self.workload_states.remove(workload_uid) else {
+            // TODO: add metrics
+            return;
         };
 
         self.update_proxy_count_metrics();
