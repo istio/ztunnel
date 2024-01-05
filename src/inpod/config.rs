@@ -17,15 +17,11 @@ use std::sync::Arc;
 
 use super::netns::InpodNetns;
 
-#[cfg(test)]
-use mockall::automock;
-
 pub struct InPodConfig {
     cur_netns: Arc<std::os::fd::OwnedFd>,
     mark: Option<std::num::NonZeroU32>,
 }
 
-#[cfg_attr(test, automock)]
 impl InPodConfig {
     pub fn new(cfg: &config::Config) -> std::io::Result<Self> {
         Ok(InPodConfig {

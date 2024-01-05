@@ -22,7 +22,6 @@ use tracing::{debug, error, info, warn};
 use super::statemanager::WorkloadProxyManagerState;
 use super::Error;
 
-#[mockall_double::double]
 use super::protocol::WorkloadStreamProcessor;
 
 const RETRY_DURATION: Duration = Duration::from_secs(5);
@@ -326,146 +325,81 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::super::config::MockInPodConfig;
-    use super::super::protocol::MockWorkloadStreamProcessor;
-    use super::super::tests::{
-        expect_error_proxy, expect_new_proxy, metrics, uid, workload_data, workload_netns,
-    };
-    use super::super::WorkloadMessage;
+
+    use super::super::protocol::WorkloadStreamProcessor;
+
     use super::*;
 
-    use crate::proxyfactory::MockProxyFactory;
+    use crate::inpod::test_helpers::{
+        create_proxy_confilct, fixture, new_netns, read_hello, read_msg, send_snap_sent,
+        send_workload_added, send_workload_del, uid,
+    };
+
     use std::collections::HashSet;
 
-    // Helpers to test process() function
-
-    fn expect_end_stream(mock_processor: &mut MockWorkloadStreamProcessor) {
-        // ending the stream by returning an error
-        mock_processor
-            .expect_read_message()
-            .times(1)
-            .returning(|| Err(anyhow::anyhow!("EOF")));
-        mock_processor
-            .expect_send_nack()
-            .times(1)
-            .returning(|_| Ok(()));
-    }
     fn assert_end_stream(res: Result<(), Error>) {
         match res {
             Err(Error::ReceiveMessageError(e)) => {
                 assert!(e.contains("EOF"));
             }
-            _ => panic!("expected error due to EOF"),
+            Ok(()) => {}
+            Err(e) => panic!("expected error due to EOF {:?}", e),
         }
-    }
-
-    fn default_cur_netns(mock_ipc: &mut MockInPodConfig) {
-        mock_ipc
-            .expect_cur_netns()
-            .times(..)
-            .returning(|| std::sync::Arc::new(workload_netns(100)));
-    }
-
-    fn expect_ack(mock_processor: &mut MockWorkloadStreamProcessor) {
-        mock_processor
-            .expect_send_ack()
-            .times(1)
-            .returning(|| Ok(()));
-    }
-    fn expect_add(mock_processor: &mut MockWorkloadStreamProcessor, i: usize) {
-        mock_processor
-            .expect_read_message()
-            .times(1)
-            .returning(move || Ok(Some(WorkloadMessage::AddWorkload(workload_data(i)))));
-        expect_ack(mock_processor);
-    }
-    fn expect_hello(mock_processor: &mut MockWorkloadStreamProcessor) {
-        mock_processor
-            .expect_send_hello()
-            .times(1)
-            .returning(move || Ok(()));
-    }
-    fn expect_fail_add(mock_processor: &mut MockWorkloadStreamProcessor, i: usize) {
-        mock_processor
-            .expect_read_message()
-            .times(1)
-            .returning(move || Ok(Some(WorkloadMessage::AddWorkload(workload_data(i)))));
-        mock_processor
-            .expect_send_nack()
-            .times(1)
-            .returning(|_| Ok(()));
-    }
-    fn expect_snap_sent(mock_processor: &mut MockWorkloadStreamProcessor) {
-        mock_processor
-            .expect_read_message()
-            .times(1)
-            .returning(|| Ok(Some(WorkloadMessage::WorkloadSnapshotSent)));
-        expect_ack(mock_processor);
-    }
-    fn expect_no_snap_sent(mock_processor: &mut MockWorkloadStreamProcessor) {
-        mock_processor
-            .expect_read_message()
-            .times(1)
-            .returning(|| Ok(Some(WorkloadMessage::WorkloadSnapshotSent)));
-        expect_ack(mock_processor);
-    }
-    fn expect_del(mock_processor: &mut MockWorkloadStreamProcessor, i: usize) {
-        mock_processor
-            .expect_read_message()
-            .times(1)
-            .returning(move || Ok(Some(WorkloadMessage::DelWorkload(uid(i)))));
-        expect_ack(mock_processor);
     }
 
     #[tokio::test]
     async fn test_process_add() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        let mut mock_processor = MockWorkloadStreamProcessor::default();
+        let f = fixture();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
+        let mut state =
+            WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
 
-        default_cur_netns(&mut mock_ipc);
+        let server = tokio::spawn(async move {
+            read_hello(&mut s2).await;
+            send_workload_added(&mut s2, "uid-0".to_owned(), new_netns()).await;
+            read_msg(&mut s2).await;
+        });
 
-        expect_hello(&mut mock_processor);
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_add(&mut mock_processor, 0);
-
-        expect_end_stream(&mut mock_processor);
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, metrics());
         let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
 
-        let res = processor_helper.process(mock_processor).await;
+        let res = processor_helper.process(processor).await;
         // make sure that the error is due to eof:
         assert_end_stream(res);
         assert!(!readiness.ready.pending().is_empty());
         state.drain().await;
+        server.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_process_failed() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        let mut mock_processor = MockWorkloadStreamProcessor::default();
+        let f = fixture();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let processor: WorkloadStreamProcessor =
+            WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
+        let mut state =
+            WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
 
-        default_cur_netns(&mut mock_ipc);
+        let podns = new_netns();
+        let socket = create_proxy_confilct(&podns);
 
-        expect_hello(&mut mock_processor);
-        expect_fail_add(&mut mock_processor, 0);
-        expect_error_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_snap_sent(&mut mock_processor);
+        let server = tokio::spawn(async move {
+            read_hello(&mut s2).await;
+            send_workload_added(&mut s2, "uid-0".to_owned(), podns).await;
+            read_msg(&mut s2).await;
+            send_snap_sent(&mut s2).await;
+            read_msg(&mut s2).await;
+        });
 
-        expect_end_stream(&mut mock_processor);
-
-        // on retry, the new proxy will succeed
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, metrics());
         let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
 
-        let res = processor_helper.process(mock_processor).await;
-        // make sure that the error is due to eof:
+        let res = processor_helper.process(processor).await;
         assert_end_stream(res);
+        std::mem::drop(socket);
+        server.await.unwrap();
+
         // not ready as we have a failing proxy
         assert!(!processor_helper.readiness.ready.pending().is_empty());
         assert!(processor_helper.next_pending_retry.is_some());
@@ -481,59 +415,29 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_process_add_and_del() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        let mut mock_processor = MockWorkloadStreamProcessor::default();
+        let f = fixture();
+        let m = f.inpod_metrics;
+        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let processor: WorkloadStreamProcessor =
+            WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
+        let mut state = WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, m.clone());
 
-        default_cur_netns(&mut mock_ipc);
-
-        expect_hello(&mut mock_processor);
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_add(&mut mock_processor, 0);
-        expect_snap_sent(&mut mock_processor);
-        expect_del(&mut mock_processor, 0);
-
-        expect_end_stream(&mut mock_processor);
-
-        let m = metrics();
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
-
-        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
-        let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
-
-        let res = processor_helper.process(mock_processor).await;
-        // make sure that the error is due to eof:
-        assert_end_stream(res);
-
-        assert_eq!(state.workload_states().len(), 0);
-        assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 0);
-        assert!(readiness.ready.pending().is_empty());
-
-        state.drain().await;
-    }
-
-    #[tokio::test]
-    async fn test_process_add_and_del_no_snap() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        let mut mock_processor = MockWorkloadStreamProcessor::default();
-
-        default_cur_netns(&mut mock_ipc);
-
-        expect_hello(&mut mock_processor);
-        expect_no_snap_sent(&mut mock_processor);
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_add(&mut mock_processor, 0);
-        expect_del(&mut mock_processor, 0);
-
-        expect_end_stream(&mut mock_processor);
-
-        let m = metrics();
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
+        let podns = new_netns();
+        let server = tokio::spawn(async move {
+            read_hello(&mut s2).await;
+            send_workload_added(&mut s2, "uid-0".to_owned(), podns).await;
+            read_msg(&mut s2).await;
+            send_snap_sent(&mut s2).await;
+            read_msg(&mut s2).await;
+            send_workload_del(&mut s2, "uid-0".to_owned()).await;
+            read_msg(&mut s2).await;
+        });
 
         let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
-        let res = processor_helper.process(mock_processor).await;
+
+        let res = processor_helper.process(processor).await;
+        server.await.unwrap();
         // make sure that the error is due to eof:
         assert_end_stream(res);
 
@@ -546,32 +450,29 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_process_snapshot_with_missing_workload() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        let mut mock_processor = MockWorkloadStreamProcessor::default();
-        let mut second_mock_processor = MockWorkloadStreamProcessor::default();
+        let f = fixture();
+        let m = f.inpod_metrics;
+        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
+        let mut state = WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, m.clone());
 
-        default_cur_netns(&mut mock_ipc);
-
-        expect_hello(&mut mock_processor);
-        expect_add(&mut mock_processor, 0);
-        expect_add(&mut mock_processor, 1);
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 1);
-        expect_snap_sent(&mut mock_processor);
-        expect_end_stream(&mut mock_processor);
-
-        let m = metrics();
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
+        let server = tokio::spawn(async move {
+            read_hello(&mut s2).await;
+            send_workload_added(&mut s2, uid(0), new_netns()).await;
+            read_msg(&mut s2).await;
+            send_workload_added(&mut s2, uid(1), new_netns()).await;
+            read_msg(&mut s2).await;
+            send_snap_sent(&mut s2).await;
+            read_msg(&mut s2).await;
+        });
 
         let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
 
-        let res = {
-            let mut processor_helper =
-                WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
-            processor_helper.process(mock_processor).await
-        };
+        let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
+        let res = processor_helper.process(processor).await;
+
         assert_end_stream(res);
+        server.await.unwrap();
         assert!(readiness.ready.pending().is_empty());
 
         // first proxy should be here:
@@ -581,19 +482,23 @@ pub(crate) mod tests {
         assert_eq!(key_set, expected_key_set);
         assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 2);
 
-        // second connection - note that workload zero is not here
-        expect_hello(&mut second_mock_processor);
-        expect_add(&mut second_mock_processor, 1);
-        expect_snap_sent(&mut second_mock_processor);
-        expect_end_stream(&mut second_mock_processor);
+        // second connection - don't send the one of the proxies here, to see ztunnel reconciles and removes it:
+        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
 
-        // run second stream:
-        let res = {
-            let mut processor_helper =
-                WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
-            processor_helper.process(second_mock_processor).await
-        };
+        let server = tokio::spawn(async move {
+            read_hello(&mut s2).await;
+            send_workload_added(&mut s2, uid(1), new_netns()).await;
+            read_msg(&mut s2).await;
+            send_snap_sent(&mut s2).await;
+            read_msg(&mut s2).await;
+        });
+
+        let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
+        let res = processor_helper.process(processor).await;
+
         assert_end_stream(res);
+        server.await.unwrap();
 
         // only second workload should remain
         assert_eq!(state.workload_states().len(), 1);

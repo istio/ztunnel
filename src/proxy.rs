@@ -41,9 +41,6 @@ use crate::state::workload::{network_addr, Workload};
 use crate::state::DemandProxyState;
 use crate::{config, identity, socket, tls};
 
-#[cfg(test)]
-use mockall::automock;
-
 mod inbound;
 mod inbound_passthrough;
 #[allow(non_camel_case_types)]
@@ -52,8 +49,6 @@ mod outbound;
 mod pool;
 mod socks5;
 mod util;
-
-pub use metrics::*;
 
 pub trait SocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<TcpSocket>;
@@ -128,7 +123,6 @@ impl ProxyInputs {
     }
 }
 
-#[cfg_attr(test, automock)]
 impl Proxy {
     pub async fn new(
         cfg: config::Config,

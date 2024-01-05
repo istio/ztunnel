@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::os::fd::AsRawFd;
+use crate::inpod::test_helpers::{
+    read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del,
+};
+
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tracing::info;
 
 pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
@@ -24,7 +27,6 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
     tokio::sync::mpsc::Receiver<()>,
 ) {
     info!("starting server {}", bind_path.as_ref().display());
-    use prost::Message;
 
     // remove file if exists
     if bind_path.as_ref().exists() {
@@ -59,25 +61,15 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             );
 
             // read the hello message:
-            let mut buf: [u8; 100] = [0u8; 100];
-            let read_amount = ztun_sock.read(&mut buf).await.unwrap();
-            info!("hello received, len {}", read_amount);
+            let hello = read_hello(&mut ztun_sock).await;
+            info!("hello received, {:?}", hello);
 
             // send snapshot done msg:
-            let r = crate::inpod::istio::zds::WorkloadRequest {
-                payload: Some(
-                    crate::inpod::istio::zds::workload_request::Payload::SnapshotSent(
-                        Default::default(),
-                    ),
-                ),
-            };
-            let data = r.encode_to_vec();
-            let written = ztun_sock.write(&data).await.expect("send failed");
+            send_snap_sent(&mut ztun_sock).await;
             info!(
                 "initial snapshot sent from ztun server {}",
                 bind_path.as_ref().display()
             );
-            assert_eq!(written, data.len());
 
             // receive ack from ztunnel
             let mut buf: [u8; 100] = [0u8; 100];
@@ -85,49 +77,15 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             info!("ack received, len {}", read_amount);
             // Now await for FDs
             while let Some(fd) = rx.recv().await {
-                let fds = [fd];
-                let mut cmsgs = vec![];
-                let r = if fd >= 0 {
-                    let cmsg = nix::sys::socket::ControlMessage::ScmRights(&fds);
-                    cmsgs.push(cmsg);
-                    crate::inpod::istio::zds::WorkloadRequest {
-                        payload: Some(crate::inpod::istio::zds::workload_request::Payload::Add(
-                            crate::inpod::istio::zds::AddWorkload {
-                                uid: "uid-0".into(),
-                            },
-                        )),
-                    }
+                if fd >= 0 {
+                    send_workload_added(&mut ztun_sock, "uid-0".into(), fd).await;
                 } else {
-                    crate::inpod::istio::zds::WorkloadRequest {
-                        payload: Some(crate::inpod::istio::zds::workload_request::Payload::Del(
-                            crate::inpod::istio::zds::DelWorkload {
-                                uid: "uid-0".into(),
-                            },
-                        )),
-                    }
+                    send_workload_del(&mut ztun_sock, "uid-0".into()).await;
                 };
-                let data: Vec<u8> = r.encode_to_vec();
-
-                let iov = [std::io::IoSlice::new(&data[..])];
-                // Wait for the socket to be writable
-                ztun_sock
-                    .async_io(tokio::io::Interest::WRITABLE, || {
-                        nix::sys::socket::sendmsg::<()>(
-                            ztun_sock.as_raw_fd(),
-                            &iov,
-                            &cmsgs[..],
-                            nix::sys::socket::MsgFlags::empty(),
-                            None,
-                        )
-                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
-                    })
-                    .await
-                    .expect("failed to sendmsg");
 
                 // receive ack from ztunnel
-                let mut buf: [u8; 100] = [0u8; 100];
-                let read_amount = ztun_sock.read(&mut buf).await.unwrap();
-                info!("ack received, len {}", read_amount);
+                let ack = read_msg(&mut ztun_sock).await;
+                info!("ack received, len {:?}", ack);
                 ack_tx.send(()).await.expect("send failed");
             }
         });

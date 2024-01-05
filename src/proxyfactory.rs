@@ -23,11 +23,7 @@ use crate::dns;
 
 use crate::proxy::{Error, Metrics};
 
-#[mockall_double::double]
 use crate::proxy::Proxy;
-
-#[cfg(test)]
-use mockall::automock;
 
 // Proxy factory creates ztunnel proxies using a socket factory.
 // this allows us to create our proxies the same way in regular mode and in inpod mode.
@@ -40,7 +36,6 @@ pub struct ProxyFactory {
     drain: Watch,
 }
 
-#[cfg_attr(test, automock)]
 impl ProxyFactory {
     pub fn new(
         config: config::Config,

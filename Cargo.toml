@@ -79,7 +79,6 @@ tower-hyper-http-body-compat = { version = "0.2", features = ["server", "http2"]
 futures-util = "0.3.26"
 chrono = "0.4.23"
 nix = "0.26.2"
-mockall_double = "0.3.0"
 hashbrown = "0.14.0"
 
 # DNS
@@ -119,5 +118,4 @@ diff = "0.1.13"
 local-ip-address = "0.5.3"
 matches = "0.1.9"
 test-case = "3.0.0"
-mockall = "0.11.2"
 #debug = true

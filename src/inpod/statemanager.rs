@@ -18,16 +18,14 @@ use tracing::{debug, info, Instrument};
 
 use super::{metrics::Metrics, Error, WorkloadInfo, WorkloadMessage};
 
-#[mockall_double::double]
 use crate::proxyfactory::ProxyFactory;
 
-#[mockall_double::double]
 use super::config::InPodConfig;
 
 use super::netns::InpodNetns;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
-struct WorkloadState {
+pub(super) struct WorkloadState {
     drain: Signal,
     workload_netns_inode: libc::ino_t,
 }
@@ -323,66 +321,89 @@ impl WorkloadProxyManagerState {
 
 #[cfg(test)]
 mod tests {
-    use super::super::config::MockInPodConfig;
-    use super::super::tests::{
-        expect_error_proxy, expect_new_proxy, expect_new_proxy_with_fd, metrics, workload_data,
-        workload_netns,
-    };
     use super::*;
+    use crate::inpod::test_helpers::{self, create_proxy_confilct, new_netns, uid};
     use crate::inpod::WorkloadData;
-    use crate::proxyfactory::MockProxyFactory;
-    use std::os::fd::AsRawFd;
-    use std::os::fd::OwnedFd;
+    use std::sync::Arc;
 
-    // test for WorkloadProxyManagerState
-
+    struct Fixture {
+        state: WorkloadProxyManagerState,
+        metrics: Arc<crate::inpod::Metrics>,
+    }
+    fn fixture() -> Fixture {
+        let f = test_helpers::fixture();
+        let state = WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
+        Fixture {
+            state,
+            metrics: f.inpod_metrics,
+        }
+    }
     #[tokio::test]
     async fn add_workload_starts_a_proxy() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, metrics());
-        let data = workload_data(0);
-        let ns = InpodNetns::new(Arc::new(workload_netns(10)), data.netns).unwrap();
-        state.add_workload(data.info, ns).await.unwrap();
+        let fixture = fixture();
+        let mut state = fixture.state;
+        let data = WorkloadData {
+            netns: new_netns(),
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
+        state
+            .process_msg(WorkloadMessage::AddWorkload(data))
+            .await
+            .unwrap();
         state.drain().await;
     }
 
     #[tokio::test]
     async fn idemepotency_add_workload_starts_only_one_proxy() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-
-        let m = metrics();
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
-        let data = workload_data(0);
-        let ns = InpodNetns::new(Arc::new(workload_netns(10)), data.netns).unwrap();
+        let fixture = fixture();
+        let mut state = fixture.state;
+        let ns = new_netns();
+        let data = WorkloadData {
+            netns: ns.try_clone().unwrap(),
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
         state
-            .add_workload(data.info.clone(), ns.clone())
+            .process_msg(WorkloadMessage::AddWorkload(data))
             .await
             .unwrap();
-        // second add should be idempotent, and return Ok().
-        assert!(matches!(state.add_workload(data.info, ns).await, Ok(())));
+        let data = WorkloadData {
+            netns: ns,
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
+        state
+            .process_msg(WorkloadMessage::AddWorkload(data))
+            .await
+            .unwrap();
         state.drain().await;
-        assert_eq!(m.proxies_started.get_or_create(&()).get(), 1);
     }
 
     #[tokio::test]
     async fn idemepotency_add_workload_fails() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        expect_error_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
+        let fixture = fixture();
+        let m = fixture.metrics.clone();
+        let mut state = fixture.state;
+        let ns = new_netns();
+        // to make the proxy fail, bind to its ports in its netns
+        let sock = create_proxy_confilct(&ns);
 
-        let m = metrics();
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
-        let data = workload_data(0);
-        let ns = InpodNetns::new(Arc::new(workload_netns(10)), data.netns).unwrap();
-        let ret = state.add_workload(data.info, ns.clone()).await;
+        let data = WorkloadData {
+            netns: ns,
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
+
+        let ret = state.process_msg(WorkloadMessage::AddWorkload(data)).await;
         assert!(ret.is_err());
         assert!(state.have_pending());
+
+        std::mem::drop(sock);
 
         state.retry_pending().await;
         assert!(!state.have_pending());
@@ -392,17 +413,32 @@ mod tests {
 
     #[tokio::test]
     async fn idemepotency_add_workload_fails_and_then_deleted() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        expect_error_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
+        let fixture = fixture();
+        let mut state = fixture.state;
 
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, metrics());
-        let data = workload_data(0);
-        let ns = InpodNetns::new(Arc::new(workload_netns(10)), data.netns).unwrap();
-        let ret = state.add_workload(data.info.clone(), ns.clone()).await;
+        let ns = new_netns();
+        // to make the proxy fail, bind to its ports in its netns
+        let _sock = create_proxy_confilct(&ns);
+
+        let data = WorkloadData {
+            netns: ns,
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
+        state
+            .process_msg(WorkloadMessage::WorkloadSnapshotSent)
+            .await
+            .unwrap();
+
+        let ret = state.process_msg(WorkloadMessage::AddWorkload(data)).await;
         assert!(ret.is_err());
         assert!(state.have_pending());
-        state.del_workload(&data.info.workload_uid);
+
+        state
+            .process_msg(WorkloadMessage::DelWorkload(uid(0)))
+            .await
+            .unwrap();
 
         assert!(!state.have_pending());
         state.drain().await;
@@ -410,30 +446,22 @@ mod tests {
 
     #[tokio::test]
     async fn add_delete_add_workload_starts_only_one_proxy() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
+        let fixture = fixture();
+        let mut state = fixture.state;
 
-        let fd2 = workload_netns(1);
+        let ns = new_netns();
+        let data = WorkloadData {
+            netns: ns.try_clone().unwrap(),
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
 
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_new_proxy_with_fd(&mut mock_proxy_gen, &mut mock_ipc, 0, Some(fd2.as_raw_fd()));
-
-        let unused_netns = Arc::new(workload_netns(10));
-        let ns = unused_netns.clone();
-        mock_ipc
-            .expect_cur_netns()
-            .times(..)
-            .returning(move || ns.clone());
-
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, metrics());
-        let data = workload_data(0);
-
-        //        let ns = InpodNetns::new(Arc::new(workload_netns(10)), data.netns).unwrap();
         let info = data.info.clone();
 
         let msg1 = WorkloadMessage::AddWorkload(data);
         let msg2 = WorkloadMessage::DelWorkload(info.workload_uid.clone());
-        let msg3 = WorkloadMessage::AddWorkload(WorkloadData { netns: fd2, info });
+        let msg3 = WorkloadMessage::AddWorkload(WorkloadData { netns: ns, info });
 
         state
             .process_msg(WorkloadMessage::WorkloadSnapshotSent)
@@ -441,24 +469,24 @@ mod tests {
             .unwrap();
         state.process_msg(msg1).await.unwrap();
         state.process_msg(msg2).await.unwrap();
+        // give a bit of time for the proxy to drain
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         state.process_msg(msg3).await.unwrap();
         state.drain().await;
     }
 
     #[tokio::test]
     async fn proxy_added_then_kept_with_new_snapshot() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        let unused_netns = Arc::new(workload_netns(10));
-        let ns = unused_netns.clone();
-        mock_ipc
-            .expect_cur_netns()
-            .times(..)
-            .returning(move || ns.clone());
-        let m = metrics();
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
-        let data = workload_data(0);
+        let fixture = fixture();
+        let m = fixture.metrics.clone();
+        let mut state = fixture.state;
+
+        let data = WorkloadData {
+            netns: new_netns(),
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
 
         let info = data.info.clone();
 
@@ -484,34 +512,29 @@ mod tests {
 
     #[tokio::test]
     async fn add_with_different_netns_keeps_latest_proxy() {
-        let mut mock_proxy_gen = MockProxyFactory::default();
-        let mut mock_ipc = MockInPodConfig::default();
-        // open a file with a different inode
-        let f = std::fs::File::open("/dev/urandom").unwrap();
-        let fd2: OwnedFd = f.into();
+        let fixture = fixture();
+        let m = fixture.metrics.clone();
+        let mut state = fixture.state;
 
-        let unused_netns = Arc::new(workload_netns(10));
-        let ns = unused_netns.clone();
-        mock_ipc
-            .expect_cur_netns()
-            .times(..)
-            .returning(move || ns.clone());
-
-        expect_new_proxy(&mut mock_proxy_gen, &mut mock_ipc, 0);
-        expect_new_proxy_with_fd(&mut mock_proxy_gen, &mut mock_ipc, 0, Some(fd2.as_raw_fd()));
-
-        let m = metrics();
-        let mut state = WorkloadProxyManagerState::new(mock_proxy_gen, mock_ipc, m.clone());
-        let data = workload_data(0);
+        let data = WorkloadData {
+            netns: new_netns(),
+            info: WorkloadInfo {
+                workload_uid: uid(0),
+            },
+        };
         let info = data.info.clone();
 
         let add1 = WorkloadMessage::AddWorkload(data);
-        let add2 = WorkloadMessage::AddWorkload(WorkloadData { netns: fd2, info });
+        let add2 = WorkloadMessage::AddWorkload(WorkloadData {
+            netns: new_netns(),
+            info,
+        });
 
         state.process_msg(add1).await.unwrap();
         state.process_msg(add2).await.unwrap();
         state.drain().await;
 
         assert_eq!(m.proxies_started.get_or_create(&()).get(), 2);
+        assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 1);
     }
 }

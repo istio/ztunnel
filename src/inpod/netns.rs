@@ -97,12 +97,6 @@ mod tests {
     use std::os::fd::OwnedFd;
     use std::process::Command;
 
-    fn cur_netns() -> OwnedFd {
-        std::fs::File::open(format!("/proc/self/task/{}/ns/net", gettid()))
-            .expect("failed to create netns")
-            .into()
-    }
-
     fn new_netns() -> OwnedFd {
         let mut new_netns: Option<OwnedFd> = None;
         std::thread::scope(|s| {
@@ -135,7 +129,7 @@ mod tests {
 
         // start with new netns to not impact the current netns
         unshare(CloneFlags::CLONE_NEWNET).unwrap();
-let cur_netns = InpodNetns::current().unwrap();
+        let cur_netns = InpodNetns::current().unwrap();
         helpers::run_command("ip link add name dummy1 type dummy").unwrap();
 
         let other_netns = new_netns();

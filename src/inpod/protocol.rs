@@ -23,9 +23,6 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use tokio::net::UnixStream;
 use tracing::{debug, info};
 
-#[cfg(test)]
-use mockall::automock;
-
 // Not dead code, but automock confuses Rust otherwise when built with certain targets
 #[allow(dead_code)]
 pub struct WorkloadStreamProcessor {
@@ -33,7 +30,6 @@ pub struct WorkloadStreamProcessor {
     drain: Watch,
 }
 
-#[cfg_attr(test, automock)]
 #[allow(dead_code)]
 impl WorkloadStreamProcessor {
     pub fn new(stream: UnixStream, drain: Watch) -> Self {
@@ -307,8 +303,8 @@ impl<'a> bytes::Buf for IoSliceBuf<'a> {
 #[cfg(test)]
 mod tests {
     use super::super::istio;
-    use super::super::tests::{fd_for_uid, uid};
     use super::*;
+    use crate::inpod::test_helpers::uid;
     use bytes::Buf;
     use nix::sys::socket::{ControlMessageOwned, MsgFlags};
     // Helpers to test get_workload_data_from_parts
@@ -320,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_parse_add_workload() {
-        let cmsgs = [ControlMessageOwned::ScmRights(vec![fd_for_uid(0)])];
+        let cmsgs = [ControlMessageOwned::ScmRights(vec![123])];
         let flags = MsgFlags::empty();
         let data = prep_request(zds::workload_request::Payload::Add(
             istio::zds::AddWorkload { uid: uid(0) },
@@ -338,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_parse_del_workload_with_fds_fails() {
-        let cmsgs = [ControlMessageOwned::ScmRights(vec![fd_for_uid(0)])];
+        let cmsgs = [ControlMessageOwned::ScmRights(vec![123])];
         let flags = MsgFlags::empty();
         let data = prep_request(zds::workload_request::Payload::Del(
             istio::zds::DelWorkload { uid: uid(0) },

@@ -14,7 +14,6 @@
 
 use std::future::Future;
 
-#[mockall_double::double]
 use crate::proxyfactory::ProxyFactory;
 
 use std::net::SocketAddr;
