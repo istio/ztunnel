@@ -1350,18 +1350,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mockall_double"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae71c7bb287375187c775cf82e2dcf1bef3388aaf58f0789a77f9c7ab28466f6"
-dependencies = [
- "cfg-if",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
 name = "multimap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2991,7 +2979,6 @@ dependencies = [
  "itertools",
  "libc",
  "log",
- "mockall_double",
  "netns-rs",
  "nix 0.26.2",
  "once_cell",
