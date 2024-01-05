@@ -58,10 +58,8 @@ pub mod netns;
 
 pub fn can_run_privilged_test() -> bool {
     let is_root = unsafe { libc::getuid() } == 0;
-    if !is_root {
-        if std::env::var("CI").is_ok() {
+    if !is_root && std::env::var("CI").is_ok() {
             panic!("CI tests should run as root to have full coverage");
-        }
     }
     is_root
 }

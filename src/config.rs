@@ -375,8 +375,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             ZTUNNEL_WORKER_THREADS,
             pc.concurrency
                 .unwrap_or(DEFAULT_WORKER_THREADS)
-                .try_into()
-                .expect("concurrency cannot be negative"),
+                .into(),
         )?,
 
         enable_original_source: parse(ENABLE_ORIG_SRC)?,

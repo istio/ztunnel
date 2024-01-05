@@ -353,7 +353,7 @@ pub(crate) mod tests {
                 eprintln!("This test requires root; skipping");
                 return;
             }
-            Fixture::new()
+            Fixture::default()
         }};
     }
 

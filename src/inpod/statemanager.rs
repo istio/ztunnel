@@ -337,7 +337,7 @@ mod tests {
                 eprintln!("This test requires root; skipping");
                 return;
             }
-            let f = test_helpers::Fixture::new();
+            let f = test_helpers::Fixture::default();
             let state =
                 WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
             Fixture {

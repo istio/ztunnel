@@ -46,12 +46,12 @@ pub struct Fixture {
     pub drain_rx: drain::Watch,
 }
 
-impl Fixture {
-    pub fn new() -> Fixture {
+impl Default for Fixture {
+    fn default() -> Fixture {
         crate::test_helpers::helpers::initialize_telemetry();
         unshare(CloneFlags::CLONE_NEWNET).unwrap();
         let lo_set = std::process::Command::new("ip")
-            .args(&["link", "set", "lo", "up"])
+            .args(["link", "set", "lo", "up"])
             .status()
             .unwrap()
             .success();
@@ -87,7 +87,7 @@ impl Fixture {
         .unwrap();
         Fixture {
             proxy_factory: proxy_gen,
-            ipc: ipc,
+            ipc,
             inpod_metrics: Arc::new(crate::inpod::Metrics::new(&mut registry)),
             drain_tx,
             drain_rx,
@@ -106,7 +106,7 @@ pub fn new_netns() -> OwnedFd {
             }
             // bring lo up
             lo_up = std::process::Command::new("ip")
-                .args(&["link", "set", "lo", "up"])
+                .args(["link", "set", "lo", "up"])
                 .status()
                 .unwrap()
                 .success();
@@ -130,7 +130,7 @@ pub async fn read_msg(s: &mut UnixStream) -> WorkloadResponse {
     debug!("read {} bytes", read_amount);
 
     let ret = WorkloadResponse::decode(&buf[..read_amount])
-        .expect(format!("failed to decode. read amount: {}", read_amount).as_str());
+        .unwrap_or_else(|_| panic!("failed to decode. read amount: {}", read_amount));
 
     debug!("decoded {:?}", ret);
     ret
