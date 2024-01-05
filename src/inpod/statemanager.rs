@@ -330,17 +330,26 @@ mod tests {
         state: WorkloadProxyManagerState,
         metrics: Arc<crate::inpod::Metrics>,
     }
-    fn fixture() -> Fixture {
-        let f = test_helpers::fixture();
-        let state = WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
-        Fixture {
-            state,
-            metrics: f.inpod_metrics,
-        }
+
+    macro_rules! fixture {
+        () => {{
+            if !crate::test_helpers::can_run_privilged_test() {
+                eprintln!("This test requires root; skipping");
+                return;
+            }
+            let f = test_helpers::Fixture::new();
+            let state =
+                WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
+            Fixture {
+                state,
+                metrics: f.inpod_metrics,
+            }
+        }};
     }
+
     #[tokio::test]
     async fn add_workload_starts_a_proxy() {
-        let fixture = fixture();
+        let fixture = fixture!();
         let mut state = fixture.state;
         let data = WorkloadData {
             netns: new_netns(),
@@ -357,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn idemepotency_add_workload_starts_only_one_proxy() {
-        let fixture = fixture();
+        let fixture = fixture!();
         let mut state = fixture.state;
         let ns = new_netns();
         let data = WorkloadData {
@@ -385,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn idemepotency_add_workload_fails() {
-        let fixture = fixture();
+        let fixture = fixture!();
         let m = fixture.metrics.clone();
         let mut state = fixture.state;
         let ns = new_netns();
@@ -413,7 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn idemepotency_add_workload_fails_and_then_deleted() {
-        let fixture = fixture();
+        let fixture = fixture!();
         let mut state = fixture.state;
 
         let ns = new_netns();
@@ -446,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_delete_add_workload_starts_only_one_proxy() {
-        let fixture = fixture();
+        let fixture = fixture!();
         let mut state = fixture.state;
 
         let ns = new_netns();
@@ -477,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_added_then_kept_with_new_snapshot() {
-        let fixture = fixture();
+        let fixture = fixture!();
         let m = fixture.metrics.clone();
         let mut state = fixture.state;
 
@@ -512,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_with_different_netns_keeps_latest_proxy() {
-        let fixture = fixture();
+        let fixture = fixture!();
         let m = fixture.metrics.clone();
         let mut state = fixture.state;
 

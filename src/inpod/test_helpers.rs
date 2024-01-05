@@ -1,3 +1,17 @@
+// Copyright Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::config::InPodConfig;
 use super::netns::InpodNetns;
 
@@ -20,8 +34,6 @@ use super::istio::zds::{WorkloadRequest, WorkloadResponse, ZdsHello};
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
 
-// test for WorkloadProxyManagerState
-
 pub fn uid(i: usize) -> String {
     format!("uid{i}")
 }
@@ -34,50 +46,52 @@ pub struct Fixture {
     pub drain_rx: drain::Watch,
 }
 
-pub fn fixture() -> Fixture {
-    crate::test_helpers::helpers::initialize_telemetry();
-    unshare(CloneFlags::CLONE_NEWNET).unwrap();
-    let lo_set = std::process::Command::new("ip")
-        .args(&["link", "set", "lo", "up"])
-        .status()
-        .unwrap()
-        .success();
-    assert!(lo_set);
-    let mut registry = Registry::default();
+impl Fixture {
+    pub fn new() -> Fixture {
+        crate::test_helpers::helpers::initialize_telemetry();
+        unshare(CloneFlags::CLONE_NEWNET).unwrap();
+        let lo_set = std::process::Command::new("ip")
+            .args(&["link", "set", "lo", "up"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(lo_set);
+        let mut registry = Registry::default();
 
-    let cfg = crate::config::Config {
-        inpod_mark: 1,
-        ..crate::config::construct_config(Default::default()).unwrap()
-    };
-    let state = Arc::new(RwLock::new(ProxyState::default()));
-    let cert_manager: Arc<crate::identity::SecretManager> =
-        crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10));
-    let metrics = crate::proxy::Metrics::new(&mut registry);
-    let (drain_tx, drain_rx) = drain::channel();
+        let cfg = crate::config::Config {
+            inpod_mark: 1,
+            ..crate::config::construct_config(Default::default()).unwrap()
+        };
+        let state = Arc::new(RwLock::new(ProxyState::default()));
+        let cert_manager: Arc<crate::identity::SecretManager> =
+            crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10));
+        let metrics = crate::proxy::Metrics::new(&mut registry);
+        let (drain_tx, drain_rx) = drain::channel();
 
-    let dstate = DemandProxyState::new(
-        state.clone(),
-        None,
-        ResolverConfig::default(),
-        ResolverOpts::default(),
-    );
+        let dstate = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
 
-    let ipc = InPodConfig::new(&cfg).unwrap();
-    let proxy_gen = ProxyFactory::new(
-        cfg,
-        dstate,
-        cert_manager,
-        Some(metrics),
-        None,
-        drain_rx.clone(),
-    )
-    .unwrap();
-    Fixture {
-        proxy_factory: proxy_gen,
-        ipc: ipc,
-        inpod_metrics: Arc::new(crate::inpod::Metrics::new(&mut registry)),
-        drain_tx,
-        drain_rx,
+        let ipc = InPodConfig::new(&cfg).unwrap();
+        let proxy_gen = ProxyFactory::new(
+            cfg,
+            dstate,
+            cert_manager,
+            Some(metrics),
+            None,
+            drain_rx.clone(),
+        )
+        .unwrap();
+        Fixture {
+            proxy_factory: proxy_gen,
+            ipc: ipc,
+            inpod_metrics: Arc::new(crate::inpod::Metrics::new(&mut registry)),
+            drain_tx,
+            drain_rx,
+        }
     }
 }
 

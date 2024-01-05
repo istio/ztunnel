@@ -119,10 +119,7 @@ mod tests {
 
     #[test]
     fn test_run_works() {
-        if !nix::unistd::geteuid().is_root() {
-            if std::env::var("CI").is_ok() {
-                panic!("CI tests should run as root to have full coverage");
-            }
+        if !crate::test_helpers::can_run_privilged_test() {
             eprintln!("This test requires root; skipping");
             return;
         }

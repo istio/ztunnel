@@ -331,8 +331,8 @@ pub(crate) mod tests {
     use super::*;
 
     use crate::inpod::test_helpers::{
-        create_proxy_confilct, fixture, new_netns, read_hello, read_msg, send_snap_sent,
-        send_workload_added, send_workload_del, uid,
+        create_proxy_confilct, new_netns, read_hello, read_msg, send_snap_sent,
+        send_workload_added, send_workload_del, uid, Fixture,
     };
 
     use std::collections::HashSet;
@@ -347,9 +347,19 @@ pub(crate) mod tests {
         }
     }
 
+    macro_rules! fixture {
+        () => {{
+            if !crate::test_helpers::can_run_privilged_test() {
+                eprintln!("This test requires root; skipping");
+                return;
+            }
+            Fixture::new()
+        }};
+    }
+
     #[tokio::test]
     async fn test_process_add() {
-        let f = fixture();
+        let f = fixture!();
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state =
@@ -374,7 +384,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_process_failed() {
-        let f = fixture();
+        let f = fixture!();
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
             WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
@@ -415,7 +425,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_process_add_and_del() {
-        let f = fixture();
+        let f = fixture!();
         let m = f.inpod_metrics;
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
@@ -450,7 +460,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_process_snapshot_with_missing_workload() {
-        let f = fixture();
+        let f = fixture!();
         let m = f.inpod_metrics;
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
