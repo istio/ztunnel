@@ -53,6 +53,7 @@ impl DrainingTasks {
 pub struct WorkloadProxyManagerState {
     proxy_gen: ProxyFactory,
     metrics: Arc<Metrics>,
+    admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
     // use hashbrown for extract_if
     workload_states: hashbrown::HashMap<String, WorkloadState>,
 
@@ -70,10 +71,16 @@ pub struct WorkloadProxyManagerState {
 }
 
 impl WorkloadProxyManagerState {
-    pub fn new(proxy_gen: ProxyFactory, inpod_config: InPodConfig, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        proxy_gen: ProxyFactory,
+        inpod_config: InPodConfig,
+        metrics: Arc<Metrics>,
+        admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
+    ) -> Self {
         WorkloadProxyManagerState {
             proxy_gen,
             metrics,
+            admin_handler,
             workload_states: Default::default(),
             pending_workloads: Default::default(),
             draining: Default::default(),
@@ -212,8 +219,7 @@ impl WorkloadProxyManagerState {
                 return Ok(());
             }
         }
-        self.metrics
-            .admin_handler()
+        self.admin_handler
             .proxy_pending(&workload_info.workload_uid);
 
         debug!(
@@ -237,9 +243,10 @@ impl WorkloadProxyManagerState {
 
         let uid = workload_info.workload_uid.clone();
 
-        self.metrics.admin_handler().proxy_up(&uid);
+        self.admin_handler.proxy_up(&uid);
 
         let metrics = self.metrics.clone();
+        let admin_handler = self.admin_handler.clone();
         metrics.proxies_started.get_or_create(&()).inc();
         if let Some(proxy) = proxies.proxy {
             tokio::spawn(
@@ -247,7 +254,7 @@ impl WorkloadProxyManagerState {
                     proxy.run().await;
                     debug!("proxy for workload {} exited", uid);
                     metrics.proxies_stopped.get_or_create(&()).inc();
-                    metrics.admin_handler().proxy_down(&uid);
+                    admin_handler.proxy_down(&uid);
                 }
                 .instrument(tracing::info_span!("proxy", uid=%workload_info.workload_uid)),
             );
@@ -338,8 +345,12 @@ mod tests {
                 return;
             }
             let f = test_helpers::Fixture::default();
-            let state =
-                WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
+            let state = WorkloadProxyManagerState::new(
+                f.proxy_factory,
+                f.ipc,
+                f.inpod_metrics.clone(),
+                Default::default(),
+            );
             Fixture {
                 state,
                 metrics: f.inpod_metrics,

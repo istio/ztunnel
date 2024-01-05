@@ -331,11 +331,11 @@ pub(crate) mod tests {
     use super::*;
 
     use crate::inpod::test_helpers::{
-        create_proxy_confilct, new_netns, read_hello, read_msg, send_snap_sent,
-        send_workload_added, send_workload_del, uid, Fixture,
+        self, create_proxy_confilct, new_netns, read_hello, read_msg, send_snap_sent,
+        send_workload_added, send_workload_del, uid,
     };
 
-    use std::collections::HashSet;
+    use std::{collections::HashSet, sync::Arc};
 
     fn assert_end_stream(res: Result<(), Error>) {
         match res {
@@ -347,13 +347,30 @@ pub(crate) mod tests {
         }
     }
 
+    struct Fixture {
+        state: WorkloadProxyManagerState,
+        inpod_metrics: Arc<crate::inpod::Metrics>,
+        drain_rx: drain::Watch,
+    }
+
     macro_rules! fixture {
         () => {{
             if !crate::test_helpers::can_run_privilged_test() {
                 eprintln!("This test requires root; skipping");
                 return;
             }
-            Fixture::default()
+            let f = test_helpers::Fixture::default();
+            let state = WorkloadProxyManagerState::new(
+                f.proxy_factory,
+                f.ipc,
+                f.inpod_metrics.clone(),
+                Default::default(),
+            );
+            Fixture {
+                state,
+                inpod_metrics: f.inpod_metrics,
+                drain_rx: f.drain_rx,
+            }
         }};
     }
 
@@ -362,8 +379,7 @@ pub(crate) mod tests {
         let f = fixture!();
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
-        let mut state =
-            WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
+        let mut state = f.state;
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
@@ -388,8 +404,7 @@ pub(crate) mod tests {
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
             WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
-        let mut state =
-            WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, f.inpod_metrics.clone());
+        let mut state = f.state;
 
         let podns = new_netns();
         let socket = create_proxy_confilct(&podns);
@@ -427,10 +442,10 @@ pub(crate) mod tests {
     async fn test_process_add_and_del() {
         let f = fixture!();
         let m = f.inpod_metrics;
+        let mut state = f.state;
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
             WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
-        let mut state = WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, m.clone());
 
         let podns = new_netns();
         let server = tokio::spawn(async move {
@@ -464,7 +479,7 @@ pub(crate) mod tests {
         let m = f.inpod_metrics;
         let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
-        let mut state = WorkloadProxyManagerState::new(f.proxy_factory, f.ipc, m.clone());
+        let mut state = f.state;
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;

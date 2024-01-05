@@ -17,7 +17,6 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
-use std::sync::Arc;
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
 struct ProxyLabels {
@@ -30,36 +29,31 @@ pub struct Metrics {
     pub(super) pending_proxy_count: Family<(), Gauge>,
     pub(super) proxies_started: Family<(), Counter>,
     pub(super) proxies_stopped: Family<(), Counter>,
-
-    admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
 }
 
 impl Metrics {
     pub fn new(registry: &mut Registry) -> Self {
         let m = Self::default();
         registry.register(
-            "inpod_active_proxy_count",
-            "The total number current workloads with active inpod proxies",
+            "active_proxy_count",
+            "The total number current workloads with active proxies",
             m.active_proxy_count.clone(),
         );
         registry.register(
-            "inpod_pending_proxy_count",
-            "The total number current workloads with pending inpod proxies",
+            "pending_proxy_count",
+            "The total number current workloads with pending proxies",
             m.pending_proxy_count.clone(),
         );
         registry.register(
-            "inpod_proxies_started",
-            "The total number of inpod proxies that were started",
+            "proxies_started",
+            "The total number of proxies that were started",
             m.proxies_started.clone(),
         );
         registry.register(
-            "inpod_proxies_stopped",
-            "The total number of inpod proxies that were stopped",
+            "proxies_stopped",
+            "The total number of proxies that were stopped",
             m.proxies_stopped.clone(),
         );
         m
-    }
-    pub fn admin_handler(&self) -> Arc<super::admin::WorkloadManagerAdminHandler> {
-        self.admin_handler.clone()
     }
 }

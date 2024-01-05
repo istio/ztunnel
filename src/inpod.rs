@@ -15,7 +15,6 @@
 use crate::config as zconfig;
 use crate::readiness;
 use metrics::Metrics;
-use prometheus_client::registry::Registry;
 use std::sync::Arc;
 use workloadmanager::WorkloadProxyManager;
 
@@ -27,7 +26,7 @@ pub use self::config::InPodSocketFactory;
 
 pub mod admin;
 mod config;
-mod metrics;
+pub mod metrics;
 pub mod netns;
 pub mod packet;
 mod protocol;
@@ -57,6 +56,7 @@ pub enum Error {
     ProtocolError,
 }
 
+
 #[derive(Debug, Clone)]
 struct WorkloadInfo {
     workload_uid: String,
@@ -76,7 +76,7 @@ pub enum WorkloadMessage {
 }
 
 pub fn init_and_new(
-    registry: &mut Registry,
+    metrics: Arc<Metrics>,
     admin_server: &mut crate::admin::Service,
     cfg: &zconfig::Config,
     proxy_gen: ProxyFactory,
@@ -84,11 +84,16 @@ pub fn init_and_new(
 ) -> anyhow::Result<WorkloadProxyManager> {
     // verify that we have the permissions for the syscalls we need
     WorkloadProxyManager::verify_syscalls()?;
-    let metrics = Arc::new(Metrics::new(registry));
-    admin_server.add_handler(metrics.admin_handler());
+    let admin_handler: Arc<admin::WorkloadManagerAdminHandler> = Default::default();
+    admin_server.add_handler(admin_handler.clone());
     let inpod_config = crate::inpod::InPodConfig::new(cfg)?;
 
-    let state_mgr = statemanager::WorkloadProxyManagerState::new(proxy_gen, inpod_config, metrics);
+    let state_mgr = statemanager::WorkloadProxyManagerState::new(
+        proxy_gen,
+        inpod_config,
+        metrics,
+        admin_handler,
+    );
 
     Ok(WorkloadProxyManager::new(
         cfg.inpod_uds.clone(),
