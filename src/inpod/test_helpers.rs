@@ -34,8 +34,8 @@ use super::istio::zds::{WorkloadRequest, WorkloadResponse, ZdsHello};
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
 
-pub fn uid(i: usize) -> String {
-    format!("uid{i}")
+pub fn uid(i: usize) -> crate::inpod::WorkloadUid {
+    crate::inpod::WorkloadUid::new(format!("uid{}", i))
 }
 
 pub struct Fixture {
@@ -153,14 +153,20 @@ pub async fn send_snap_sent(s: &mut UnixStream) {
     assert_eq!(written, data.len());
 }
 
-pub async fn send_workload_added(s: &mut UnixStream, uid: String, fd: impl std::os::fd::AsRawFd) {
+pub async fn send_workload_added(
+    s: &mut UnixStream,
+    uid: super::WorkloadUid,
+    fd: impl std::os::fd::AsRawFd,
+) {
     let fds = [fd.as_raw_fd()];
     let mut cmsgs = vec![];
     let cmsg = nix::sys::socket::ControlMessage::ScmRights(&fds);
     cmsgs.push(cmsg);
     let r = WorkloadRequest {
         payload: Some(crate::inpod::istio::zds::workload_request::Payload::Add(
-            crate::inpod::istio::zds::AddWorkload { uid },
+            crate::inpod::istio::zds::AddWorkload {
+                uid: uid.into_string(),
+            },
         )),
     };
 
@@ -183,10 +189,12 @@ pub async fn send_workload_added(s: &mut UnixStream, uid: String, fd: impl std::
     .expect("failed to sendmsg");
 }
 
-pub async fn send_workload_del(s: &mut UnixStream, uid: String) {
+pub async fn send_workload_del(s: &mut UnixStream, uid: super::WorkloadUid) {
     let r = WorkloadRequest {
         payload: Some(crate::inpod::istio::zds::workload_request::Payload::Del(
-            crate::inpod::istio::zds::DelWorkload { uid },
+            crate::inpod::istio::zds::DelWorkload {
+                uid: uid.into_string(),
+            },
         )),
     };
     let data: Vec<u8> = r.encode_to_vec();

@@ -56,10 +56,21 @@ pub enum Error {
     ProtocolError,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct WorkloadUid(String);
+
+impl WorkloadUid {
+    pub fn new(uid: String) -> Self {
+        Self(uid)
+    }
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 struct WorkloadInfo {
-    workload_uid: String,
+    workload_uid: WorkloadUid,
 }
 #[derive(Debug)]
 pub struct WorkloadData {
@@ -70,9 +81,9 @@ pub struct WorkloadData {
 #[derive(Debug)]
 pub enum WorkloadMessage {
     AddWorkload(WorkloadData),
-    KeepWorkload(String),
+    KeepWorkload(WorkloadUid),
     WorkloadSnapshotSent,
-    DelWorkload(String),
+    DelWorkload(WorkloadUid),
 }
 
 pub fn init_and_new(

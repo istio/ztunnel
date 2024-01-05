@@ -153,17 +153,21 @@ fn get_workload_data(
     let payload = req.payload.ok_or(anyhow::anyhow!("no payload"))?;
     match (payload, maybe_our_fd) {
         (Payload::Add(a), Some(our_netns)) => {
-            let uid: String = a.uid;
+            let uid = a.uid;
             Ok(WorkloadMessage::AddWorkload(WorkloadData {
                 netns: our_netns,
-                info: WorkloadInfo { workload_uid: uid },
+                info: WorkloadInfo {
+                    workload_uid: super::WorkloadUid::new(uid),
+                },
             }))
         }
         (Payload::Add(_), None) => Err(anyhow::anyhow!("No control message")),
         // anything other than Add shouldn't have FDs
         (_, Some(_)) => Err(anyhow::anyhow!("Unexpected control message")),
-        (Payload::Keep(k), None) => Ok(WorkloadMessage::KeepWorkload(k.uid)),
-        (Payload::Del(d), None) => Ok(WorkloadMessage::DelWorkload(d.uid)),
+        (Payload::Keep(k), None) => Ok(WorkloadMessage::KeepWorkload(super::WorkloadUid::new(
+            k.uid,
+        ))),
+        (Payload::Del(d), None) => Ok(WorkloadMessage::DelWorkload(super::WorkloadUid::new(d.uid))),
         (Payload::SnapshotSent(_), None) => Ok(WorkloadMessage::WorkloadSnapshotSent),
     }
 }
@@ -268,7 +272,9 @@ mod tests {
         let owned_fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
         let flags = MsgFlags::empty();
         let data = prep_request(zds::workload_request::Payload::Add(
-            istio::zds::AddWorkload { uid: uid(0) },
+            istio::zds::AddWorkload {
+                uid: uid(0).into_string(),
+            },
         ));
 
         let m = get_workload_data(&data[..], Some(owned_fd), flags).unwrap();
@@ -281,7 +287,9 @@ mod tests {
         let owned_fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
         let flags = MsgFlags::empty();
         let data = prep_request(zds::workload_request::Payload::Del(
-            istio::zds::DelWorkload { uid: uid(0) },
+            istio::zds::DelWorkload {
+                uid: uid(0).into_string(),
+            },
         ));
 
         let res = get_workload_data(&data[..], Some(owned_fd), flags);
@@ -292,7 +300,9 @@ mod tests {
     fn test_parse_del_workload() {
         let flags = MsgFlags::empty();
         let data = prep_request(zds::workload_request::Payload::Del(
-            istio::zds::DelWorkload { uid: uid(0) },
+            istio::zds::DelWorkload {
+                uid: uid(0).into_string(),
+            },
         ));
 
         let res = get_workload_data(&data[..], None, flags).unwrap();

@@ -383,7 +383,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, "uid-0".to_owned(), new_netns()).await;
+            send_workload_added(&mut s2, uid(0), new_netns()).await;
             read_msg(&mut s2).await;
         });
 
@@ -411,7 +411,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, "uid-0".to_owned(), podns).await;
+            send_workload_added(&mut s2, uid(0), podns).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
@@ -450,11 +450,11 @@ pub(crate) mod tests {
         let podns = new_netns();
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, "uid-0".to_owned(), podns).await;
+            send_workload_added(&mut s2, uid(0), podns).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
-            send_workload_del(&mut s2, "uid-0".to_owned()).await;
+            send_workload_del(&mut s2, uid(0)).await;
             read_msg(&mut s2).await;
         });
 
@@ -502,8 +502,13 @@ pub(crate) mod tests {
 
         // first proxy should be here:
         assert_eq!(state.workload_states().len(), 2);
-        let key_set: HashSet<String> = state.workload_states().keys().cloned().collect();
-        let expected_key_set: HashSet<String> = [0, 1].into_iter().map(uid).collect();
+        let key_set: HashSet<crate::inpod::WorkloadUid> =
+            state.workload_states().keys().cloned().collect();
+        let expected_key_set: HashSet<crate::inpod::WorkloadUid> = [0, 1]
+            .into_iter()
+            .map(uid)
+            .map(crate::inpod::WorkloadUid::from)
+            .collect();
         assert_eq!(key_set, expected_key_set);
         assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 2);
 

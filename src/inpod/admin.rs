@@ -40,11 +40,11 @@ pub struct ProxyState {
 
 #[derive(Default)]
 pub struct WorkloadManagerAdminHandler {
-    state: RwLock<HashMap<String, ProxyState>>,
+    state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
 }
 
 impl WorkloadManagerAdminHandler {
-    pub fn proxy_pending(&self, uid: &str) {
+    pub fn proxy_pending(&self, uid: &crate::inpod::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
         // don't increment count here, as it is only for up and down. see comment in count.
@@ -54,7 +54,7 @@ impl WorkloadManagerAdminHandler {
             }
             None => {
                 state.insert(
-                    uid.to_string(),
+                    uid.clone(),
                     ProxyState {
                         state: State::Pending,
                         count: 0,
@@ -63,7 +63,7 @@ impl WorkloadManagerAdminHandler {
             }
         }
     }
-    pub fn proxy_up(&self, uid: &str) {
+    pub fn proxy_up(&self, uid: &crate::inpod::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
@@ -73,7 +73,7 @@ impl WorkloadManagerAdminHandler {
             }
             None => {
                 state.insert(
-                    uid.to_string(),
+                    uid.clone(),
                     ProxyState {
                         state: State::Up,
                         count: 1,
@@ -83,7 +83,7 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
-    pub fn proxy_down(&self, uid: &str) {
+    pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
@@ -150,11 +150,12 @@ mod test {
         let handler = WorkloadManagerAdminHandler::default();
         let data = || String::from_utf8_lossy(&handler.to_bytes()).to_string();
 
-        handler.proxy_pending("uid1");
+        let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
+        handler.proxy_pending(&uid1);
         assert_eq!(data(), "{\"uid1\":{\"state\":\"Pending\"}}");
-        handler.proxy_up("uid1");
+        handler.proxy_up(&uid1);
         assert_eq!(data(), "{\"uid1\":{\"state\":\"Up\"}}");
-        handler.proxy_down("uid1");
+        handler.proxy_down(&uid1);
         assert_eq!(data(), "{}");
 
         let state = handler.state.read().unwrap();

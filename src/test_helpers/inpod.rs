@@ -77,10 +77,11 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             info!("ack received, len {}", read_amount);
             // Now await for FDs
             while let Some(fd) = rx.recv().await {
+                let uid = crate::inpod::WorkloadUid::new("uid-0".to_string());
                 if fd >= 0 {
-                    send_workload_added(&mut ztun_sock, "uid-0".into(), fd).await;
+                    send_workload_added(&mut ztun_sock, uid, fd).await;
                 } else {
-                    send_workload_del(&mut ztun_sock, "uid-0".into()).await;
+                    send_workload_del(&mut ztun_sock, uid).await;
                 };
 
                 // receive ack from ztunnel

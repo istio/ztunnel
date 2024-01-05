@@ -23,6 +23,7 @@ use crate::proxyfactory::ProxyFactory;
 use super::config::InPodConfig;
 
 use super::netns::InpodNetns;
+use super::WorkloadUid;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {
@@ -55,17 +56,17 @@ pub struct WorkloadProxyManagerState {
     metrics: Arc<Metrics>,
     admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
     // use hashbrown for extract_if
-    workload_states: hashbrown::HashMap<String, WorkloadState>,
+    workload_states: hashbrown::HashMap<WorkloadUid, WorkloadState>,
 
     // workloads we wanted to start but couldn't because we had an error starting them.
     // This happened to use mainly in testing when we redeploy ztunnel, and the old pod was
     // not completely drained yet.
-    pending_workloads: hashbrown::HashMap<String, (WorkloadInfo, InpodNetns)>,
+    pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, InpodNetns)>,
     draining: DrainingTasks,
 
     // new connection stuff
     snapshot_received: bool,
-    snapshot_names: std::collections::HashSet<String>,
+    snapshot_names: std::collections::HashSet<WorkloadUid>,
 
     inpod_config: InPodConfig,
 }
@@ -92,7 +93,7 @@ impl WorkloadProxyManagerState {
     }
 
     #[cfg(test)] // only used in tests, so added this to avoid warning
-    pub(super) fn workload_states(&self) -> &hashbrown::HashMap<String, WorkloadState> {
+    pub(super) fn workload_states(&self) -> &hashbrown::HashMap<WorkloadUid, WorkloadState> {
         &self.workload_states
     }
 
@@ -107,7 +108,7 @@ impl WorkloadProxyManagerState {
         match msg {
             WorkloadMessage::AddWorkload(poddata) => {
                 info!(
-                    "pod {} received netns, starting proxy",
+                    "pod {:?} received netns, starting proxy",
                     poddata.info.workload_uid
                 );
                 if !self.snapshot_received {
@@ -252,19 +253,19 @@ impl WorkloadProxyManagerState {
             tokio::spawn(
                 async move {
                     proxy.run().await;
-                    debug!("proxy for workload {} exited", uid);
+                    debug!("proxy for workload {:?} exited", uid);
                     metrics.proxies_stopped.get_or_create(&()).inc();
                     admin_handler.proxy_down(&uid);
                 }
-                .instrument(tracing::info_span!("proxy", uid=%workload_info.workload_uid)),
+                .instrument(
+                    tracing::info_span!("proxy", uid=%workload_info.workload_uid.clone().into_string()),
+                ),
             );
         }
         if let Some(proxy) = proxies.dns_proxy {
-            tokio::spawn(
-                proxy
-                    .run()
-                    .instrument(tracing::info_span!("dns_proxy", uid=%workload_info.workload_uid)),
-            );
+            tokio::spawn(proxy.run().instrument(
+                tracing::info_span!("dns_proxy", uid=%workload_info.workload_uid.clone().into_string()),
+            ));
         }
 
         self.workload_states.insert(
@@ -291,17 +292,17 @@ impl WorkloadProxyManagerState {
         let current_pending_workloads = std::mem::take(&mut self.pending_workloads);
 
         for (uid, (info, netns)) in current_pending_workloads {
-            info!("retrying workload {}", uid);
+            info!("retrying workload {:?}", uid);
             match self.add_workload(info, netns).await {
                 Ok(()) => {}
                 Err(e) => {
-                    info!("retrying workload {} failed: {}", uid, e);
+                    info!("retrying workload {:?} failed: {}", uid, e);
                 }
             }
         }
     }
 
-    fn del_workload(&mut self, workload_uid: &str) {
+    fn del_workload(&mut self, workload_uid: &WorkloadUid) {
         // for idempotency, we ignore errors here (maybe just log / metric them)
         self.pending_workloads.remove(workload_uid);
         let Some(workload_state) = self.workload_states.remove(workload_uid) else {
