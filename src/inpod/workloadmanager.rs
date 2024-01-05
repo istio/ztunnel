@@ -106,7 +106,7 @@ impl WorkloadProxyNetworkHandler {
                 }
 
                 Ok(conn) => {
-                    break conn;
+                    return conn;
                 }
             };
         }
@@ -122,10 +122,9 @@ impl WorkloadProxyManager {
         Self::verify_set_mark().map_err(|e| anyhow::anyhow!("failed to set socket mark: {:?}", e))
     }
 
-    fn verify_set_mark() -> std::io::Result<()> {
+    fn verify_set_mark() -> anyhow::Result<()> {
         let socket = tokio::net::TcpSocket::new_v4()?;
-        crate::socket::set_mark(&socket, 1337)?;
-        Ok(())
+        crate::socket::set_mark(&socket, 1337).map_err(|e| anyhow::anyhow!("failed to set mark on socket. make sure ztunnel has CAP_NET_RAW, CAP_NET_ADMIN. error: {:?}", e))
     }
 
     pub fn new(

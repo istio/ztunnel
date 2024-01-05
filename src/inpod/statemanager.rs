@@ -153,7 +153,6 @@ impl WorkloadProxyManagerState {
                 Ok(())
             }
         }
-        // TODO: add metrics, about how many pods we have currently, how many we added, how many we removed
     }
 
     // reconcile existing state to snaphsot. drains any workloads not in the snapshot
