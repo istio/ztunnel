@@ -350,6 +350,7 @@ pub(crate) mod tests {
         state: WorkloadProxyManagerState,
         inpod_metrics: Arc<crate::inpod::Metrics>,
         drain_rx: drain::Watch,
+        _drain_tx: drain::Signal,
     }
 
     macro_rules! fixture {
@@ -369,6 +370,7 @@ pub(crate) mod tests {
                 state,
                 inpod_metrics: f.inpod_metrics,
                 drain_rx: f.drain_rx,
+                _drain_tx: f.drain_tx,
             }
         }};
     }
