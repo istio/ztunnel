@@ -36,6 +36,7 @@ const PROXY_MODE: &str = "PROXY_MODE";
 const INPOD_ENABLED: &str = "INPOD_ENABLED";
 const INPOD_MARK: &str = "INPOD_MARK";
 const INPOD_UDS: &str = "INPOD_UDS";
+const INPOD_PORT_REUSE: &str = "INPOD_PORT_REUSE";
 const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
 const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
@@ -182,6 +183,7 @@ pub struct Config {
 
     pub inpod_enabled: bool,
     pub inpod_uds: PathBuf,
+    pub inpod_port_reuse: bool,
     pub inpod_mark: u32,
 }
 
@@ -382,6 +384,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         dns_resolver_opts,
         inpod_enabled: parse_default(INPOD_ENABLED, false)?,
         inpod_uds: parse_default(INPOD_UDS, PathBuf::from("/var/run/ztunnel/ztunnel.sock"))?,
+        inpod_port_reuse: parse_default(INPOD_PORT_REUSE, true)?,
         inpod_mark: parse_default(INPOD_MARK, DEFAULT_INPOD_MARK)?,
     })
 }
