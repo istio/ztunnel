@@ -179,7 +179,7 @@ impl WorkloadProxyManager {
                     info!("process stream ended with eof");
                 }
                 Err(e) => {
-                    info!("process stream ended: {:?}", e);
+                    warn!("process stream ended: {:?}", e);
                 }
             };
             debug!("workload proxy manager is NOT ready");
