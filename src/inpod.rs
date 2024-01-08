@@ -22,8 +22,6 @@ use crate::proxyfactory::ProxyFactory;
 
 use self::config::InPodConfig;
 
-pub use self::config::InPodSocketFactory;
-
 pub mod admin;
 mod config;
 pub mod metrics;

@@ -45,24 +45,20 @@ impl InPodConfig {
 }
 
 #[derive(Clone)]
-pub struct InPodSocketFactory {
+struct InPodSocketFactory {
     netns: InpodNetns,
     mark: Option<std::num::NonZeroU32>,
 }
 
 impl InPodSocketFactory {
-    pub fn from_cfg(inpod_config: &InPodConfig, netns: InpodNetns) -> Self {
+    fn from_cfg(inpod_config: &InPodConfig, netns: InpodNetns) -> Self {
         Self::new(netns, inpod_config.mark())
     }
-    pub fn new(netns: InpodNetns, mark: Option<std::num::NonZeroU32>) -> Self {
+    fn new(netns: InpodNetns, mark: Option<std::num::NonZeroU32>) -> Self {
         Self { netns, mark }
     }
 
-    pub fn netns(&self) -> &InpodNetns {
-        &self.netns
-    }
-
-    pub fn configure<S: std::os::unix::io::AsFd, F: FnOnce() -> std::io::Result<S>>(
+    fn configure<S: std::os::unix::io::AsFd, F: FnOnce() -> std::io::Result<S>>(
         &self,
         f: F,
     ) -> std::io::Result<S> {

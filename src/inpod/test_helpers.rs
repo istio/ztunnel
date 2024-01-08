@@ -15,7 +15,6 @@
 use super::config::InPodConfig;
 use super::netns::InpodNetns;
 
-use crate::proxy::SocketFactory;
 use crate::proxyfactory::ProxyFactory;
 use crate::state::{DemandProxyState, ProxyState};
 use nix::sched::{unshare, CloneFlags};
@@ -216,13 +215,16 @@ pub async fn send_workload_del(s: &mut UnixStream, uid: super::WorkloadUid) {
     .expect("failed to sendmsg");
 }
 
-pub fn create_proxy_confilct(ns: &std::os::fd::OwnedFd) -> tokio::net::TcpListener {
+pub fn create_proxy_confilct(ns: &std::os::fd::OwnedFd) -> std::os::fd::OwnedFd {
     let inpodns = InpodNetns::new(
         Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
         ns.try_clone().unwrap(),
     )
     .unwrap();
-    let sf = crate::inpod::InPodSocketFactory::new(inpodns, None);
-    sf.tcp_bind(std::net::SocketAddr::from(([0, 0, 0, 0], 15008)))
+    let tl = inpodns
+        .run(|| std::net::TcpListener::bind(std::net::SocketAddr::from(([0, 0, 0, 0], 15008))))
         .unwrap()
+        .unwrap();
+
+    tl.into()
 }
