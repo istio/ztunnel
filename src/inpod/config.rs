@@ -168,3 +168,148 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
         tokio::net::UdpSocket::from_std(std_sock)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use crate::inpod::test_helpers::new_netns;
+
+    macro_rules! fixture {
+        () => {{
+            if !crate::test_helpers::can_run_privilged_test() {
+                eprintln!("This test requires root; skipping");
+                return;
+            }
+
+            crate::config::Config {
+                inpod_mark: 123,
+                ..crate::config::parse_config().unwrap()
+            }
+        }};
+    }
+
+    #[tokio::test]
+    async fn test_inpod_config_no_port_reuse() {
+        let mut cfg = fixture!();
+        cfg.inpod_port_reuse = false;
+
+        let inpod_cfg = InPodConfig::new(&cfg).unwrap();
+        assert_eq!(
+            inpod_cfg.mark(),
+            Some(std::num::NonZeroU32::new(123).unwrap())
+        );
+        assert!(!inpod_cfg.reuse_port);
+
+        let sf = inpod_cfg.socket_factory(
+            InpodNetns::new(
+                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                new_netns(),
+            )
+            .unwrap(),
+        );
+
+        let sock_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        {
+            let s = sf.tcp_bind(sock_addr).unwrap();
+
+            // make sure mark nad port re-use are set
+            let sock_ref = socket2::SockRef::from(&s);
+            assert_eq!(
+                sock_ref.local_addr().unwrap(),
+                socket2::SockAddr::from(sock_addr)
+            );
+            assert!(!sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+
+        {
+            let s = sf.udp_bind(sock_addr).unwrap();
+
+            // make sure mark nad port re-use are set
+            let sock_ref = socket2::SockRef::from(&s);
+            assert_eq!(
+                sock_ref.local_addr().unwrap(),
+                socket2::SockAddr::from(sock_addr)
+            );
+            assert!(!sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inpod_config_port_reuse() {
+        let cfg = fixture!();
+
+        let inpod_cfg = InPodConfig::new(&cfg).unwrap();
+        assert_eq!(
+            inpod_cfg.mark(),
+            Some(std::num::NonZeroU32::new(123).unwrap())
+        );
+        assert!(inpod_cfg.reuse_port);
+
+        let sf = inpod_cfg.socket_factory(
+            InpodNetns::new(
+                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                new_netns(),
+            )
+            .unwrap(),
+        );
+
+        let sock_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        {
+            let s = sf.tcp_bind(sock_addr).unwrap();
+
+            // make sure mark nad port re-use are set
+            let sock_ref = socket2::SockRef::from(&s);
+            assert_eq!(
+                sock_ref.local_addr().unwrap(),
+                socket2::SockAddr::from(sock_addr)
+            );
+            assert!(sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+
+        {
+            let s = sf.udp_bind(sock_addr).unwrap();
+
+            // make sure mark nad port re-use are set
+            let sock_ref = socket2::SockRef::from(&s);
+            assert_eq!(
+                sock_ref.local_addr().unwrap(),
+                socket2::SockAddr::from(sock_addr)
+            );
+            assert!(sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inpod_config_outbound_sockets() {
+        let cfg = fixture!();
+
+        let inpod_cfg = InPodConfig::new(&cfg).unwrap();
+
+        let sf = inpod_cfg.socket_factory(
+            InpodNetns::new(
+                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                new_netns(),
+            )
+            .unwrap(),
+        );
+
+        {
+            let s = sf.new_tcp_v4().unwrap();
+            let sock_ref = socket2::SockRef::from(&s);
+            assert!(!sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+
+        {
+            let s = sf.new_tcp_v6().unwrap();
+            let sock_ref = socket2::SockRef::from(&s);
+            assert!(!sock_ref.reuse_port().unwrap());
+            assert_eq!(sock_ref.mark().unwrap(), 123);
+        }
+    }
+}
