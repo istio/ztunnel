@@ -16,7 +16,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use drain::Watch;
@@ -37,7 +37,7 @@ use crate::metrics::Recorder;
 use crate::proxy;
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
-use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::proxy::{metrics, Alpn, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 
@@ -110,32 +110,72 @@ impl Inbound {
                 };
                 debug!(%conn, "accepted connection");
                 let enable_original_source = self.cfg.enable_original_source;
-                let serve = crate::hyper_util::http2_server()
-                    .initial_stream_window_size(self.cfg.window_size)
-                    .initial_connection_window_size(self.cfg.connection_window_size)
-                    .max_frame_size(self.cfg.frame_size)
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(socket),
-                        service_fn(move |req| {
-                            Self::serve_connect(
-                                state.clone(),
-                                conn.clone(),
-                                enable_original_source.unwrap_or_default(),
-                                req,
-                                metrics.clone(),
-                            )
-                        }),
-                    );
-                // Wait for drain to signal or connection serving to complete
-                match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
-                    // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
-                    futures_util::future::Either::Left((_shutdown, mut server)) => {
-                        let drain = std::pin::Pin::new(&mut server);
-                        drain.graceful_shutdown();
-                        server.await
+                match proxy::parse_alpn(socket.ssl().selected_alpn_protocol()) {
+                    Ok(Alpn::Http11) => {
+                        let serve = crate::hyper_util::http1_server()
+                            .half_close(true)
+                            .header_read_timeout(Duration::from_secs(2))
+                            .serve_connection(
+                                hyper_util::rt::TokioIo::new(socket),
+                                service_fn(move |req| {
+                                    Self::serve_connect(
+                                        state.clone(),
+                                        conn.clone(),
+                                        enable_original_source.unwrap_or_default(),
+                                        req,
+                                        metrics.clone(),
+                                    )
+                                }),
+                            );
+                        let serve = serve.with_upgrades();
+                        // Wait for drain to signal or connection serving to complete
+                        let _ =
+                            match futures_util::future::select(Box::pin(drain.signaled()), serve)
+                                .await
+                            {
+                                // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
+                                futures_util::future::Either::Left((_shutdown, mut server)) => {
+                                    let drain = std::pin::Pin::new(&mut server);
+                                    drain.graceful_shutdown();
+                                    server.await
+                                }
+                                // Serving finished, just return the result.
+                                futures_util::future::Either::Right((server, _shutdown)) => server,
+                            };
                     }
-                    // Serving finished, just return the result.
-                    futures_util::future::Either::Right((server, _shutdown)) => server,
+                    Ok(Alpn::Http2) => {
+                        let serve = crate::hyper_util::http2_server()
+                            .initial_stream_window_size(self.cfg.window_size)
+                            .initial_connection_window_size(self.cfg.connection_window_size)
+                            .max_frame_size(self.cfg.frame_size)
+                            .serve_connection(
+                                hyper_util::rt::TokioIo::new(socket),
+                                service_fn(move |req| {
+                                    Self::serve_connect(
+                                        state.clone(),
+                                        conn.clone(),
+                                        enable_original_source.unwrap_or_default(),
+                                        req,
+                                        metrics.clone(),
+                                    )
+                                }),
+                            );
+                        // Wait for drain to signal or connection serving to complete
+                        let _ =
+                            match futures_util::future::select(Box::pin(drain.signaled()), serve)
+                                .await
+                            {
+                                // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
+                                futures_util::future::Either::Left((_shutdown, mut server)) => {
+                                    let drain = std::pin::Pin::new(&mut server);
+                                    drain.graceful_shutdown();
+                                    server.await
+                                }
+                                // Serving finished, just return the result.
+                                futures_util::future::Either::Right((server, _shutdown)) => server,
+                            };
+                    }
+                    Err(e) => warn!("TLS ALPN handshake error: {}", e),
                 }
             });
         }

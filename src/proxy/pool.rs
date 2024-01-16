@@ -18,8 +18,8 @@ use futures_util::future;
 use futures_util::future::Either;
 use http_body_util::Empty;
 use hyper::body::Incoming;
-use hyper::client::conn::http2;
-use hyper::http::{Request, Response};
+use hyper::client::conn::{http1, http2};
+use hyper::http::Response;
 use hyper_util::client::pool;
 use hyper_util::client::pool::{Pool as HyperPool, Poolable, Pooled, Reservation};
 use std::future::Future;
@@ -62,22 +62,39 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-struct Client(http2::SendRequest<Empty<Bytes>>);
+#[derive(Debug)]
+struct Client(PoolTx);
+
+#[derive(Debug)]
+pub enum PoolTx {
+    Http1(http1::SendRequest<Empty<Bytes>>),
+    Http2(http2::SendRequest<Empty<Bytes>>),
+}
 
 impl Poolable for Client {
     fn is_open(&self) -> bool {
-        self.0.is_ready()
+        match &self.0 {
+            PoolTx::Http1(tx) => tx.is_ready(),
+            PoolTx::Http2(tx) => tx.is_ready(),
+        }
     }
 
     fn reserve(self) -> Reservation<Self> {
-        let b = self.clone();
-        let a = self;
-        Reservation::Shared(a, b)
+        match self.0 {
+            PoolTx::Http1(tx) => Reservation::Unique(Client(PoolTx::Http1(tx))),
+            PoolTx::Http2(tx) => {
+                let b = Client(PoolTx::Http2(tx.clone()));
+                let a = Client(PoolTx::Http2(tx));
+                Reservation::Shared(a, b)
+            }
+        }
     }
 
     fn can_share(&self) -> bool {
-        true // http2 always shares
+        match &self.0 {
+            PoolTx::Http1(_) => false,
+            PoolTx::Http2(_) => true,
+        }
     }
 }
 
@@ -94,18 +111,21 @@ pub struct Key {
 pub struct Connection(Pooled<Client, Key>);
 
 impl Connection {
-    pub fn send_request(
+    pub async fn send_request(
         &mut self,
-        req: Request<Empty<Bytes>>,
-    ) -> impl Future<Output = hyper::Result<Response<Incoming>>> {
-        self.0 .0.send_request(req)
+        req: hyper::http::Request<Empty<Bytes>>,
+    ) -> hyper::Result<Response<Incoming>> {
+        match &mut self.0 .0 {
+            PoolTx::Http1(tx) => tx.send_request(req).await,
+            PoolTx::Http2(tx) => tx.send_request(req).await,
+        }
     }
 }
 
 impl Pool {
     pub async fn connect<F>(&self, key: Key, connect: F) -> Result<Connection, Error>
     where
-        F: Future<Output = Result<http2::SendRequest<Empty<Bytes>>, Error>>,
+        F: Future<Output = Result<PoolTx, Error>>,
     {
         let reuse_connection = self.pool.checkout(key.clone());
 
@@ -217,7 +237,7 @@ mod test {
                     error!("Error in connection handshake: {:?}", e);
                 }
             });
-            Ok(request_sender)
+            Ok(PoolTx::Http2(request_sender))
         };
         let req = || {
             hyper::Request::builder()
