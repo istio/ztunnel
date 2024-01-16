@@ -34,6 +34,8 @@ pub struct WorkloadManager {
     namespaces: netns::NamespaceManager,
     /// workloads that we have constructed
     workloads: Vec<LocalWorkload>,
+    /// policies to load into the ztunnel
+    policies: Vec<crate::rbac::Authorization>,
     /// services that we have constructed. VIP -> SVC
     services: HashMap<NamespacedHostname, Service>,
     /// Node to IPs on the node that are captured
@@ -47,6 +49,7 @@ impl WorkloadManager {
         Ok(Self {
             namespaces: netns::NamespaceManager::new(name)?,
             workloads: vec![],
+            policies: vec![],
             services: HashMap::new(),
             captured_workloads: Default::default(),
             waypoints: vec![],
@@ -66,7 +69,7 @@ impl WorkloadManager {
         let veth = ns.interface();
         let lc = LocalConfig {
             workloads: self.workloads.clone(),
-            policies: vec![],
+            policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
         let mut b = bytes::BytesMut::new().writer();
@@ -132,6 +135,12 @@ impl WorkloadManager {
     /// service_builder allows creating a new service
     pub fn service_builder(&mut self, name: &str) -> TestServiceBuilder {
         TestServiceBuilder::new(name, self)
+    }
+
+    /// service_builder allows creating a new service
+    pub fn with_policies(&mut self, policies: Vec<crate::rbac::Authorization>) -> &mut Self {
+        self.policies = policies;
+        self
     }
 
     /// register_waypoint builds a new waypoint. This must be used for waypoints, rather than workload_builder,

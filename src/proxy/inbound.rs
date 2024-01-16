@@ -33,7 +33,7 @@ use super::Error;
 use crate::baggage::parse_baggage_header;
 use crate::config::Config;
 use crate::identity::SecretManager;
-use crate::metrics::Recorder;
+use crate::metrics::{IncrementRecorder, Recorder};
 use crate::proxy;
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
@@ -292,20 +292,8 @@ impl Inbound {
                 }
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
-                } else if !state.assert_rbac(&conn).await {
-                    info!(%conn, "RBAC rejected");
-                    return Ok(Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Empty::new())
-                        .unwrap());
                 }
-                if has_waypoint && !from_waypoint {
-                    info!(%conn, "bypassed waypoint");
-                    return Ok(Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Empty::new())
-                        .unwrap());
-                }
+
                 let source_ip = if from_waypoint {
                     // If the request is from our waypoint, trust the Forwarded header.
                     // For other request types, we can only trust the source from the connection.
@@ -349,6 +337,26 @@ impl Inbound {
                     connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                     destination_service: ds,
                 };
+
+                if !from_waypoint && !state.assert_rbac(&conn).await {
+                    info!(%conn, "RBAC rejected");
+                    let denied_metrics: metrics::ConnectionDenied =
+                        metrics::ConnectionDenied::from(&connection_metrics);
+                    metrics.as_ref().increment(&denied_metrics);
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Empty::new())
+                        .unwrap());
+                }
+
+                if has_waypoint && !from_waypoint {
+                    info!(%conn, "bypassed waypoint");
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Empty::new())
+                        .unwrap());
+                }
+
                 let status_code = match Self::handle_inbound(
                     Hbone(req),
                     enable_original_source.then_some(source_ip),

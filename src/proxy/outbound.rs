@@ -28,6 +28,7 @@ use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
+use crate::metrics::IncrementRecorder;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool};
@@ -187,10 +188,7 @@ impl OutboundConnection {
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
-            if !self.pi.state.assert_rbac(&conn).await {
-                info!(%conn, "RBAC rejected");
-                return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
-            }
+
             // same as above but inverted, this is the "inbound" metric
             let inbound_connection_metrics = metrics::ConnectionOpen {
                 reporter: Reporter::destination,
@@ -204,6 +202,14 @@ impl OutboundConnection {
                 },
                 destination_service: req.destination_service,
             };
+
+            if !self.pi.state.assert_rbac(&conn).await {
+                info!(%conn, "RBAC rejected");
+                let denied_metrics: metrics::ConnectionDenied =
+                    metrics::ConnectionDenied::from(&inbound_connection_metrics);
+                self.pi.metrics.as_ref().increment(&denied_metrics);
+                return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
+            }
             return Inbound::handle_inbound(
                 InboundConnect::DirectPath(stream),
                 origin_src,
