@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, trace, warn, Instrument};
 
 use crate::config::ProxyMode;
+use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::metrics::Reporter;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{metrics, util, ProxyInputs};
@@ -31,6 +32,7 @@ pub(super) struct InboundPassthrough {
     listener: TcpListener,
     pi: ProxyInputs,
     drain: Watch,
+    connection_manager: ConnectionManager,
 }
 
 impl InboundPassthrough {
@@ -57,6 +59,7 @@ impl InboundPassthrough {
             listener,
             pi,
             drain,
+            connection_manager: ConnectionManager::new(),
         })
     }
 
@@ -66,6 +69,7 @@ impl InboundPassthrough {
             // Asynchronously wait for an inbound socket.
             let socket = self.listener.accept().await;
             let pi = self.pi.clone();
+            let connection_manager = self.connection_manager.clone();
             match socket {
                 Ok((stream, remote)) => {
                     tokio::spawn(async move {
@@ -73,6 +77,7 @@ impl InboundPassthrough {
                             pi, // pi cloned above; OK to move
                             socket::to_canonical(remote),
                             stream,
+                                connection_manager,
                         )
                         .await
                         {
@@ -105,6 +110,7 @@ impl InboundPassthrough {
         pi: ProxyInputs,
         source: SocketAddr,
         mut inbound: TcpStream,
+        connection_manager: ConnectionManager,
     ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(&inbound);
         // Check if it is a recursive call when proxy mode is Node.
@@ -130,6 +136,7 @@ impl InboundPassthrough {
             let mut oc = OutboundConnection {
                 pi: pi.clone(),
                 id: TraceParent::new(),
+                connection_manager,
             };
             // Spoofing the source IP only works when the destination or the source are on our node.
             // In this case, the source and the destination might both be remote, so we need to disable it.
@@ -154,6 +161,7 @@ impl InboundPassthrough {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }
+        let drain = connection_manager.track(&conn).await;
         let source_ip = super::get_original_src_from_stream(&inbound);
         let orig_src = pi
             .cfg
@@ -198,7 +206,10 @@ impl InboundPassthrough {
             .metrics
             .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
         let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
-        proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes).await?;
+        tokio::select! {
+            err =  proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes) => {err?;}
+            _signaled = drain.signaled() => {}
+        }
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }

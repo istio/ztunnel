@@ -39,7 +39,7 @@ pub struct Authorization {
     pub rules: Vec<Vec<Vec<RbacMatch>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct Connection {
     pub src_identity: Option<Identity>,
     pub src_ip: IpAddr,

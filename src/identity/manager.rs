@@ -42,6 +42,15 @@ pub enum Identity {
     },
 }
 
+impl PartialOrd for Identity {
+    // Not sure this is a super legit compare but I think it should work for POC
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let s = format!("{self}");
+        let o = format!("{other}");
+        s.partial_cmp(&o)
+    }
+}
+
 impl EncodeLabelValue for Identity {
     fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
         writer.write_str(&self.to_string())

@@ -26,8 +26,10 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
+use super::connection_manager::ConnectionManager;
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::config::Config;
@@ -52,6 +54,7 @@ pub(super) struct Inbound {
     drain: Watch,
     metrics: Arc<Metrics>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    connection_manager: ConnectionManager,
 }
 
 impl Inbound {
@@ -77,6 +80,7 @@ impl Inbound {
             metrics: pi.metrics,
             drain,
             socket_factory: pi.socket_factory.clone(),
+            connection_manager: ConnectionManager::new(),
         })
     }
 
@@ -94,12 +98,35 @@ impl Inbound {
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
 
-        let (sub_drain_signal, sub_drain) = drain::channel();
+        // spawn a task which subscribes to watch updates and asserts rbac against this proxy's connections, closing the ones which have become denied
+        let (stop_tx, mut stop_rx) = watch::channel(());
+        let state = self.state.clone();
+        let connection_manager = self.connection_manager.clone();
+
+        tokio::spawn(async move {
+            let mut policies_changed = state.read().policies.subscribe();
+            loop {
+                tokio::select! {
+                    _ = stop_rx.changed() => {
+                        return
+                    }
+                    _ = policies_changed.changed() => {
+                        let connections = connection_manager.connections().await;
+                        for conn in connections {
+                            if !state.assert_rbac(&conn).await {
+                                connection_manager.drain(&conn).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         while let Some(socket) = stream.next().await {
             let state = self.state.clone();
             let metrics = self.metrics.clone();
             let socket_factory = self.socket_factory.clone();
-            let drain = sub_drain.clone();
+            let connection_manager = self.connection_manager.clone();
             let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
@@ -112,6 +139,7 @@ impl Inbound {
                     dst_network: network, // inbound request must be on our network
                     dst,
                 };
+                let drain = connection_manager.track(&conn).await;
                 debug!(%conn, "accepted connection");
                 let enable_original_source = self.cfg.enable_original_source;
                 let serve = crate::hyper_util::http2_server()
@@ -144,9 +172,9 @@ impl Inbound {
                 }
             });
         }
-        std::mem::drop(sub_drain);
         info!("draining connections");
-        sub_drain_signal.drain().await;
+        self.connection_manager.drain_all().await;
+        stop_tx.send_replace(());
         info!("all inbound connections drained");
     }
 

@@ -14,6 +14,7 @@
 
 use crate::rbac::{Authorization, RbacScope};
 use std::collections::{HashMap, HashSet};
+use tokio::sync::watch;
 
 /// A PolicyStore encapsulates all policy information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
@@ -23,6 +24,27 @@ pub struct PolicyStore {
 
     /// policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     by_namespace: HashMap<String, HashSet<String>>,
+
+    #[serde(skip)]
+    notifier: PolicyStoreNotify,
+}
+
+#[derive(Debug)]
+struct PolicyStoreNotify {
+    sender: watch::Sender<()>,
+}
+
+impl PolicyStoreNotify {
+    fn send(&mut self) {
+        self.sender.send_replace(());
+    }
+}
+
+impl Default for PolicyStoreNotify {
+    fn default() -> Self {
+        let (tx, _rx) = watch::channel(());
+        PolicyStoreNotify { sender: tx }
+    }
 }
 
 impl PolicyStore {
@@ -57,12 +79,14 @@ impl PolicyStore {
             RbacScope::WorkloadSelector => {}
         }
         self.by_key.insert(key, rbac);
+        self.notifier.send();
     }
 
     pub fn remove(&mut self, name: String) {
         let Some(rbac) = self.by_key.remove(&name) else {
             return;
         };
+        self.notifier.send();
         if let Some(key) = match rbac.scope {
             RbacScope::Global => Some("".to_string()),
             RbacScope::Namespace => Some(rbac.namespace),
@@ -75,5 +99,8 @@ impl PolicyStore {
                 }
             }
         }
+    }
+    pub fn subscribe(&self) -> watch::Receiver<()> {
+        self.notifier.sender.subscribe()
     }
 }
