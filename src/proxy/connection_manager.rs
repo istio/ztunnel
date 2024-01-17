@@ -29,6 +29,14 @@ impl ConnectionDrain {
         let (tx, rx) = drain::channel();
         ConnectionDrain { tx, rx }
     }
+
+    /// drain drops the internal reference to rx and then signals drain on the tx
+    // always inline, this is for convenience so that we don't forget do drop the rx but there's really no reason it needs to grow the stack
+    #[inline(always)]
+    async fn drain(self) {
+        drop(self.rx); // very important, drain cannont complete if there are outstand rx
+        self.tx.drain().await;
+    }
 }
 
 #[derive(Clone)]
@@ -44,32 +52,28 @@ impl ConnectionManager {
     }
 
     pub async fn track(self, c: &Connection) -> drain::Watch {
-        match self.drains.read().await.get(c) {
-            Some(cd) => cd.rx.clone(),
-            None => {
-                let cd = ConnectionDrain::new();
-                let rx = cd.rx.clone();
-                //TODO: this was racy, another insert may happen between dropping the read lock and attaining this write lock
-                // try_insert is the best solution once it's no longer a nightly-only experimental API
-                let mut drains = self.drains.write().await;
-                if let Some(w) = drains.get(c) {
-                    return w.rx.clone();
-                }
-                drains.insert(c.clone(), cd);
-                rx
-            }
+        // consider removing this whole if let since if it's None we need to perform another get inside the write lock to prevnt racy inserts
+        if let Some(cd) = self.drains.read().await.get(c) {
+            return cd.rx.clone();
         }
+        let cd = ConnectionDrain::new();
+        let rx = cd.rx.clone();
+        //TODO: this was racy, another insert may happen between dropping the read lock and attaining this write lock
+        // try_insert is the best solution once it's no longer a nightly-only experimental API
+        let mut drains = self.drains.write().await;
+        if let Some(w) = drains.get(c) {
+            return w.rx.clone();
+        }
+        drains.insert(c.clone(), cd);
+        rx
     }
 
     pub async fn drain(&self, c: &Connection) {
-        match self.drains.clone().write().await.remove(c) {
-            Some(cd) => {
-                cd.tx.drain().await;
-            }
-            None => {
-                // this is bad, possibly drain called twice
-                error!("requested drain on a Connection which wasn't initialized");
-            }
+        if let Some(cd) = self.drains.clone().write().await.remove(c) {
+            cd.drain().await;
+        } else {
+            // this is bad, possibly drain called twice
+            error!("requested drain on a Connection which wasn't initialized");
         }
     }
 
@@ -80,8 +84,8 @@ impl ConnectionManager {
 
     pub async fn drain_all(self) {
         let mut drains = self.drains.write_owned().await;
-        for (_c, cd) in drains.drain() {
-            cd.tx.drain().await;
+        for (_conn, cd) in drains.drain() {
+            cd.drain().await;
         }
     }
 }

@@ -108,18 +108,20 @@ impl Inbound {
             loop {
                 tokio::select! {
                     _ = stop_rx.changed() => {
-                        return
+                        break;
                     }
                     _ = policies_changed.changed() => {
                         let connections = connection_manager.connections().await;
                         for conn in connections {
                             if !state.assert_rbac(&conn).await {
                                 connection_manager.drain(&conn).await;
+                                info!("connection {} drained because it's no longer allowed after a policy update", conn);
                             }
                         }
                     }
                 }
             }
+            info!("live connection policy check loop exited");
         });
 
         while let Some(socket) = stream.next().await {
