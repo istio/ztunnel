@@ -22,6 +22,7 @@ fn main() -> Result<(), anyhow::Error> {
         "proto/workload.proto",
         "proto/authorization.proto",
         "proto/citadel.proto",
+        "proto/zds.proto",
     ]
     .iter()
     .map(|name| std::env::current_dir().unwrap().join(name))

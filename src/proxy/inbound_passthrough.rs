@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 
+use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, trace, warn, Instrument};
 
@@ -29,13 +30,19 @@ use crate::{proxy, socket};
 pub(super) struct InboundPassthrough {
     listener: TcpListener,
     pi: ProxyInputs,
+    drain: Watch,
 }
 
 impl InboundPassthrough {
-    pub(super) async fn new(mut pi: ProxyInputs) -> Result<InboundPassthrough, Error> {
-        let listener: TcpListener = TcpListener::bind(pi.cfg.inbound_plaintext_addr)
-            .await
+    pub(super) async fn new(
+        mut pi: ProxyInputs,
+        drain: Watch,
+    ) -> Result<InboundPassthrough, Error> {
+        let listener: TcpListener = pi
+            .socket_factory
+            .tcp_bind(pi.cfg.inbound_plaintext_addr)
             .map_err(|e| Error::Bind(pi.cfg.inbound_plaintext_addr, e))?;
+
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
         pi.cfg.enable_original_source = Some(transparent);
@@ -46,10 +53,15 @@ impl InboundPassthrough {
             transparent,
             "listener established",
         );
-        Ok(InboundPassthrough { listener, pi })
+        Ok(InboundPassthrough {
+            listener,
+            pi,
+            drain,
+        })
     }
 
     pub(super) async fn run(self) {
+        let accept = async move {
         loop {
             // Asynchronously wait for an inbound socket.
             let socket = self.listener.accept().await;
@@ -74,6 +86,17 @@ impl InboundPassthrough {
                     }
                     error!("Failed TCP handshake {}", e);
                 }
+            }
+        }
+      }.in_current_span();
+
+        // Stop accepting once we drain.
+        // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
+        // this, but will need some timeout period, as we have no back-pressure mechanism on connections.
+        tokio::select! {
+            res = accept => { res }
+            _ = self.drain.signaled() => {
+                info!("inbound passthrough drained");
             }
         }
     }
@@ -139,7 +162,10 @@ impl InboundPassthrough {
             .then_some(source_ip)
             .flatten();
         trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
-        let mut outbound = super::freebind_connect(orig_src, orig).await?;
+
+        let mut outbound =
+            super::freebind_connect(orig_src, orig, pi.socket_factory.as_ref()).await?;
+
         trace!(%source, destination=%orig, component="inbound plaintext", "connected");
 
         // Find source info. We can lookup by XDS or from connection attributes

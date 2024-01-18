@@ -19,11 +19,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use drain::Watch;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use tokio::net::{TcpListener, UdpSocket};
 use tracing::{info, warn};
 use trust_dns_proto::error::ProtoErrorKind;
 use trust_dns_proto::op::ResponseCode;
@@ -33,6 +33,8 @@ use trust_dns_resolver::system_conf::read_system_conf;
 use trust_dns_server::authority::LookupError;
 use trust_dns_server::server::Request;
 use trust_dns_server::ServerFuture;
+
+use crate::proxy::SocketFactory;
 
 use crate::config::ProxyMode;
 use crate::dns;
@@ -58,6 +60,7 @@ static SVC: Lazy<Name> = Lazy::new(|| as_name("svc"));
 pub struct Server {
     addr: SocketAddr,
     server: ServerFuture<dns::handler::Handler>,
+    drain: Watch,
 }
 
 impl Server {
@@ -69,13 +72,16 @@ impl Server {
     /// * `network` - The network of the current node.
     /// * `state` - The state of ztunnel.
     /// * `forwarder` - The forwarder to use for requests not handled by this server.
+    #[allow(clippy::too_many_arguments)] // no good way of grouping arguments here..
     pub async fn new<S: AsRef<str>>(
         domain: String,
         addr: SocketAddr,
         network: S,
         state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
-        metrics: Metrics,
+        metrics: Arc<Metrics>,
+        drain: Watch,
+        socket_factory: &(dyn SocketFactory + Send + Sync),
     ) -> Result<Self, Error> {
         // Create the DNS server, backed by ztunnel data structures.
         let handler = dns::handler::Handler::new(Arc::new(Store::new(
@@ -92,23 +98,27 @@ impl Server {
             "starting local DNS server",
         );
         // Bind and register the UDP socket.
-        let udp_socket = UdpSocket::bind(addr)
-            .await
+        let udp_socket = socket_factory
+            .udp_bind(addr)
             .map_err(|e| Error::Bind(addr, e))?;
         // Save the bound address.
         let addr = udp_socket.local_addr().unwrap();
         server.register_socket(udp_socket);
 
         // Bind and register the TCP socket.
-        let tcp_listener = TcpListener::bind(addr)
-            .await
+        let tcp_listener = socket_factory
+            .tcp_bind(addr)
             .map_err(|e| Error::Bind(addr, e))?;
         server.register_listener(
             tcp_listener,
             Duration::from_secs(DEFAULT_TCP_REQUEST_TIMEOUT),
         );
 
-        Ok(Self { addr, server })
+        Ok(Self {
+            addr,
+            server,
+            drain,
+        })
     }
 
     /// Returns the address to which this DNS server is bound.
@@ -118,13 +128,18 @@ impl Server {
 
     /// Runs this DNS server to completion.
     pub async fn run(self) {
-        // TODO(nmittler): Do we need to use drain?
-        if let Err(e) = self.server.block_until_done().await {
-            match e.kind() {
-                ProtoErrorKind::NoError => (),
-                _ => warn!("DNS server shutdown error: {e}"),
+        tokio::select! {
+            res = self.server.block_until_done() =>{
+                if let Err(e) = res {
+                    match e.kind() {
+                        ProtoErrorKind::NoError => (),
+                        _ => warn!("DNS server shutdown error: {e}"),
+                    }
+                }
             }
+            _ = self.drain.signaled() => {}
         }
+        info!("dns server drained");
     }
 }
 
@@ -135,7 +150,7 @@ struct Store {
     forwarder: Arc<dyn Forwarder>,
     domain: Name,
     svc_domain: Name,
-    metrics: Metrics,
+    metrics: Arc<Metrics>,
 }
 
 impl Store {
@@ -144,7 +159,7 @@ impl Store {
         network: String,
         state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
-        metrics: Metrics,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let domain = as_name(domain);
         let svc_domain = append_name(as_name("svc"), &domain);
@@ -1108,6 +1123,8 @@ mod tests {
         let domain = "cluster.local".to_string();
         let state = state();
         let forwarder = forwarder();
+        let (_signal, drain) = drain::channel();
+        let factory = crate::proxy::DefaultSocketFactory;
         let proxy = Server::new(
             domain,
             SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -1115,6 +1132,8 @@ mod tests {
             state,
             forwarder,
             test_metrics(),
+            drain,
+            &factory,
         )
         .await
         .unwrap();
@@ -1204,6 +1223,8 @@ mod tests {
         let domain = "cluster.local".to_string();
         let state = state();
         let forwarder = Arc::new(SystemForwarder::new().unwrap());
+        let (_signal, drain) = drain::channel();
+        let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
             domain,
             SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -1211,6 +1232,8 @@ mod tests {
             state,
             forwarder,
             test_metrics(),
+            drain,
+            &factory,
         )
         .await
         .unwrap();
@@ -1557,9 +1580,9 @@ mod tests {
         }
     }
 
-    fn test_metrics() -> Metrics {
+    fn test_metrics() -> Arc<Metrics> {
         let mut registry = Registry::default();
         let istio_registry = metrics::sub_registry(&mut registry);
-        Metrics::new(istio_registry)
+        Arc::new(Metrics::new(istio_registry))
     }
 }

@@ -33,6 +33,10 @@ const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
+const INPOD_ENABLED: &str = "INPOD_ENABLED";
+const INPOD_MARK: &str = "INPOD_MARK";
+const INPOD_UDS: &str = "INPOD_UDS";
+const INPOD_PORT_REUSE: &str = "INPOD_PORT_REUSE";
 const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
 const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
@@ -56,8 +60,11 @@ const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 
+const DEFAULT_INPOD_MARK: u32 = 1337;
+
 const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
+const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
@@ -91,14 +98,14 @@ impl ConfigSource {
     }
 }
 
-#[derive(serde::Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
 }
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct Config {
     /// If true, the HBONE proxy will be used.
     pub proxy: bool,
@@ -173,6 +180,11 @@ pub struct Config {
 
     // System dns resolver opts used for on-demand ztunnel dns resolution
     pub dns_resolver_opts: ResolverOpts,
+
+    pub inpod_enabled: bool,
+    pub inpod_uds: PathBuf,
+    pub inpod_port_reuse: bool,
+    pub inpod_mark: u32,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -291,6 +303,13 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     use trust_dns_resolver::system_conf::read_system_conf;
     let (dns_resolver_cfg, dns_resolver_opts) = read_system_conf().unwrap();
 
+    let dns_proxy_addr = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
+        Some(dns_addr) => dns_addr
+            .parse()
+            .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
+        None => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
+    };
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         dns_proxy: pc
@@ -323,7 +342,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
-        dns_proxy_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
+        dns_proxy_addr,
 
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
@@ -363,6 +382,10 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         proxy_args: parse_args(),
         dns_resolver_cfg,
         dns_resolver_opts,
+        inpod_enabled: parse_default(INPOD_ENABLED, false)?,
+        inpod_uds: parse_default(INPOD_UDS, PathBuf::from("/var/run/ztunnel/ztunnel.sock"))?,
+        inpod_port_reuse: parse_default(INPOD_PORT_REUSE, true)?,
+        inpod_mark: parse_default(INPOD_MARK, DEFAULT_INPOD_MARK)?,
     })
 }
 

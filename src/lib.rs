@@ -20,8 +20,11 @@ pub mod config;
 pub mod dns;
 pub mod hyper_util;
 pub mod identity;
+#[cfg(target_os = "linux")]
+pub mod inpod;
 pub mod metrics;
 pub mod proxy;
+pub mod proxyfactory;
 pub mod rbac;
 pub mod readiness;
 pub mod signal;

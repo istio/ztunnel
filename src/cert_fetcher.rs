@@ -70,7 +70,7 @@ impl CertFetcherImpl {
         });
 
         Self {
-            proxy_mode: cfg.proxy_mode.clone(),
+            proxy_mode: cfg.proxy_mode,
             local_node: cfg.local_node.clone(),
             tx,
         }

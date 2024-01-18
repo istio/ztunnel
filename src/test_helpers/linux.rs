@@ -23,6 +23,7 @@ use crate::{config, identity, proxy};
 use bytes::BufMut;
 use itertools::Itertools;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
 
@@ -58,6 +59,20 @@ impl WorkloadManager {
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
     pub fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
+        self.deploy_ztunnel_maybe_inpod(node, None)
+    }
+    pub fn deploy_ztunnel_inpod(
+        &mut self,
+        node: &str,
+        inpod_uds: PathBuf,
+    ) -> anyhow::Result<TestApp> {
+        self.deploy_ztunnel_maybe_inpod(node, Some(inpod_uds))
+    }
+    pub fn deploy_ztunnel_maybe_inpod(
+        &mut self,
+        node: &str,
+        inpod_uds: Option<PathBuf>,
+    ) -> anyhow::Result<TestApp> {
         let ns = TestWorkloadBuilder::new(&format!("ztunnel-{node}"), self)
             .on_node(node)
             .uncaptured()
@@ -71,7 +86,7 @@ impl WorkloadManager {
         };
         let mut b = bytes::BytesMut::new().writer();
         serde_yaml::to_writer(&mut b, &lc)?;
-
+        let inpod_enabled = inpod_uds.is_some();
         let cfg = config::Config {
             xds_address: None,
             dns_proxy: true,
@@ -79,17 +94,30 @@ impl WorkloadManager {
             local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
             local_node: Some(node.to_string()),
             local_ip: Some(ns.ip()),
+            inpod_uds: inpod_uds.unwrap_or("/dev/null".into()),
+            inpod_enabled,
             ..config::parse_config().unwrap()
         };
         let waypoints = self.waypoints.iter().map(|i| i.to_string()).join(" ");
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
+        let cloned_ns = ns.clone();
         ns.run_ready(move |ready| async move {
-            helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip} {waypoints}"))?;
+            if !inpod_enabled {
+                // not needed in inpod mode. In in pod mode we run `ztunnel-redirect-inpod.sh`
+                // inside the pod's netns
+                helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip} {waypoints}"))?;
+            }
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(cfg, cert_manager.clone()).await?;
 
-            let proxy_addresses = app.proxy_addresses.unwrap();
+            // inpod mode doesn't have ore need these, so just put bogus values.
+            let proxy_addresses = app.proxy_addresses.unwrap_or(proxy::Addresses {
+                inbound: "0.0.0.0:0".parse()?,
+                outbound: "0.0.0.0:0".parse()?,
+                socks5: "0.0.0.0:0".parse()?,
+            });
+
             let ta = TestApp {
                 // Not actually accessible
                 admin_address: helpers::with_ip(app.admin_address, ip),
@@ -100,8 +128,13 @@ impl WorkloadManager {
                     inbound: helpers::with_ip(proxy_addresses.inbound, ip),
                     socks5: helpers::with_ip(proxy_addresses.socks5, ip),
                 },
-                dns_proxy_address: Some(helpers::with_ip(app.dns_proxy_address.unwrap(), ip)),
+                dns_proxy_address: Some(helpers::with_ip(
+                    app.dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
+                    ip,
+                )),
                 cert_manager,
+
+                namespace: Some(cloned_ns),
             };
             ta.ready().await;
             info!("ready");
@@ -110,17 +143,20 @@ impl WorkloadManager {
 
             app.wait_termination().await
         })?;
-        // Setup the node...
-        let captured = self
-            .captured_workloads
-            .get(node)
-            .unwrap_or(&vec![])
-            .iter()
-            .map(|i| i.to_string())
-            .join(" ");
-        self.namespaces.run_in_node(node, || {
-            helpers::run_command(&format!("scripts/node-redirect.sh {ip} {veth} {captured}"))
-        })?;
+        if !inpod_enabled {
+            // Setup the node...
+            // not needed in inpod mode.
+            let captured = self
+                .captured_workloads
+                .get(node)
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|i| i.to_string())
+                .join(" ");
+            self.namespaces.run_in_node(node, || {
+                helpers::run_command(&format!("scripts/node-redirect.sh {ip} {veth} {captured}"))
+            })?;
+        }
         Ok(rx.recv()?)
     }
 

@@ -19,6 +19,8 @@ mod namespaced {
     use http_body_util::Empty;
     use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr};
+    use std::os::fd::AsRawFd;
+    use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -34,6 +36,7 @@ mod namespaced {
     use ztunnel::test_helpers::app::ParsedMetrics;
     use ztunnel::test_helpers::app::TestApp;
     use ztunnel::test_helpers::helpers::initialize_telemetry;
+    use ztunnel::test_helpers::inpod::start_ztunnel_server;
     use ztunnel::test_helpers::linux::WorkloadManager;
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
@@ -234,6 +237,87 @@ mod namespaced {
             (BYTES_SENT, REQ_SIZE * 2),
         ];
         verify_local_remote_metrics(&remote, &local, &metrics).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tcp_request_inpod_mode() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!();
+        info!("running server for ztunnel");
+
+        let randnum: usize = rand::random();
+        let uds_remote_node = PathBuf::from(format!("/tmp/ztunnel-uds-remote-{}", randnum));
+        let uds_default_node = PathBuf::from(format!("/tmp/ztunnel-uds-default-{}", randnum));
+        let (remote_node_server, mut remote_node_server_ack) =
+            start_ztunnel_server(uds_remote_node.clone());
+        let (default_node_server, mut default_node_server_ack) =
+            start_ztunnel_server(uds_default_node.clone());
+
+        info!("starting in-pod test");
+        let server = manager
+            .workload_builder("server", REMOTE_NODE)
+            .hbone()
+            .register()
+            .expect("register server failed");
+        server.netns().run(|_| {
+            // add "CNI" rules to pod.
+            helpers::run_command("scripts/ztunnel-redirect-inpod.sh")
+        })??;
+
+        let server_fd = server.netns().file().as_raw_fd();
+        run_tcp_server(server)?;
+        info!("deploying server ztunnel");
+        let remote = manager.deploy_ztunnel_inpod(REMOTE_NODE, uds_remote_node.clone())?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .hbone()
+            .register()
+            .expect("register client failed");
+        client.netns().run(|_| {
+            // add "CNI" rules
+            helpers::run_command("scripts/ztunnel-redirect-inpod.sh")
+        })??;
+        let client_fd = client.netns().file().as_raw_fd();
+
+        info!("deploying client ztunnel");
+        let local = manager.deploy_ztunnel_inpod(DEFAULT_NODE, uds_default_node.clone())?;
+
+        info!("sending workload to ztunnel");
+        remote_node_server.send(server_fd).await.unwrap();
+        remote_node_server_ack.recv().await.unwrap();
+        default_node_server.send(client_fd).await.unwrap();
+        default_node_server_ack.recv().await.unwrap();
+
+        info!("running tcp client");
+        run_tcp_client(client, manager.resolver(), "server")?;
+        let metrics: [(&str, u64); 4] = [
+            (CONNECTIONS_OPENED, 1),
+            (CONNECTIONS_CLOSED, 1),
+            // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+            (BYTES_RECV, REQ_SIZE),
+            (BYTES_SENT, REQ_SIZE * 2),
+        ];
+        info!("verifying remote metrics");
+        verify_local_remote_metrics(&remote, &local, &metrics).await;
+
+        // verify that we see the "pods" in the ztunnel
+        assert_eq!(remote.inpod_state().await?.len(), 1);
+        assert_eq!(local.inpod_state().await?.len(), 1);
+
+        // now tell ztunnel the node was removed
+        remote_node_server.send(-1).await.unwrap();
+        remote_node_server_ack.recv().await.unwrap();
+        default_node_server.send(-1).await.unwrap();
+        default_node_server_ack.recv().await.unwrap();
+        let remote_state = remote.inpod_state().await?;
+
+        info!("verifying remote state {:?}", remote_state);
+        assert_eq!(remote.inpod_state().await?.len(), 0);
+        assert_eq!(local.inpod_state().await?.len(), 0);
+
+        std::fs::remove_file(&uds_remote_node).unwrap();
+        std::fs::remove_file(&uds_default_node).unwrap();
+
         Ok(())
     }
 

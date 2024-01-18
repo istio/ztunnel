@@ -46,6 +46,8 @@ pub struct TestApp {
     pub proxy_addresses: proxy::Addresses,
     pub dns_proxy_address: Option<SocketAddr>,
     pub cert_manager: Arc<SecretManager>,
+
+    pub namespace: Option<super::netns::Namespace>,
 }
 
 impl From<(&Bound, Arc<SecretManager>)> for TestApp {
@@ -57,6 +59,7 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
             readiness_address: app.readiness_address,
             dns_proxy_address: app.dns_proxy_address,
             cert_manager,
+            namespace: None,
         }
     }
 }
@@ -85,17 +88,24 @@ where
 
 impl TestApp {
     pub async fn admin_request(&self, path: &str) -> anyhow::Result<Response<Incoming>> {
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri(format!(
-                "http://localhost:{}/{path}",
-                self.admin_address.port()
-            ))
-            .header("content-type", "application/json")
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-        let client = hyper_util::pooling_client();
-        Ok(client.request(req).await?)
+        let port = self.admin_address.port();
+        let path = path.to_string();
+
+        let get_resp = move || async move {
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri(format!("http://localhost:{}/{path}", port))
+                .header("content-type", "application/json")
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            let client = hyper_util::pooling_client();
+            Ok(client.request(req).await?)
+        };
+
+        match self.namespace {
+            Some(ref ns) => ns.clone().run(get_resp)?.join().unwrap(),
+            None => get_resp().await,
+        }
     }
 
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {
@@ -113,6 +123,14 @@ impl TestApp {
             .map(|x| Ok::<_, io::Error>(x.to_string()));
         let scrape = prometheus_parse::Scrape::parse(iter).unwrap();
         Ok(ParsedMetrics { scrape })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn inpod_state(&self) -> anyhow::Result<HashMap<String, inpod::admin::ProxyState>> {
+        let body = self.admin_request("workloadmanager").await?;
+        let body = body.collect().await?.to_bytes();
+        let result: HashMap<String, inpod::admin::ProxyState> = serde_json::from_slice(&body)?;
+        Ok(result)
     }
 
     pub async fn readiness_request(&self) -> anyhow::Result<()> {

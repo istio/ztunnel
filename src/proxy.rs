@@ -21,8 +21,8 @@ use std::{fmt, io};
 use boring::error::ErrorStack;
 use drain::Watch;
 use hyper::{header, Request};
-
 use rand::Rng;
+
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tracing::{error, trace, warn, Instrument};
@@ -50,6 +50,41 @@ mod pool;
 mod socks5;
 mod util;
 
+pub trait SocketFactory {
+    fn new_tcp_v4(&self) -> std::io::Result<TcpSocket>;
+
+    fn new_tcp_v6(&self) -> std::io::Result<TcpSocket>;
+
+    fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<TcpListener>;
+
+    fn udp_bind(&self, addr: SocketAddr) -> std::io::Result<tokio::net::UdpSocket>;
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct DefaultSocketFactory;
+
+impl SocketFactory for DefaultSocketFactory {
+    fn new_tcp_v4(&self) -> std::io::Result<TcpSocket> {
+        TcpSocket::new_v4()
+    }
+
+    fn new_tcp_v6(&self) -> std::io::Result<TcpSocket> {
+        TcpSocket::new_v6()
+    }
+
+    fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<TcpListener> {
+        let std_sock = std::net::TcpListener::bind(addr)?;
+        std_sock.set_nonblocking(true)?;
+        TcpListener::from_std(std_sock)
+    }
+
+    fn udp_bind(&self, addr: SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
+        let std_sock = std::net::UdpSocket::bind(addr)?;
+        std_sock.set_nonblocking(true)?;
+        tokio::net::UdpSocket::from_std(std_sock)
+    }
+}
+
 pub struct Proxy {
     inbound: Inbound,
     inbound_passthrough: InboundPassthrough,
@@ -65,6 +100,27 @@ pub(super) struct ProxyInputs {
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
     pool: pool::Pool,
+    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+}
+
+impl ProxyInputs {
+    pub fn new(
+        cfg: config::Config,
+        cert_manager: Arc<SecretManager>,
+        state: DemandProxyState,
+        metrics: Arc<Metrics>,
+        socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    ) -> Self {
+        Self {
+            cfg,
+            state,
+            cert_manager,
+            metrics,
+            pool: pool::Pool::new(),
+            hbone_port: 0,
+            socket_factory,
+        }
+    }
 }
 
 impl Proxy {
@@ -76,21 +132,25 @@ impl Proxy {
         drain: Watch,
     ) -> Result<Proxy, Error> {
         let metrics = Arc::new(metrics);
-        let mut pi = ProxyInputs {
-            cfg: cfg.clone(),
+        let pi = ProxyInputs {
+            cfg,
             state,
             cert_manager,
             metrics,
             pool: pool::Pool::new(),
             hbone_port: 0,
+            socket_factory: Arc::new(DefaultSocketFactory),
         };
+        Self::from_inputs(pi, drain).await
+    }
+    pub(super) async fn from_inputs(mut pi: ProxyInputs, drain: Watch) -> Result<Self, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
         pi.hbone_port = inbound.address().port();
 
-        let inbound_passthrough = InboundPassthrough::new(pi.clone()).await?;
+        let inbound_passthrough = InboundPassthrough::new(pi.clone(), drain.clone()).await?;
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
-        let socks5 = Socks5::new(pi.clone(), drain).await?;
+        let socks5 = Socks5::new(pi.clone(), drain.clone()).await?;
 
         Ok(Proxy {
             inbound,
@@ -354,26 +414,43 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
-    async fn connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
+pub async fn freebind_connect(
+    local: Option<IpAddr>,
+    addr: SocketAddr,
+    socket_factory: &(dyn SocketFactory + Send + Sync),
+) -> io::Result<TcpStream> {
+    async fn connect(
+        local: Option<IpAddr>,
+        addr: SocketAddr,
+        socket_factory: &(dyn SocketFactory + Send + Sync),
+    ) -> io::Result<TcpStream> {
+        let create_socket = |is_ipv4: bool| {
+            if is_ipv4 {
+                socket_factory.new_tcp_v4()
+            } else {
+                socket_factory.new_tcp_v6()
+            }
+        };
+
+        // we don't need original src with inpod outbound mode.
+        // we do need it in inbound and inbound passthrough TODO: refactor so this is derived from config
+        // local = None; // commented out for now as we only want to disable this in inpod + outbound mode
+
         match local {
             None => {
+                let socket = create_socket(addr.is_ipv4())?;
                 trace!(dest=%addr, "no local address, connect directly");
-                Ok(TcpStream::connect(addr).await?)
+                Ok(socket.connect(addr).await?)
             }
             // TODO: Need figure out how to handle case of loadbalancing to itself.
             //       We use ztunnel addr instead, otherwise app side will be confused.
             Some(src) if src == socket::to_canonical(addr).ip() => {
+                let socket = create_socket(addr.is_ipv4())?;
                 trace!(%src, dest=%addr, "dest and source are the same, connect directly");
-                Ok(TcpStream::connect(addr).await?)
+                Ok(socket.connect(addr).await?)
             }
             Some(src) => {
-                let socket = if src.is_ipv4() {
-                    TcpSocket::new_v4()?
-                } else {
-                    TcpSocket::new_v6()?
-                };
-
+                let socket = create_socket(src.is_ipv4())?;
                 let local_addr = SocketAddr::new(src, 0);
                 match socket::set_freebind_and_transparent(&socket) {
                     Err(err) => warn!("failed to set freebind: {:?}", err),
@@ -389,7 +466,7 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
         }
     }
     // Wrap the entire connect function in a timeout
-    timeout(CONNECTION_TIMEOUT, connect(local, addr))
+    timeout(CONNECTION_TIMEOUT, connect(local, addr, socket_factory))
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
 }

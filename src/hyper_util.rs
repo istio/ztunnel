@@ -180,7 +180,7 @@ pub struct Server<S> {
     name: String,
     bind: TcpListener,
     drain_rx: Watch,
-    state: Arc<S>,
+    state: S,
 }
 
 impl<S> Server<S> {
@@ -190,12 +190,16 @@ impl<S> Server<S> {
             name: name.to_string(),
             bind,
             drain_rx,
-            state: Arc::new(s),
+            state: s,
         })
     }
 
     pub fn address(&self) -> SocketAddr {
         self.bind.local_addr().expect("local address must be ready")
+    }
+
+    pub fn state_mut(&mut self) -> &mut S {
+        &mut self.state
     }
 
     pub fn spawn<F, R>(self, f: F)
@@ -210,7 +214,7 @@ impl<S> Server<S> {
         let drain_connections = self.drain_rx;
         let _name = self.name.clone();
         // let (tx, rx) = oneshot::channel();
-        let state = self.state.clone();
+        let state = Arc::new(self.state);
         let f = Arc::new(f);
         info!(
             %address,
