@@ -161,7 +161,7 @@ impl InboundPassthrough {
             info!(%conn, "RBAC rejected");
             return Ok(());
         }
-        let drain = connection_manager.track(&conn).await;
+        let close = connection_manager.track(&conn).await;
         let source_ip = super::get_original_src_from_stream(&inbound);
         let orig_src = pi
             .cfg
@@ -208,7 +208,7 @@ impl InboundPassthrough {
         let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
         tokio::select! {
             err =  proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes) => {err?;}
-            _signaled = drain.signaled() => {}
+            _signaled = close.signaled() => {}
         }
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())

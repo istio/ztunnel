@@ -68,7 +68,7 @@ impl ConnectionManager {
         rx
     }
 
-    pub async fn drain(&self, c: &Connection) {
+    pub async fn close(&self, c: &Connection) {
         if let Some(cd) = self.drains.clone().write().await.remove(c) {
             cd.drain().await;
         } else {
@@ -82,6 +82,7 @@ impl ConnectionManager {
         self.drains.read().await.keys().cloned().collect()
     }
 
+    #[allow(dead_code)]
     pub async fn drain_all(self) {
         let mut drains = self.drains.write_owned().await;
         for (_conn, cd) in drains.drain() {

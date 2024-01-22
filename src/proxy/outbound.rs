@@ -197,7 +197,7 @@ impl OutboundConnection {
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
-            let drain = self.connection_manager.clone().track(&conn).await;
+            let close = self.connection_manager.clone().track(&conn).await;
             // same as above but inverted, this is the "inbound" metric
             let inbound_connection_metrics = metrics::ConnectionOpen {
                 reporter: Reporter::destination,
@@ -211,19 +211,17 @@ impl OutboundConnection {
                 },
                 destination_service: req.destination_service,
             };
-            return tokio::select! {
-            res = Inbound::handle_inbound(
-            InboundConnect::DirectPath(stream),
-            origin_src,
-            req.destination,
-            self.pi.metrics.to_owned(), // self is a borrow so this clone is to return an owned
-            connection_metrics,
-            Some(inbound_connection_metrics),
-            self.pi.socket_factory.as_ref(),
-                     ) => {res}
-
-            _sig = drain.signaled() => { Ok(())}// we should drain
-            }
+            return Inbound::handle_inbound(
+                InboundConnect::DirectPath(stream),
+                origin_src,
+                req.destination,
+                self.pi.metrics.to_owned(), // self is a borrow so this clone is to return an owned
+                connection_metrics,
+                Some(inbound_connection_metrics),
+                self.pi.socket_factory.as_ref(),
+                close,
+            )
+            .await
             .map_err(Error::Io);
         }
 

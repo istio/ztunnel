@@ -98,6 +98,7 @@ impl Inbound {
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
 
+        let (sub_drain_signal, sub_drain) = drain::channel();
         // spawn a task which subscribes to watch updates and asserts rbac against this proxy's connections, closing the ones which have become denied
         let (stop_tx, mut stop_rx) = watch::channel(());
         let state = self.state.clone();
@@ -114,14 +115,13 @@ impl Inbound {
                         let connections = connection_manager.connections().await;
                         for conn in connections {
                             if !state.assert_rbac(&conn).await {
-                                connection_manager.drain(&conn).await;
-                                info!("connection {} drained because it's no longer allowed after a policy update", conn);
+                                connection_manager.close(&conn).await;
+                                info!("connection {} closed because it's no longer allowed after a policy update", conn);
                             }
                         }
                     }
                 }
             }
-            info!("live connection policy check loop exited");
         });
 
         while let Some(socket) = stream.next().await {
@@ -129,6 +129,7 @@ impl Inbound {
             let metrics = self.metrics.clone();
             let socket_factory = self.socket_factory.clone();
             let connection_manager = self.connection_manager.clone();
+            let drain = sub_drain.clone();
             let network = self.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
@@ -141,7 +142,6 @@ impl Inbound {
                     dst_network: network, // inbound request must be on our network
                     dst,
                 };
-                let drain = connection_manager.track(&conn).await;
                 debug!(%conn, "accepted connection");
                 let enable_original_source = self.cfg.enable_original_source;
                 let serve = crate::hyper_util::http2_server()
@@ -158,6 +158,7 @@ impl Inbound {
                                 req,
                                 metrics.clone(),
                                 socket_factory.clone(),
+                                connection_manager.clone(),
                             )
                         }),
                     );
@@ -175,8 +176,9 @@ impl Inbound {
             });
         }
         info!("draining connections");
-        self.connection_manager.drain_all().await;
-        stop_tx.send_replace(());
+        stop_tx.send_replace(()); // close the task handling auth updates
+        drop(sub_drain); // sub_drain_signal.drain() will never resolve while sub_drain is valid, will deadlock if not dropped
+        sub_drain_signal.drain().await;
         info!("all inbound connections drained");
     }
 
@@ -190,6 +192,7 @@ impl Inbound {
         connection_metrics: ConnectionOpen,
         extra_connection_metrics: Option<ConnectionOpen>,
         socket_factory: &(dyn SocketFactory + Send + Sync),
+        close: drain::Watch,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr, socket_factory).await;
@@ -215,14 +218,19 @@ impl Inbound {
                             metrics::BytesTransferred::from(&connection_metrics);
                         match request_type {
                             DirectPath(mut incoming) => {
-                                match proxy::relay(
+                                let res = tokio::select! {
+                                r = proxy::relay(
                                     &mut incoming,
                                     &mut stream,
                                     &metrics,
                                     transferred_bytes,
-                                )
-                                .await
-                                {
+                                ) => {r}
+                                _c = close.signaled() => {
+                                        error!(dur=?start.elapsed(), "internal server copy: connection close received");
+                                        Ok((0,0))
+                                    }
+                                };
+                                match res {
                                     Ok(transferred) => {
                                         if let Some(co) = extra_connection_metrics.as_ref() {
                                             metrics.record(
@@ -238,14 +246,20 @@ impl Inbound {
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
-                                    if let Err(e) = super::copy_hbone(
+                                    let res = tokio::select! {
+                                        r =  super::copy_hbone(
                                         &mut upgraded,
                                         &mut stream,
                                         &metrics,
                                         transferred_bytes,
-                                    )
-                                    .instrument(trace_span!("hbone server"))
-                                    .await
+                                        ).instrument(trace_span!("hbone server")) => {r}
+                                    
+                                        _c = close.signaled() => {
+                                            error!(dur=?start.elapsed(), "internal server copy: connection close received");
+                                            Ok(())
+                                        }
+                                    };
+                                    if let Err(e) = res
                                     {
                                         error!(dur=?start.elapsed(), "hbone server copy: {}", e);
                                     }
@@ -288,7 +302,9 @@ impl Inbound {
         req: Request<Incoming>,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+        connection_manager: ConnectionManager
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
+        let close = connection_manager.track(&conn).await;
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
@@ -399,6 +415,7 @@ impl Inbound {
                     connection_metrics,
                     None,
                     socket_factory.as_ref(),
+                    close,
                 )
                 .in_current_span()
                 .await
