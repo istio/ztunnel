@@ -494,7 +494,7 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
 
 #[cfg(test)]
 mod test {
-    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
     use super::*;
     use crate::state::service::endpoint_uid;

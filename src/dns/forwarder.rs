@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use crate::dns::resolver::{Answer, Resolver};
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::error::ResolveError;
-use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
-use trust_dns_server::authority::LookupError;
-use trust_dns_server::server::Request;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::error::ResolveError;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::TokioAsyncResolver;
+use hickory_server::authority::LookupError;
+use hickory_server::server::Request;
 
 /// A forwarding [Resolver] that delegates requests to an upstream [TokioAsyncResolver].
 pub struct Forwarder(TokioAsyncResolver);
@@ -25,7 +26,7 @@ pub struct Forwarder(TokioAsyncResolver);
 impl Forwarder {
     /// Creates a new [Forwarder] from the provided resolver configuration.
     pub fn new(cfg: ResolverConfig, opts: ResolverOpts) -> Result<Self, ResolveError> {
-        let resolver = TokioAsyncResolver::new(cfg, opts, TokioHandle)?;
+        let resolver = TokioAsyncResolver::new(cfg, opts, TokioConnectionProvider::default());
         Ok(Self(resolver))
     }
 }
@@ -50,10 +51,10 @@ mod tests {
     use crate::dns::resolver::Resolver;
     use crate::test_helpers::dns::{a_request, n, socket_addr, system_forwarder};
     use crate::test_helpers::helpers::subscribe;
-    use trust_dns_proto::op::ResponseCode;
-    use trust_dns_proto::rr::RecordType;
-    use trust_dns_resolver::error::ResolveErrorKind;
-    use trust_dns_server::server::Protocol;
+    use hickory_proto::op::ResponseCode;
+    use hickory_proto::rr::RecordType;
+    use hickory_resolver::error::ResolveErrorKind;
+    use hickory_server::server::Protocol;
 
     #[tokio::test]
     async fn found() {
@@ -72,7 +73,7 @@ mod tests {
 
         let record = answer.record_iter().next().unwrap();
         assert_eq!(n("www.google.com."), *record.name());
-        assert_eq!(RecordType::A, record.rr_type());
+        assert_eq!(RecordType::A, record.record_type());
     }
 
     #[tokio::test]

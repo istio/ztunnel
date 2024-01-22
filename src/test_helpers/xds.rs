@@ -21,6 +21,7 @@ use crate::xds::istio::workload::Address as XdsAddress;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hyper::server::conn::http2;
 use hyper_util::rt::TokioIo;
 use prometheus_client::registry::Registry;
@@ -28,7 +29,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Status, Streaming};
 use tracing::{debug, error, info};
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 use super::test_config_with_port_xds_addr_and_root_cert;
 use crate::config::RootCert;

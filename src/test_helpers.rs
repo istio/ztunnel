@@ -28,6 +28,9 @@ use crate::xds::istio::workload::Service as XdsService;
 use crate::xds::istio::workload::Workload as XdsWorkload;
 use crate::xds::{Handler, LocalConfig, LocalWorkload, ProxyStateUpdater, XdsResource, XdsUpdate};
 use bytes::{BufMut, Bytes};
+use hickory_resolver::config::*;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::TokioAsyncResolver;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
 use std::collections::HashMap;
@@ -39,8 +42,6 @@ use std::ops::Add;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tracing::trace;
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
 pub mod app;
 pub mod ca;
@@ -114,19 +115,18 @@ pub async fn add_nip_io_nameserver(mut cfg: config::Config) -> config::Config {
     let r = TokioAsyncResolver::new(
         ResolverConfig::default(),
         ResolverOpts::default(),
-        TokioHandle,
-    )
-    .unwrap();
+        TokioConnectionProvider::default(),
+    );
     let resp = r.lookup_ip("nip.io").await.unwrap();
     let ips = resp.iter().collect::<Vec<_>>();
     assert!(!ips.is_empty());
     for ip in ips {
         let name_server = NameServerConfig {
             socket_addr: SocketAddr::new(ip, 53),
-            protocol: trust_dns_resolver::config::Protocol::Udp,
+            protocol: hickory_resolver::config::Protocol::Udp,
             tls_dns_name: None,
-            trust_nx_responses: false,
             bind_addr: None,
+            trust_negative_responses: false,
         };
         cfg.dns_resolver_cfg.add_name_server(name_server);
     }

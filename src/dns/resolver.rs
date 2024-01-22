@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hickory_proto::rr::Record;
+use hickory_resolver::lookup::Lookup;
+use hickory_server::authority::LookupError;
+use hickory_server::server::Request;
 use std::slice::Iter;
-use trust_dns_proto::rr::Record;
-use trust_dns_resolver::lookup::Lookup;
-use trust_dns_server::authority::LookupError;
-use trust_dns_server::server::Request;
 
 /// Similar to a TrustDNS `Authority`, although the resulting [Answer] indicates whether
 /// the response is authoritative. This makes the interface generally more composable and

@@ -192,7 +192,7 @@ impl TestApp {
         hostname: &str,
         udp: bool,
         ipv6: bool,
-    ) -> trust_dns_proto::xfer::DnsResponse {
+    ) -> hickory_proto::xfer::DnsResponse {
         let addr = self.dns_proxy_address.unwrap();
         dns_request(addr, hostname, udp, ipv6).await
     }
@@ -203,11 +203,11 @@ pub async fn dns_request(
     hostname: &str,
     udp: bool,
     ipv6: bool,
-) -> trust_dns_proto::xfer::DnsResponse {
+) -> hickory_proto::xfer::DnsResponse {
     use crate::test_helpers::dns::n;
     use crate::test_helpers::dns::send_request;
     use crate::test_helpers::dns::{new_tcp_client, new_udp_client};
-    use trust_dns_proto::rr::RecordType;
+    use hickory_proto::rr::RecordType;
 
     let mut client = if udp {
         new_udp_client(addr).await

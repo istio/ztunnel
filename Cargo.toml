@@ -82,10 +82,10 @@ nix = "0.26.2"
 hashbrown = "0.14.0"
 
 # DNS
-trust-dns-client = "0.22.0"
-trust-dns-proto = "0.22.0"
-trust-dns-resolver = "0.22.0"
-trust-dns-server = { version = "0.22.1", features = [ "trust-dns-resolver" ] }
+hickory-client = "0.24.0"
+hickory-proto = "0.24.0"
+hickory-resolver = "0.24.0"
+hickory-server = { version = "0.24.0", features = [ "hickory-resolver" ] }
 duration-str = "0.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
