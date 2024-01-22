@@ -253,7 +253,6 @@ impl Inbound {
                                         &metrics,
                                         transferred_bytes,
                                         ).instrument(trace_span!("hbone server")) => {r}
-                                    
                                         _c = close.signaled() => {
                                             error!(dur=?start.elapsed(), "internal server copy: connection close received");
                                             Ok(())
@@ -302,7 +301,7 @@ impl Inbound {
         req: Request<Incoming>,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-        connection_manager: ConnectionManager
+        connection_manager: ConnectionManager,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
         let close = connection_manager.track(&conn).await;
         match req.method() {
