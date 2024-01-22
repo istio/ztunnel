@@ -28,6 +28,9 @@ use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, xds};
+use hickory_resolver::config::*;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::TokioAsyncResolver;
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
@@ -37,9 +40,6 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, trace, warn};
-
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::{TokioAsyncResolver, TokioHandle};
 
 pub mod policy;
 pub mod service;
@@ -368,19 +368,11 @@ impl DemandProxyState {
 
         let resolver_result = TokioAsyncResolver::new(
             state.dns_resolver_cfg.to_owned(),
-            state.dns_resolver_opts,
-            TokioHandle,
+            state.dns_resolver_opts.clone(),
+            TokioConnectionProvider::default(),
         );
-        if resolver_result.is_err() {
-            warn!(
-                "system dns async resolution: error creating resolver for workload {} is: {:?}",
-                &workload_uid, resolver_result
-            );
-            return;
-        }
-        let r = resolver_result.unwrap();
 
-        let resp = r.lookup_ip(&hostname).await;
+        let resp = resolver_result.lookup_ip(&hostname).await;
         if resp.is_err() {
             warn!(
                 "system dns async resolution: error response for workload {} is: {:?}",
@@ -397,19 +389,19 @@ impl DemandProxyState {
         let resp = resp.unwrap();
         let mut dns_refresh_rate = std::time::Duration::from_secs(u64::MAX);
         let ips = HashSet::from_iter(resp.as_lookup().record_iter().filter_map(|record| {
-            if record.rr_type().is_ip_addr() {
+            if record.record_type().is_ip_addr() {
                 let record_ttl = u64::from(record.ttl());
                 if let Some(ipv4) = record.data().unwrap().as_a() {
                     if record_ttl < dns_refresh_rate.as_secs() {
                         dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
                     }
-                    return Some(IpAddr::V4(*ipv4));
+                    return Some(IpAddr::V4(ipv4.0));
                 }
                 if let Some(ipv6) = record.data().unwrap().as_aaaa() {
                     if record_ttl < dns_refresh_rate.as_secs() {
                         dns_refresh_rate = std::time::Duration::from_secs(record_ttl);
                     }
-                    return Some(IpAddr::V6(*ipv6));
+                    return Some(IpAddr::V6(ipv6.0));
                 }
                 return None;
             }
