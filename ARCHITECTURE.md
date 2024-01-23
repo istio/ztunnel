@@ -10,15 +10,16 @@ Ztunnel runs two distinct async runtimes:
 
 Ztunnel runs with the following ports:
 
-| Port  | Purpose                               |
-|-------|---------------------------------------|
-| 15001 | Pod outbound traffic capture          |
-| 15006 | Pod inbound plaintext traffic capture |
-| 15008 | Pod inbound HBONE traffic capture     |
-| 15080 | Pod outbound `socks5` traffic         |
-| 15021 | Readiness                             |
-| 15000 | Admin (Admin thread) (Localhost)      |
-| 15020 | Metrics (Admin thread)                |
+| Port  | Purpose                               | Bound Within Pod Network Namespace |
+|-------|---------------------------------------|------------------------------------|
+| 15001 | Pod outbound traffic capture          | Y                                  |
+| 15006 | Pod inbound plaintext traffic capture | Y                                  |
+| 15008 | Pod inbound HBONE traffic capture     | Y                                  |
+| 15080 | Pod outbound `socks5` traffic         | Y                                  |
+| 15053 | Pod outbound DNS traffic capture      | Y                                  |
+| 15021 | Readiness                             | N                                  |
+| 15000 | Admin (Admin thread) (Localhost)      | N                                  |
+| 15020 | Metrics (Admin thread)                | N                                  |
 
 The three admin ports (Readiness, Admin, and Metrics) are intentionally split.
 
