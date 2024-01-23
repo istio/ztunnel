@@ -33,7 +33,7 @@ use super::Error::{self, Spiffe};
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Ord)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Identity {
     Spiffe {
         trust_domain: String,
@@ -42,12 +42,18 @@ pub enum Identity {
     },
 }
 
-impl PartialOrd for Identity {
+impl Ord for Identity {
     // Not sure this is a super legit compare but I think it should work for POC
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn cmp(&self, other: &Self) -> Ordering {
         let s = format!("{self}");
         let o = format!("{other}");
-        s.partial_cmp(&o)
+        s.cmp(&o)
+    }
+}
+
+impl PartialOrd for Identity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
