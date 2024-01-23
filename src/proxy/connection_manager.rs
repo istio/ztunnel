@@ -140,10 +140,9 @@ mod test {
         // ensure drains contains exactly 2 items
         assert_eq!(connection_manager.drains.read().await.len(), 2);
         assert_eq!(connection_manager.connections().await.len(), 2);
-        assert_eq!(
-            connection_manager.connections().await,
-            vec!(conn1.clone(), conn2.clone())
-        );
+        let mut connections = connection_manager.connections().await;
+        connections.sort(); // ordering cannot be guaranteed without sorting
+        assert_eq!(connections, vec![conn1.clone(), conn2.clone()]);
 
         // spawn tasks to assert that we close in a timely manner for conn1
         tokio::spawn(async_close_assert(close1));
