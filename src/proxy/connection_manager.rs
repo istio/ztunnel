@@ -90,3 +90,83 @@ impl ConnectionManager {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use drain::Watch;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::time::Duration;
+
+    use super::ConnectionManager;
+    use crate::rbac::Connection;
+
+    #[tokio::test]
+    async fn test_connection_manager() {
+        // setup a new ConnectionManager
+        let connection_manager = ConnectionManager::new();
+        // ensure drains is empty
+        assert_eq!(connection_manager.drains.read().await.len(), 0);
+        assert_eq!(connection_manager.connections().await.len(), 0);
+
+        // track a new connection
+        let conn1 = Connection {
+            src_identity: None,
+            src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+            dst_network: "".to_string(),
+            dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
+        };
+        let close1 = connection_manager.clone().track(&conn1).await;
+        // ensure drains contains exactly 1 item
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
+
+        // setup a second track on the same connection
+        let another_conn1 = conn1.clone();
+        let another_close1 = connection_manager.clone().track(&another_conn1).await;
+        // ensure drains contains exactly 1 item
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
+
+        // track a second connection
+        let conn2 = Connection {
+            src_identity: None,
+            src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3)),
+            dst_network: "".to_string(),
+            dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
+        };
+        let close2 = connection_manager.clone().track(&conn2).await;
+        // ensure drains contains exactly 2 items
+        assert_eq!(connection_manager.drains.read().await.len(), 2);
+        assert_eq!(connection_manager.connections().await.len(), 2);
+        assert_eq!(
+            connection_manager.connections().await,
+            vec!(conn1.clone(), conn2.clone())
+        );
+
+        // spawn tasks to assert that we close in a timely manner for conn1
+        tokio::spawn(async_close_assert(close1));
+        tokio::spawn(async_close_assert(another_close1));
+        // close conn1
+        connection_manager.close(&conn1).await;
+        // ensure drains contains exactly 1 item
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.connections().await, vec!(conn2.clone()));
+
+        // spawn a task to assert that we close in a timely manner for conn2
+        tokio::spawn(async_close_assert(close2));
+        // close conn2
+        connection_manager.close(&conn2).await;
+        // assert that drains is empty again
+        assert_eq!(connection_manager.drains.read().await.len(), 0);
+        assert_eq!(connection_manager.connections().await.len(), 0);
+    }
+
+    // small helper to assert that the Watches are working in a timely manner
+    async fn async_close_assert(c: Watch) {
+        let result = tokio::time::timeout(Duration::from_secs(1), c.signaled()).await;
+        assert!(matches!(result, Ok(_)));
+    }
+}
