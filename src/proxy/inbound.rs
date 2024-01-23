@@ -29,7 +29,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
-use super::connection_manager::ConnectionManager;
+use super::connection_manager::{self, ConnectionManager};
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::config::Config;
@@ -100,29 +100,16 @@ impl Inbound {
 
         let (sub_drain_signal, sub_drain) = drain::channel();
         // spawn a task which subscribes to watch updates and asserts rbac against this proxy's connections, closing the ones which have become denied
-        let (stop_tx, mut stop_rx) = watch::channel(());
+        let (stop_tx, stop_rx) = watch::channel(());
         let state = self.state.clone();
         let connection_manager = self.connection_manager.clone();
 
-        tokio::spawn(async move {
-            let mut policies_changed = state.read().policies.subscribe();
-            loop {
-                tokio::select! {
-                    _ = stop_rx.changed() => {
-                        break;
-                    }
-                    _ = policies_changed.changed() => {
-                        let connections = connection_manager.connections().await;
-                        for conn in connections {
-                            if !state.assert_rbac(&conn).await {
-                                connection_manager.close(&conn).await;
-                                info!("connection {} closed because it's no longer allowed after a policy update", conn);
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        tokio::spawn(connection_manager::policy_watcher(
+            state,
+            stop_rx,
+            connection_manager,
+            "inbound",
+        ));
 
         while let Some(socket) = stream.next().await {
             let state = self.state.clone();

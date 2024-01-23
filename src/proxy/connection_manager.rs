@@ -14,10 +14,13 @@
 
 use crate::proxy::error;
 use crate::rbac::Connection;
+use crate::state::DemandProxyState;
 use drain;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::sync::RwLock;
+use tracing::info;
 
 pub struct ConnectionDrain {
     tx: drain::Signal,
@@ -87,6 +90,31 @@ impl ConnectionManager {
         let mut drains = self.drains.write_owned().await;
         for (_conn, cd) in drains.drain() {
             cd.drain().await;
+        }
+    }
+}
+
+pub async fn policy_watcher(
+    state: DemandProxyState,
+    mut stop_rx: watch::Receiver<()>,
+    connection_manager: ConnectionManager,
+    parent_proxy: &str,
+) {
+    let mut policies_changed = state.read().policies.subscribe();
+    loop {
+        tokio::select! {
+            _ = stop_rx.changed() => {
+                break;
+            }
+            _ = policies_changed.changed() => {
+                let connections = connection_manager.connections().await;
+                for conn in connections {
+                    if !state.assert_rbac(&conn).await {
+                        connection_manager.close(&conn).await;
+                        info!("{parent_proxy} connection {conn} closed because it's no longer allowed after a policy update");
+                    }
+                }
+            }
         }
     }
 }
@@ -166,6 +194,6 @@ mod test {
     // small helper to assert that the Watches are working in a timely manner
     async fn async_close_assert(c: Watch) {
         let result = tokio::time::timeout(Duration::from_secs(1), c.signaled()).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok())
     }
 }
