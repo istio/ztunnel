@@ -166,6 +166,6 @@ mod test {
     // small helper to assert that the Watches are working in a timely manner
     async fn async_close_assert(c: Watch) {
         let result = tokio::time::timeout(Duration::from_secs(1), c.signaled()).await;
-        assert!(matches!(result, Ok(_)));
+        assert!(result.is_ok());
     }
 }
