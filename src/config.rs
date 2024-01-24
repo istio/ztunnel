@@ -203,17 +203,6 @@ impl From<InvalidUri> for Error {
     }
 }
 
-/// GoDuration wraps a Duration to implement golang Duration parsing semantics
-struct GoDuration(Duration);
-
-impl FromStr for GoDuration {
-    type Err = go_parse_duration::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        go_parse_duration::parse_duration(s).map(|ns| GoDuration(Duration::from_nanos(ns as u64)))
-    }
-}
-
 fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
     match env::var(env) {
         Ok(val) => val
