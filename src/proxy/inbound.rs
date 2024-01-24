@@ -179,7 +179,8 @@ impl Inbound {
         connection_metrics: ConnectionOpen,
         extra_connection_metrics: Option<ConnectionOpen>,
         socket_factory: &(dyn SocketFactory + Send + Sync),
-        close: drain::Watch,
+        connection_manager: ConnectionManager,
+        conn: Connection,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr, socket_factory).await;
@@ -194,6 +195,7 @@ impl Inbound {
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
+                        let close = connection_manager.clone().track(&conn).await;
                         let _connection_close = metrics
                             .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
 
@@ -256,6 +258,7 @@ impl Inbound {
                                 }
                             },
                         }
+                        connection_manager.release(&conn).await;
                     })
                     .in_current_span(),
                 );
@@ -290,7 +293,6 @@ impl Inbound {
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         connection_manager: ConnectionManager,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
-        let close = connection_manager.track(&conn).await;
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
@@ -401,7 +403,8 @@ impl Inbound {
                     connection_metrics,
                     None,
                     socket_factory.as_ref(),
-                    close,
+                    connection_manager,
+                    conn,
                 )
                 .in_current_span()
                 .await

@@ -17,24 +17,26 @@ use crate::rbac::Connection;
 use crate::state::DemandProxyState;
 use drain;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicUsize, Arc};
 use tokio::sync::watch;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{debug, info};
 
-pub struct ConnectionDrain {
+struct ConnectionDrain {
     tx: drain::Signal,
     rx: drain::Watch,
+    count: AtomicUsize,
 }
 
 impl ConnectionDrain {
     fn new() -> Self {
         let (tx, rx) = drain::channel();
-        ConnectionDrain { tx, rx }
+        let count = AtomicUsize::new(1);
+        ConnectionDrain { tx, rx, count }
     }
 
     /// drain drops the internal reference to rx and then signals drain on the tx
-    // always inline, this is for convenience so that we don't forget do drop the rx but there's really no reason it needs to grow the stack
+    // always inline, this is for convenience so that we don't forget to drop the rx but there's really no reason it needs to grow the stack
     #[inline(always)]
     async fn drain(self) {
         drop(self.rx); // very important, drain cannont complete if there are outstand rx
@@ -54,24 +56,37 @@ impl ConnectionManager {
         }
     }
 
+    // register a connection with the manager and get a channel to receive on
     pub async fn track(self, c: &Connection) -> drain::Watch {
-        // consider removing this whole if let since if it's None we need to perform another get inside the write lock to prevnt racy inserts
-        if let Some(cd) = self.drains.read().await.get(c) {
-            return cd.rx.clone();
-        }
         let cd = ConnectionDrain::new();
         let rx = cd.rx.clone();
-        //TODO: this was racy, another insert may happen between dropping the read lock and attaining this write lock
-        // try_insert is the best solution once it's no longer a nightly-only experimental API
         let mut drains = self.drains.write().await;
-        if let Some(w) = drains.get(c) {
-            return w.rx.clone();
+        if let Some(w) = drains.remove(c) {
+            w.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let rx = w.rx.clone();
+            drains.insert(c.clone(), w);
+            debug!("there are {} tracked connections", drains.len());
+            return rx;
         }
         drains.insert(c.clone(), cd);
+        debug!("there are {} tracked connections", drains.len());
         rx
     }
 
-    pub async fn close(&self, c: &Connection) {
+    // releases tracking on a connection
+    // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
+    pub async fn release(self, c: &Connection) {
+        let mut drains = self.drains.write().await;
+        if let Some((k, v)) = drains.remove_entry(c) {
+            if v.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) > 1 {
+                // something else is tracking this connection, retain
+                drains.insert(k, v);
+            }
+        }
+    }
+
+    // signal all connections listening to this channel to take action (typically terminate traffic)
+    async fn close(&self, c: &Connection) {
         if let Some(cd) = self.drains.clone().write().await.remove(c) {
             cd.drain().await;
         } else {
@@ -80,7 +95,8 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn connections(&self) -> Vec<Connection> {
+    //  get a list of all connections being tracked
+    async fn connections(&self) -> Vec<Connection> {
         // potentially large copy under read lock, could require optomization
         self.drains.read().await.keys().cloned().collect()
     }
@@ -128,7 +144,7 @@ mod tests {
     use super::ConnectionManager;
 
     #[tokio::test]
-    async fn test_connection_manager() {
+    async fn test_connection_manager_close() {
         // setup a new ConnectionManager
         let connection_manager = ConnectionManager::new();
         // ensure drains is empty
@@ -191,7 +207,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_policy_watcher_closes() {
+    async fn test_connection_manager_release() {
+        // setup a new ConnectionManager
+        let connection_manager = ConnectionManager::new();
+        // ensure drains is empty
+        assert_eq!(connection_manager.drains.read().await.len(), 0);
+        assert_eq!(connection_manager.connections().await.len(), 0);
+
+        // create a new connection
+        let conn1 = Connection {
+            src_identity: None,
+            src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+            dst_network: "".to_string(),
+            dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
+        };
+
+        // create a second connection
+        let conn2 = Connection {
+            src_identity: None,
+            src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3)),
+            dst_network: "".to_string(),
+            dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
+        };
+
+        let another_conn1 = conn1.clone();
+
+        // watch the connections
+        let close1 = connection_manager.clone().track(&conn1).await;
+        let another_close1 = connection_manager.clone().track(&another_conn1).await;
+        // ensure drains contains exactly 1 item
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
+
+        // release conn1's clone
+        drop(another_close1);
+        connection_manager.clone().release(&another_conn1).await;
+        // ensure drains still contains exactly 1 item
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
+
+        // track conn2
+        let close2 = connection_manager.clone().track(&conn2).await;
+        // ensure drains contains exactly 2 items
+        assert_eq!(connection_manager.drains.read().await.len(), 2);
+        assert_eq!(connection_manager.connections().await.len(), 2);
+        let mut connections = connection_manager.connections().await;
+        connections.sort(); // ordering cannot be guaranteed without sorting
+        assert_eq!(connections, vec![conn1.clone(), conn2.clone()]);
+
+        // release conn1
+        drop(close1);
+        connection_manager.clone().release(&conn1).await;
+        // ensure drains contains exactly 1 item
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.connections().await, vec!(conn2.clone()));
+
+        // clone conn2 and track it
+        let another_conn2 = conn2.clone();
+        let another_close2 = connection_manager.clone().track(&another_conn2).await;
+        drop(close2);
+        // release tracking on conn2
+        connection_manager.clone().release(&conn2).await;
+        // ensure drains still contains exactly 1 item
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(
+            connection_manager.connections().await,
+            vec!(another_conn2.clone())
+        );
+
+        // release tracking on conn2's clone
+        drop(another_close2);
+        connection_manager.clone().release(&another_conn2).await;
+        // ensure drains contains exactly 0 items
+        assert_eq!(connection_manager.drains.read().await.len(), 0);
+        assert_eq!(connection_manager.connections().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_policy_watcher_lifecycle() {
         // preamble: setup an environment
         let state = Arc::new(RwLock::new(ProxyState::default()));
         let dstate = DemandProxyState::new(

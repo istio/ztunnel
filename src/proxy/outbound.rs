@@ -197,7 +197,6 @@ impl OutboundConnection {
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
-            let close = self.connection_manager.clone().track(&conn).await;
             // same as above but inverted, this is the "inbound" metric
             let inbound_connection_metrics = metrics::ConnectionOpen {
                 reporter: Reporter::destination,
@@ -219,7 +218,8 @@ impl OutboundConnection {
                 connection_metrics,
                 Some(inbound_connection_metrics),
                 self.pi.socket_factory.as_ref(),
-                close,
+                self.connection_manager.clone(),
+                conn,
             )
             .await
             .map_err(Error::Io);
