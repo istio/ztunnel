@@ -114,11 +114,11 @@ pub async fn policy_watcher(
 #[cfg(test)]
 mod tests {
     use drain::Watch;
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
     use tokio::sync::watch;
-    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
     use crate::rbac::Connection;
     use crate::state::{DemandProxyState, ProxyState};
