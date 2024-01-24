@@ -82,7 +82,6 @@ impl InboundPassthrough {
             let socket = self.listener.accept().await;
             let pi = self.pi.clone();
 
-
             let connection_manager = self.connection_manager.clone();
             match socket {
                 Ok((stream, remote)) => {
