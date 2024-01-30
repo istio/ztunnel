@@ -17,7 +17,7 @@ use crate::rbac::Connection;
 use crate::state::DemandProxyState;
 use drain;
 use std::collections::HashMap;
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -25,14 +25,13 @@ use tracing::{debug, info};
 struct ConnectionDrain {
     tx: drain::Signal,
     rx: drain::Watch,
-    count: AtomicUsize,
+    count: usize,
 }
 
 impl ConnectionDrain {
     fn new() -> Self {
         let (tx, rx) = drain::channel();
-        let count = AtomicUsize::new(1);
-        ConnectionDrain { tx, rx, count }
+        ConnectionDrain { tx, rx, count: 1 }
     }
 
     /// drain drops the internal reference to rx and then signals drain on the tx
@@ -61,8 +60,8 @@ impl ConnectionManager {
         let cd = ConnectionDrain::new();
         let rx = cd.rx.clone();
         let mut drains = self.drains.write().await;
-        if let Some(w) = drains.remove(c) {
-            w.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut w) = drains.remove(c) {
+            w.count += 1;
             let rx = w.rx.clone();
             drains.insert(c.clone(), w);
             debug!("there are {} tracked connections", drains.len());
@@ -77,9 +76,10 @@ impl ConnectionManager {
     // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
     pub async fn release(self, c: &Connection) {
         let mut drains = self.drains.write().await;
-        if let Some((k, v)) = drains.remove_entry(c) {
-            if v.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) > 1 {
-                // something else is tracking this connection, retain
+        if let Some((k, mut v)) = drains.remove_entry(c) {
+            if v.count > 1 {
+                // something else is tracking this connection, decrement count but retain
+                v.count -= 1;
                 drains.insert(k, v);
             }
         }
