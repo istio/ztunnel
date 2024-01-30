@@ -123,7 +123,7 @@ impl WorkloadProxyManagerState {
                     .map_err(Error::ProxyError)
             }
             WorkloadMessage::KeepWorkload(workload_uid) => {
-                debug!("pod keep recieved. will not delete it when snapshot is sent");
+                debug!("pod keep received. will not delete it when snapshot is sent");
                 if self.snapshot_received {
                     // this can only happen before snapshot is received.
                     return Err(Error::ProtocolError);
