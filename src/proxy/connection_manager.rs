@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::info;
 
 struct ConnectionDrain {
     tx: drain::Signal,
@@ -57,19 +57,14 @@ impl ConnectionManager {
 
     // register a connection with the manager and get a channel to receive on
     pub async fn track(self, c: &Connection) -> drain::Watch {
-        let cd = ConnectionDrain::new();
-        let rx = cd.rx.clone();
-        let mut drains = self.drains.write().await;
-        if let Some(mut w) = drains.remove(c) {
-            w.count += 1;
-            let rx = w.rx.clone();
-            drains.insert(c.clone(), w);
-            debug!("there are {} tracked connections", drains.len());
-            return rx;
-        }
-        drains.insert(c.clone(), cd);
-        debug!("there are {} tracked connections", drains.len());
-        rx
+        self.drains
+            .write()
+            .await
+            .entry(c.to_owned())
+            .and_modify(|cd| cd.count += 1)
+            .or_insert(ConnectionDrain::new())
+            .rx
+            .clone()
     }
 
     // releases tracking on a connection
