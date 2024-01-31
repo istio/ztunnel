@@ -34,12 +34,6 @@ struct PolicyStoreNotify {
     sender: watch::Sender<()>,
 }
 
-impl PolicyStoreNotify {
-    fn send(&mut self) {
-        self.sender.send_replace(());
-    }
-}
-
 impl Default for PolicyStoreNotify {
     fn default() -> Self {
         let (tx, _rx) = watch::channel(());
@@ -79,14 +73,12 @@ impl PolicyStore {
             RbacScope::WorkloadSelector => {}
         }
         self.by_key.insert(key, rbac);
-        self.notifier.send();
     }
 
     pub fn remove(&mut self, name: String) {
         let Some(rbac) = self.by_key.remove(&name) else {
             return;
         };
-        self.notifier.send();
         if let Some(key) = match rbac.scope {
             RbacScope::Global => Some("".to_string()),
             RbacScope::Namespace => Some(rbac.namespace),
@@ -102,5 +94,8 @@ impl PolicyStore {
     }
     pub fn subscribe(&self) -> watch::Receiver<()> {
         self.notifier.sender.subscribe()
+    }
+    pub fn send(&mut self) {
+        self.notifier.sender.send_replace(());
     }
 }
