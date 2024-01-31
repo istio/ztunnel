@@ -82,7 +82,7 @@ impl ConnectionManager {
 
     // signal all connections listening to this channel to take action (typically terminate traffic)
     async fn close(&self, c: &Connection) {
-        if let Some(cd) = self.drains.clone().write().await.remove(c) {
+        if let Some(cd) = self.drains.write().await.remove(c) {
             cd.drain().await;
         } else {
             // this is bad, possibly drain called twice
