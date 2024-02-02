@@ -62,7 +62,7 @@ impl ConnectionManager {
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
     // even no tasks have a receiver channel yet
-    pub async fn register(self, c: &Connection) {
+    pub async fn register(&self, c: &Connection) {
         self.drains
             .write()
             .await
@@ -73,7 +73,7 @@ impl ConnectionManager {
     // get a channel to receive close on for your connection
     // requires that the connection be registered first
     // if you receive None this connection is invalid and should close
-    pub async fn track(self, c: &Connection) -> Option<drain::Watch> {
+    pub async fn track(&self, c: &Connection) -> Option<drain::Watch> {
         match self
             .drains
             .write()
@@ -91,7 +91,7 @@ impl ConnectionManager {
 
     // releases tracking on a connection
     // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
-    pub async fn release(self, c: &Connection) {
+    pub async fn release(&self, c: &Connection) {
         let mut drains = self.drains.write().await;
         if let Some((k, mut v)) = drains.remove_entry(c) {
             if v.count > 1 {
@@ -177,18 +177,17 @@ mod tests {
         };
 
         // assert that tracking an unregistered connection is None
-        let close1 = connection_manager.clone().track(&conn1).await;
+        let close1 = connection_manager.track(&conn1).await;
         assert!(close1.is_none());
         assert_eq!(connection_manager.drains.read().await.len(), 0);
         assert_eq!(connection_manager.connections().await.len(), 0);
 
-        connection_manager.clone().register(&conn1).await;
+        connection_manager.register(&conn1).await;
         assert_eq!(connection_manager.drains.read().await.len(), 1);
         assert_eq!(connection_manager.connections().await.len(), 1);
         assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
 
         let close1 = connection_manager
-            .clone()
             .track(&conn1)
             .await
             .expect("should not be None");
@@ -201,7 +200,6 @@ mod tests {
         // setup a second track on the same connection
         let another_conn1 = conn1.clone();
         let another_close1 = connection_manager
-            .clone()
             .track(&another_conn1)
             .await
             .expect("should not be None");
@@ -219,9 +217,8 @@ mod tests {
             dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
         };
 
-        connection_manager.clone().register(&conn2).await;
+        connection_manager.register(&conn2).await;
         let close2 = connection_manager
-            .clone()
             .track(&conn2)
             .await
             .expect("should not be None");
@@ -278,16 +275,14 @@ mod tests {
 
         let another_conn1 = conn1.clone();
 
-        connection_manager.clone().register(&conn1).await;
+        connection_manager.register(&conn1).await;
 
         // watch the connections
         let close1 = connection_manager
-            .clone()
             .track(&conn1)
             .await
             .expect("should not be None");
         let another_close1 = connection_manager
-            .clone()
             .track(&another_conn1)
             .await
             .expect("should not be None");
@@ -298,16 +293,15 @@ mod tests {
 
         // release conn1's clone
         drop(another_close1);
-        connection_manager.clone().release(&another_conn1).await;
+        connection_manager.release(&another_conn1).await;
         // ensure drains still contains exactly 1 item
         assert_eq!(connection_manager.drains.read().await.len(), 1);
         assert_eq!(connection_manager.connections().await.len(), 1);
         assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
 
-        connection_manager.clone().register(&conn2).await;
+        connection_manager.register(&conn2).await;
         // track conn2
         let close2 = connection_manager
-            .clone()
             .track(&conn2)
             .await
             .expect("should not be None");
@@ -320,7 +314,7 @@ mod tests {
 
         // release conn1
         drop(close1);
-        connection_manager.clone().release(&conn1).await;
+        connection_manager.release(&conn1).await;
         // ensure drains contains exactly 1 item
         assert_eq!(connection_manager.drains.read().await.len(), 1);
         assert_eq!(connection_manager.connections().await.len(), 1);
@@ -329,13 +323,12 @@ mod tests {
         // clone conn2 and track it
         let another_conn2 = conn2.clone();
         let another_close2 = connection_manager
-            .clone()
             .track(&another_conn2)
             .await
             .expect("should not be None");
         drop(close2);
         // release tracking on conn2
-        connection_manager.clone().release(&conn2).await;
+        connection_manager.release(&conn2).await;
         // ensure drains still contains exactly 1 item
         assert_eq!(connection_manager.drains.read().await.len(), 1);
         assert_eq!(connection_manager.connections().await.len(), 1);
@@ -346,7 +339,7 @@ mod tests {
 
         // release tracking on conn2's clone
         drop(another_close2);
-        connection_manager.clone().release(&another_conn2).await;
+        connection_manager.release(&another_conn2).await;
         // ensure drains contains exactly 0 items
         assert_eq!(connection_manager.drains.read().await.len(), 0);
         assert_eq!(connection_manager.connections().await.len(), 0);
@@ -388,9 +381,8 @@ mod tests {
             dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
         };
         // watch the connection
-        connection_manager.clone().register(&conn1).await;
+        connection_manager.register(&conn1).await;
         let close1 = connection_manager
-            .clone()
             .track(&conn1)
             .await
             .expect("should not be None");
