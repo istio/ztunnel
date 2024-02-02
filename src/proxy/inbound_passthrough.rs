@@ -170,11 +170,21 @@ impl InboundPassthrough {
             dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
+        //register before assert_rbac to ensure the connection is tracked during it's entire valid span
+        connection_manager.clone().register(&conn).await;
         if !pi.state.assert_rbac(&conn).await {
             info!(%conn, "RBAC rejected");
+            connection_manager.release(&conn).await;
             return Ok(());
         }
-        let close = connection_manager.clone().track(&conn).await;
+        let close = match connection_manager.clone().track(&conn).await {
+            Some(c) => c,
+            None => {
+                // this seems unlikely but could occur if policy changes while track awaits lock
+                error!(%conn, "RBAC rejected");
+                return Ok(());
+            }
+        };
         let source_ip = super::get_original_src_from_stream(&inbound);
         let orig_src = pi
             .cfg

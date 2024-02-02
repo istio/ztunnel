@@ -23,6 +23,9 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 struct ConnectionDrain {
+    // TODO: this should almost certainly be changed to a type which has counted references exposed.
+    // tokio::sync::watch can be subscribed without taking a write lock and exposes references
+    // and also a receiver_count method
     tx: drain::Signal,
     rx: drain::Watch,
     count: usize,
@@ -31,7 +34,7 @@ struct ConnectionDrain {
 impl ConnectionDrain {
     fn new() -> Self {
         let (tx, rx) = drain::channel();
-        ConnectionDrain { tx, rx, count: 1 }
+        ConnectionDrain { tx, rx, count: 0 }
     }
 
     /// drain drops the internal reference to rx and then signals drain on the tx
@@ -55,16 +58,35 @@ impl ConnectionManager {
         }
     }
 
-    // register a connection with the manager and get a channel to receive on
-    pub async fn track(self, c: &Connection) -> drain::Watch {
+    // register a connection with the connection manager
+    // this must be done before a connection can be tracked
+    // allows policy to be asserted against the connection
+    // even no tasks have a receiver channel yet
+    pub async fn register(self, c: &Connection) {
         self.drains
+            .write()
+            .await
+            .entry(c.clone())
+            .or_insert(ConnectionDrain::new());
+    }
+
+    // get a channel to receive close on for your connection
+    // requires that the connection be registered first
+    // if you receive None this connection is invalid and should close
+    pub async fn track(self, c: &Connection) -> Option<drain::Watch> {
+        match self
+            .drains
             .write()
             .await
             .entry(c.to_owned())
             .and_modify(|cd| cd.count += 1)
-            .or_insert(ConnectionDrain::new())
-            .rx
-            .clone()
+        {
+            std::collections::hash_map::Entry::Occupied(cd) => {
+                let rx = cd.get().rx.clone();
+                Some(rx)
+            }
+            std::collections::hash_map::Entry::Vacant(_) => None,
+        }
     }
 
     // releases tracking on a connection
@@ -153,7 +175,24 @@ mod tests {
             dst_network: "".to_string(),
             dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
         };
+
+        // assert that tracking an unregistered connection is None
         let close1 = connection_manager.clone().track(&conn1).await;
+        assert!(close1.is_none());
+        assert_eq!(connection_manager.drains.read().await.len(), 0);
+        assert_eq!(connection_manager.connections().await.len(), 0);
+
+        connection_manager.clone().register(&conn1).await;
+        assert_eq!(connection_manager.drains.read().await.len(), 1);
+        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
+
+        let close1 = connection_manager
+            .clone()
+            .track(&conn1)
+            .await
+            .expect("should not be None");
+
         // ensure drains contains exactly 1 item
         assert_eq!(connection_manager.drains.read().await.len(), 1);
         assert_eq!(connection_manager.connections().await.len(), 1);
@@ -161,7 +200,12 @@ mod tests {
 
         // setup a second track on the same connection
         let another_conn1 = conn1.clone();
-        let another_close1 = connection_manager.clone().track(&another_conn1).await;
+        let another_close1 = connection_manager
+            .clone()
+            .track(&another_conn1)
+            .await
+            .expect("should not be None");
+
         // ensure drains contains exactly 1 item
         assert_eq!(connection_manager.drains.read().await.len(), 1);
         assert_eq!(connection_manager.connections().await.len(), 1);
@@ -174,7 +218,14 @@ mod tests {
             dst_network: "".to_string(),
             dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
         };
-        let close2 = connection_manager.clone().track(&conn2).await;
+
+        connection_manager.clone().register(&conn2).await;
+        let close2 = connection_manager
+            .clone()
+            .track(&conn2)
+            .await
+            .expect("should not be None");
+
         // ensure drains contains exactly 2 items
         assert_eq!(connection_manager.drains.read().await.len(), 2);
         assert_eq!(connection_manager.connections().await.len(), 2);
@@ -227,9 +278,19 @@ mod tests {
 
         let another_conn1 = conn1.clone();
 
+        connection_manager.clone().register(&conn1).await;
+
         // watch the connections
-        let close1 = connection_manager.clone().track(&conn1).await;
-        let another_close1 = connection_manager.clone().track(&another_conn1).await;
+        let close1 = connection_manager
+            .clone()
+            .track(&conn1)
+            .await
+            .expect("should not be None");
+        let another_close1 = connection_manager
+            .clone()
+            .track(&another_conn1)
+            .await
+            .expect("should not be None");
         // ensure drains contains exactly 1 item
         assert_eq!(connection_manager.drains.read().await.len(), 1);
         assert_eq!(connection_manager.connections().await.len(), 1);
@@ -243,8 +304,13 @@ mod tests {
         assert_eq!(connection_manager.connections().await.len(), 1);
         assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
 
+        connection_manager.clone().register(&conn2).await;
         // track conn2
-        let close2 = connection_manager.clone().track(&conn2).await;
+        let close2 = connection_manager
+            .clone()
+            .track(&conn2)
+            .await
+            .expect("should not be None");
         // ensure drains contains exactly 2 items
         assert_eq!(connection_manager.drains.read().await.len(), 2);
         assert_eq!(connection_manager.connections().await.len(), 2);
@@ -262,7 +328,11 @@ mod tests {
 
         // clone conn2 and track it
         let another_conn2 = conn2.clone();
-        let another_close2 = connection_manager.clone().track(&another_conn2).await;
+        let another_close2 = connection_manager
+            .clone()
+            .track(&another_conn2)
+            .await
+            .expect("should not be None");
         drop(close2);
         // release tracking on conn2
         connection_manager.clone().release(&conn2).await;
@@ -318,7 +388,12 @@ mod tests {
             dst: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 2), 8080)),
         };
         // watch the connection
-        let close1 = connection_manager.clone().track(&conn1).await;
+        connection_manager.clone().register(&conn1).await;
+        let close1 = connection_manager
+            .clone()
+            .track(&conn1)
+            .await
+            .expect("should not be None");
 
         // generate policy which denies everything
         let auth = Authorization {

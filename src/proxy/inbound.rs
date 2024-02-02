@@ -195,7 +195,15 @@ impl Inbound {
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
-                        let close = connection_manager.clone().track(&conn).await;
+                        let close = match connection_manager.clone().track(&conn).await {
+                            Some(c) => c,
+                            None => {
+                                // if track returns None it means the connection was closed due to policy change
+                                // between the intial assertion of policy and the spawinging of the task
+                                error!(dur=?start.elapsed(), "internal server copy: connection close");
+                                return;
+                            }
+                        };
                         let _connection_close = metrics
                             .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
 
@@ -336,10 +344,13 @@ impl Inbound {
                 if from_gateway {
                     debug!("request from gateway");
                 }
+                //register before assert_rbac to ensure the connection is tracked during it's entire valid span
+                connection_manager.clone().register(&conn).await;
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
                 } else if !state.assert_rbac(&conn).await {
                     info!(%conn, "RBAC rejected");
+                    connection_manager.clone().release(&conn).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
@@ -347,6 +358,7 @@ impl Inbound {
                 }
                 if has_waypoint && !from_waypoint {
                     info!(%conn, "bypassed waypoint");
+                    connection_manager.clone().release(&conn).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
