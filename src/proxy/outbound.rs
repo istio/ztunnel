@@ -193,7 +193,9 @@ impl OutboundConnection {
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
+            self.connection_manager.clone().register(&conn).await;
             if !self.pi.state.assert_rbac(&conn).await {
+                self.connection_manager.clone().release(&conn).await;
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
