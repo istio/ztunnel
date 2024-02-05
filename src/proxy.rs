@@ -41,6 +41,7 @@ use crate::state::workload::{network_addr, Workload};
 use crate::state::DemandProxyState;
 use crate::{config, identity, socket, tls};
 
+mod connection_manager;
 mod inbound;
 mod inbound_passthrough;
 #[allow(non_camel_case_types)]

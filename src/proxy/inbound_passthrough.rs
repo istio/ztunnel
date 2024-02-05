@@ -16,9 +16,11 @@ use std::net::SocketAddr;
 
 use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tracing::{error, info, trace, warn, Instrument};
 
 use crate::config::ProxyMode;
+use crate::proxy::connection_manager::{self, ConnectionManager};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{metrics, util, ProxyInputs};
@@ -31,6 +33,7 @@ pub(super) struct InboundPassthrough {
     listener: TcpListener,
     pi: ProxyInputs,
     drain: Watch,
+    connection_manager: ConnectionManager,
 }
 
 impl InboundPassthrough {
@@ -57,15 +60,29 @@ impl InboundPassthrough {
             listener,
             pi,
             drain,
+            connection_manager: ConnectionManager::new(),
         })
     }
 
     pub(super) async fn run(self) {
+        // spawn a task which subscribes to watch updates and asserts rbac against this proxy's connections, closing the ones which have become denied
+        let (stop_tx, stop_rx) = watch::channel(());
+        let connection_manager = self.connection_manager.clone();
+        let state = self.pi.state.clone();
+
+        tokio::spawn(connection_manager::policy_watcher(
+            state,
+            stop_rx,
+            connection_manager,
+            "inbound_passthrough",
+        ));
         let accept = async move {
         loop {
             // Asynchronously wait for an inbound socket.
             let socket = self.listener.accept().await;
             let pi = self.pi.clone();
+
+            let connection_manager = self.connection_manager.clone();
             match socket {
                 Ok((stream, remote)) => {
                     tokio::spawn(async move {
@@ -73,6 +90,7 @@ impl InboundPassthrough {
                             pi, // pi cloned above; OK to move
                             socket::to_canonical(remote),
                             stream,
+                            connection_manager,
                         )
                         .await
                         {
@@ -89,7 +107,6 @@ impl InboundPassthrough {
             }
         }
       }.in_current_span();
-
         // Stop accepting once we drain.
         // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
         // this, but will need some timeout period, as we have no back-pressure mechanism on connections.
@@ -97,6 +114,7 @@ impl InboundPassthrough {
             res = accept => { res }
             _ = self.drain.signaled() => {
                 info!("inbound passthrough drained");
+                stop_tx.send_replace(());
             }
         }
     }
@@ -105,6 +123,7 @@ impl InboundPassthrough {
         pi: ProxyInputs,
         source: SocketAddr,
         mut inbound: TcpStream,
+        connection_manager: ConnectionManager,
     ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(&inbound);
         // Check if it is a recursive call when proxy mode is Node.
@@ -130,6 +149,7 @@ impl InboundPassthrough {
             let mut oc = OutboundConnection {
                 pi: pi.clone(),
                 id: TraceParent::new(),
+                connection_manager,
             };
             // Spoofing the source IP only works when the destination or the source are on our node.
             // In this case, the source and the destination might both be remote, so we need to disable it.
@@ -150,10 +170,21 @@ impl InboundPassthrough {
             dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
+        //register before assert_rbac to ensure the connection is tracked during it's entire valid span
+        connection_manager.register(&conn).await;
         if !pi.state.assert_rbac(&conn).await {
             info!(%conn, "RBAC rejected");
+            connection_manager.release(&conn).await;
             return Ok(());
         }
+        let close = match connection_manager.track(&conn).await {
+            Some(c) => c,
+            None => {
+                // this seems unlikely but could occur if policy changes while track awaits lock
+                error!(%conn, "RBAC rejected");
+                return Ok(());
+            }
+        };
         let source_ip = super::get_original_src_from_stream(&inbound);
         let orig_src = pi
             .cfg
@@ -198,7 +229,13 @@ impl InboundPassthrough {
             .metrics
             .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
         let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
-        proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes).await?;
+        tokio::select! {
+            err =  proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes) => {
+                connection_manager.release(&conn).await;
+                err?;
+            }
+            _signaled = close.signaled() => {}
+        }
         info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
         Ok(())
     }

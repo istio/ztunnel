@@ -22,6 +22,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
+use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent};
 use crate::socket;
@@ -30,6 +31,7 @@ pub(super) struct Socks5 {
     pi: ProxyInputs,
     listener: TcpListener,
     drain: Watch,
+    connection_manager: ConnectionManager,
 }
 
 impl Socks5 {
@@ -49,6 +51,7 @@ impl Socks5 {
             pi,
             listener,
             drain,
+            connection_manager: ConnectionManager::new(),
         })
     }
 
@@ -60,6 +63,7 @@ impl Socks5 {
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
+                let connection_manager = self.connection_manager.clone();
                 let socket = self.listener.accept().await;
                 match socket {
                     Ok((stream, remote)) => {
@@ -67,6 +71,7 @@ impl Socks5 {
                         let oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
+                            connection_manager,
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream).await {

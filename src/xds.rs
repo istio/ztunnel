@@ -341,7 +341,20 @@ impl Handler<XdsAuthorization> for ProxyStateUpdater {
             }
             Ok(())
         };
-        handle_single_resource(updates, handle)
+        let len_updates = updates.len(); //get len now, handle_single_resource takes ownership of the vec
+        match handle_single_resource(updates, handle) {
+            Ok(()) => {
+                state.policies.send();
+                Ok(())
+            }
+            Err(e) => {
+                if e.len() < len_updates {
+                    // not all config was rejected, we have _some_ valide update
+                    state.policies.send();
+                }
+                Err(e)
+            }
+        }
     }
 }
 

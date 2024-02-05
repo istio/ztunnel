@@ -14,6 +14,7 @@
 
 use crate::rbac::{Authorization, RbacScope};
 use std::collections::{HashMap, HashSet};
+use tokio::sync::watch;
 
 /// A PolicyStore encapsulates all policy information about workloads in the mesh
 #[derive(serde::Serialize, Default, Debug)]
@@ -23,6 +24,21 @@ pub struct PolicyStore {
 
     /// policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     by_namespace: HashMap<String, HashSet<String>>,
+
+    #[serde(skip)]
+    notifier: PolicyStoreNotify,
+}
+
+#[derive(Debug)]
+struct PolicyStoreNotify {
+    sender: watch::Sender<()>,
+}
+
+impl Default for PolicyStoreNotify {
+    fn default() -> Self {
+        let (tx, _rx) = watch::channel(());
+        PolicyStoreNotify { sender: tx }
+    }
 }
 
 impl PolicyStore {
@@ -75,5 +91,11 @@ impl PolicyStore {
                 }
             }
         }
+    }
+    pub fn subscribe(&self) -> watch::Receiver<()> {
+        self.notifier.sender.subscribe()
+    }
+    pub fn send(&mut self) {
+        self.notifier.sender.send_replace(());
     }
 }
