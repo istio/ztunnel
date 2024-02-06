@@ -19,7 +19,7 @@ use nix::sys::socket::{
     bind as nixbind, connect as nixconnect, listen, socket, AddressFamily, SockFlag, SockType,
     UnixAddr,
 };
-use std::os::fd::FromRawFd;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use tokio::net::{UnixListener, UnixStream};
 
@@ -33,11 +33,10 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
 
     let addr = UnixAddr::new(path)?;
 
-    nixbind(socket, &addr)?;
-    listen(socket, 1024)?;
+    nixbind(socket.as_raw_fd(), &addr)?;
+    listen(&socket, 1024)?;
 
-    // safe as we just created it, it's non blocking and listening.
-    let std_socket = unsafe { std::os::unix::net::UnixListener::from_raw_fd(socket) };
+    let std_socket = std::os::unix::net::UnixListener::from(socket);
     UnixListener::from_std(std_socket)
 }
 
@@ -50,9 +49,9 @@ pub async fn connect(path: &Path) -> std::io::Result<UnixStream> {
     )?;
 
     let addr = UnixAddr::new(path)?;
-    let res = nixconnect(socket, &addr);
+    let res = nixconnect(socket.as_raw_fd(), &addr);
     // safe as we just created it, it's non blocking and listening.
-    let std_socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(socket) };
+    let std_socket = std::os::unix::net::UnixStream::from(socket);
     let socket = UnixStream::from_std(std_socket)?;
     match res {
         Ok(_) => {}
