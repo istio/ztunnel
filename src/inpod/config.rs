@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config;
-use std::{os::fd::FromRawFd, sync::Arc};
+use std::sync::Arc;
 
 use super::netns::InpodNetns;
 
@@ -151,8 +151,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
                 )
                 .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
             }?;
-            // safety: we just created this socket
-            Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(sock) })
+            Ok(sock)
         })?;
 
         let socket_ref = socket2::SockRef::from(&sock);
