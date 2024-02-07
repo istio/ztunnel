@@ -44,6 +44,7 @@ use crate::{config, identity, socket, tls};
 pub mod connection_manager;
 mod inbound;
 mod inbound_passthrough;
+mod metadata;
 #[allow(non_camel_case_types)]
 pub mod metrics;
 mod outbound;

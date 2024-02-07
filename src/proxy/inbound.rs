@@ -33,6 +33,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 use super::connection_manager::ConnectionManager;
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
+
 use crate::identity::{Identity, SecretManager};
 use crate::metrics::Recorder;
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
@@ -79,7 +80,6 @@ impl Inbound {
     }
 
     pub(super) async fn run(self) {
-        // let (tx, rx) = oneshot::channel();
         let acceptor = InboundCertProvider {
             state: self.pi.state.clone(),
             cert_manager: self.pi.cert_manager.clone(),
@@ -126,7 +126,7 @@ impl Inbound {
                     );
                 // Wait for drain to signal or connection serving to complete
                 match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
-                    // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
+                    // We got a shutdown request. Start graceful shutdown and wait for the pending requests to complete.
                     futures_util::future::Either::Left((_shutdown, mut server)) => {
                         let drain = std::pin::Pin::new(&mut server);
                         drain.graceful_shutdown();

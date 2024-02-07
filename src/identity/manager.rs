@@ -23,6 +23,7 @@ use crate::config::ProxyMode;
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
+use serde::{Serialize, Serializer};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
@@ -42,6 +43,15 @@ pub enum Identity {
         namespace: String,
         service_account: String,
     },
+}
+
+impl Serialize for Identity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("{}", self))
+    }
 }
 
 impl EncodeLabelValue for Identity {

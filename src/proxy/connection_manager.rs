@@ -12,14 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::identity::Identity;
 use crate::proxy::error;
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
 use drain;
+use http_types::convert::Serialize;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
+
+#[derive(Clone, Copy, Hash, Debug, Eq, PartialEq)]
+pub struct ConnectionTuple {
+    pub src: SocketAddr,
+    pub dst: SocketAddr,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConnectionMetadata {
+    #[serde(default)]
+    identity: Option<Identity>,
+}
 
 struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.
@@ -117,6 +132,19 @@ impl ConnectionManager {
     async fn connections(&self) -> Vec<ProxyRbacContext> {
         // potentially large copy under read lock, could require optomization
         self.drains.read().await.keys().cloned().collect()
+    }
+
+    /// fetch looks up a tuple and returns the connection metadata
+    // TODO: we should key on tuple so we can more efficiently lookup
+    pub async fn fetch(&self, ctu: &ConnectionTuple) -> Option<ConnectionMetadata> {
+        let cm = self.drains.read().await;
+        cm.iter()
+            .map(|(c, _)| &c.conn)
+            // TODO: we are ignoring source port here
+            .find(|c| ctu.dst == c.dst && ctu.src.ip() == c.src_ip)
+            .map(|c| ConnectionMetadata {
+                identity: c.src_identity.clone(),
+            })
     }
 }
 
