@@ -31,7 +31,9 @@ use crate::tls;
 use super::CaClient;
 use super::Error::{self, Spiffe};
 
-const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
+use backoff::{ExponentialBackoff, backoff::Backoff};
+ 
+const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Identity {
@@ -232,6 +234,20 @@ impl Worker {
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
         let mut pending: PriorityQueue<Identity, PendingPriority> = PriorityQueue::new();
+        // The backoff strategy used for retrying operations.
+        let mut cert_backoff: ExponentialBackoff<> = Default::default();
+        // Set the initial values for the backoff. The values are chosen to be reasonable for the CA 
+        // client to be able to recover from transient errors.
+        cert_backoff.initial_interval = Duration::from_millis(500);
+        cert_backoff.current_interval = Duration::from_secs(1);
+        cert_backoff.max_interval = Duration::from_secs(60);
+        // cert_backoff.max_elapsed_time is the maximum elapsed time after instantiating 
+        // [`ExponentialBackoff`](struct.ExponentialBackoff.html) or calling 
+        // [`reset`](trait.Backoff.html#method.reset) after which [`next_backoff`](../trait.Backoff.html#method.reset) 
+        // returns `None`. More info can be found here: https://docs.rs/backoff/0.4.0/backoff.
+        cert_backoff.max_elapsed_time = Some(Duration::from_secs(300));
+        cert_backoff.multiplier = 2.0;
+        cert_backoff.randomization_factor = 0.2;
 
         'main: loop {
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
@@ -287,6 +303,7 @@ impl Worker {
                     },
                     None => break 'main,
                 },
+
                 // Handle fetch results.
                 Some((id, res)) = fetches.next() => {
                     match processing.remove(&id) {
@@ -296,10 +313,42 @@ impl Worker {
                     }
                     let (state, refresh_at) = match res {
                         Err(err) => {
-                            let refresh_at = Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY;
-                            (CertState::Unavailable(err), refresh_at)
+                            // Use the next backoff to determine when to retry the fetch and default 
+                            // to the constant value if the backoff has been reset. In the case of 
+                            // None we'll use the max_interval to retry the fetch. The max_interval 
+                            // is set to 60 seconds, otherwise next_backoff will increment the backoff 
+                            // value based on the current_interval, the multiplier and the randomization_factor
+                            // defined earlier.
+                            //
+                            // The exact formula for how next backoff is calculated, per the backoff crate
+                            // documentation (https://docs.rs/backoff/0.4.0/backoff/#enums), is as follows:
+                            // 
+                            // randomized interval = 
+                            //     retry_interval * (random value in range [1 - randomization_factor, 1 + randomization_factor])
+                            let refresh_at = Instant::now() + cert_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            // cert_backoff.start_time is the system time. It is calculated when an 
+                            // [`ExponentialBackoff`](struct.ExponentialBackoff.html) instance is created 
+                            // and is reset when [`retry`](../trait.Operation.html#method.retry) is called. 
+                            // More info can be found here: https://docs.rs/backoff/0.4.0/backoff.
+                            let start_time = cert_backoff.start_time;
+                            let elapsed_duration = start_time.elapsed();
+                            let time_difference = elapsed_duration;
+                            // This is a check to ensure that the backoff has been reset before the max_elapsed_time
+                            // is reached. If the backoff has not been reset by the time max_elapsed_time has been 
+                            // reached then we should stop retrying.
+                            if Some(time_difference) == cert_backoff.max_elapsed_time {
+                                // Hit the max_elapsed_time. If this was truly a transient error, the backoff would 
+                                // have been reset by now. This indicates a permanent error, so we should stop retrying.
+                                log::error!("Failed to fetch certificate for {} after {} seconds", id, time_difference.as_secs());
+                                unreachable!("unable to process fetched certificate for identity: {} after {} seconds", id, time_difference.as_secs());
+                            } else {
+                                (CertState::Unavailable(err), refresh_at)
+                            }
                         },
                         Ok(certs) => {
+                            // Reset the backoff on success. This will also reset the max_elapsed_time to 0 and restart 
+                            // the 5 minute countdown.
+                            cert_backoff.reset();
                             let certs: tls::Certs = certs; // Type annotation.
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
@@ -489,7 +538,7 @@ impl SecretManager {
         id: &Identity,
         pri: Priority,
     ) -> Result<tls::Certs, Error> {
-        // This method is intentionally left simple, since since unit tests are based on start_fetch
+        // This method is intentionally left simple, since unit tests are based on start_fetch
         // and wait. Any changes should go to one of those two methods, and if that proves
         // impossible - unit testing strategy may need to be rethinked.
         self.wait(self.start_fetch(id, pri).await?).await
@@ -965,6 +1014,25 @@ mod tests {
             .await;
 
         assert_matches!(fetch.await.unwrap(), Err(Error::Forgotten));
+        test.tear_down().await;
+    }
+
+    #[tokio::test]
+    async fn test_backoff_resets_on_successful_fetch_after_failure() {
+        let mut test = setup(1);
+        let id = identity("test");
+        let sm = test.secret_manager.clone();
+        let fetch = tokio::spawn(async move { sm.fetch_certificate(&id).await });
+        tokio::time::sleep(SEC).await;
+        // The first fetch will fail, but the backoff should reset after the second fetch.
+        test.caclient.set_error(true).await;
+        tokio::time::sleep(SEC).await;
+        // The second fetch should fail.
+        test.caclient.set_error(true).await;
+        tokio::time::sleep(SEC).await;
+        // The third fetch should succeed.
+        test.caclient.set_error(false).await;
+        assert_matches!(fetch.await.unwrap(), Ok(_));
         test.tear_down().await;
     }
 
