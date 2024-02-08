@@ -32,6 +32,7 @@ pub use metrics::*;
 
 use crate::identity::SecretManager;
 use crate::metrics::Recorder;
+use crate::proxy::connection_manager::{ConnectionManager, PolicyWatcher};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
@@ -91,6 +92,7 @@ pub struct Proxy {
     inbound_passthrough: InboundPassthrough,
     outbound: Outbound,
     socks5: Socks5,
+    policy_watcher: PolicyWatcher,
 }
 
 #[derive(Clone)]
@@ -145,19 +147,23 @@ impl Proxy {
         Self::from_inputs(pi, drain).await
     }
     pub(super) async fn from_inputs(mut pi: ProxyInputs, drain: Watch) -> Result<Self, Error> {
+        let cm = ConnectionManager::new();
         // We setup all the listeners first so we can capture any errors that should block startup
-        let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
+        let inbound = Inbound::new(pi.clone(), drain.clone(), cm.clone()).await?;
         pi.hbone_port = inbound.address().port();
 
-        let inbound_passthrough = InboundPassthrough::new(pi.clone(), drain.clone()).await?;
-        let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
-        let socks5 = Socks5::new(pi.clone(), drain.clone()).await?;
+        let inbound_passthrough =
+            InboundPassthrough::new(pi.clone(), drain.clone(), cm.clone()).await?;
+        let outbound = Outbound::new(pi.clone(), drain.clone(), cm.clone()).await?;
+        let socks5 = Socks5::new(pi.clone(), drain.clone(), cm.clone()).await?;
+        let policy_watcher = PolicyWatcher::new(pi.state, drain.clone(), cm);
 
         Ok(Proxy {
             inbound,
             inbound_passthrough,
             outbound,
             socks5,
+            policy_watcher,
         })
     }
 
@@ -167,6 +173,7 @@ impl Proxy {
             tokio::spawn(self.inbound.run().in_current_span()),
             tokio::spawn(self.outbound.run().in_current_span()),
             tokio::spawn(self.socks5.run().in_current_span()),
+            tokio::spawn(self.policy_watcher.run().in_current_span()),
         ];
 
         futures::future::join_all(tasks).await;

@@ -35,7 +35,11 @@ pub(super) struct Socks5 {
 }
 
 impl Socks5 {
-    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Socks5, Error> {
+    pub(super) async fn new(
+        pi: ProxyInputs,
+        drain: Watch,
+        connection_manager: ConnectionManager,
+    ) -> Result<Socks5, Error> {
         let listener: TcpListener = pi
             .socket_factory
             .tcp_bind(pi.cfg.socks5_addr)
@@ -51,7 +55,7 @@ impl Socks5 {
             pi,
             listener,
             drain,
-            connection_manager: ConnectionManager::new(),
+            connection_manager,
         })
     }
 

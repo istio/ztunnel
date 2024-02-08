@@ -119,6 +119,47 @@ impl ConnectionManager {
     }
 }
 
+pub struct PolicyWatcher {
+    state: DemandProxyState,
+    stop: drain::Watch,
+    connection_manager: ConnectionManager,
+}
+
+impl PolicyWatcher {
+    pub fn new(
+        state: DemandProxyState,
+        stop: drain::Watch,
+        connection_manager: ConnectionManager,
+    ) -> Self {
+        PolicyWatcher {
+            state,
+            stop,
+            connection_manager,
+        }
+    }
+
+    pub async fn run(self) {
+        let mut policies_changed = self.state.read().policies.subscribe();
+        loop {
+            tokio::select! {
+            b
+                           _ = self.stop.clone().signaled() => {
+                               break;
+                           }
+                           _ = policies_changed.changed() => {
+                               let connections = self.connection_manager.connections().await;
+                               for conn in connections {
+                                   if !self.state.assert_rbac(&conn).await {
+                                       self.connection_manager.close(&conn).await;
+                                       info!("connection {conn} closed because it's no longer allowed after a policy update");
+                                   }
+                               }
+                           }
+                       }
+        }
+    }
+}
+
 pub async fn policy_watcher(
     state: DemandProxyState,
     mut stop_rx: watch::Receiver<()>,

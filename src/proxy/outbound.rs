@@ -47,7 +47,11 @@ pub struct Outbound {
 }
 
 impl Outbound {
-    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
+    pub(super) async fn new(
+        mut pi: ProxyInputs,
+        drain: Watch,
+        connection_manager: ConnectionManager,
+    ) -> Result<Outbound, Error> {
         let listener: TcpListener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
@@ -66,7 +70,7 @@ impl Outbound {
             pi,
             listener,
             drain,
-            connection_manager: ConnectionManager::new(),
+            connection_manager,
         })
     }
 
