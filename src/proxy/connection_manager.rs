@@ -18,7 +18,6 @@ use crate::state::DemandProxyState;
 use drain;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::watch;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -159,31 +158,6 @@ impl PolicyWatcher {
     }
 }
 
-pub async fn policy_watcher(
-    state: DemandProxyState,
-    mut stop_rx: watch::Receiver<()>,
-    connection_manager: ConnectionManager,
-    parent_proxy: &str,
-) {
-    let mut policies_changed = state.read().policies.subscribe();
-    loop {
-        tokio::select! {
-            _ = stop_rx.changed() => {
-                break;
-            }
-            _ = policies_changed.changed() => {
-                let connections = connection_manager.connections().await;
-                for conn in connections {
-                    if !state.assert_rbac(&conn).await {
-                        connection_manager.close(&conn).await;
-                        info!("{parent_proxy} connection {conn} closed because it's no longer allowed after a policy update");
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use drain::Watch;
@@ -191,14 +165,13 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
-    use tokio::sync::watch;
 
     use crate::rbac::Connection;
     use crate::state::{DemandProxyState, ProxyState};
     use crate::xds::istio::security::{Action, Authorization, Scope};
     use crate::xds::ProxyStateUpdateMutator;
 
-    use super::ConnectionManager;
+    use super::{ConnectionManager, PolicyWatcher};
 
     #[tokio::test]
     async fn test_connection_manager_close() {
@@ -396,20 +369,16 @@ mod tests {
             ResolverOpts::default(),
         );
         let connection_manager = ConnectionManager::new();
-        let parent_proxy = "test";
-        let (stop_tx, stop_rx) = watch::channel(());
+        let (tx, stop) = drain::channel();
         let state_mutator = ProxyStateUpdateMutator::new_no_fetch();
 
         // clones to move into spawned task
         let ds = dstate.clone();
         let cm = connection_manager.clone();
+        let pw = PolicyWatcher::new(ds, stop, cm);
         // spawn a task which watches policy and asserts that the policy watcher stop correctly
         tokio::spawn(async move {
-            let res = tokio::time::timeout(
-                Duration::from_secs(1),
-                super::policy_watcher(ds, stop_rx, cm, parent_proxy),
-            )
-            .await;
+            let res = tokio::time::timeout(Duration::from_secs(1), pw.run()).await;
             assert!(res.is_ok())
         });
 
@@ -439,18 +408,19 @@ mod tests {
         // spawn an assertion that our connection close is received
         tokio::spawn(assert_close(close1));
 
-        // update our state
-        let mut s = state
-            .write()
-            .expect("test fails if we're unable to get a write lock on state");
-        let res = state_mutator.insert_authorization(&mut s, auth);
-        // assert that the update was OK
-        assert!(res.is_ok());
-        // release lock
-        drop(s);
+        // this block will scope our guard appropriately
+        {
+            // update our state
+            let mut s = state
+                .write()
+                .expect("test fails if we're unable to get a write lock on state");
+            let res = state_mutator.insert_authorization(&mut s, auth);
+            // assert that the update was OK
+            assert!(res.is_ok());
+        } // release lock
 
         // send the signal which stops policy watcher
-        stop_tx.send_replace(());
+        tx.drain().await;
     }
 
     // small helper to assert that the Watches are working in a timely manner
