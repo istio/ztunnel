@@ -339,10 +339,9 @@ impl Worker {
                             let time_difference = elapsed_duration;
                             // This is a check to ensure that the backoff has been reset before the max_elapsed_time
                             // is reached. If the backoff has not been reset by the time max_elapsed_time has been
-                            // reached then we should stop retrying.
+                            // reached (which would indicate a transient error) then we should stop retrying, because
+                            // the error is likely permanent.
                             if Some(time_difference) == cert_backoff.max_elapsed_time {
-                                // Hit the max_elapsed_time. If this was truly a transient error, the backoff would
-                                // have been reset by now. This indicates a permanent error, so we should stop retrying.
                                 log::error!("Failed to fetch certificate for {} after {} seconds", id, time_difference.as_secs());
                                 unreachable!("unable to process fetched certificate for identity: {} after {} seconds", id, time_difference.as_secs());
                             } else {
