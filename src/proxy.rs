@@ -156,7 +156,7 @@ impl Proxy {
             InboundPassthrough::new(pi.clone(), drain.clone(), cm.clone()).await?;
         let outbound = Outbound::new(pi.clone(), drain.clone(), cm.clone()).await?;
         let socks5 = Socks5::new(pi.clone(), drain.clone(), cm.clone()).await?;
-        let policy_watcher = PolicyWatcher::new(pi.state, drain.clone(), cm);
+        let policy_watcher = PolicyWatcher::new(pi.state, drain, cm);
 
         Ok(Proxy {
             inbound,
