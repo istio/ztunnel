@@ -242,9 +242,10 @@ impl Worker {
             current_interval: Duration::from_secs(1),
             max_interval: Duration::from_secs(60),
             // cert_backoff.max_elapsed_time is the maximum elapsed time after instantiating
-            // [`ExponentialBackoff`](struct.ExponentialBackoff.html) or calling
-            // [`reset`](trait.Backoff.html#method.reset) after which [`next_backoff`](../trait.Backoff.html#method.reset)
-            // returns `None`. More info can be found here: https://docs.rs/backoff/0.4.0/backoff.
+            // [`ExponentialBackoff`](https://docs.rs/backoff/0.4.0/backoff/type.ExponentialBackoff.html)
+            // or calling [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
+            // after which [`next_backoff`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.next_backoff)
+            // returns `None`.
             //
             // We set it to 5 minutes (300 seconds) to ensure that we don't retry indefinitely.
             max_elapsed_time: Some(Duration::from_secs(300)),
@@ -331,9 +332,9 @@ impl Worker {
                             //     retry_interval * (random value in range [1 - randomization_factor, 1 + randomization_factor])
                             let refresh_at = Instant::now() + cert_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
                             // cert_backoff.start_time is the system time. It is calculated when an
-                            // [`ExponentialBackoff`](struct.ExponentialBackoff.html) instance is created
-                            // and is reset when [`retry`](../trait.Operation.html#method.retry) is called.
-                            // More info can be found here: https://docs.rs/backoff/0.4.0/backoff.
+                            // [`ExponentialBackoff`](https://docs.rs/backoff/0.4.0/backoff/type.ExponentialBackoff.html)
+                            // instance is created and is reset when [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
+                            // is called.
                             let start_time = cert_backoff.start_time;
                             let elapsed_duration = start_time.elapsed();
                             let time_difference = elapsed_duration;
