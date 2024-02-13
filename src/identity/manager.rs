@@ -240,15 +240,9 @@ impl Worker {
         let mut cert_backoff = ExponentialBackoff {
             initial_interval: Duration::from_millis(500),
             current_interval: Duration::from_secs(1),
-            max_interval: Duration::from_secs(60),
-            // cert_backoff.max_elapsed_time is the maximum elapsed time after instantiating
-            // [`ExponentialBackoff`](https://docs.rs/backoff/0.4.0/backoff/type.ExponentialBackoff.html)
-            // or calling [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
-            // after which [`next_backoff`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.next_backoff)
-            // returns `None`.
-            //
-            // We set it to 5 minutes (300 seconds) to ensure that we don't retry indefinitely.
-            max_elapsed_time: Some(Duration::from_secs(300)),
+            // The maximum interval is set to 150 seconds, which is the maximum time the backoff will
+            // wait to retry a cert again.
+            max_interval: Duration::from_secs(150),
             multiplier: 2.0,
             randomization_factor: 0.2,
             ..Default::default()
@@ -331,27 +325,11 @@ impl Worker {
                             // randomized interval =
                             //     retry_interval * (random value in range [1 - randomization_factor, 1 + randomization_factor])
                             let refresh_at = Instant::now() + cert_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
-                            // cert_backoff.start_time is the system time. It is calculated when an
-                            // [`ExponentialBackoff`](https://docs.rs/backoff/0.4.0/backoff/type.ExponentialBackoff.html)
-                            // instance is created and is reset when [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
-                            // is called.
-                            let start_time = cert_backoff.start_time;
-                            let elapsed_duration = start_time.elapsed();
-                            let time_difference = elapsed_duration;
-                            // This is a check to ensure that the backoff has been reset before the max_elapsed_time
-                            // is reached. If the backoff has not been reset by the time max_elapsed_time has been
-                            // reached (which would indicate a transient error) then we should stop retrying, because
-                            // the error is likely permanent.
-                            if Some(time_difference) == cert_backoff.max_elapsed_time {
-                                log::error!("Failed to fetch certificate for {} after {} seconds", id, time_difference.as_secs());
-                                unreachable!("unable to process fetched certificate for identity: {} after {} seconds", id, time_difference.as_secs());
-                            } else {
-                                (CertState::Unavailable(err), refresh_at)
-                            }
+                            (CertState::Unavailable(err), refresh_at)
                         },
                         Ok(certs) => {
-                            // Reset the backoff on success. This will also reset the max_elapsed_time to 0 and restart
-                            // the 5 minute countdown.
+                            // Reset the backoff on success.
+                            // [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
                             cert_backoff.reset();
                             let certs: tls::Certs = certs; // Type annotation.
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
