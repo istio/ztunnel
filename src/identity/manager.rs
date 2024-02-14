@@ -317,7 +317,7 @@ impl Worker {
                             // None we'll use the max_interval to retry the fetch. The max_interval
                             // is set to 150 seconds, otherwise next_backoff will increment the backoff
                             // value based on the current_interval, the multiplier and the randomization_factor
-                            // defined earlier. In the case that we hit the max_interval, the 150 second wait 
+                            // defined earlier. In the case that we hit the max_interval, the 150 second wait
                             // time will continue for a cert until the backoff is reset by a successful fetch.
                             //
                             // The exact formula for how next backoff is calculated, per the backoff crate
