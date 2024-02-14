@@ -22,6 +22,7 @@ use hyper::client::conn::http2;
 use hyper::http::{Request, Response};
 use hyper_util::client::legacy::pool;
 use hyper_util::client::legacy::pool::{Pool as HyperPool, Poolable, Pooled, Reservation};
+use hyper_util::rt::TokioTimer;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -44,6 +45,7 @@ impl Pool {
                     max_idle_per_host: std::usize::MAX,
                 },
                 TokioExec,
+                Some(TokioTimer::new()),
             ),
         }
     }

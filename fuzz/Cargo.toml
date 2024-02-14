@@ -8,9 +8,9 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-hyper = "0.14.18"
+hyper = "1.1"
 libfuzzer-sys = "0.4"
-prost = "0.11"
+prost = "0.12.1"
 anyhow = "1.0.65"
 
 [dependencies.ztunnel]

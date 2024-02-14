@@ -352,7 +352,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ca_address,
         ca_root_cert,
         secret_ttl: match parse::<String>(SECRET_TTL)? {
-            Some(ttl) => duration_str::parse(&ttl).unwrap_or(DEFAULT_TTL),
+            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_TTL),
             None => DEFAULT_TTL,
         },
         local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),

@@ -268,6 +268,7 @@ checksum = "b4682ae6287fcf752ecaabbfcc7b6f9b72aa33933dc23a554d853aea8eea8635"
 [[package]]
 name = "boring"
 version = "5.0.0"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#41ce085b7458431b45715dfdeab4f86d6d5e7c30"
 dependencies = [
  "bitflags 2.4.0",
  "boring-sys",
@@ -279,6 +280,7 @@ dependencies = [
 [[package]]
 name = "boring-sys"
 version = "5.0.0"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#41ce085b7458431b45715dfdeab4f86d6d5e7c30"
 dependencies = [
  "bindgen",
  "cmake",
@@ -1246,9 +1248,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24590385be94998c5def4cf53d34edc5381144c805126f00efb954d986f9a7b2"
+checksum = "fb5aa53871fc917b1a9ed87b683a5d86db645e23acb32c2e0785a353e522fb75"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1267,12 +1269,13 @@ dependencies = [
 [[package]]
 name = "hyper-boring"
 version = "5.0.0"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#41ce085b7458431b45715dfdeab4f86d6d5e7c30"
 dependencies = [
  "antidote",
  "boring",
  "http 1.0.0",
- "hyper 1.0.0",
- "hyper-util 0.1.0",
+ "hyper 1.1.0",
+ "hyper-util",
  "linked_hash_set",
  "once_cell",
  "tokio",
@@ -1295,34 +1298,16 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "futures-channel",
- "futures-util",
- "http 1.0.0",
- "http-body 1.0.0",
- "hyper 1.0.0",
- "pin-project-lite",
- "socket2 0.5.3",
- "tokio",
- "tower",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "hyper-util"
-version = "0.1.0"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61cec7646c446f27ed929e7bf1feace8c7d5e248109ba7fc716d846b27081fac"
+checksum = "ca38ef113da30126bbff9cd1705f9273e15d45498615d138b0c20279ac7a76aa"
 dependencies = [
  "bytes",
  "futures-channel",
  "futures-util",
  "http 1.0.0",
  "http-body 1.0.0",
- "hyper 1.0.0",
+ "hyper 1.1.0",
  "pin-project-lite",
  "socket2 0.5.3",
  "tokio",
@@ -2787,6 +2772,7 @@ dependencies = [
 [[package]]
 name = "tokio-boring"
 version = "5.0.0"
+source = "git+https://github.com/howardjohn/boring/?branch=hyper-boring/adopt-hyper-1.0.0-snapshot1#41ce085b7458431b45715dfdeab4f86d6d5e7c30"
 dependencies = [
  "boring",
  "boring-sys",
@@ -2932,7 +2918,7 @@ dependencies = [
  "http 1.0.0",
  "http-body 0.4.5",
  "http-body 1.0.0",
- "hyper 1.0.0",
+ "hyper 1.1.0",
  "pin-project-lite",
  "tower",
  "tower-service",
@@ -3370,9 +3356,9 @@ dependencies = [
  "http-body 1.0.0",
  "http-body-util",
  "http-types",
- "hyper 1.0.0",
+ "hyper 1.1.0",
  "hyper-boring",
- "hyper-util 0.0.0",
+ "hyper-util",
  "ipnet",
  "itertools 0.11.0",
  "libc",
