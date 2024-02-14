@@ -33,7 +33,7 @@ use super::Error::{self, Spiffe};
 
 use backoff::{backoff::Backoff, ExponentialBackoff};
 
-const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(60);
+const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Identity {
@@ -242,7 +242,7 @@ impl Worker {
             current_interval: Duration::from_secs(1),
             // The maximum interval is set to 150 seconds, which is the maximum time the backoff will
             // wait to retry a cert again.
-            max_interval: Duration::from_secs(150),
+            max_interval: CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL,
             multiplier: 2.0,
             randomization_factor: 0.2,
             ..Default::default()
