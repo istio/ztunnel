@@ -57,7 +57,7 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
                 }
             }
         })
-        .map(|conn| {
+        .map(|(conn, _)| {
             conn.get_ref().set_nodelay(true).unwrap();
             conn
         })
