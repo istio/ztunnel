@@ -3289,6 +3289,7 @@ dependencies = [
  "tower",
  "tower-hyper-http-body-compat",
  "tracing",
+ "tracing-core",
  "tracing-subscriber",
  "url",
  "ztunnel",

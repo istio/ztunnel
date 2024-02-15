@@ -118,4 +118,5 @@ diff = "0.1.13"
 local-ip-address = "0.5.3"
 matches = "0.1.9"
 test-case = "3.0.0"
+tracing-core = "0.1.30"
 #debug = true

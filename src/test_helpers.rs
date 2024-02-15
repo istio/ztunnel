@@ -44,6 +44,8 @@ use std::time::{Duration, SystemTime};
 use tracing::trace;
 
 pub mod app;
+#[cfg(any(test, doc))]
+pub mod asynctrace;
 pub mod ca;
 pub mod dns;
 pub mod helpers;
