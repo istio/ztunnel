@@ -50,6 +50,7 @@ struct CertFetcherImpl {
     tx: mpsc::Sender<Action>,
 }
 
+#[derive(Debug)]
 enum Action {
     Fetch(Identity),
     Forget(Identity),
