@@ -546,6 +546,15 @@ impl WorkloadStore {
         }
     }
 
+    // checks whether or not the service account associated with a Workload
+    // has another is also associated with another Pod on the node
+    pub fn svc_account_match_on_node(&self, workload: &Workload, node: &str) -> bool {
+        let service_account = workload.service_account.as_str();
+        self.by_uid
+            .values()
+            .any(|w| w.node == node && w.service_account == service_account)
+    }
+
     /// Finds the workload by address.
     pub fn find_address(&self, addr: &NetworkAddress) -> Option<Workload> {
         self.by_addr.get(addr).map(|wl| wl.deref().clone())

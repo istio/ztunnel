@@ -74,6 +74,7 @@ impl fmt::Display for Upstream {
 /// The current state information for this proxy.
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ProxyState {
+    pub node: String,
     #[serde(flatten)]
     pub workloads: WorkloadStore,
 
@@ -110,6 +111,12 @@ pub struct ResolvedDns {
 }
 
 impl ProxyState {
+    pub fn with_node_name(node: String) -> Self {
+        Self {
+            node,
+            ..Self::default()
+        }
+    }
     /// Find either a workload or service by the destination.
     pub fn find_destination(&self, dest: &Destination) -> Option<Address> {
         match dest {
@@ -616,7 +623,9 @@ impl ProxyStateManager {
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<ProxyStateManager> {
         let cert_fetcher = cert_fetcher::new(&config, cert_manager);
-        let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
+        let local_node = config.local_node.clone().unwrap_or_default();
+        let state: Arc<RwLock<ProxyState>> =
+            Arc::new(RwLock::new(ProxyState::with_node_name(local_node)));
         let xds_client = if config.xds_address.is_some() {
             let updater = ProxyStateUpdater::new(state.clone(), cert_fetcher.clone());
             let tls_client_fetcher = Box::new(tls::FileClientCertProviderImpl::RootCert(
