@@ -16,8 +16,9 @@ use drain::Signal;
 use std::sync::Arc;
 use tracing::{debug, info, Instrument};
 
-use super::{metrics::Metrics, Error, WorkloadInfo, WorkloadMessage};
+use super::{metrics::Metrics, Error, WorkloadMessage};
 
+use crate::proxy::WorkloadInfo;
 use crate::proxyfactory::ProxyFactory;
 
 use super::config::InPodConfig;
@@ -61,7 +62,7 @@ pub struct WorkloadProxyManagerState {
     // workloads we wanted to start but couldn't because we had an error starting them.
     // This happened to use mainly in testing when we redeploy ztunnel, and the old pod was
     // not completely drained yet.
-    pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, InpodNetns)>,
+    pending_workloads: hashbrown::HashMap<WorkloadUid, (Option<WorkloadInfo>, InpodNetns)>,
     draining: DrainingTasks,
 
     // new connection stuff
@@ -70,13 +71,11 @@ pub struct WorkloadProxyManagerState {
 
     inpod_config: InPodConfig,
 
-    cluster_id: String,
 }
 
 impl WorkloadProxyManagerState {
     pub fn new(
         proxy_gen: ProxyFactory,
-        cluster_id: String,
         inpod_config: InPodConfig,
         metrics: Arc<Metrics>,
         admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
@@ -92,7 +91,6 @@ impl WorkloadProxyManagerState {
             snapshot_received: false,
             snapshot_names: Default::default(),
             inpod_config,
-            cluster_id,
         }
     }
 
@@ -113,16 +111,20 @@ impl WorkloadProxyManagerState {
             WorkloadMessage::AddWorkload(poddata) => {
                 info!(
                     "pod {:?} received netns, starting proxy",
-                    poddata.info.workload_uid
+                    poddata.workload_uid
                 );
                 if !self.snapshot_received {
-                    self.snapshot_names
-                        .insert(poddata.info.workload_uid.clone());
+                    self.snapshot_names.insert(poddata.workload_uid.clone());
                 }
                 let netns = InpodNetns::new(self.inpod_config.cur_netns(), poddata.netns)
                     .map_err(|e| Error::ProxyError(crate::proxy::Error::Io(e)))?;
-
-                self.add_workload(poddata.info, netns)
+                let info = poddata.workload_info.map(|w| WorkloadInfo {
+                    name: w.name,
+                    namespace: w.namespace,
+                    service_account: w.service_account,
+                    trust_domain: w.trust_domain,
+                });
+                self.add_workload(&poddata.workload_uid, info, netns)
                     .await
                     .map_err(Error::ProxyError)
             }
@@ -186,17 +188,21 @@ impl WorkloadProxyManagerState {
 
     async fn add_workload(
         &mut self,
-        workload_info: WorkloadInfo,
+        workload_uid: &WorkloadUid,
+        workload_info: Option<WorkloadInfo>,
         netns: InpodNetns,
     ) -> Result<(), crate::proxy::Error> {
-        match self.add_workload_inner(&workload_info, netns.clone()).await {
+        match self
+            .add_workload_inner(&workload_uid, &workload_info, netns.clone())
+            .await
+        {
             Ok(()) => {
                 self.update_proxy_count_metrics();
                 Ok(())
             }
             Err(e) => {
                 self.pending_workloads
-                    .insert(workload_info.workload_uid.clone(), (workload_info, netns));
+                    .insert(workload_uid.clone(), (workload_info, netns));
                 self.update_proxy_count_metrics();
                 Err(e)
             }
@@ -204,18 +210,19 @@ impl WorkloadProxyManagerState {
     }
     async fn add_workload_inner(
         &mut self,
-        workload_info: &WorkloadInfo,
+        workload_uid: &WorkloadUid,
+        workload_info: &Option<WorkloadInfo>,
         netns: InpodNetns,
     ) -> Result<(), crate::proxy::Error> {
         // check if we have a proxy already
-        let maybe_existing = self.workload_states.get(&workload_info.workload_uid);
+        let maybe_existing = self.workload_states.get(workload_uid);
         if let Some(existing) = maybe_existing {
             if existing.workload_netns_inode != netns.workload_inode() {
                 // inodes are different, we have a new netns.
                 // this can happen when there's a CNI failure (that's unrelated to us) which triggers
                 // pod sandobx to be re-created with a fresh new netns.
                 // drain the old proxy and add this one.
-                self.del_workload(&workload_info.workload_uid);
+                self.del_workload(workload_uid);
             } else {
                 // idempotency - no error if we already have a proxy for the workload
                 // check if the inodes match. if they don't, we have a new netns
@@ -223,11 +230,11 @@ impl WorkloadProxyManagerState {
                 return Ok(());
             }
         }
-        self.admin_handler
-            .proxy_pending(&workload_info.workload_uid);
+        self.admin_handler.proxy_pending(workload_uid);
 
         debug!(
-            workload=?workload_info,
+            workload=?workload_uid,
+            workload_info=?workload_info,
             inode=?netns.workload_inode(),
             "starting proxy",
         );
@@ -237,23 +244,16 @@ impl WorkloadProxyManagerState {
         let workload_netns_inode = netns.workload_inode();
         let (drain_tx, drain_rx) = drain::channel();
 
-        // this matches istio's generatePodUID
-        // TODO: we may want to use the pod's UUID here instead. if we want to do so we need to add it to WDS.
-        let workload_uid = workload_info
-            .pod_info
-            .as_ref()
-            .map(|pi| format!("{}//Pod/{}/{}", self.cluster_id, pi.namespace, pi.name));
-
         let proxies = self
             .proxy_gen
             .new_proxies_from_factory(
                 Some(drain_rx),
-                workload_uid,
+                workload_info.clone(),
                 Arc::from(self.inpod_config.socket_factory(netns)),
             )
             .await?;
 
-        let uid = workload_info.workload_uid.clone();
+        let uid = workload_uid.clone();
 
         self.admin_handler.proxy_up(&uid);
 
@@ -268,19 +268,17 @@ impl WorkloadProxyManagerState {
                     metrics.proxies_stopped.get_or_create(&()).inc();
                     admin_handler.proxy_down(&uid);
                 }
-                .instrument(
-                    tracing::info_span!("proxy", uid=%workload_info.workload_uid.clone().into_string()),
-                ),
+                .instrument(tracing::info_span!("proxy", uid=%workload_uid.clone().into_string())),
             );
         }
         if let Some(proxy) = proxies.dns_proxy {
             tokio::spawn(proxy.run().instrument(
-                tracing::info_span!("dns_proxy", uid=%workload_info.workload_uid.clone().into_string()),
+                tracing::info_span!("dns_proxy", uid=%workload_uid.clone().into_string()),
             ));
         }
 
         self.workload_states.insert(
-            workload_info.workload_uid.clone(),
+            workload_uid.clone(),
             WorkloadState {
                 drain: drain_tx,
                 workload_netns_inode,
@@ -304,7 +302,7 @@ impl WorkloadProxyManagerState {
 
         for (uid, (info, netns)) in current_pending_workloads {
             info!("retrying workload {:?}", uid);
-            match self.add_workload(info, netns).await {
+            match self.add_workload(&uid, info, netns).await {
                 Ok(()) => {}
                 Err(e) => {
                     info!("retrying workload {:?} failed: {}", uid, e);
@@ -376,9 +374,8 @@ mod tests {
         let mut state = fixture.state;
         let data = WorkloadData {
             netns: new_netns(),
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
         state
             .process_msg(WorkloadMessage::AddWorkload(data))
@@ -394,9 +391,8 @@ mod tests {
         let ns = new_netns();
         let data = WorkloadData {
             netns: ns.try_clone().unwrap(),
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
         state
             .process_msg(WorkloadMessage::AddWorkload(data))
@@ -404,9 +400,8 @@ mod tests {
             .unwrap();
         let data = WorkloadData {
             netns: ns,
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
         state
             .process_msg(WorkloadMessage::AddWorkload(data))
@@ -426,9 +421,8 @@ mod tests {
 
         let data = WorkloadData {
             netns: ns,
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
 
         let ret = state.process_msg(WorkloadMessage::AddWorkload(data)).await;
@@ -454,9 +448,8 @@ mod tests {
 
         let data = WorkloadData {
             netns: ns,
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
         state
             .process_msg(WorkloadMessage::WorkloadSnapshotSent)
@@ -484,16 +477,19 @@ mod tests {
         let ns = new_netns();
         let data = WorkloadData {
             netns: ns.try_clone().unwrap(),
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
 
-        let info = data.info.clone();
+        let workload_uid = data.workload_uid.clone();
 
         let msg1 = WorkloadMessage::AddWorkload(data);
-        let msg2 = WorkloadMessage::DelWorkload(info.workload_uid.clone());
-        let msg3 = WorkloadMessage::AddWorkload(WorkloadData { netns: ns, info });
+        let msg2 = WorkloadMessage::DelWorkload(workload_uid.clone());
+        let msg3 = WorkloadMessage::AddWorkload(WorkloadData {
+            netns: ns,
+            workload_uid,
+            workload_info: None,
+        });
 
         state
             .process_msg(WorkloadMessage::WorkloadSnapshotSent)
@@ -515,15 +511,14 @@ mod tests {
 
         let data = WorkloadData {
             netns: new_netns(),
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
 
-        let info = data.info.clone();
+        let workload_uid = data.workload_uid.clone();
 
         let msg1 = WorkloadMessage::AddWorkload(data);
-        let msg2 = WorkloadMessage::KeepWorkload(info.workload_uid.clone());
+        let msg2 = WorkloadMessage::KeepWorkload(workload_uid.clone());
 
         state.process_msg(msg1).await.unwrap();
         state
@@ -550,16 +545,16 @@ mod tests {
 
         let data = WorkloadData {
             netns: new_netns(),
-            info: WorkloadInfo {
-                workload_uid: uid(0),
-            },
+            workload_uid: uid(0),
+            workload_info: None,
         };
-        let info = data.info.clone();
+        let workload_uid = data.workload_uid.clone();
 
         let add1 = WorkloadMessage::AddWorkload(data);
         let add2 = WorkloadMessage::AddWorkload(WorkloadData {
             netns: new_netns(),
-            info,
+            workload_uid,
+            workload_info: None,
         });
 
         state.process_msg(add1).await.unwrap();

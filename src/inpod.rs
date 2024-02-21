@@ -66,15 +66,11 @@ impl WorkloadUid {
     }
 }
 
-#[derive(Debug, Clone)]
-struct WorkloadInfo {
-    workload_uid: WorkloadUid,
-    pod_info: Option<istio::zds::PodInfo>,
-}
 #[derive(Debug)]
 pub struct WorkloadData {
     netns: std::os::fd::OwnedFd,
-    info: WorkloadInfo,
+    workload_uid: WorkloadUid,
+    workload_info: Option<istio::zds::WorkloadInfo>,
 }
 
 #[derive(Debug)]
@@ -100,7 +96,6 @@ pub fn init_and_new(
 
     let state_mgr = statemanager::WorkloadProxyManagerState::new(
         proxy_gen,
-        cfg.cluster_id.clone(),
         inpod_config,
         metrics,
         admin_handler,

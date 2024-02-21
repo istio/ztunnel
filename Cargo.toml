@@ -102,6 +102,10 @@ opt-level = 3
 codegen-units = 1
 lto = true
 
+[profile.symbols-release]
+inherits = "release"
+debug = true
+
 # Release optimized but without as many dependencies, suitable for incremental development
 [profile.quick-release]
 inherits = "release"

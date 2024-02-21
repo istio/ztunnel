@@ -82,7 +82,7 @@ impl ProxyFactory {
     pub async fn new_proxies_from_factory(
         &self,
         proxy_drain: Option<Watch>,
-        proxy_workload_uid: Option<String>,
+        proxy_workload_info: Option<crate::proxy::WorkloadInfo>,
         socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
     ) -> Result<ProxyResult, Error> {
         let mut result: ProxyResult = Default::default();
@@ -96,7 +96,7 @@ impl ProxyFactory {
                 self.state.clone(),
                 self.proxy_metrics.clone().unwrap(),
                 socket_factory.clone(),
-                proxy_workload_uid,
+                proxy_workload_info,
             );
             result.proxy = Some(Proxy::from_inputs(pi, drain.clone()).await?);
         }

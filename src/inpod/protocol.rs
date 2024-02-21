@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::istio::zds::{self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello};
-use super::{WorkloadData, WorkloadInfo, WorkloadMessage};
+use super::{WorkloadData, WorkloadMessage};
 use drain::Watch;
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessageOwned, MsgFlags};
 use prost::Message;
@@ -156,10 +156,8 @@ fn get_workload_data(
             let uid = a.uid;
             Ok(WorkloadMessage::AddWorkload(WorkloadData {
                 netns: our_netns,
-                info: WorkloadInfo {
-                    workload_uid: super::WorkloadUid::new(uid),
-                    pod_info: a.pod_info,
-                },
+                workload_uid: super::WorkloadUid::new(uid),
+                workload_info: a.workload_info,
             }))
         }
         (Payload::Add(_), None) => Err(anyhow::anyhow!("No control message")),
@@ -275,6 +273,7 @@ mod tests {
         let data = prep_request(zds::workload_request::Payload::Add(
             istio::zds::AddWorkload {
                 uid: uid(0).into_string(),
+                ..Default::default()
             },
         ));
 

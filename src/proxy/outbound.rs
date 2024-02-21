@@ -617,6 +617,7 @@ mod tests {
                 metrics: test_proxy_metrics(),
                 pool: pool::Pool::new(),
                 socket_factory: std::sync::Arc::new(crate::proxy::DefaultSocketFactory),
+                proxy_workload_info: None,
             },
             id: TraceParent::new(),
         };

@@ -92,6 +92,37 @@ pub struct Proxy {
     socks5: Socks5,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkloadInfo {
+    pub name: String,
+    pub namespace: String,
+    pub trust_domain: String,
+    pub service_account: String,
+}
+
+impl WorkloadInfo {
+    pub fn new(
+        name: String,
+        namespace: String,
+        trust_domain: String,
+        service_account: String,
+    ) -> Self {
+        Self {
+            name,
+            namespace,
+            trust_domain,
+            service_account,
+        }
+    }
+
+    pub fn matches(&self, w: &Workload) -> bool {
+        self.name == w.name
+            && self.namespace == w.namespace
+            && self.trust_domain == w.trust_domain
+            && self.service_account == w.service_account
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ProxyInputs {
     cfg: config::Config,
@@ -101,7 +132,7 @@ pub(super) struct ProxyInputs {
     metrics: Arc<Metrics>,
     pool: pool::Pool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    proxy_workload_uid: Option<String>,
+    proxy_workload_info: Option<Arc<WorkloadInfo>>,
 }
 
 impl ProxyInputs {
@@ -111,7 +142,7 @@ impl ProxyInputs {
         state: DemandProxyState,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-        proxy_workload_uid: Option<String>,
+        proxy_workload_info: Option<WorkloadInfo>,
     ) -> Self {
         Self {
             cfg,
@@ -121,19 +152,26 @@ impl ProxyInputs {
             pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory,
-            proxy_workload_uid,
+            proxy_workload_info: proxy_workload_info.map(Arc::new),
         }
     }
 
     pub async fn assert_rbac_inbound(&self, conn: &crate::rbac::Connection) -> bool {
-        match self.proxy_workload_uid {
-            Some(ref uid) => match self.state.fetch_workload_by_uid(&uid).await {
-                Some(wl) => self.state.assert_rbac_for_destination(conn, &wl).await,
-                None => {
-                    debug!("proxy workload not found {}", uid);
-                    false
+        match self.proxy_workload_info {
+            Some(ref wl_info) => {
+                let nw_addr = network_addr(&conn.dst_network, conn.dst.ip());
+                let Some(wl) = self.state.fetch_workload(&nw_addr).await else {
+                    debug!("destination workload not found {}", nw_addr);
+                    return false;
+                };
+
+                if !wl_info.matches(&wl) {
+                    warn!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
+                    return false;
                 }
-            },
+
+                self.state.assert_rbac_for_destination(conn, &wl).await
+            }
             None => self.state.assert_rbac(conn).await,
         }
     }
@@ -156,7 +194,7 @@ impl Proxy {
             pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory: Arc::new(DefaultSocketFactory),
-            proxy_workload_uid: None,
+            proxy_workload_info: None,
         };
         Self::from_inputs(pi, drain).await
     }
