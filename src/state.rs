@@ -711,7 +711,7 @@ impl ProxyStateManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use super::*;
     use crate::test_helpers;
@@ -783,5 +783,73 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn assert_rbac_with_dest_workload_info() {
+        let mut state = ProxyState::default();
+        let wl = Workload {
+            name: "test".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "defaultacct".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
+            ..test_helpers::test_default_workload()
+        };
+        state.workloads.insert(wl).unwrap();
+
+        let mock_proxy_state = DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
+
+        let wi = WorkloadInfo {
+            name: "test".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "defaultacct".to_string(),
+        };
+
+        let mut ctx = crate::state::ProxyRbacContext {
+            conn: rbac::Connection {
+                src_identity: None,
+                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                dst_network: "".to_string(),
+                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 168, 0, 2),
+                    8080,
+                )),
+            },
+            dest_workload_info: Some(Arc::new(wi.clone())),
+        };
+        assert!(mock_proxy_state.assert_rbac(&ctx).await);
+
+        // now make sure it fails when we change just one property of the workload info
+        {
+            let mut wi = wi.clone();
+            wi.name = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
+        {
+            let mut wi = wi.clone();
+            wi.namespace = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
+        {
+            let mut wi = wi.clone();
+            wi.service_account = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
+        {
+            let mut wi = wi.clone();
+            wi.trust_domain = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
     }
 }
