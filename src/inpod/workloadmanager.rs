@@ -356,8 +356,7 @@ pub(crate) mod tests {
     macro_rules! fixture {
         () => {{
             if !crate::test_helpers::can_run_privilged_test() {
-                eprintln!("This test requires root; skipping");
-                return;
+                panic!("This test requires root; skipping");
             }
             let f = test_helpers::Fixture::default();
             let state = WorkloadProxyManagerState::new(
