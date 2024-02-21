@@ -71,6 +71,12 @@ impl fmt::Display for Upstream {
     }
 }
 
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ProxyRbacContext {
+    pub conn: rbac::Connection,
+    pub dest_workload_info: Option<Arc<proxy::WorkloadInfo>>,
+}
+
 /// The current state information for this proxy.
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ProxyState {
@@ -231,19 +237,22 @@ impl DemandProxyState {
         self.state.read().unwrap()
     }
 
-    pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {
-        let nw_addr = network_addr(&conn.dst_network, conn.dst.ip());
+    pub async fn assert_rbac(&self, ctx: &ProxyRbacContext) -> bool {
+        let nw_addr = network_addr(&ctx.conn.dst_network, ctx.conn.dst.ip());
         let Some(wl) = self.fetch_workload(&nw_addr).await else {
             debug!("destination workload not found {}", nw_addr);
             return false;
         };
-        self.assert_rbac_for_destination(conn, &wl).await
+        if let Some(ref wl_info) = ctx.dest_workload_info {
+            if !wl_info.matches(&wl) {
+                warn!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
+                return false;
+            }
+        }
+
+        self.assert_rbac_for_destination(&ctx.conn, &wl).await
     }
-    pub async fn assert_rbac_for_destination(
-        &self,
-        conn: &rbac::Connection,
-        wl: &Workload,
-    ) -> bool {
+    async fn assert_rbac_for_destination(&self, conn: &rbac::Connection, wl: &Workload) -> bool {
         let state = self.state.read().unwrap();
 
         // We can get policies from namespace, global, and workload...

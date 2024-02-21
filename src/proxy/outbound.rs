@@ -193,12 +193,17 @@ impl OutboundConnection {
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
+
+            let rbac_ctx = crate::state::ProxyRbacContext {
+                conn,
+                dest_workload_info: None,
+            };
             // Note: here we can't use `pi.assert_rbac_inbound` as the proxy instance presents the source and not the dest
-            // so we call the one in the state instead.
-            self.connection_manager.register(&conn).await;
-            if !self.pi.state.assert_rbac(&conn).await {
-                self.connection_manager.release(&conn).await;
-                info!(%conn, "RBAC rejected");
+            // so we call the one in the state instead. Note that fastpath is disabled in the inpod mode, so that's not a concern.
+            self.connection_manager.register(&rbac_ctx).await;
+            if !self.pi.state.assert_rbac(&rbac_ctx).await {
+                self.connection_manager.release(&rbac_ctx).await;
+                info!(%rbac_ctx.conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
             // same as above but inverted, this is the "inbound" metric
@@ -223,7 +228,7 @@ impl OutboundConnection {
                 Some(inbound_connection_metrics),
                 self.pi.socket_factory.as_ref(),
                 self.connection_manager.clone(),
-                conn,
+                rbac_ctx,
             )
             .await
             .map_err(Error::Io);

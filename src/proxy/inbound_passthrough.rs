@@ -170,18 +170,24 @@ impl InboundPassthrough {
             dst_network: pi.cfg.network.clone(),
             dst: orig,
         };
+
+        let rbac_ctx = crate::state::ProxyRbacContext {
+            conn,
+            dest_workload_info: pi.proxy_workload_info.clone(),
+        };
+
         //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-        connection_manager.register(&conn).await;
-        if !pi.assert_rbac_inbound(&conn).await {
-            info!(%conn, "RBAC rejected");
-            connection_manager.release(&conn).await;
+        connection_manager.register(&rbac_ctx).await;
+        if !pi.state.assert_rbac(&rbac_ctx).await {
+            info!(%rbac_ctx.conn, "RBAC rejected");
+            connection_manager.release(&rbac_ctx).await;
             return Ok(());
         }
-        let close = match connection_manager.track(&conn).await {
+        let close = match connection_manager.track(&rbac_ctx).await {
             Some(c) => c,
             None => {
                 // this seems unlikely but could occur if policy changes while track awaits lock
-                error!(%conn, "RBAC rejected");
+                error!(%rbac_ctx.conn, "RBAC rejected");
                 return Ok(());
             }
         };
@@ -213,10 +219,10 @@ impl InboundPassthrough {
             None
         };
         let derived_source = metrics::DerivedWorkload {
-            identity: conn.src_identity.clone(),
+            identity: rbac_ctx.conn.src_identity.clone(),
             ..Default::default()
         };
-        let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
+        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, upstream_service, &upstream);
         let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::destination,
             source: source_workload,
@@ -231,7 +237,7 @@ impl InboundPassthrough {
         let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
         tokio::select! {
             err =  proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes) => {
-                connection_manager.release(&conn).await;
+                connection_manager.release(&rbac_ctx).await;
                 err?;
             }
             _signaled = close.signaled() => {}

@@ -167,7 +167,7 @@ impl Inbound {
         extra_connection_metrics: Option<ConnectionOpen>,
         socket_factory: &(dyn SocketFactory + Send + Sync),
         connection_manager: ConnectionManager,
-        conn: Connection,
+        rbac_ctx: crate::state::ProxyRbacContext,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr, socket_factory).await;
@@ -182,7 +182,7 @@ impl Inbound {
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
-                        let close = match connection_manager.track(&conn).await {
+                        let close = match connection_manager.track(&rbac_ctx).await {
                             Some(c) => c,
                             None => {
                                 // if track returns None it means the connection was closed due to policy change
@@ -253,7 +253,7 @@ impl Inbound {
                                 }
                             },
                         }
-                        connection_manager.release(&conn).await;
+                        connection_manager.release(&rbac_ctx).await;
                     })
                     .in_current_span(),
                 );
@@ -329,21 +329,27 @@ impl Inbound {
                 if from_gateway {
                     debug!("request from gateway");
                 }
+
+                let rbac_ctx = crate::state::ProxyRbacContext {
+                    conn,
+                    dest_workload_info: pi.proxy_workload_info.clone(),
+                };
+
                 //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-                connection_manager.register(&conn).await;
+                connection_manager.register(&rbac_ctx).await;
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
-                } else if !pi.assert_rbac_inbound(&conn).await {
-                    info!(%conn, "RBAC rejected");
-                    connection_manager.release(&conn).await;
+                } else if !pi.state.assert_rbac(&rbac_ctx).await {
+                    info!(%rbac_ctx.conn, "RBAC rejected");
+                    connection_manager.release(&rbac_ctx).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
                         .unwrap());
                 }
                 if has_waypoint && !from_waypoint {
-                    info!(%conn, "bypassed waypoint");
-                    connection_manager.release(&conn).await;
+                    info!(%rbac_ctx.conn, "bypassed waypoint");
+                    connection_manager.release(&rbac_ctx).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
@@ -354,9 +360,9 @@ impl Inbound {
                     // For other request types, we can only trust the source from the connection.
                     // Since our own waypoint is in the same trust domain though, we can use Forwarded,
                     // which drops the requirement of spoofing IPs from waypoints
-                    super::get_original_src_from_fwded(&req).unwrap_or(conn.src_ip)
+                    super::get_original_src_from_fwded(&req).unwrap_or(rbac_ctx.conn.src_ip)
                 } else {
-                    conn.src_ip
+                    rbac_ctx.conn.src_ip
                 };
 
                 let baggage =
@@ -367,7 +373,7 @@ impl Inbound {
                     false => {
                         let src_network_addr = NetworkAddress {
                             // we can assume source network is our network because we did not traverse a gateway
-                            network: conn.dst_network.to_string(),
+                            network: rbac_ctx.conn.dst_network.to_string(),
                             address: source_ip,
                         };
                         // Find source info. We can lookup by XDS or from connection attributes
@@ -376,14 +382,14 @@ impl Inbound {
                 };
 
                 let derived_source = metrics::DerivedWorkload {
-                    identity: conn.src_identity.clone(),
+                    identity: rbac_ctx.conn.src_identity.clone(),
                     cluster_id: baggage.cluster_id,
                     namespace: baggage.namespace,
                     workload_name: baggage.workload_name,
                     revision: baggage.revision,
                     ..Default::default()
                 };
-                let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
+                let ds = proxy::guess_inbound_service(&rbac_ctx.conn, upstream_service, &upstream);
                 let connection_metrics = ConnectionOpen {
                     reporter: Reporter::destination,
                     source,
@@ -401,7 +407,7 @@ impl Inbound {
                     None,
                     pi.socket_factory.as_ref(),
                     connection_manager,
-                    conn,
+                    rbac_ctx,
                 )
                 .in_current_span()
                 .await

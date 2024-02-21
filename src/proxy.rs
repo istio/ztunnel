@@ -25,7 +25,7 @@ use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
-use tracing::{debug, error, trace, warn, Instrument};
+use tracing::{error, trace, warn, Instrument};
 
 use inbound::Inbound;
 pub use metrics::*;
@@ -93,7 +93,7 @@ pub struct Proxy {
     socks5: Socks5,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkloadInfo {
     pub name: String,
     pub namespace: String,
@@ -154,26 +154,6 @@ impl ProxyInputs {
             hbone_port: 0,
             socket_factory,
             proxy_workload_info: proxy_workload_info.map(Arc::new),
-        }
-    }
-
-    pub async fn assert_rbac_inbound(&self, conn: &crate::rbac::Connection) -> bool {
-        match self.proxy_workload_info {
-            Some(ref wl_info) => {
-                let nw_addr = network_addr(&conn.dst_network, conn.dst.ip());
-                let Some(wl) = self.state.fetch_workload(&nw_addr).await else {
-                    debug!("destination workload not found {}", nw_addr);
-                    return false;
-                };
-
-                if !wl_info.matches(&wl) {
-                    warn!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
-                    return false;
-                }
-
-                self.state.assert_rbac_for_destination(conn, &wl).await
-            }
-            None => self.state.assert_rbac(conn).await,
         }
     }
 }

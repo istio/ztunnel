@@ -70,7 +70,6 @@ pub struct WorkloadProxyManagerState {
     snapshot_names: std::collections::HashSet<WorkloadUid>,
 
     inpod_config: InPodConfig,
-
 }
 
 impl WorkloadProxyManagerState {
