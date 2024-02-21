@@ -38,7 +38,7 @@ use crate::proxy::socks5::Socks5;
 use crate::rbac::Connection;
 use crate::state::service::{endpoint_uid, Service, ServiceDescription};
 use crate::state::workload::{network_addr, Workload};
-use crate::state::DemandProxyState;
+use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
 mod connection_manager;
@@ -91,37 +91,6 @@ pub struct Proxy {
     inbound_passthrough: InboundPassthrough,
     outbound: Outbound,
     socks5: Socks5,
-}
-
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct WorkloadInfo {
-    pub name: String,
-    pub namespace: String,
-    pub trust_domain: String,
-    pub service_account: String,
-}
-
-impl WorkloadInfo {
-    pub fn new(
-        name: String,
-        namespace: String,
-        trust_domain: String,
-        service_account: String,
-    ) -> Self {
-        Self {
-            name,
-            namespace,
-            trust_domain,
-            service_account,
-        }
-    }
-
-    pub fn matches(&self, w: &Workload) -> bool {
-        self.name == w.name
-            && self.namespace == w.namespace
-            && self.trust_domain == w.trust_domain
-            && self.service_account == w.service_account
-    }
 }
 
 #[derive(Clone)]

@@ -39,7 +39,7 @@ use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 pub mod policy;
 pub mod service;
@@ -71,10 +71,43 @@ impl fmt::Display for Upstream {
     }
 }
 
+// Workload information that a specific proxy instance represents. This is used to cross check
+// with the workload fetched using destination address when making RBAC decisions.
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkloadInfo {
+    pub name: String,
+    pub namespace: String,
+    pub trust_domain: String,
+    pub service_account: String,
+}
+
+impl WorkloadInfo {
+    pub fn new(
+        name: String,
+        namespace: String,
+        trust_domain: String,
+        service_account: String,
+    ) -> Self {
+        Self {
+            name,
+            namespace,
+            trust_domain,
+            service_account,
+        }
+    }
+
+    pub fn matches(&self, w: &Workload) -> bool {
+        self.name == w.name
+            && self.namespace == w.namespace
+            && self.trust_domain == w.trust_domain
+            && self.service_account == w.service_account
+    }
+}
+
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProxyRbacContext {
     pub conn: rbac::Connection,
-    pub dest_workload_info: Option<Arc<proxy::WorkloadInfo>>,
+    pub dest_workload_info: Option<Arc<WorkloadInfo>>,
 }
 
 /// The current state information for this proxy.
@@ -244,8 +277,9 @@ impl DemandProxyState {
             return false;
         };
         if let Some(ref wl_info) = ctx.dest_workload_info {
+            // make sure that the workload we fetched matches the workload info we got over ZDS.
             if !wl_info.matches(&wl) {
-                warn!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
+                error!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
                 return false;
             }
         }

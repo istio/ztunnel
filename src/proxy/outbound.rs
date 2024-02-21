@@ -196,10 +196,10 @@ impl OutboundConnection {
 
             let rbac_ctx = crate::state::ProxyRbacContext {
                 conn,
+                // Note: here we can't use `pi.proxy_workload_info` as the proxy instance presents the source and not the dest.
+                // Note that fastpath is disabled in the inpod mode, so that's not a concern.
                 dest_workload_info: None,
             };
-            // Note: here we can't use `pi.assert_rbac_inbound` as the proxy instance presents the source and not the dest
-            // so we call the one in the state instead. Note that fastpath is disabled in the inpod mode, so that's not a concern.
             self.connection_manager.register(&rbac_ctx).await;
             if !self.pi.state.assert_rbac(&rbac_ctx).await {
                 self.connection_manager.release(&rbac_ctx).await;

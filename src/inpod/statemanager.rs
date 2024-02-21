@@ -18,8 +18,8 @@ use tracing::{debug, info, Instrument};
 
 use super::{metrics::Metrics, Error, WorkloadMessage};
 
-use crate::proxy::WorkloadInfo;
 use crate::proxyfactory::ProxyFactory;
+use crate::state::WorkloadInfo;
 
 use super::config::InPodConfig;
 
