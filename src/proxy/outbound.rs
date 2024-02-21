@@ -28,6 +28,7 @@ use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
+use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::inbound::{Inbound, InboundConnect};
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool};
@@ -42,6 +43,7 @@ pub struct Outbound {
     pi: ProxyInputs,
     drain: Watch,
     listener: TcpListener,
+    connection_manager: ConnectionManager,
 }
 
 impl Outbound {
@@ -64,6 +66,7 @@ impl Outbound {
             pi,
             listener,
             drain,
+            connection_manager: ConnectionManager::new(),
         })
     }
 
@@ -82,6 +85,7 @@ impl Outbound {
                         let mut oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
+                            connection_manager: self.connection_manager.clone(),
                         };
                         let span = info_span!("outbound", id=%oc.id);
                         tokio::spawn(
@@ -120,6 +124,7 @@ impl Outbound {
 pub(super) struct OutboundConnection {
     pub(super) pi: ProxyInputs,
     pub(super) id: TraceParent,
+    pub(super) connection_manager: ConnectionManager,
 }
 
 impl OutboundConnection {
@@ -189,8 +194,10 @@ impl OutboundConnection {
                 dst: req.destination,
             };
             // Note: here we can't use `pi.assert_rbac_inbound` as the proxy instance presents the source and not the dest
-            // so we call the one in the state instead
+            // so we call the one in the state instead.
+            self.connection_manager.register(&conn).await;
             if !self.pi.state.assert_rbac(&conn).await {
+                self.connection_manager.release(&conn).await;
                 info!(%conn, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }
@@ -215,6 +222,8 @@ impl OutboundConnection {
                 connection_metrics,
                 Some(inbound_connection_metrics),
                 self.pi.socket_factory.as_ref(),
+                self.connection_manager.clone(),
+                conn,
             )
             .await
             .map_err(Error::Io);
@@ -574,6 +583,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::proxy::connection_manager::ConnectionManager;
     use crate::test_helpers::helpers::test_proxy_metrics;
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
@@ -620,6 +630,7 @@ mod tests {
                 proxy_workload_info: None,
             },
             id: TraceParent::new(),
+            connection_manager: ConnectionManager::new(),
         };
 
         let req = outbound

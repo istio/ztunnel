@@ -15,24 +15,25 @@
 use crate::dns::forwarder::Forwarder;
 use futures_util::ready;
 use futures_util::stream::{Stream, StreamExt};
+use hickory_client::client::{AsyncClient, ClientHandle};
+use hickory_client::error::ClientError;
+use hickory_proto::error::{ProtoError, ProtoErrorKind};
+use hickory_proto::iocompat::AsyncIoTokioAsStd;
+use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query};
+use hickory_proto::rr::rdata::{A, AAAA, CNAME};
+use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
+use hickory_proto::serialize::binary::BinDecodable;
+use hickory_proto::tcp::TcpClientStream;
+use hickory_proto::udp::UdpClientStream;
+use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
+use hickory_proto::DnsHandle;
+use hickory_server::authority::MessageRequest;
+use hickory_server::server::{Protocol, Request};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::net::{TcpStream, UdpSocket};
-use trust_dns_client::client::{AsyncClient, ClientHandle};
-use trust_dns_client::error::ClientError;
-use trust_dns_proto::error::{ProtoError, ProtoErrorKind};
-use trust_dns_proto::iocompat::AsyncIoTokioAsStd;
-use trust_dns_proto::op::{Edns, Message, MessageType, OpCode, Query};
-use trust_dns_proto::rr::{DNSClass, Name, RData, Record, RecordType};
-use trust_dns_proto::serialize::binary::BinDecodable;
-use trust_dns_proto::tcp::TcpClientStream;
-use trust_dns_proto::udp::UdpClientStream;
-use trust_dns_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
-use trust_dns_proto::DnsHandle;
-use trust_dns_server::authority::MessageRequest;
-use trust_dns_server::server::{Protocol, Request};
 
 const TTL: u32 = 5;
 
@@ -43,23 +44,23 @@ pub fn n<S: AsRef<str>>(name: S) -> Name {
 
 /// Creates an A record for the name and IP.
 pub fn a(name: Name, addr: Ipv4Addr) -> Record {
-    Record::from_rdata(name, TTL, RData::A(addr))
+    Record::from_rdata(name, TTL, RData::A(A(addr)))
 }
 
 /// Creates an AAAA record for the name and IP.
 pub fn aaaa(name: Name, addr: Ipv6Addr) -> Record {
-    Record::from_rdata(name, TTL, RData::AAAA(addr))
+    Record::from_rdata(name, TTL, RData::AAAA(AAAA(addr)))
 }
 
 /// Creates a CNAME record for the given canonical name.
 pub fn cname(name: Name, canonical_name: Name) -> Record {
-    Record::from_rdata(name, TTL, RData::CNAME(canonical_name))
+    Record::from_rdata(name, TTL, RData::CNAME(CNAME(canonical_name)))
 }
 
 #[cfg(any(unix, target_os = "windows"))]
 /// Creates a [Forwarder] that uses the system configuration (e.g. /etc/resolv.conf).
 pub fn system_forwarder() -> Forwarder {
-    use trust_dns_resolver::system_conf::read_system_conf;
+    use hickory_resolver::system_conf::read_system_conf;
     let (cfg, opts) = read_system_conf().unwrap();
     Forwarder::new(cfg, opts).unwrap()
 }

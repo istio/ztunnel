@@ -23,7 +23,7 @@ use prometheus_client::registry::Registry;
 use std::sync::{Arc, RwLock};
 use tokio::net::UnixStream;
 
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

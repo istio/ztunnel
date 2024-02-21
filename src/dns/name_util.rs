@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use trust_dns_proto::rr::Name;
+use hickory_proto::rr::Name;
 
 /// Returns true if the given name ends with the labels provided by the domain iterator.
 // TODO(nmittler): Consider upstreaming to TrustDNS.
@@ -49,7 +49,7 @@ pub fn trim_domain(name: &Name, domain: &Name) -> Option<Name> {
 mod tests {
     use super::*;
     use crate::test_helpers::dns::n;
-    use trust_dns_proto::rr::Name;
+    use hickory_proto::rr::Name;
 
     #[test]
     fn test_has_domain() {

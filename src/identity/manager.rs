@@ -33,7 +33,7 @@ use super::Error::{self, Spiffe};
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub enum Identity {
     Spiffe {
         trust_domain: String,

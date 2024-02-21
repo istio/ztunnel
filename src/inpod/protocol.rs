@@ -18,6 +18,7 @@ use drain::Watch;
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessageOwned, MsgFlags};
 use prost::Message;
 use std::io::{IoSlice, IoSliceMut};
+use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
@@ -212,16 +213,13 @@ fn maybe_get_fd(
     if let Some(our_netns) = &our_netns {
         // validate that the fd we got is a netns. This should never happen, and is here
         // to catch potential bugs in the node agent during development.
-        debug!(
-            "Validating netns FD: {:?}",
-            validate_ns(our_netns.as_raw_fd())
-        );
+        debug!("Validating netns FD: {:?}", validate_ns(our_netns));
     }
 
     Ok(our_netns)
 }
 
-fn validate_ns(fd: std::os::fd::RawFd) -> anyhow::Result<()> {
+fn validate_ns(fd: &OwnedFd) -> anyhow::Result<()> {
     // on newer kernels we can get the ns type! note that this doesn't work on older kernels.
     // so an error doesn't mean its not a netns.
     // #define NSIO	0xb7
@@ -229,24 +227,24 @@ fn validate_ns(fd: std::os::fd::RawFd) -> anyhow::Result<()> {
     // #define NS_GET_NSTYPE		_IO(NSIO, 0x3)
     const NS_GET_NSTYPE: u8 = 0x3;
     nix::ioctl_none!(get_ns_type, NSIO, NS_GET_NSTYPE);
-    let nstype = unsafe { get_ns_type(fd) };
+    let nstype = unsafe { get_ns_type(fd.as_raw_fd()) };
     if let Ok(nstype) = nstype {
         // ignore errors in case we are in an old kernel
         if nstype != nix::libc::CLONE_NEWNET {
             anyhow::bail!("Unexpected ns type: {:?}", nstype);
         } else {
-            debug!("FD {} type is netns", fd);
+            debug!("FD {:?} type is netns", fd);
         }
     } else {
         // can get ns type, do a different check - that the fd came from the nsfs.
-        let data = nix::sys::statfs::fstatfs(&fd)?;
+        let data = nix::sys::statfs::fstatfs(fd)?;
         let f_type = data.filesystem_type();
         if f_type != nix::sys::statfs::PROC_SUPER_MAGIC && f_type != nix::sys::statfs::NSFS_MAGIC {
             anyhow::bail!("Unexpected FD type for netns: {:?}", f_type);
         }
     }
 
-    debug!("FD {} looks like a netns", fd);
+    debug!("FD {:?} looks like a netns", fd);
     Ok(())
 }
 

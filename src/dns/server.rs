@@ -20,19 +20,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use drain::Watch;
+use hickory_proto::error::ProtoErrorKind;
+use hickory_proto::op::ResponseCode;
+use hickory_proto::rr::rdata::{A, AAAA, CNAME};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::system_conf::read_system_conf;
+use hickory_server::authority::LookupError;
+use hickory_server::server::Request;
+use hickory_server::ServerFuture;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use tracing::{info, warn};
-use trust_dns_proto::error::ProtoErrorKind;
-use trust_dns_proto::op::ResponseCode;
-use trust_dns_proto::rr::{Name, RData, Record, RecordType};
-use trust_dns_resolver::config::ResolverConfig;
-use trust_dns_resolver::system_conf::read_system_conf;
-use trust_dns_server::authority::LookupError;
-use trust_dns_server::server::Request;
-use trust_dns_server::ServerFuture;
 
 use crate::proxy::SocketFactory;
 
@@ -127,7 +128,7 @@ impl Server {
     }
 
     /// Runs this DNS server to completion.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         tokio::select! {
             res = self.server.block_until_done() =>{
                 if let Err(e) = res {
@@ -137,7 +138,10 @@ impl Server {
                     }
                 }
             }
-            _ = self.drain.signaled() => {}
+            _ = self.drain.signaled() => {
+                info!("shutting down the DNS server");
+                let _ = self.server.shutdown_gracefully().await;
+            }
         }
         info!("dns server drained");
     }
@@ -631,14 +635,14 @@ fn to_record(name: Name, rdata: RData) -> Record {
 }
 
 fn cname_record(name: Name, canonical_name: Name) -> Record {
-    to_record(name, RData::CNAME(canonical_name))
+    to_record(name, RData::CNAME(CNAME(canonical_name)))
 }
 
 fn ip_records(name: Name, addrs: Vec<IpAddr>, out: &mut Vec<Record>) {
     for addr in addrs {
         match addr {
-            IpAddr::V4(addr) => out.push(to_record(name.clone(), RData::A(addr))),
-            IpAddr::V6(addr) => out.push(to_record(name.clone(), RData::AAAA(addr))),
+            IpAddr::V4(addr) => out.push(to_record(name.clone(), RData::A(A(addr)))),
+            IpAddr::V6(addr) => out.push(to_record(name.clone(), RData::AAAA(AAAA(addr)))),
         }
     }
 }
@@ -680,7 +684,7 @@ struct SystemForwarder {
 impl SystemForwarder {
     fn new() -> Result<Self, Error> {
         // Get the resolver config from /etc/resolv.conf.
-        let (cfg, opts) = read_system_conf()?;
+        let (cfg, opts) = read_system_conf().map_err(|e| Error::Generic(Box::new(e)))?;
 
         // Extract the parts.
         let domain = cfg.domain().cloned();
@@ -726,8 +730,8 @@ mod tests {
     use std::net::{SocketAddrV4, SocketAddrV6};
 
     use bytes::Bytes;
+    use hickory_server::server::Protocol;
     use prometheus_client::registry::Registry;
-    use trust_dns_server::server::Protocol;
 
     use super::*;
     use crate::metrics;

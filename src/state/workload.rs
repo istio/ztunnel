@@ -594,11 +594,11 @@ mod tests {
     use crate::xds::{LocalClient, ProxyStateUpdateMutator};
     use crate::{cert_fetcher, test_helpers};
     use bytes::Bytes;
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use std::collections::HashSet;
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::RwLock;
-    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
     use xds::istio::workload::NetworkAddress as XdsNetworkAddress;
 
     #[test]

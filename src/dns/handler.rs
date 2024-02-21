@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use crate::dns::resolver::{Answer, Resolver};
+use hickory_proto::op::{Edns, Header, MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::Record;
+use hickory_resolver::error::ResolveErrorKind;
+use hickory_server::authority::{LookupError, MessageResponse, MessageResponseBuilder};
+use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use std::sync::Arc;
 use tracing::{error, warn};
-use trust_dns_proto::op::{Edns, Header, MessageType, OpCode, ResponseCode};
-use trust_dns_proto::rr::Record;
-use trust_dns_resolver::error::ResolveErrorKind;
-use trust_dns_server::authority::{LookupError, MessageResponse, MessageResponseBuilder};
-use trust_dns_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 
 /// A Trust-DNS [RequestHandler] that proxies all DNS requests.
 ///
@@ -204,18 +204,18 @@ mod tests {
     use crate::dns::resolver::{Answer, Resolver};
     use crate::test_helpers::dns::{a, a_request, n, socket_addr};
     use crate::test_helpers::helpers::subscribe;
+    use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+    use hickory_proto::rr::{Name, Record, RecordType};
+    use hickory_proto::serialize::binary::BinEncoder;
+    use hickory_server::authority::LookupError;
+    use hickory_server::authority::MessageResponse;
+    use hickory_server::server::{
+        Protocol, Request, RequestHandler, ResponseHandler, ResponseInfo,
+    };
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::mpsc::Sender;
-    use trust_dns_proto::op::{Message, MessageType, OpCode, ResponseCode};
-    use trust_dns_proto::rr::{Name, Record, RecordType};
-    use trust_dns_proto::serialize::binary::BinEncoder;
-    use trust_dns_server::authority::LookupError;
-    use trust_dns_server::authority::MessageResponse;
-    use trust_dns_server::server::{
-        Protocol, Request, RequestHandler, ResponseHandler, ResponseInfo,
-    };
 
     #[tokio::test]
     async fn record_found() {
@@ -251,7 +251,7 @@ mod tests {
         let answers = resp.answers();
         assert!(!answers.is_empty());
         assert_eq!(n("fake.com."), *answers[0].name());
-        assert_eq!(RecordType::A, answers[0].rr_type());
+        assert_eq!(RecordType::A, answers[0].record_type());
 
         let expected = a(n("fake.com."), Ipv4Addr::new(127, 0, 0, 1));
         assert_eq!(expected, *answers.iter().next().unwrap());

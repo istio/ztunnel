@@ -22,9 +22,9 @@ use std::{env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 use crate::identity;
 
@@ -203,17 +203,6 @@ impl From<InvalidUri> for Error {
     }
 }
 
-/// GoDuration wraps a Duration to implement golang Duration parsing semantics
-struct GoDuration(Duration);
-
-impl FromStr for GoDuration {
-    type Err = go_parse_duration::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        go_parse_duration::parse_duration(s).map(|ns| GoDuration(Duration::from_nanos(ns as u64)))
-    }
-}
-
 fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
     match env::var(env) {
         Ok(val) => val
@@ -300,7 +289,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Err(_) => identity::AuthSource::None,
     };
 
-    use trust_dns_resolver::system_conf::read_system_conf;
+    use hickory_resolver::system_conf::read_system_conf;
     let (dns_resolver_cfg, dns_resolver_opts) = read_system_conf().unwrap();
 
     let dns_proxy_addr = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {

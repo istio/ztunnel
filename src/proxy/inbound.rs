@@ -26,8 +26,10 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
+use super::connection_manager::{self, ConnectionManager};
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::identity::SecretManager;
@@ -47,6 +49,7 @@ pub(super) struct Inbound {
     listener: TcpListener,
     drain: Watch,
     pi: ProxyInputs,
+    connection_manager: ConnectionManager,
 }
 
 impl Inbound {
@@ -68,6 +71,7 @@ impl Inbound {
             listener,
             drain,
             pi,
+            connection_manager: ConnectionManager::new(),
         })
     }
 
@@ -86,8 +90,21 @@ impl Inbound {
         let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
 
         let (sub_drain_signal, sub_drain) = drain::channel();
+        // spawn a task which subscribes to watch updates and asserts rbac against this proxy's connections, closing the ones which have become denied
+        let (stop_tx, stop_rx) = watch::channel(());
+        let state = self.pi.state.clone();
+        let connection_manager = self.connection_manager.clone();
+
+        tokio::spawn(connection_manager::policy_watcher(
+            state,
+            stop_rx,
+            connection_manager,
+            "inbound",
+        ));
+
         while let Some(socket) = stream.next().await {
             let pi = self.pi.clone();
+            let connection_manager = self.connection_manager.clone();
             let drain = sub_drain.clone();
             let network = self.pi.cfg.network.clone();
             tokio::task::spawn(async move {
@@ -115,6 +132,7 @@ impl Inbound {
                                 conn.clone(),
                                 enable_original_source.unwrap_or_default(),
                                 req,
+                                connection_manager.clone(),
                             )
                         }),
                     );
@@ -131,8 +149,9 @@ impl Inbound {
                 }
             });
         }
-        std::mem::drop(sub_drain);
         info!("draining connections");
+        stop_tx.send_replace(()); // close the task handling auth updates
+        drop(sub_drain); // sub_drain_signal.drain() will never resolve while sub_drain is valid, will deadlock if not dropped
         sub_drain_signal.drain().await;
         info!("all inbound connections drained");
     }
@@ -147,6 +166,8 @@ impl Inbound {
         connection_metrics: ConnectionOpen,
         extra_connection_metrics: Option<ConnectionOpen>,
         socket_factory: &(dyn SocketFactory + Send + Sync),
+        connection_manager: ConnectionManager,
+        conn: Connection,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr, socket_factory).await;
@@ -161,6 +182,15 @@ impl Inbound {
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
+                        let close = match connection_manager.track(&conn).await {
+                            Some(c) => c,
+                            None => {
+                                // if track returns None it means the connection was closed due to policy change
+                                // between the intial assertion of policy and the spawinging of the task
+                                error!(dur=?start.elapsed(), "internal server copy: connection close");
+                                return;
+                            }
+                        };
                         let _connection_close = metrics
                             .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
 
@@ -172,14 +202,19 @@ impl Inbound {
                             metrics::BytesTransferred::from(&connection_metrics);
                         match request_type {
                             DirectPath(mut incoming) => {
-                                match proxy::relay(
+                                let res = tokio::select! {
+                                r = proxy::relay(
                                     &mut incoming,
                                     &mut stream,
                                     &metrics,
                                     transferred_bytes,
-                                )
-                                .await
-                                {
+                                ) => {r}
+                                _c = close.signaled() => {
+                                        error!(dur=?start.elapsed(), "internal server copy: connection close received");
+                                        Ok((0,0))
+                                    }
+                                };
+                                match res {
                                     Ok(transferred) => {
                                         if let Some(co) = extra_connection_metrics.as_ref() {
                                             metrics.record(
@@ -195,14 +230,19 @@ impl Inbound {
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
-                                    if let Err(e) = super::copy_hbone(
+                                    let res = tokio::select! {
+                                        r =  super::copy_hbone(
                                         &mut upgraded,
                                         &mut stream,
                                         &metrics,
                                         transferred_bytes,
-                                    )
-                                    .instrument(trace_span!("hbone server"))
-                                    .await
+                                        ).instrument(trace_span!("hbone server")) => {r}
+                                        _c = close.signaled() => {
+                                            error!(dur=?start.elapsed(), "internal server copy: connection close received");
+                                            Ok(())
+                                        }
+                                    };
+                                    if let Err(e) = res
                                     {
                                         error!(dur=?start.elapsed(), "hbone server copy: {}", e);
                                     }
@@ -213,6 +253,7 @@ impl Inbound {
                                 }
                             },
                         }
+                        connection_manager.release(&conn).await;
                     })
                     .in_current_span(),
                 );
@@ -243,6 +284,7 @@ impl Inbound {
         conn: Connection,
         enable_original_source: bool,
         req: Request<Incoming>,
+        connection_manager: ConnectionManager,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
         match req.method() {
             &Method::CONNECT => {
@@ -287,10 +329,13 @@ impl Inbound {
                 if from_gateway {
                     debug!("request from gateway");
                 }
+                //register before assert_rbac to ensure the connection is tracked during it's entire valid span
+                connection_manager.register(&conn).await;
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
                 } else if !pi.assert_rbac_inbound(&conn).await {
                     info!(%conn, "RBAC rejected");
+                    connection_manager.release(&conn).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
@@ -298,6 +343,7 @@ impl Inbound {
                 }
                 if has_waypoint && !from_waypoint {
                     info!(%conn, "bypassed waypoint");
+                    connection_manager.release(&conn).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
@@ -354,6 +400,8 @@ impl Inbound {
                     connection_metrics,
                     None,
                     pi.socket_factory.as_ref(),
+                    connection_manager,
+                    conn,
                 )
                 .in_current_span()
                 .await
@@ -479,7 +527,7 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
 
 #[cfg(test)]
 mod test {
-    use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
     use super::*;
     use crate::state::service::endpoint_uid;
