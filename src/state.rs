@@ -249,10 +249,7 @@ impl DemandProxyState {
                 return false;
             }
         }
-
-        self.assert_rbac_for_destination(&ctx.conn, &wl).await
-    }
-    async fn assert_rbac_for_destination(&self, conn: &rbac::Connection, wl: &Workload) -> bool {
+        let conn = &ctx.conn;
         let state = self.state.read().unwrap();
 
         // We can get policies from namespace, global, and workload...

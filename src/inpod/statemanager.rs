@@ -192,7 +192,7 @@ impl WorkloadProxyManagerState {
         netns: InpodNetns,
     ) -> Result<(), crate::proxy::Error> {
         match self
-            .add_workload_inner(&workload_uid, &workload_info, netns.clone())
+            .add_workload_inner(workload_uid, &workload_info, netns.clone())
             .await
         {
             Ok(()) => {

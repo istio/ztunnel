@@ -924,7 +924,7 @@ mod tests {
                         ..conn
                     };
                     let rbac_ctx = crate::state::ProxyRbacContext {
-                        conn: conn,
+                        conn,
                         dest_workload_info: None,
                     };
 
