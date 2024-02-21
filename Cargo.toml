@@ -80,6 +80,7 @@ futures-util = "0.3.26"
 chrono = "0.4.23"
 nix = { version = "0.27.1", features = ["socket", "sched", "uio", "fs", "ioctl", "user"] }
 hashbrown = "0.14.0"
+backoff = "0.4.0"
 
 # DNS
 hickory-client = "0.24.0"
