@@ -804,6 +804,7 @@ mod tests {
                         target_port: 80,
                     }],
                     subject_alt_names: vec![],
+                    waypoint: None,
                 },
             )
             .unwrap();
@@ -834,6 +835,7 @@ mod tests {
                         target_port: 80,
                     }],
                     subject_alt_names: vec![],
+                    waypoint: None,
                 },
             )
             .unwrap();
@@ -887,6 +889,7 @@ mod tests {
                         target_port: 80,
                     }],
                     subject_alt_names: vec![],
+                    waypoint: None,
                 },
             )
             .unwrap();

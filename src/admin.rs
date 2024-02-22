@@ -773,6 +773,7 @@ mod tests {
                 target_port: 80,
             }],
             subject_alt_names: vec!["SAN1".to_string(), "SAN2".to_string()],
+            waypoint: None,
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
