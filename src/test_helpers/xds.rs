@@ -80,15 +80,17 @@ impl AdsServer {
         tokio::spawn(async move {
             while let Some(socket) = tls_stream.next().await {
                 let srv = srv.clone();
-                if let Err(err) = http2::Builder::new(TokioExecutor)
-                    .serve_connection(
-                        TokioIo::new(socket),
-                        tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
-                    )
-                    .await
-                {
-                    error!("Error serving connection: {:?}", err);
-                }
+                tokio::spawn(async move {
+                    if let Err(err) = http2::Builder::new(TokioExecutor)
+                        .serve_connection(
+                            TokioIo::new(socket),
+                            tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
+                        )
+                        .await
+                    {
+                        error!("Error serving connection: {:?}", err);
+                    }
+                });
             }
         });
 

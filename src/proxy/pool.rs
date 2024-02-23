@@ -20,8 +20,9 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::client::conn::http2;
 use hyper::http::{Request, Response};
-use hyper_util::client::pool;
-use hyper_util::client::pool::{Pool as HyperPool, Poolable, Pooled, Reservation};
+use hyper_util::client::legacy::pool;
+use hyper_util::client::legacy::pool::{Pool as HyperPool, Poolable, Pooled, Reservation};
+use hyper_util::rt::TokioTimer;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -39,11 +40,12 @@ impl Pool {
     pub fn new() -> Pool {
         Self {
             pool: HyperPool::new(
-                hyper_util::client::pool::Config {
+                hyper_util::client::legacy::pool::Config {
                     idle_timeout: Some(Duration::from_secs(90)),
                     max_idle_per_host: std::usize::MAX,
                 },
-                &hyper_util::Exec::Default,
+                TokioExec,
+                Some(TokioTimer::new()),
             ),
         }
     }
