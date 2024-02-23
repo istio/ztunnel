@@ -19,12 +19,12 @@ use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::codegen::InterceptedService;
 
-use tracing::{instrument, warn};
+use tracing::{error, instrument, warn};
 
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
 use crate::identity::Error;
-use crate::tls::{self, SanChecker, TlsGrpcChannel};
+use crate::tls::{self, TlsGrpcChannel};
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 use crate::xds::istio::ca::IstioCertificateRequest;
 
@@ -57,15 +57,14 @@ impl CaClient {
 
 impl CaClient {
     #[instrument(skip_all)]
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
-        let cs = tls::CsrOptions {
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+        let cs = tls::csr::CsrOptions {
             san: id.to_string(),
         }
         .generate()?;
-        let csr: Vec<u8> = cs.csr;
-        let pkey = cs.pkey;
+        let csr = cs.csr;
+        let private_key = cs.private_key;
 
-        let csr = std::str::from_utf8(&csr).map_err(Error::Utf8)?.to_string();
         let req = IstioCertificateRequest {
             csr,
             validity_duration: self.secret_ttl,
@@ -101,11 +100,15 @@ impl CaClient {
             warn!("no chain certs for: {}", id);
             vec![]
         };
-        let certs = tls::cert_from(&pkey, leaf, chain);
-        if self.enable_impersonated_identity {
-            certs
-                .verify_san(&[id.clone()])
-                .map_err(|_| Error::SanError(id.to_owned()))?;
+        let certs = tls::WorkloadCertificate::new(&private_key, leaf, chain)?;
+        // Make the certificate actually matches the identity we requested.
+        if self.enable_impersonated_identity && certs.cert.identity().as_ref() != Some(id) {
+            error!(
+                "expected identity {:?}, got {:?}",
+                id,
+                certs.cert.identity()
+            );
+            return Err(Error::SanError(id.to_owned()));
         }
         Ok(certs)
     }
@@ -113,11 +116,12 @@ impl CaClient {
 
 #[async_trait]
 impl crate::identity::CaClientTrait for CaClient {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
         self.fetch_certificate(id).await
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub mod mock {
     use std::sync::Arc;
     use std::time::Duration;
@@ -126,15 +130,13 @@ pub mod mock {
     use tokio::time::Instant;
 
     use crate::identity::Identity;
-    use crate::tls::mock::CertGenerator;
-    use crate::tls::Certs;
 
     use super::*;
 
     #[derive(Default)]
     struct ClientState {
         fetches: Vec<Identity>,
-        gen: CertGenerator,
+        gen: tls::mock::CertGenerator,
     }
 
     #[derive(Clone)]
@@ -186,7 +188,10 @@ pub mod mock {
             self.state.write().await.fetches.clear();
         }
 
-        async fn fetch_certificate(&self, id: &Identity) -> Result<Certs, Error> {
+        async fn fetch_certificate(
+            &self,
+            id: &Identity,
+        ) -> Result<tls::WorkloadCertificate, Error> {
             let Identity::Spiffe {
                 trust_domain: td,
                 namespace: ns,
@@ -240,7 +245,10 @@ pub mod mock {
 
     #[async_trait]
     impl crate::identity::CaClientTrait for CaClient {
-        async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
+        async fn fetch_certificate(
+            &self,
+            id: &Identity,
+        ) -> Result<tls::WorkloadCertificate, Error> {
             self.fetch_certificate(id).await
         }
     }
@@ -248,6 +256,7 @@ pub mod mock {
 
 #[cfg(test)]
 mod tests {
+    use std::iter;
     use std::time::Duration;
 
     use matches::assert_matches;
@@ -260,7 +269,7 @@ mod tests {
 
     async fn test_ca_client_with_response(
         res: IstioCertificateResponse,
-    ) -> Result<tls::Certs, Error> {
+    ) -> Result<tls::WorkloadCertificate, Error> {
         let (mock, ca_client) = test_helpers::ca::CaServer::spawn().await;
         mock.send(Ok(res)).unwrap();
         ca_client.fetch_certificate(&Identity::default()).await
@@ -280,11 +289,17 @@ mod tests {
             namespace: "foo".to_string(),
             trust_domain: "cluster.local".to_string(),
         };
-        let certs =
-            tls::generate_test_certs(&id.into(), Duration::from_secs(0), Duration::from_secs(0));
+        let certs = tls::mock::generate_test_certs(
+            &id.into(),
+            Duration::from_secs(0),
+            Duration::from_secs(0),
+        );
 
         let res = test_ca_client_with_response(IstioCertificateResponse {
-            cert_chain: vec![String::from_utf8(certs.x509().to_pem().unwrap()).unwrap()],
+            cert_chain: iter::once(certs.cert)
+                .chain(certs.chain)
+                .map(|c| c.as_pem())
+                .collect(),
         })
         .await;
         assert_matches!(res, Err(Error::SanError(_)));
@@ -292,13 +307,17 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_certificate() {
-        let certs = tls::generate_test_certs(
+        let certs = tls::mock::generate_test_certs(
             &Identity::default().into(),
             Duration::from_secs(0),
             Duration::from_secs(0),
         );
+
         let res = test_ca_client_with_response(IstioCertificateResponse {
-            cert_chain: vec![String::from_utf8(certs.x509().to_pem().unwrap()).unwrap()],
+            cert_chain: iter::once(certs.cert)
+                .chain(certs.chain)
+                .map(|c| c.as_pem())
+                .collect(),
         })
         .await;
         assert_matches!(res, Ok(_));

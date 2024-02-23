@@ -33,16 +33,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
 use tracing::{debug, info, warn};
 
-use crate::tls::{BoringTlsAcceptor, ServerCertProvider};
+use crate::tls::ServerCertProvider;
 
 pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
-    acceptor: T,
+    cert_provider: T,
     listener: TcpListener,
-) -> impl Stream<Item = tokio_boring::SslStream<TcpStream>> {
+) -> impl Stream<Item = tokio_rustls::server::TlsStream<TcpStream>> {
     use tokio_stream::StreamExt;
-    let boring_acceptor = BoringTlsAcceptor { acceptor };
 
-    tls_listener::builder(boring_acceptor)
+    tls_listener::builder(crate::tls::InboundAcceptor::new(cert_provider))
         .listen(listener)
         .filter_map(|conn| {
             // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
@@ -58,7 +57,7 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
             }
         })
         .map(|(conn, _)| {
-            conn.get_ref().set_nodelay(true).unwrap();
+            conn.get_ref().0.set_nodelay(true).unwrap();
             conn
         })
 }
