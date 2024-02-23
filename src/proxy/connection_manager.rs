@@ -50,13 +50,15 @@ pub struct ConnectionManager {
     drains: Arc<RwLock<HashMap<Connection, ConnectionDrain>>>,
 }
 
-impl ConnectionManager {
-    pub fn new() -> Self {
+impl std::default::Default for ConnectionManager {
+    fn default() -> Self {
         ConnectionManager {
             drains: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+}
 
+impl ConnectionManager {
     // register a connection with the connection manager
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
@@ -176,7 +178,7 @@ mod tests {
     #[tokio::test]
     async fn test_connection_manager_close() {
         // setup a new ConnectionManager
-        let connection_manager = ConnectionManager::new();
+        let connection_manager = ConnectionManager::default();
         // ensure drains is empty
         assert_eq!(connection_manager.drains.read().await.len(), 0);
         assert_eq!(connection_manager.connections().await.len(), 0);
@@ -265,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn test_connection_manager_release() {
         // setup a new ConnectionManager
-        let connection_manager = ConnectionManager::new();
+        let connection_manager = ConnectionManager::default();
         // ensure drains is empty
         assert_eq!(connection_manager.drains.read().await.len(), 0);
         assert_eq!(connection_manager.connections().await.len(), 0);
@@ -368,7 +370,7 @@ mod tests {
             ResolverConfig::default(),
             ResolverOpts::default(),
         );
-        let connection_manager = ConnectionManager::new();
+        let connection_manager = ConnectionManager::default();
         let (tx, stop) = drain::channel();
         let state_mutator = ProxyStateUpdateMutator::new_no_fetch();
 

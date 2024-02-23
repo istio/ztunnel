@@ -57,11 +57,7 @@ pub(super) struct Inbound {
 }
 
 impl Inbound {
-    pub(super) async fn new(
-        mut pi: ProxyInputs,
-        drain: Watch,
-        connection_manager: ConnectionManager,
-    ) -> Result<Inbound, Error> {
+    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
         let listener: TcpListener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -83,7 +79,7 @@ impl Inbound {
             metrics: pi.metrics,
             drain,
             socket_factory: pi.socket_factory.clone(),
-            connection_manager,
+            connection_manager: pi.connection_manager,
         })
     }
 

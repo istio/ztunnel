@@ -42,7 +42,7 @@ use crate::state::workload::{network_addr, Workload};
 use crate::state::DemandProxyState;
 use crate::{config, identity, socket, tls};
 
-mod connection_manager;
+pub mod connection_manager;
 mod inbound;
 mod inbound_passthrough;
 #[allow(non_camel_case_types)]
@@ -99,6 +99,7 @@ pub struct Proxy {
 pub(super) struct ProxyInputs {
     cfg: config::Config,
     cert_manager: Arc<SecretManager>,
+    connection_manager: ConnectionManager,
     hbone_port: u16,
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
@@ -110,6 +111,7 @@ impl ProxyInputs {
     pub fn new(
         cfg: config::Config,
         cert_manager: Arc<SecretManager>,
+        connection_manager: ConnectionManager,
         state: DemandProxyState,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
@@ -119,6 +121,7 @@ impl ProxyInputs {
             state,
             cert_manager,
             metrics,
+            connection_manager,
             pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory,
@@ -139,6 +142,7 @@ impl Proxy {
             cfg,
             state,
             cert_manager,
+            connection_manager: ConnectionManager::default(),
             metrics,
             pool: pool::Pool::new(),
             hbone_port: 0,
@@ -147,16 +151,14 @@ impl Proxy {
         Self::from_inputs(pi, drain).await
     }
     pub(super) async fn from_inputs(mut pi: ProxyInputs, drain: Watch) -> Result<Self, Error> {
-        let cm = ConnectionManager::new();
         // We setup all the listeners first so we can capture any errors that should block startup
-        let inbound = Inbound::new(pi.clone(), drain.clone(), cm.clone()).await?;
+        let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
         pi.hbone_port = inbound.address().port();
 
-        let inbound_passthrough =
-            InboundPassthrough::new(pi.clone(), drain.clone(), cm.clone()).await?;
-        let outbound = Outbound::new(pi.clone(), drain.clone(), cm.clone()).await?;
-        let socks5 = Socks5::new(pi.clone(), drain.clone(), cm.clone()).await?;
-        let policy_watcher = PolicyWatcher::new(pi.state, drain, cm);
+        let inbound_passthrough = InboundPassthrough::new(pi.clone(), drain.clone()).await?;
+        let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
+        let socks5 = Socks5::new(pi.clone(), drain.clone()).await?;
+        let policy_watcher = PolicyWatcher::new(pi.state, drain, pi.connection_manager);
 
         Ok(Proxy {
             inbound,

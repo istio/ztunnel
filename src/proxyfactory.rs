@@ -21,6 +21,7 @@ use tracing::error;
 
 use crate::dns;
 
+use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::{Error, Metrics};
 
 use crate::proxy::Proxy;
@@ -92,6 +93,7 @@ impl ProxyFactory {
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
                 self.cert_manager.clone(),
+                ConnectionManager::default(),
                 self.state.clone(),
                 self.proxy_metrics.clone().unwrap(),
                 socket_factory.clone(),

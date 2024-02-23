@@ -32,14 +32,12 @@ pub(super) struct InboundPassthrough {
     listener: TcpListener,
     pi: ProxyInputs,
     drain: Watch,
-    connection_manager: ConnectionManager,
 }
 
 impl InboundPassthrough {
     pub(super) async fn new(
         mut pi: ProxyInputs,
         drain: Watch,
-        connection_manager: ConnectionManager,
     ) -> Result<InboundPassthrough, Error> {
         let listener: TcpListener = pi
             .socket_factory
@@ -60,7 +58,6 @@ impl InboundPassthrough {
             listener,
             pi,
             drain,
-            connection_manager,
         })
     }
 
@@ -82,7 +79,7 @@ impl InboundPassthrough {
             let socket = self.listener.accept().await;
             let pi = self.pi.clone();
 
-            let connection_manager = self.connection_manager.clone();
+            let connection_manager = self.pi.connection_manager.clone();
             match socket {
                 Ok((stream, remote)) => {
                     tokio::spawn(async move {
@@ -149,7 +146,6 @@ impl InboundPassthrough {
             let mut oc = OutboundConnection {
                 pi: pi.clone(),
                 id: TraceParent::new(),
-                connection_manager,
             };
             // Spoofing the source IP only works when the destination or the source are on our node.
             // In this case, the source and the destination might both be remote, so we need to disable it.
