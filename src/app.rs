@@ -120,7 +120,8 @@ pub async fn build_with_cert(
 
     // Optionally create the HBONE proxy.
     let mut proxy_addresses = None;
-    let mut dns_proxy_address: Option<SocketAddr> = None;
+    let mut tcp_dns_proxy_address: Option<SocketAddr> = None;
+    let mut udp_dns_proxy_address: Option<SocketAddr> = None;
 
     let proxy_gen = ProxyFactory::new(
         config.clone(),
@@ -180,7 +181,8 @@ pub async fn build_with_cert(
         match proxies.dns_proxy {
             Some(dns_proxy) => {
                 // Optional
-                dns_proxy_address = Some(dns_proxy.address());
+                tcp_dns_proxy_address = Some(dns_proxy.tcp_address());
+                udp_dns_proxy_address = Some(dns_proxy.udp_address());
 
                 // Run the DNS proxy in the data plane worker pool.
                 let mut xds_rx_for_dns_proxy = xds_rx.clone();
@@ -219,7 +221,8 @@ pub async fn build_with_cert(
         admin_address,
         metrics_address,
         proxy_addresses,
-        dns_proxy_address,
+        tcp_dns_proxy_address,
+        udp_dns_proxy_address,
     })
 }
 
@@ -331,7 +334,8 @@ pub struct Bound {
     pub readiness_address: SocketAddr,
 
     pub proxy_addresses: Option<proxy::Addresses>,
-    pub dns_proxy_address: Option<SocketAddr>,
+    pub tcp_dns_proxy_address: Option<SocketAddr>,
+    pub udp_dns_proxy_address: Option<SocketAddr>,
 
     pub shutdown: signal::Shutdown,
     drain_tx: drain::Signal,
