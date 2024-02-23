@@ -99,18 +99,6 @@ impl Inbound {
 
         let (sub_drain_signal, sub_drain) = drain::channel();
 
-        // // spawn a task which subscribes to watch updates and asserts rbac against this proxy's connections, closing the ones which have become denied
-        // let (stop_tx, stop_rx) = watch::channel(());
-        // let state = self.state.clone();
-        // let connection_manager = self.connection_manager.clone();
-
-        // tokio::spawn(connection_manager::policy_watcher(
-        //     state,
-        //     stop_rx,
-        //     connection_manager,
-        //     "inbound",
-        // ));
-
         while let Some(socket) = stream.next().await {
             let state = self.state.clone();
             let metrics = self.metrics.clone();
@@ -163,7 +151,6 @@ impl Inbound {
             });
         }
         info!("draining connections");
-        // stop_tx.send_replace(()); // close the task handling auth updates
         drop(sub_drain); // sub_drain_signal.drain() will never resolve while sub_drain is valid, will deadlock if not dropped
         sub_drain_signal.drain().await;
         info!("all inbound connections drained");

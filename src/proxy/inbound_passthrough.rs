@@ -62,17 +62,6 @@ impl InboundPassthrough {
     }
 
     pub(super) async fn run(self) {
-        // // spawn a task which subscribes to watch updates and asserts rbac against this proxy's connections, closing the ones which have become denied
-        // let (stop_tx, stop_rx) = watch::channel(());
-        // let connection_manager = self.connection_manager.clone();
-        // let state = self.pi.state.clone();
-
-        // tokio::spawn(connection_manager::policy_watcher(
-        //     state,
-        //     stop_rx,
-        //     connection_manager,
-        //     "inbound_passthrough",
-        // ));
         let accept = async move {
         loop {
             // Asynchronously wait for an inbound socket.
@@ -111,7 +100,6 @@ impl InboundPassthrough {
             res = accept => { res }
             _ = self.drain.signaled() => {
                 info!("inbound passthrough drained");
-                // stop_tx.send_replace(());
             }
         }
     }
