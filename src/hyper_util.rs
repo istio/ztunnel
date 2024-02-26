@@ -28,7 +28,7 @@ use hyper::client;
 use hyper::rt::Sleep;
 use hyper::server::conn::{http1, http2};
 use hyper::{Request, Response};
-use hyper_util::client::connect::HttpConnector;
+use hyper_util::client::legacy::connect::HttpConnector;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
 use tracing::{debug, info, warn};
@@ -57,7 +57,7 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
                 }
             }
         })
-        .map(|conn| {
+        .map(|(conn, _)| {
             conn.get_ref().set_nodelay(true).unwrap();
             conn
         })

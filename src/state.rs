@@ -81,6 +81,16 @@ pub struct WorkloadInfo {
     pub service_account: String,
 }
 
+impl fmt::Display for WorkloadInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}.{} ({})",
+            self.service_account, self.namespace, self.trust_domain, self.name
+        )
+    }
+}
+
 impl WorkloadInfo {
     pub fn new(
         name: String,
@@ -110,6 +120,15 @@ pub struct ProxyRbacContext {
     pub dest_workload_info: Option<Arc<WorkloadInfo>>,
 }
 
+impl fmt::Display for ProxyRbacContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.conn)?;
+        if let Some(ref info) = self.dest_workload_info {
+            write!(f, "({})", info)?;
+        }
+        Ok(())
+    }
+}
 /// The current state information for this proxy.
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ProxyState {
