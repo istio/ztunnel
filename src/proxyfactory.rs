@@ -14,7 +14,7 @@
 
 use crate::config;
 use crate::identity::SecretManager;
-use crate::state::DemandProxyState;
+use crate::state::{DemandProxyState, WorkloadInfo};
 use drain::Watch;
 use std::sync::Arc;
 use tracing::error;
@@ -76,13 +76,14 @@ impl ProxyFactory {
     }
 
     pub async fn new_proxies(&self) -> Result<ProxyResult, Error> {
-        self.new_proxies_from_factory(None, Arc::new(crate::proxy::DefaultSocketFactory))
+        self.new_proxies_from_factory(None, None, Arc::new(crate::proxy::DefaultSocketFactory))
             .await
     }
 
     pub async fn new_proxies_from_factory(
         &self,
         proxy_drain: Option<Watch>,
+        proxy_workload_info: Option<WorkloadInfo>,
         socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
     ) -> Result<ProxyResult, Error> {
         let mut result: ProxyResult = Default::default();
@@ -97,6 +98,7 @@ impl ProxyFactory {
                 self.state.clone(),
                 self.proxy_metrics.clone().unwrap(),
                 socket_factory.clone(),
+                proxy_workload_info,
             );
             result.proxy = Some(Proxy::from_inputs(pi, drain.clone()).await?);
         }

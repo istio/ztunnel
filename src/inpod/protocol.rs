@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::istio::zds::{self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello};
-use super::{WorkloadData, WorkloadInfo, WorkloadMessage};
+use super::{WorkloadData, WorkloadMessage};
 use drain::Watch;
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessageOwned, MsgFlags};
 use prost::Message;
@@ -157,9 +157,8 @@ fn get_workload_data(
             let uid = a.uid;
             Ok(WorkloadMessage::AddWorkload(WorkloadData {
                 netns: our_netns,
-                info: WorkloadInfo {
-                    workload_uid: super::WorkloadUid::new(uid),
-                },
+                workload_uid: super::WorkloadUid::new(uid),
+                workload_info: a.workload_info,
             }))
         }
         (Payload::Add(_), None) => Err(anyhow::anyhow!("No control message")),
@@ -272,12 +271,42 @@ mod tests {
         let data = prep_request(zds::workload_request::Payload::Add(
             istio::zds::AddWorkload {
                 uid: uid(0).into_string(),
+                ..Default::default()
             },
         ));
 
         let m = get_workload_data(&data[..], Some(owned_fd), flags).unwrap();
 
         assert!(matches!(m, WorkloadMessage::AddWorkload(_)));
+    }
+
+    #[test]
+    fn test_parse_add_workload_with_info() {
+        let owned_fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let flags = MsgFlags::empty();
+        let wi = zds::WorkloadInfo {
+            name: "test".to_string(),
+            namespace: "default".to_string(),
+            service_account: "defaultsvc".to_string(),
+            trust_domain: "cluster.local".to_string(),
+        };
+        let uid = uid(0);
+        let data = prep_request(zds::workload_request::Payload::Add(
+            istio::zds::AddWorkload {
+                uid: uid.clone().into_string(),
+                workload_info: Some(wi.clone()),
+            },
+        ));
+
+        let m = get_workload_data(&data[..], Some(owned_fd), flags).unwrap();
+
+        match m {
+            WorkloadMessage::AddWorkload(data) => {
+                assert_eq!(data.workload_info, Some(wi));
+                assert_eq!(data.workload_uid, uid);
+            }
+            _ => panic!("unexpected message"),
+        }
     }
 
     #[test]

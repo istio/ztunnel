@@ -31,7 +31,6 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 use super::connection_manager::ConnectionManager;
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
-use crate::config::Config;
 use crate::identity::SecretManager;
 use crate::metrics::Recorder;
 use crate::proxy;
@@ -46,14 +45,9 @@ use crate::state::DemandProxyState;
 use crate::tls::TlsError;
 
 pub(super) struct Inbound {
-    cfg: Config,
     listener: TcpListener,
-    cert_manager: Arc<SecretManager>,
-    state: DemandProxyState,
     drain: Watch,
-    metrics: Arc<Metrics>,
-    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    connection_manager: ConnectionManager,
+    pi: ProxyInputs,
 }
 
 impl Inbound {
@@ -72,14 +66,9 @@ impl Inbound {
             "listener established",
         );
         Ok(Inbound {
-            cfg: pi.cfg,
-            state: pi.state,
             listener,
-            cert_manager: pi.cert_manager,
-            metrics: pi.metrics,
             drain,
-            socket_factory: pi.socket_factory.clone(),
-            connection_manager: pi.connection_manager,
+            pi,
         })
     }
 
@@ -90,9 +79,9 @@ impl Inbound {
     pub(super) async fn run(self) {
         // let (tx, rx) = oneshot::channel();
         let acceptor = InboundCertProvider {
-            state: self.state.clone(),
-            cert_manager: self.cert_manager.clone(),
-            network: self.cfg.network.clone(),
+            state: self.pi.state.clone(),
+            cert_manager: self.pi.cert_manager.clone(),
+            network: self.pi.cfg.network.clone(),
         };
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
@@ -100,12 +89,10 @@ impl Inbound {
         let (sub_drain_signal, sub_drain) = drain::channel();
 
         while let Some(socket) = stream.next().await {
-            let state = self.state.clone();
-            let metrics = self.metrics.clone();
-            let socket_factory = self.socket_factory.clone();
-            let connection_manager = self.connection_manager.clone();
+            let pi = self.pi.clone();
+            let connection_manager = self.pi.connection_manager.clone();
             let drain = sub_drain.clone();
-            let network = self.cfg.network.clone();
+            let network = self.pi.cfg.network.clone();
             tokio::task::spawn(async move {
                 let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
                 let conn = Connection {
@@ -118,21 +105,19 @@ impl Inbound {
                     dst,
                 };
                 debug!(%conn, "accepted connection");
-                let enable_original_source = self.cfg.enable_original_source;
+                let enable_original_source = self.pi.cfg.enable_original_source;
                 let serve = crate::hyper_util::http2_server()
-                    .initial_stream_window_size(self.cfg.window_size)
-                    .initial_connection_window_size(self.cfg.connection_window_size)
-                    .max_frame_size(self.cfg.frame_size)
+                    .initial_stream_window_size(self.pi.cfg.window_size)
+                    .initial_connection_window_size(self.pi.cfg.connection_window_size)
+                    .max_frame_size(self.pi.cfg.frame_size)
                     .serve_connection(
                         hyper_util::rt::TokioIo::new(socket),
                         service_fn(move |req| {
                             Self::serve_connect(
-                                state.clone(),
+                                pi.clone(),
                                 conn.clone(),
                                 enable_original_source.unwrap_or_default(),
                                 req,
-                                metrics.clone(),
-                                socket_factory.clone(),
                                 connection_manager.clone(),
                             )
                         }),
@@ -167,7 +152,7 @@ impl Inbound {
         extra_connection_metrics: Option<ConnectionOpen>,
         socket_factory: &(dyn SocketFactory + Send + Sync),
         connection_manager: ConnectionManager,
-        conn: Connection,
+        rbac_ctx: crate::state::ProxyRbacContext,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
         let stream = super::freebind_connect(orig_src, addr, socket_factory).await;
@@ -182,7 +167,7 @@ impl Inbound {
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
-                        let close = match connection_manager.track(&conn).await {
+                        let close = match connection_manager.track(&rbac_ctx).await {
                             Some(c) => c,
                             None => {
                                 // if track returns None it means the connection was closed due to policy change
@@ -253,7 +238,7 @@ impl Inbound {
                                 }
                             },
                         }
-                        connection_manager.release(&conn).await;
+                        connection_manager.release(&rbac_ctx).await;
                     })
                     .in_current_span(),
                 );
@@ -280,12 +265,10 @@ impl Inbound {
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
-        state: DemandProxyState,
+        pi: ProxyInputs,
         conn: Connection,
         enable_original_source: bool,
         req: Request<Incoming>,
-        metrics: Arc<Metrics>,
-        socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         connection_manager: ConnectionManager,
     ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
         match req.method() {
@@ -316,7 +299,7 @@ impl Inbound {
                     address: addr.ip(),
                 };
                 let Some((upstream, upstream_service)) =
-                    state.fetch_workload_services(&dst_network_addr).await
+                    pi.state.fetch_workload_services(&dst_network_addr).await
                 else {
                     info!(%conn, "unknown destination");
                     return Ok(Response::builder()
@@ -325,27 +308,33 @@ impl Inbound {
                         .unwrap());
                 };
                 let has_waypoint = upstream.waypoint.is_some();
-                let from_waypoint = Self::check_waypoint(state.clone(), &upstream, &conn).await;
-                let from_gateway = Self::check_gateway(state.clone(), &upstream, &conn).await;
+                let from_waypoint = Self::check_waypoint(pi.state.clone(), &upstream, &conn).await;
+                let from_gateway = Self::check_gateway(pi.state.clone(), &upstream, &conn).await;
 
                 if from_gateway {
                     debug!("request from gateway");
                 }
+
+                let rbac_ctx = crate::state::ProxyRbacContext {
+                    conn,
+                    dest_workload_info: pi.proxy_workload_info.clone(),
+                };
+
                 //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-                connection_manager.register(&conn).await;
+                connection_manager.register(&rbac_ctx).await;
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
-                } else if !state.assert_rbac(&conn).await {
-                    info!(%conn, "RBAC rejected");
-                    connection_manager.release(&conn).await;
+                } else if !pi.state.assert_rbac(&rbac_ctx).await {
+                    info!(%rbac_ctx.conn, "RBAC rejected");
+                    connection_manager.release(&rbac_ctx).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
                         .unwrap());
                 }
                 if has_waypoint && !from_waypoint {
-                    info!(%conn, "bypassed waypoint");
-                    connection_manager.release(&conn).await;
+                    info!(%rbac_ctx.conn, "bypassed waypoint");
+                    connection_manager.release(&rbac_ctx).await;
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
@@ -356,9 +345,9 @@ impl Inbound {
                     // For other request types, we can only trust the source from the connection.
                     // Since our own waypoint is in the same trust domain though, we can use Forwarded,
                     // which drops the requirement of spoofing IPs from waypoints
-                    super::get_original_src_from_fwded(&req).unwrap_or(conn.src_ip)
+                    super::get_original_src_from_fwded(&req).unwrap_or(rbac_ctx.conn.src_ip)
                 } else {
-                    conn.src_ip
+                    rbac_ctx.conn.src_ip
                 };
 
                 let baggage =
@@ -369,23 +358,23 @@ impl Inbound {
                     false => {
                         let src_network_addr = NetworkAddress {
                             // we can assume source network is our network because we did not traverse a gateway
-                            network: conn.dst_network.to_string(),
+                            network: rbac_ctx.conn.dst_network.to_string(),
                             address: source_ip,
                         };
                         // Find source info. We can lookup by XDS or from connection attributes
-                        state.fetch_workload(&src_network_addr).await
+                        pi.state.fetch_workload(&src_network_addr).await
                     }
                 };
 
                 let derived_source = metrics::DerivedWorkload {
-                    identity: conn.src_identity.clone(),
+                    identity: rbac_ctx.conn.src_identity.clone(),
                     cluster_id: baggage.cluster_id,
                     namespace: baggage.namespace,
                     workload_name: baggage.workload_name,
                     revision: baggage.revision,
                     ..Default::default()
                 };
-                let ds = proxy::guess_inbound_service(&conn, upstream_service, &upstream);
+                let ds = proxy::guess_inbound_service(&rbac_ctx.conn, upstream_service, &upstream);
                 let connection_metrics = ConnectionOpen {
                     reporter: Reporter::destination,
                     source,
@@ -398,12 +387,12 @@ impl Inbound {
                     Hbone(req),
                     enable_original_source.then_some(source_ip),
                     addr,
-                    metrics,
+                    pi.metrics,
                     connection_metrics,
                     None,
-                    socket_factory.as_ref(),
+                    pi.socket_factory.as_ref(),
                     connection_manager,
-                    conn,
+                    rbac_ctx,
                 )
                 .in_current_span()
                 .await

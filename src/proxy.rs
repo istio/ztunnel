@@ -39,7 +39,7 @@ use crate::proxy::socks5::Socks5;
 use crate::rbac::Connection;
 use crate::state::service::{endpoint_uid, Service, ServiceDescription};
 use crate::state::workload::{network_addr, Workload};
-use crate::state::DemandProxyState;
+use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
 pub mod connection_manager;
@@ -105,6 +105,7 @@ pub(super) struct ProxyInputs {
     metrics: Arc<Metrics>,
     pool: pool::Pool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    proxy_workload_info: Option<Arc<WorkloadInfo>>,
 }
 
 impl ProxyInputs {
@@ -115,6 +116,7 @@ impl ProxyInputs {
         state: DemandProxyState,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+        proxy_workload_info: Option<WorkloadInfo>,
     ) -> Self {
         Self {
             cfg,
@@ -125,6 +127,7 @@ impl ProxyInputs {
             pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory,
+            proxy_workload_info: proxy_workload_info.map(Arc::new),
         }
     }
 }
@@ -147,6 +150,7 @@ impl Proxy {
             pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory: Arc::new(DefaultSocketFactory),
+            proxy_workload_info: None,
         };
         Self::from_inputs(pi, drain).await
     }

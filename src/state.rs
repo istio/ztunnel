@@ -39,7 +39,7 @@ use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 pub mod policy;
 pub mod service;
@@ -71,6 +71,64 @@ impl fmt::Display for Upstream {
     }
 }
 
+// Workload information that a specific proxy instance represents. This is used to cross check
+// with the workload fetched using destination address when making RBAC decisions.
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkloadInfo {
+    pub name: String,
+    pub namespace: String,
+    pub trust_domain: String,
+    pub service_account: String,
+}
+
+impl fmt::Display for WorkloadInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}.{} ({})",
+            self.service_account, self.namespace, self.trust_domain, self.name
+        )
+    }
+}
+
+impl WorkloadInfo {
+    pub fn new(
+        name: String,
+        namespace: String,
+        trust_domain: String,
+        service_account: String,
+    ) -> Self {
+        Self {
+            name,
+            namespace,
+            trust_domain,
+            service_account,
+        }
+    }
+
+    pub fn matches(&self, w: &Workload) -> bool {
+        self.name == w.name
+            && self.namespace == w.namespace
+            && self.trust_domain == w.trust_domain
+            && self.service_account == w.service_account
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ProxyRbacContext {
+    pub conn: rbac::Connection,
+    pub dest_workload_info: Option<Arc<WorkloadInfo>>,
+}
+
+impl fmt::Display for ProxyRbacContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.conn)?;
+        if let Some(ref info) = self.dest_workload_info {
+            write!(f, "({})", info)?;
+        }
+        Ok(())
+    }
+}
 /// The current state information for this proxy.
 #[derive(serde::Serialize, Default, Debug)]
 pub struct ProxyState {
@@ -231,13 +289,20 @@ impl DemandProxyState {
         self.state.read().unwrap()
     }
 
-    pub async fn assert_rbac(&self, conn: &rbac::Connection) -> bool {
-        let nw_addr = network_addr(&conn.dst_network, conn.dst.ip());
+    pub async fn assert_rbac(&self, ctx: &ProxyRbacContext) -> bool {
+        let nw_addr = network_addr(&ctx.conn.dst_network, ctx.conn.dst.ip());
         let Some(wl) = self.fetch_workload(&nw_addr).await else {
             debug!("destination workload not found {}", nw_addr);
             return false;
         };
-
+        if let Some(ref wl_info) = ctx.dest_workload_info {
+            // make sure that the workload we fetched matches the workload info we got over ZDS.
+            if !wl_info.matches(&wl) {
+                error!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
+                return false;
+            }
+        }
+        let conn = &ctx.conn;
         let state = self.state.read().unwrap();
 
         // We can get policies from namespace, global, and workload...
@@ -665,7 +730,7 @@ impl ProxyStateManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use super::*;
     use crate::test_helpers;
@@ -737,5 +802,73 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn assert_rbac_with_dest_workload_info() {
+        let mut state = ProxyState::default();
+        let wl = Workload {
+            name: "test".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "defaultacct".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
+            ..test_helpers::test_default_workload()
+        };
+        state.workloads.insert(wl).unwrap();
+
+        let mock_proxy_state = DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
+
+        let wi = WorkloadInfo {
+            name: "test".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "defaultacct".to_string(),
+        };
+
+        let mut ctx = crate::state::ProxyRbacContext {
+            conn: rbac::Connection {
+                src_identity: None,
+                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                dst_network: "".to_string(),
+                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 168, 0, 2),
+                    8080,
+                )),
+            },
+            dest_workload_info: Some(Arc::new(wi.clone())),
+        };
+        assert!(mock_proxy_state.assert_rbac(&ctx).await);
+
+        // now make sure it fails when we change just one property of the workload info
+        {
+            let mut wi = wi.clone();
+            wi.name = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
+        {
+            let mut wi = wi.clone();
+            wi.namespace = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
+        {
+            let mut wi = wi.clone();
+            wi.service_account = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
+        {
+            let mut wi = wi.clone();
+            wi.trust_domain = "not-test".to_string();
+            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
+            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+        }
     }
 }

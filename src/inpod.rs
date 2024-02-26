@@ -66,14 +66,11 @@ impl WorkloadUid {
     }
 }
 
-#[derive(Debug, Clone)]
-struct WorkloadInfo {
-    workload_uid: WorkloadUid,
-}
 #[derive(Debug)]
 pub struct WorkloadData {
     netns: std::os::fd::OwnedFd,
-    info: WorkloadInfo,
+    workload_uid: WorkloadUid,
+    workload_info: Option<istio::zds::WorkloadInfo>,
 }
 
 #[derive(Debug)]

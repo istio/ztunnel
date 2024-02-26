@@ -911,15 +911,25 @@ mod tests {
                         src_ip: std::net::Ipv4Addr::new(1, 2,3, 5).into(),
                         dst_network: "".to_string(),
                     };
+                    let rbac_ctx = crate::state::ProxyRbacContext {
+                        conn: conn.clone(),
+                        dest_workload_info: None,
+                    };
+
                     // rbac should reject port 80
-                    let rbac_res = state.assert_rbac(&conn).await;
+                    let rbac_res = state.assert_rbac(&rbac_ctx).await;
                     assert!(!rbac_res);
                     let conn = crate::rbac::Connection{
                         dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 81),
                         ..conn
                     };
+                    let rbac_ctx = crate::state::ProxyRbacContext {
+                        conn,
+                        dest_workload_info: None,
+                    };
+
                     // but allow port 81
-                    let rbac_res = state.assert_rbac(&conn).await;
+                    let rbac_res = state.assert_rbac(&rbac_ctx).await;
                     assert!(rbac_res);
                     return;
                 }
