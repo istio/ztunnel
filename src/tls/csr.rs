@@ -41,7 +41,7 @@ impl CsrOptions {
         let pkey_pem = pkey.private_key_to_pem_pkcs8()?;
         let csr_pem = csr.to_pem()?;
         let csr_pem = std::str::from_utf8(&csr_pem)
-            .expect("CSR is valid string")?
+            .expect("CSR is valid string")
             .to_string();
         Ok(CertSign {
             csr: csr_pem,
