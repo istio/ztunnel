@@ -1,18 +1,23 @@
 include common/Makefile.common.mk
 
-test:
-	RUST_BACKTRACE=1 cargo test --benches --tests --bins
+FEATURES ?=
+ifeq ($(TLS_MODE), boring)
+	FEATURES:=--no-default-features -F tls-boring
+endif
+ifeq ($(TEST_MODE), root)
+	export CARGO_TARGET_$(shell rustc -vV | sed -n 's|host: ||p' | tr [:lower:] [:upper:]| tr - _)_RUNNER=sudo -E
+endif
 
-test-root: export CARGO_TARGET_$(shell rustc -vV | sed -n 's|host: ||p' | tr [:lower:] [:upper:]| tr - _)_RUNNER = sudo -E
-test-root:
-	RUST_BACKTRACE=1 cargo test --benches --tests --bins
+test:
+	RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
 
 build:
-	cargo build
+	cargo build $(FEATURES)
 
 # Test that all important features build
 check-features:
 	cargo check --features console
+	cargo check --no-default-features -F tls-boring
 	(cd fuzz; cargo check)
 
 # target in common/Makefile.common.mk doesn't handle our third party vendored files; only check golang and rust codes
@@ -21,23 +26,23 @@ lint-copyright:
 		${XARGS} common/scripts/lint_copyright_banner.sh
 
 lint: lint-scripts lint-yaml lint-markdown lint-licenses lint-copyright
-	cargo clippy --benches --tests --bins
+	cargo clippy --benches --tests --bins $(FEATURES)
 
 check:
-	cargo check
+	cargo check $(FEATURES)
 
 cve-check:
-	cargo deny check advisories
+	cargo deny check advisories $(FEATURES)
 
 license-check:
-	cargo deny check licenses
+	cargo deny check licenses $(FEATURES)
 
 fix: fix-copyright-banner
-	cargo clippy --fix --allow-staged --allow-dirty
-	cargo fmt
+	cargo clippy --fix --allow-staged --allow-dirty $(FEATURES)
+	cargo fmt $(FEATURES)
 
 format:
-	cargo fmt
+	cargo fmt $(FEATURES)
 
 release:
 	./scripts/release.sh
@@ -50,4 +55,4 @@ presubmit: export RUSTFLAGS = -D warnings
 presubmit: check-features test lint gen-check
 
 clean:
-	cargo clean
+	cargo clean $(FEATURES)
