@@ -674,6 +674,7 @@ mod test {
             ports,
             endpoints,
             subject_alt_names: vec![],
+            waypoint: None,
         }
     }
 

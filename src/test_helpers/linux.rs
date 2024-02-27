@@ -211,6 +211,7 @@ impl<'a> TestServiceBuilder<'a> {
                 ports: Default::default(),
                 endpoints: Default::default(), // populated later when workloads are added
                 subject_alt_names: vec![],
+                waypoint: None,
             },
             manager,
         }

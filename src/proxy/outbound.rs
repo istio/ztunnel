@@ -35,6 +35,7 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEP
 
 use crate::state::service::ServiceDescription;
 use crate::state::set_gateway_address;
+use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 
@@ -380,7 +381,54 @@ impl OutboundConnection {
             None => return Err(Error::UnknownSource(downstream)),
         };
 
+        // to Service with waypoint
+        if let Some(target_address) = self
+            .pi
+            .state
+            .fetch_destination(&Destination::Address(NetworkAddress {
+                network: self.pi.cfg.network.clone(),
+                address: target.ip(),
+            }))
+            .await
+        {
+            match target_address {
+                crate::state::workload::address::Address::Workload(_w) => {
+                    // this is to workload, fall through
+                }
+                crate::state::workload::address::Address::Service(s) => {
+                    if let Some(wp) = s.waypoint.clone() {
+                        let addr = match wp.destination {
+                            Destination::Address(a) => a.address,
+                            Destination::Hostname(_) => todo!(), // it has a waypoint with an invalid addy... error?
+                        };
+                        let gateway = SocketAddr::new(addr, wp.hbone_mtls_port);
+                        let wp_upstream = self
+                            .pi
+                            .state
+                            .fetch_upstream(&self.pi.cfg.network, gateway)
+                            .await
+                            .unwrap(); // ugh, TODO NOT OK
+                        let destination_service = ServiceDescription::try_from(&*s).ok();
+
+                        return Ok(Request {
+                            protocol: Protocol::HBONE,
+                            direction: Direction::Inbound,
+                            source: source_workload,
+                            destination: target,
+                            destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
+                            destination_service,
+                            expected_identity: Some(wp_upstream.workload.identity()),
+                            gateway,
+                            request_type: RequestType::ToServerWaypoint,
+                            upstream_sans: wp_upstream.sans,
+                        });
+                    }
+                }
+            }
+        }
+
         // TODO: we want a single lock for source and upstream probably...?
+        // TODO(ilrudie) where I put to svc logic probably makes this worse...
         let us = self
             .pi
             .state
