@@ -59,7 +59,8 @@ static SVC: Lazy<Name> = Lazy::new(|| as_name("svc"));
 /// A DNS server that serves known hostnames from ztunnel data structures.
 /// Unknown hosts are forwarded to an upstream resolver.
 pub struct Server {
-    addr: SocketAddr,
+    tcp_addr: SocketAddr,
+    udp_addr: SocketAddr,
     server: ServerFuture<dns::handler::Handler>,
     drain: Watch,
 }
@@ -98,33 +99,40 @@ impl Server {
             component="dns",
             "starting local DNS server",
         );
-        // Bind and register the UDP socket.
-        let udp_socket = socket_factory
-            .udp_bind(addr)
-            .map_err(|e| Error::Bind(addr, e))?;
-        // Save the bound address.
-        let addr = udp_socket.local_addr().unwrap();
-        server.register_socket(udp_socket);
-
         // Bind and register the TCP socket.
         let tcp_listener = socket_factory
             .tcp_bind(addr)
             .map_err(|e| Error::Bind(addr, e))?;
+        // Save the bound address.
+        let tcp_addr = tcp_listener.local_addr().unwrap();
         server.register_listener(
             tcp_listener,
             Duration::from_secs(DEFAULT_TCP_REQUEST_TIMEOUT),
         );
 
+        // Bind and register the UDP socket.
+        let udp_socket = socket_factory
+            .udp_bind(addr)
+            .map_err(|e| Error::Bind(addr, e))?;
+        let udp_addr = udp_socket.local_addr().unwrap();
+        server.register_socket(udp_socket);
+
         Ok(Self {
-            addr,
+            tcp_addr,
+            udp_addr,
             server,
             drain,
         })
     }
 
-    /// Returns the address to which this DNS server is bound.
-    pub fn address(&self) -> SocketAddr {
-        self.addr
+    /// Returns the address to which this DNS server is bound for TCP.
+    pub fn tcp_address(&self) -> SocketAddr {
+        self.tcp_addr
+    }
+
+    /// Returns the address to which this DNS server is bound for UDP.
+    pub fn udp_address(&self) -> SocketAddr {
+        self.udp_addr
     }
 
     /// Runs this DNS server to completion.
@@ -1141,11 +1149,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let addr = proxy.address();
+        let tcp_addr = proxy.tcp_address();
+        let udp_addr = proxy.udp_address();
         tokio::spawn(proxy.run());
 
-        let mut tcp_client = new_tcp_client(addr).await;
-        let mut udp_client = new_udp_client(addr).await;
+        let mut tcp_client = new_tcp_client(tcp_addr).await;
+        let mut udp_client = new_udp_client(udp_addr).await;
 
         // Lookup the server from the client.
         for c in cases {
@@ -1241,11 +1250,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let addr = server.address();
+        let tcp_addr = server.tcp_address();
+        let udp_addr = server.udp_address();
         tokio::spawn(server.run());
 
-        let mut tcp_client = new_tcp_client(addr).await;
-        let mut udp_client = new_udp_client(addr).await;
+        let mut tcp_client = new_tcp_client(tcp_addr).await;
+        let mut udp_client = new_udp_client(udp_addr).await;
 
         for c in cases {
             for (protocol, client) in [("tcp", &mut tcp_client), ("udp", &mut udp_client)] {

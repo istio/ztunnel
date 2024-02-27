@@ -44,7 +44,8 @@ pub struct TestApp {
     pub metrics_address: SocketAddr,
     pub readiness_address: SocketAddr,
     pub proxy_addresses: proxy::Addresses,
-    pub dns_proxy_address: Option<SocketAddr>,
+    pub tcp_dns_proxy_address: Option<SocketAddr>,
+    pub udp_dns_proxy_address: Option<SocketAddr>,
     pub cert_manager: Arc<SecretManager>,
 
     pub namespace: Option<super::netns::Namespace>,
@@ -57,7 +58,8 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
             metrics_address: app.metrics_address,
             proxy_addresses: app.proxy_addresses.unwrap(),
             readiness_address: app.readiness_address,
-            dns_proxy_address: app.dns_proxy_address,
+            tcp_dns_proxy_address: app.tcp_dns_proxy_address,
+            udp_dns_proxy_address: app.udp_dns_proxy_address,
             cert_manager,
             namespace: None,
         }
@@ -193,7 +195,11 @@ impl TestApp {
         udp: bool,
         ipv6: bool,
     ) -> hickory_proto::xfer::DnsResponse {
-        let addr = self.dns_proxy_address.unwrap();
+        let addr = if udp {
+            self.udp_dns_proxy_address.unwrap()
+        } else {
+            self.tcp_dns_proxy_address.unwrap()
+        };
         dns_request(addr, hostname, udp, ipv6).await
     }
 }

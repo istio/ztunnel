@@ -128,8 +128,12 @@ impl WorkloadManager {
                     inbound: helpers::with_ip(proxy_addresses.inbound, ip),
                     socks5: helpers::with_ip(proxy_addresses.socks5, ip),
                 },
-                dns_proxy_address: Some(helpers::with_ip(
-                    app.dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
+                tcp_dns_proxy_address: Some(helpers::with_ip(
+                    app.tcp_dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
+                    ip,
+                )),
+                udp_dns_proxy_address: Some(helpers::with_ip(
+                    app.udp_dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
                     ip,
                 )),
                 cert_manager,
