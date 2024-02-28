@@ -138,7 +138,6 @@ impl OutboundConnection {
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
     ) -> Result<(), Error> {
-        let remote_ip = remote_addr.ip();
         if orig_dst_addr.ip() == METADATA_SERVER_IP {
             return handle_metadata_lookup(
                 &self.pi.connection_manager.clone(),
@@ -152,7 +151,7 @@ impl OutboundConnection {
         {
             return Err(Error::SelfCall);
         }
-        let req = self.build_request(remote_ip, orig_dst_addr).await?;
+        let req = self.build_request(remote_addr.ip(), orig_dst_addr).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig_dst_addr, req.gateway, req.request_type, req.direction
@@ -195,7 +194,7 @@ impl OutboundConnection {
             };
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
-                src_ip: remote_ip,
+                src: remote_addr,
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
@@ -288,7 +287,7 @@ impl OutboundConnection {
                         .cfg
                         .enable_original_source
                         .unwrap_or_default()
-                        .then_some(remote_ip);
+                        .then_some(remote_addr.ip());
                     let id = &req.source.identity();
                     let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                     let connector = cert.outbound_connector(dst_identity)?;

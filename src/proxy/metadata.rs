@@ -49,16 +49,7 @@ pub async fn handle_metadata_lookup(
             hyper_util::rt::TokioIo::new(stream),
             service_fn(|req: hyper::Request<hyper::body::Incoming>| {
                 let ct = ct.clone();
-                async move {
-                    let res: Result<_, Infallible> =
-                        serve_request(&ct, remote_addr, req).await.or_else(|e| {
-                            Ok(crate::hyper_util::plaintext_response(
-                                StatusCode::UNPROCESSABLE_ENTITY,
-                                e.to_string(),
-                            ))
-                        });
-                    res
-                }
+                async move { serve_request(&ct, remote_addr, req).await }
             }),
         )
         .await
@@ -68,10 +59,25 @@ pub async fn handle_metadata_lookup(
     Ok(())
 }
 
-async fn serve_request(
+/// serve_request handles a metadata request. Any errors will be returned to the client.
+async fn serve_request<T>(
     ct: &ConnectionManager,
     remote: SocketAddr,
-    req: hyper::Request<hyper::body::Incoming>,
+    req: hyper::Request<T>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    serve_request_helper(ct, remote, req).await.or_else(|e| {
+        Ok(crate::hyper_util::plaintext_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            e.to_string(),
+        ))
+    })
+}
+
+// Errors are returned to client
+async fn serve_request_helper<T>(
+    ct: &ConnectionManager,
+    remote: SocketAddr,
+    req: hyper::Request<T>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     // Currently only one path, so just check it
     if req.uri().path() != "/connection" {
@@ -88,8 +94,16 @@ async fn serve_request(
 
     // To restrict access to sensitive metadata, ensure the client is part of the requested connection.
     // This can be error prone if the client has multiple NICs.
-    if remote.ip() != dst.ip() && remote.ip() != src.ip() {
-        anyhow::bail!("metadata server request must come from the src or dst address (remote {}, dst {}, src {})", remote.ip(), dst.ip(), src.ip())
+    // TODO: allow lookup as client or server; for now we only write to the ConnectionManager for inbound, so only server is supported
+    if remote.ip() != dst.ip() {
+        return Ok(crate::hyper_util::plaintext_response(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "metadata server request must come from the src or dst address (remote {}, dst {})",
+                remote.ip(),
+                dst.ip()
+            ),
+        ));
     }
 
     let ctu = ConnectionTuple { src, dst };
@@ -102,4 +116,99 @@ async fn serve_request(
 
     let r = serde_json::to_vec(&resp).unwrap();
     Ok(Response::new(Full::new(Bytes::from(r))))
+}
+#[cfg(test)]
+mod tests {
+    use http_body_util::{BodyExt, Empty};
+    use hyper::Method;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    use crate::rbac::Connection;
+
+    use super::ConnectionManager;
+    use super::*;
+
+    #[tokio::test]
+    async fn test_metadata_server() {
+        let connection_manager = ConnectionManager::default();
+
+        let rbac_ctx1 = crate::state::ProxyRbacContext {
+            conn: Connection {
+                src_identity: Some("spiffe://td/ns/n/sa/s".parse().unwrap()),
+                src: "127.0.0.1:1234".parse().unwrap(),
+                dst: "127.0.0.2:8080".parse().unwrap(),
+                dst_network: "".to_string(),
+            },
+            dest_workload_info: None,
+        };
+
+        connection_manager.register(&rbac_ctx1).await;
+
+        let res = serve_request(
+            &connection_manager,
+            // Request will come from the destination, with some random port
+            "127.0.0.2:4567".parse().unwrap(),
+            hyper::Request::builder()
+                .uri("http://foo/connection?src=127.0.0.1:1234&dst=127.0.0.2:8080")
+                .method(Method::GET)
+                .version(hyper::Version::HTTP_11)
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            "{\"peer_identity\":\"spiffe://td/ns/n/sa/s\"}",
+            std::str::from_utf8(res.collect().await.unwrap().to_bytes().as_ref()).unwrap()
+        );
+
+        // Wrong destination port
+        let res = serve_request(
+            &connection_manager,
+            // Request will come from the destination, with some random port
+            "127.0.0.2:4567".parse().unwrap(),
+            hyper::Request::builder()
+                .uri("http://foo/connection?src=127.0.0.1:1234&dst=127.0.0.2:999")
+                .method(Method::GET)
+                .version(hyper::Version::HTTP_11)
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(StatusCode::NOT_FOUND, res.status());
+
+        // Wrong src port
+        let res = serve_request(
+            &connection_manager,
+            // Request will come from the destination, with some random port
+            "127.0.0.2:4567".parse().unwrap(),
+            hyper::Request::builder()
+                .uri("http://foo/connection?src=127.0.0.1:9999&dst=127.0.0.2:8080")
+                .method(Method::GET)
+                .version(hyper::Version::HTTP_11)
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(StatusCode::NOT_FOUND, res.status());
+
+        // Not a part of the connection
+        let res = serve_request(
+            &connection_manager,
+            // Bogus source of request
+            "127.0.0.9:4567".parse().unwrap(),
+            hyper::Request::builder()
+                .uri("http://foo/connection?src=127.0.0.1:1234&dst=127.0.0.2:8080")
+                .method(Method::GET)
+                .version(hyper::Version::HTTP_11)
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(StatusCode::UNAUTHORIZED, res.status());
+    }
 }

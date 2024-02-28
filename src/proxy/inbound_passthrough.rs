@@ -147,7 +147,7 @@ impl InboundPassthrough {
         // On the inbound HBONE side, we will validate it came from the waypoint (and therefor had enforcemen).
         let conn = rbac::Connection {
             src_identity: None,
-            src_ip: source.ip(),
+            src: source,
             // inbound request must be on our network since this is passthrough
             // rather than HBONE, which can be tunneled across networks through gateways.
             // by definition, without the gateway our source must be on our network.

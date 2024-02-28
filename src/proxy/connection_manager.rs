@@ -24,16 +24,19 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
+/// ConnectionTuple allows looking up a connection
 #[derive(Clone, Copy, Hash, Debug, Eq, PartialEq)]
 pub struct ConnectionTuple {
     pub src: SocketAddr,
     pub dst: SocketAddr,
 }
 
+/// ConnectionMetadata provides metadata about a connect
 #[derive(Clone, Debug, Serialize)]
 pub struct ConnectionMetadata {
+    /// The identity of the peer
     #[serde(default)]
-    identity: Option<Identity>,
+    peer_identity: Option<Identity>,
 }
 
 struct ConnectionDrain {
@@ -135,15 +138,15 @@ impl ConnectionManager {
     }
 
     /// fetch looks up a tuple and returns the connection metadata
-    // TODO: we should key on tuple so we can more efficiently lookup
+    // TODO: we should key on tuple so we can more efficiently lookup. For now, its not worth the complexity since
+    // this is only used in experimental code path.
     pub async fn fetch(&self, ctu: &ConnectionTuple) -> Option<ConnectionMetadata> {
         let cm = self.drains.read().await;
         cm.iter()
             .map(|(c, _)| &c.conn)
-            // TODO: we are ignoring source port here
-            .find(|c| ctu.dst == c.dst && ctu.src.ip() == c.src_ip)
+            .find(|c| ctu.dst == c.dst && ctu.src == c.src)
             .map(|c| ConnectionMetadata {
-                identity: c.src_identity.clone(),
+                peer_identity: c.src_identity.clone(),
             })
     }
 }
@@ -215,12 +218,9 @@ mod tests {
         let rbac_ctx1 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                src: "127.0.0.1:1234".parse().unwrap(),
                 dst_network: "".to_string(),
-                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(192, 168, 0, 2),
-                    8080,
-                )),
+                dst: "127.0.0.2:80".parse().unwrap(),
             },
             dest_workload_info: None,
         };
@@ -271,12 +271,9 @@ mod tests {
         let rbac_ctx2 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3)),
+                src: "127.0.0.3:1234".parse().unwrap(),
                 dst_network: "".to_string(),
-                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(192, 168, 0, 2),
-                    8080,
-                )),
+                dst: "127.0.0.2:8080".parse().unwrap(),
             },
             dest_workload_info: None,
         };
@@ -328,12 +325,9 @@ mod tests {
         let conn1 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                src: "127.0.0.1:1234".parse().unwrap(),
                 dst_network: "".to_string(),
-                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(192, 168, 0, 2),
-                    8080,
-                )),
+                dst: "127.0.0.2:8080".parse().unwrap(),
             },
             dest_workload_info: None,
         };
@@ -341,12 +335,9 @@ mod tests {
         let conn2 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3)),
+                src: "127.0.0.3:1234".parse().unwrap(),
                 dst_network: "".to_string(),
-                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(192, 168, 0, 2),
-                    8080,
-                )),
+                dst: "127.0.0.2:8080".parse().unwrap(),
             },
             dest_workload_info: None,
         };
@@ -450,12 +441,9 @@ mod tests {
         let conn1 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                src: "127.0.0.1:1234".parse().unwrap(),
                 dst_network: "".to_string(),
-                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(192, 168, 0, 2),
-                    8080,
-                )),
+                dst: "127.0.0.2:8080".parse().unwrap(),
             },
             dest_workload_info: None,
         };

@@ -135,7 +135,7 @@ func FetchFromClientConnection(c net.Conn) (*ConnectionMetadata, error) {
 	return lookup(c.LocalAddr().String(), c.RemoteAddr().String())
 }
 
-// FetchFromServerConnection attempts to fetch ConnectionMetadata from a client connection.
+// FetchFromServerConnection attempts to fetch ConnectionMetadata from a server connection.
 func FetchFromServerConnection(c net.Conn) (*ConnectionMetadata, error) {
 	return lookup(c.RemoteAddr().String(), c.LocalAddr().String())
 }

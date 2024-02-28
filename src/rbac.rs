@@ -16,7 +16,7 @@ use ipnet::IpNet;
 
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use tracing::{instrument, trace};
 use xds::istio::security::string_match::MatchType;
 use xds::istio::security::Address as XdsAddress;
@@ -42,7 +42,7 @@ pub struct Authorization {
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Connection {
     pub src_identity: Option<Identity>,
-    pub src_ip: IpAddr,
+    pub src: SocketAddr,
     pub dst_network: String,
     pub dst: SocketAddr,
 }
@@ -63,7 +63,7 @@ impl Display for Connection {
         write!(
             f,
             "{}({})->{}",
-            self.src_ip,
+            self.src,
             OptionDisplay(&self.src_identity),
             self.dst
         )
@@ -120,7 +120,7 @@ impl Authorization {
                         "source_ips",
                         &mg.source_ips,
                         &mg.not_source_ips,
-                        |i| i.contains(&conn.src_ip),
+                        |i| i.contains(&conn.src.ip()),
                     );
                     m &= Self::matches_internal(
                         "destination_ports",
@@ -434,7 +434,7 @@ mod tests {
     fn plaintext_conn() -> Connection {
         Connection {
             src_identity: None,
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
@@ -447,7 +447,7 @@ mod tests {
                 namespace: "namespace".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
@@ -460,7 +460,7 @@ mod tests {
                 namespace: "ns-alt".to_string(),
                 service_account: "sa=alt".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 3]),
+            src: "127.0.0.3:1235".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.4:9090".parse().unwrap(),
         }
@@ -508,7 +508,7 @@ mod tests {
                 namespace: "a".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
@@ -518,7 +518,7 @@ mod tests {
                 namespace: "b".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
@@ -529,7 +529,7 @@ mod tests {
                 namespace: "b".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "remote".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
@@ -540,7 +540,7 @@ mod tests {
                 namespace: "bad".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
@@ -551,7 +551,7 @@ mod tests {
                 namespace: "b".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:12345".parse().unwrap(),
         }));
@@ -579,7 +579,7 @@ mod tests {
                 namespace: "a".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
@@ -589,7 +589,7 @@ mod tests {
                 namespace: "b".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
@@ -600,7 +600,7 @@ mod tests {
                 namespace: "bad".to_string(),
                 service_account: "account".to_string(),
             }),
-            src_ip: IpAddr::from([127, 0, 0, 1]),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
