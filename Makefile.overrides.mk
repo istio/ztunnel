@@ -7,9 +7,11 @@ ifeq ($(TEST_MODE), root)
     ifeq ($(BUILD_WITH_CONTAINER), 1)
         $(info ***** NOTE ******)
         $(info TEST_MODE=root and BUILD_WITH_CONTAINER=1)
-        $(info If you wish to run tests that require root privilege inside the build container,)
-        $(info you must run the container as privileged yourself.)
-        $(info Alternatively, set BUILD_WITH_CONTAINER=0 and run the tests as root outside the build container.)
+        $(info Running tests as root inside a build container requires running the container in privileged mode)
+        $(info If you are uncomfortable with this or your environment does not allow priviledged containers,)
+        $(info set BUILD_WITH_CONTAINER=0 and run the tests as root outside the build container.)
         $(info ***** NOTE ******)
+		DOCKER_RUN_OPTIONS += --privileged
+		UID = 0
 	endif
 endif
