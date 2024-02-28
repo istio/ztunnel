@@ -188,7 +188,7 @@ impl HboneTestServer {
     }
 
     pub async fn run(self) {
-        let certs = tls::generate_test_certs(
+        let certs = tls::mock::generate_test_certs(
             &identity::Identity::Spiffe {
                 trust_domain: "cluster.local".to_string(),
                 namespace: "default".to_string(),
@@ -198,7 +198,7 @@ impl HboneTestServer {
             Duration::from_secs(0),
             Duration::from_secs(100),
         );
-        let acceptor = tls::ControlPlaneCertProvider(certs);
+        let acceptor = tls::mock::MockServerCertProvider::new(certs);
         let mut tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mode = self.mode;
         while let Some(socket) = tls_stream.next().await {

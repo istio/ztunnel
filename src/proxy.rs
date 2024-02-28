@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
 
-use boring::error::ErrorStack;
 use drain::Watch;
 use hyper::{header, Request};
 use rand::Rng;
@@ -220,9 +219,6 @@ pub enum Error {
     #[error("{0}")]
     Generic(Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("tls handshake failed: {0:?}")]
-    TlsHandshake(#[from] tokio_boring::HandshakeError<TcpStream>),
-
     #[error("http handshake failed: {0}")]
     HttpHandshake(#[source] hyper::Error),
 
@@ -234,9 +230,6 @@ pub enum Error {
 
     #[error("tls error: {0}")]
     Tls(#[from] tls::Error),
-
-    #[error("ssl error: {0}")]
-    Ssl(#[from] ErrorStack),
 
     #[error("identity error: {0}")]
     Identity(#[from] identity::Error),

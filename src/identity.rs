@@ -24,6 +24,7 @@ pub use manager::*;
 mod auth;
 pub use auth::*;
 
+#[cfg(any(test, feature = "testing"))]
 pub mod mock {
     pub use super::caclient::mock::CaClient;
     pub use super::manager::mock::{

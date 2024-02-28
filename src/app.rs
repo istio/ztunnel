@@ -21,7 +21,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Context;
 use prometheus_client::registry::Registry;
@@ -30,7 +29,7 @@ use tracing::{warn, Instrument};
 
 use crate::identity::SecretManager;
 use crate::state::ProxyStateManager;
-use crate::{admin, config, identity, metrics, proxy, readiness, signal};
+use crate::{admin, config, metrics, proxy, readiness, signal};
 use crate::{dns, xds};
 
 pub async fn build_with_cert(
@@ -283,11 +282,21 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
 
 pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
-        identity::mock::new_secret_manager(Duration::from_secs(86400))
+        mock_secret_manager()
     } else {
         Arc::new(SecretManager::new(config.clone()).await?)
     };
     build_with_cert(config, cert_manager).await
+}
+
+#[cfg(feature = "testing")]
+fn mock_secret_manager() -> Arc<SecretManager> {
+    crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(86400))
+}
+
+#[cfg(not(feature = "testing"))]
+fn mock_secret_manager() -> Arc<SecretManager> {
+    unimplemented!("fake_ca requires --feature testing")
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -684,7 +684,7 @@ impl ProxyStateManager {
         let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
         let xds_client = if config.xds_address.is_some() {
             let updater = ProxyStateUpdater::new(state.clone(), cert_fetcher.clone());
-            let tls_client_fetcher = Box::new(tls::FileClientCertProviderImpl::RootCert(
+            let tls_client_fetcher = Box::new(tls::ControlPlaneAuthentication::RootCert(
                 config.xds_root_cert.clone(),
             ));
             Some(

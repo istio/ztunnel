@@ -16,13 +16,12 @@ use crate::config::Config;
 use crate::hyper_util::{empty_response, plaintext_response, Server};
 use crate::identity::SecretManager;
 use crate::state::DemandProxyState;
-use crate::tls::asn1_time_to_system_time;
+use crate::tls::Certificate;
 use crate::version::BuildInfo;
 use crate::xds::LocalConfig;
 use crate::{signal, telemetry};
-use boring::asn1::Asn1TimeRef;
-use boring::base64;
-use boring::x509::X509;
+
+use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use drain::Watch;
 use http_body_util::Full;
@@ -33,6 +32,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::SystemTime;
 use std::{net::SocketAddr, time::Duration};
 use tokio::time;
 use tracing::{error, info, warn};
@@ -93,7 +93,6 @@ pub struct CertDump {
 pub struct CertsDump {
     identity: String,
     state: String,
-    ca_cert: Vec<CertDump>,
     cert_chain: Vec<CertDump>,
 }
 
@@ -218,25 +217,18 @@ async fn handle_dashboard(
     response
 }
 
-fn x509_to_pem(x509: &X509) -> String {
-    match x509.to_pem() {
-        Err(e) => format!("<pem construction error: {e}>"),
-        Ok(vec) => base64::encode_block(&vec),
-    }
+fn rfc3339(t: SystemTime) -> String {
+    use chrono::prelude::{DateTime, Utc};
+    let dt: DateTime<Utc> = t.into();
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn dump_cert(x509: &X509) -> CertDump {
-    fn rfc3339(t: &Asn1TimeRef) -> String {
-        use chrono::prelude::{DateTime, Utc};
-        let dt: DateTime<Utc> = asn1_time_to_system_time(t).into();
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-    }
-
+fn dump_cert(cert: &Certificate) -> CertDump {
     CertDump {
-        pem: x509_to_pem(x509),
-        serial_number: x509.serial_number().to_bn().unwrap().to_string(),
-        valid_from: rfc3339(x509.not_before()),
-        expiration_time: rfc3339(x509.not_after()),
+        pem: base64_encode(cert.as_pem()),
+        serial_number: cert.serial(),
+        valid_from: rfc3339(cert.expiration().not_before),
+        expiration_time: rfc3339(cert.expiration().not_after),
     }
 }
 
@@ -253,8 +245,10 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
                 Unavailable(err) => dump.state = format!("Unavailable: {err}"),
                 Available(certs) => {
                     dump.state = "Available".to_string();
-                    dump.ca_cert = vec![dump_cert(certs.x509())];
-                    dump.cert_chain = certs.iter_chain().map(dump_cert).collect();
+                    dump.cert_chain = std::iter::once(&certs.cert)
+                        .chain(certs.chain.iter())
+                        .map(dump_cert)
+                        .collect();
                 }
             };
             dump
@@ -470,6 +464,11 @@ async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
+fn base64_encode(data: String) -> String {
+    use base64::Engine;
+    STANDARD.encode(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::change_log_level;
@@ -567,126 +566,48 @@ mod tests {
         let got = serde_json::to_value(dump_certs(&manager).await).unwrap();
         let want = serde_json::json!([
           {
-            "ca_cert": [],
             "cert_chain": [],
             "identity": "spiffe://error/ns/forgotten/sa/sa-failed",
             "state": "Unavailable: the identity is no longer needed"
           },
           {
-            "ca_cert": [],
             "cert_chain": [],
             "identity": "spiffe://test/ns/test/sa/sa-pending",
             "state": "Initializing"
           },
           {
-            "ca_cert": [{
-              "expiration_time": "2023-03-11T12:57:26Z",
-              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNkekNDQVYrZ0F3SUJBZ0lVWn\
-                      lUOTI5c3d0QjhPSG1qUmFURWFENnlqcWc0d0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dE\
-                      RVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVT\
-                      NNalphRncweQpNekF6TVRFeE1qVTNNalphTUFBd1dUQVRCZ2NxaGtqT1BRSUJCZ2dx\
-                      aGtqT1BRTUJCd05DQUFSYXIyQm1JWUFnCnZKbU9yU3BDZUZRNzlKUHk4Y3c0K3pFRT\
-                      hmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTIKZFNta2ZLNUFL\
-                      TVd4bzRHYk1JR1lNQTRHQTFVZER3RUIvd1FFQXdJRm9EQWRCZ05WSFNVRUZqQVVCZ2\
-                      dyQmdFRgpCUWNEQVFZSUt3WUJCUVVIQXdJd0RBWURWUjBUQVFIL0JBSXdBREFmQmdO\
-                      VkhTTUVHREFXZ0JRL0pPSDlXcTVMCnNFZmxFWVNnSHRpRTJTbWUxVEE0QmdOVkhSRU\
-                      JBZjhFTGpBc2hpcHpjR2xtWm1VNkx5OTBjblZ6ZEY5a2IyMWgKYVc0dmJuTXZibUZ0\
-                      WlhOd1lXTmxMM05oTDNOaExUQXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBR2RYY2\
-                      8yQgo3a05LMzVRMjBPc0YwZjI2bkpXTFd6eGpYV3FzNUx0dXhnRW5URjNJc3RuUWdm\
-                      cDVSMEszRXhsK1U4ZlhjblYyClNPOEdQTkdxSC82SUxsQzl2a1BYeU90WkJDMEZSRm\
-                      dVajR2NlZhamlURm1RYzJnS1k4Y0ZJS2hGMHRocW5NN3IKTDA3QytLUUkxRW9sR2Nm\
-                      R3BkTy80OU1oUEMvRi9MbnFnS3BzOUs0dlh1QWZLWW1VbXNQQWVRdnV0cmU2Z3ZJdQ\
-                      pzMHdIWWZwSGRIakhPdUhuSWFObDkzdVpueTBDQ3ovZ2wxKzlwdHIzL2ZFR0NPZFZE\
-                      SUp5MG5Tcmwwd0RpY3BYCk8wV2VBYzFVZUsvTFlCR2V5ZmVrWlJ4c3RsbDMzVGxJUk\
-                      k1cUt5SnFtdjh4ajhUZFdjUXpiTTZpRkdJbkd0YVEKQUphdU00SmVQRWI4RnF3PQot\
-                      LS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
-              "serial_number": "588850990443535479077311695632745359443207891470",
-              "valid_from": "2023-03-11T05:57:26Z"
-            }],
-            "cert_chain": [{
-              "expiration_time": "2296-12-24T18:31:28Z",
-              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQyt\
-                      jLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dERV\
-                      dNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXhNa\
-                      mhhR0E4eQpNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNS\
-                      bGNpNXNiMk5oYkRDQ0FTSXdEUVlKCktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0N\
-                      nZ0VCQU1lQ1R4UEp0dWQwVXh3K0NhYWRkV0Q3YStRRXVRWSsKQlBUS0pkbk1lajBzQk\
-                      1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3Ayc2QzMlNZNGJkYm9rUWNvcCtCa\
-                      gp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiRlllYWkrNnE3\
-                      aU1qbGJDR0F1Ny9VbktKCnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3F\
-                      pRVhNUm13NC9CRWhGR3ptSUQyb1VES0IzNmR1VmIKZHpTRW01MVF2Z1U1SUxYSWd5Vn\
-                      Jlak41Q0ZzQytXK3hqZU9YTEV6dGZIRlVvcWIzd1doa0J1RXhtcjgxSjJoRwpXOXBVT\
-                      Eoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94SWVhTm1MelBJR3JYMDF6UVlJZFpUdUR3TVkw\
-                      Q0F3RUFBYU5UCk1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFp\
-                      LWjdWTUI4R0ExVWRJd1FZTUJhQUZEOGsKNGYxYXJrdXdSK1VSaEtBZTJJVFpLWjdWTU\
-                      E4R0ExVWRFd0VCL3dRRk1BTUJBZjh3RFFZSktvWklodmNOQVFFTApCUUFEZ2dFQkFLc\
-                      m5BZVNzU1NLMy84engraHpqNlNGWGRKQTlDUTAyR0VKN2hIcktpakdXVllkZGFsOWRB\
-                      YlM1CnRMZC8vcUtPOXVJc0dldHkvT2syYlJRNmNxcU1sZ2ROejNqbW1yYlNsWVdtSVh\
-                      JMHlIR21DaVNhekhzWFZiRUYKNkl3eTN0Y1I0dm9YV0tJQ1dQaCtDMmNUZ0xtZVowRX\
-                      V6RnhxNHdabkNmNDB3S29BSjlpMWF3U3JCbkU5ald0bgpwNEY0aFduSlRwR2t5NWRSQ\
-                      UxFMGwvMkFicmwzOHdnZk04cjRJb3RtUFRoRktuRmVJSFU3YlExcllBb3FwYkFoCkN2\
-                      MEJONVBqQVFSV01rNmJvbzNmMGFrUzA3bmxZSVZxWGh4cWNZbk9nd2tkbFR0WDlNcUd\
-                      JcTI2bjhuMU5XV3cKbm1LT2pOc2s2cVJtdWxFZ2VHTzR2eFR2U0pZYitoVT0KLS0tLS\
-                      1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=",
-              "serial_number": "67955938755654933561614970125599055831405010529",
-              "valid_from": "2023-03-11T18:31:28Z"
-            }],
+            "cert_chain": [
+              {
+                "expiration_time": "2023-03-11T12:57:26Z",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVWnlUOTI5c3d0QjhPSG1qUmFURWFENnlqcWc0d0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVTMKTWpaYUZ3MHlNekF6TVRFeE1qVTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEF3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFjTzNlMjAvK0ZrRkwKUmttMTNtQlFNYjVPUmpTOGhwWjBRMkZKd2wrSXV4TGY2MUJDZS9RVlhOVklpSUdlMXRVRTh5UTRoMXZrCjhVb01sSmpTQkdiM3VDdHVLRFVKN0xOM1VBUmV4YU1uQkZobC9mWmQxU3ZZcmhlWjU3WDlrTElVa2hkSQpDUVdxOFVFcXBWZEloNGxTZjhoYnFRQksvUWhCN0I2bUJOSW5uMThZTEhiOEpmU0N2aXBWYTRuNXByTlYKbVNWc1JPMUtpY1FQYVhpUzJta0xBWVFRanROYkVJdnJwQldCYytmVWZPaEQ0YmhwUFVmSVFIN1dFcUZLCm5TMnQwSmh1d08zM2FoUDhLZVBWWDRDRkJ4VXc2SDhrd1dJUkh5dW9YbGFwMmVST1EycFRyYmtmVjJZbgpmWjZxV0huREJ5ZjN6bkFQQVM1ZnZ4b1RoKzBYTHc9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serial_number": "588850990443535479077311695632745359443207891470",
+                "valid_from": "2023-03-11T05:57:26Z"
+              },
+              {
+                "expiration_time": "2296-12-24T18:31:28Z",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQytjLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXgKTWpoYUdBOHlNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU1lQ1R4UEp0dWQwVXh3KwpDYWFkZFdEN2ErUUV1UVkrQlBUS0pkbk1lajBzQk1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3AKMnNkMzJTWTRiZGJva1Fjb3ArQmp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiCkZZZWFpKzZxN2lNamxiQ0dBdTcvVW5LSnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3FpRQpYTVJtdzQvQkVoRkd6bUlEMm9VREtCMzZkdVZiZHpTRW01MVF2Z1U1SUxYSWd5VnJlak41Q0ZzQytXK3gKamVPWExFenRmSEZVb3FiM3dXaGtCdUV4bXI4MUoyaEdXOXBVTEoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94CkllYU5tTHpQSUdyWDAxelFZSWRaVHVEd01ZMENBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYQpya3V3UitVUmhLQWUySVRaS1o3Vk1COEdBMVVkSXdRWU1CYUFGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFoKS1o3Vk1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFLcm5BZVNzClNTSzMvOHp4K2h6ajZTRlhkSkE5Q1EwMkdFSjdoSHJLaWpHV1ZZZGRhbDlkQWJTNXRMZC8vcUtPOXVJcwpHZXR5L09rMmJSUTZjcXFNbGdkTnozam1tcmJTbFlXbUlYSTB5SEdtQ2lTYXpIc1hWYkVGNkl3eTN0Y1IKNHZvWFdLSUNXUGgrQzJjVGdMbWVaMEV1ekZ4cTR3Wm5DZjQwd0tvQUo5aTFhd1NyQm5FOWpXdG5wNEY0CmhXbkpUcEdreTVkUkFMRTBsLzJBYnJsMzh3Z2ZNOHI0SW90bVBUaEZLbkZlSUhVN2JRMXJZQW9xcGJBaApDdjBCTjVQakFRUldNazZib28zZjBha1MwN25sWUlWcVhoeHFjWW5PZ3drZGxUdFg5TXFHSXEyNm44bjEKTldXd25tS09qTnNrNnFSbXVsRWdlR080dnhUdlNKWWIraFU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
+                "serial_number": "67955938755654933561614970125599055831405010529",
+                "valid_from": "2023-03-11T18:31:28Z"
+              }
+            ],
             "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0",
             "state": "Available"
           },
           {
-            "ca_cert": [{
-              "expiration_time": "2023-03-11T13:57:26Z",
-              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNkekNDQVYrZ0F3SUJBZ0lVWEl\
-                      QK29ySVF3dDZFUGRLSFdRU0VMOTM0bjdFd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dERV\
-                      dNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTNNa\
-                      lphRncweQpNekF6TVRFeE16VTNNalphTUFBd1dUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtq\
-                      T1BRTUJCd05DQUFSYXIyQm1JWUFnCnZKbU9yU3BDZUZRNzlKUHk4Y3c0K3pFRThmcXI\
-                      1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTIKZFNta2ZLNUFLTVd4bz\
-                      RHYk1JR1lNQTRHQTFVZER3RUIvd1FFQXdJRm9EQWRCZ05WSFNVRUZqQVVCZ2dyQmdFR\
-                      gpCUWNEQVFZSUt3WUJCUVVIQXdJd0RBWURWUjBUQVFIL0JBSXdBREFmQmdOVkhTTUVH\
-                      REFXZ0JRL0pPSDlXcTVMCnNFZmxFWVNnSHRpRTJTbWUxVEE0QmdOVkhSRUJBZjhFTGp\
-                      Bc2hpcHpjR2xtWm1VNkx5OTBjblZ6ZEY5a2IyMWgKYVc0dmJuTXZibUZ0WlhOd1lXTm\
-                      xMM05oTDNOaExURXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBQ3luRSt6UgpIK0t0c\
-                      3lzNThOUDY3REdlaCtEMi91eG4zdkc0U1ZDT1RoTU03RFR3cWZQVVFxUDRxSlVxU3gv\
-                      cnRYUDJwZU40CmRhSStHMVBaUTNhNmhXZFlkTUNhMitxZnRmNFZDYVlZRkY5VjUxejh\
-                      NcVhqck9oOXlYWXhPWEwrejNnemdsaW8KYnVHTG83b3U3VDNTQ0NkUWZQRE93M3ZTUV\
-                      dlZFBXOU0yekVWT3V1RDJaTkd5REYzcEMrNEpxMzFuME45U0w2MgpOWjVCdFpLNHRKY\
-                      kF1WGJzZnJHQlRmRkxNd0c1SzlES3F6cW9hWjRJcXI2aUdjN2NqeGJ3M25sUlVwWGU4\
-                      NzMyCkpPSmYySXZPVTZ6NExPN1ludEFhU0ZvaGhZWE1wQ0ZqUWtKRmlYNnZvTm9TZm5\
-                      mTE44c1NxUklEcHVCWjlHOFIKaG96SG1GbGRNYWxoNlNzPQotLS0tLUVORCBDRVJUSU\
-                      ZJQ0FURS0tLS0tCg==",
-              "serial_number": "528170730419860468572163268563070820131458817969",
-              "valid_from": "2023-03-11T06:57:26Z"
-            }],
-            "cert_chain": [{
-              "expiration_time": "2296-12-24T18:31:28Z",
-              "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQyt\
-                      jLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0dERV\
-                      dNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXhNa\
-                      mhhR0E4eQpNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNS\
-                      bGNpNXNiMk5oYkRDQ0FTSXdEUVlKCktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0N\
-                      nZ0VCQU1lQ1R4UEp0dWQwVXh3K0NhYWRkV0Q3YStRRXVRWSsKQlBUS0pkbk1lajBzQk\
-                      1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3Ayc2QzMlNZNGJkYm9rUWNvcCtCa\
-                      gp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiRlllYWkrNnE3\
-                      aU1qbGJDR0F1Ny9VbktKCnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3F\
-                      pRVhNUm13NC9CRWhGR3ptSUQyb1VES0IzNmR1VmIKZHpTRW01MVF2Z1U1SUxYSWd5Vn\
-                      Jlak41Q0ZzQytXK3hqZU9YTEV6dGZIRlVvcWIzd1doa0J1RXhtcjgxSjJoRwpXOXBVT\
-                      Eoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94SWVhTm1MelBJR3JYMDF6UVlJZFpUdUR3TVkw\
-                      Q0F3RUFBYU5UCk1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFp\
-                      LWjdWTUI4R0ExVWRJd1FZTUJhQUZEOGsKNGYxYXJrdXdSK1VSaEtBZTJJVFpLWjdWTU\
-                      E4R0ExVWRFd0VCL3dRRk1BTUJBZjh3RFFZSktvWklodmNOQVFFTApCUUFEZ2dFQkFLc\
-                      m5BZVNzU1NLMy84engraHpqNlNGWGRKQTlDUTAyR0VKN2hIcktpakdXVllkZGFsOWRB\
-                      YlM1CnRMZC8vcUtPOXVJc0dldHkvT2syYlJRNmNxcU1sZ2ROejNqbW1yYlNsWVdtSVh\
-                      JMHlIR21DaVNhekhzWFZiRUYKNkl3eTN0Y1I0dm9YV0tJQ1dQaCtDMmNUZ0xtZVowRX\
-                      V6RnhxNHdabkNmNDB3S29BSjlpMWF3U3JCbkU5ald0bgpwNEY0aFduSlRwR2t5NWRSQ\
-                      UxFMGwvMkFicmwzOHdnZk04cjRJb3RtUFRoRktuRmVJSFU3YlExcllBb3FwYkFoCkN2\
-                      MEJONVBqQVFSV01rNmJvbzNmMGFrUzA3bmxZSVZxWGh4cWNZbk9nd2tkbFR0WDlNcUd\
-                      JcTI2bjhuMU5XV3cKbm1LT2pOc2s2cVJtdWxFZ2VHTzR2eFR2U0pZYitoVT0KLS0tLS\
-                      1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=",
-              "serial_number": "67955938755654933561614970125599055831405010529",
-              "valid_from": "2023-03-11T18:31:28Z"
-            }],
+            "cert_chain": [
+              {
+                "expiration_time": "2023-03-11T13:57:26Z",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVWElQK29ySVF3dDZFUGRLSFdRU0VMOTM0bjdFd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTMKTWpaYUZ3MHlNekF6TVRFeE16VTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEV3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFHV2tCY1plUEhrZisKSEpoazY5NHhDaHZLVENkVlRoNE9QNTBvWC9TdE0vK3NsazU0Y2RkcnRpOG0rdEFnai8wK0FLaFhpSTJaCjBNRFZPaEpOWTVRT1VXdkVBUWNYVTlPR2NCWmsyRWNGVW9BOC9RRzFpcVB3ejJJRGluakYrb3lTWExEdApFRGxPdW1Sa3VETWtyME51TGNZTlJuYUI0LzMreDAvdVlRM2M3TXpvUEtUQmZQdW1DY0wzbG5mR1dGR3kKc1d3b1p5V01CK1ZFdjYzK2psdTZDZmwzUGN1NEtFNHVhQUJiWHVvRkhjeU8yMW5sZVVvT3Z2VXhLZDdGCkxvQWNsVDNaSUI3dzNUcXE2MFR3UlV6ZGZkQlA5UURabEVSL1JLTDZWbnBBUVZhbXZBWmNjZFVuTWZjOAppT0N6TWVqV2tweGxXL3MrMW1nMUxzQWxyYlJMdHc9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serial_number": "528170730419860468572163268563070820131458817969",
+                "valid_from": "2023-03-11T06:57:26Z"
+              },
+              {
+                "expiration_time": "2296-12-24T18:31:28Z",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQytjLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXgKTWpoYUdBOHlNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU1lQ1R4UEp0dWQwVXh3KwpDYWFkZFdEN2ErUUV1UVkrQlBUS0pkbk1lajBzQk1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3AKMnNkMzJTWTRiZGJva1Fjb3ArQmp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiCkZZZWFpKzZxN2lNamxiQ0dBdTcvVW5LSnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3FpRQpYTVJtdzQvQkVoRkd6bUlEMm9VREtCMzZkdVZiZHpTRW01MVF2Z1U1SUxYSWd5VnJlak41Q0ZzQytXK3gKamVPWExFenRmSEZVb3FiM3dXaGtCdUV4bXI4MUoyaEdXOXBVTEoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94CkllYU5tTHpQSUdyWDAxelFZSWRaVHVEd01ZMENBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYQpya3V3UitVUmhLQWUySVRaS1o3Vk1COEdBMVVkSXdRWU1CYUFGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFoKS1o3Vk1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFLcm5BZVNzClNTSzMvOHp4K2h6ajZTRlhkSkE5Q1EwMkdFSjdoSHJLaWpHV1ZZZGRhbDlkQWJTNXRMZC8vcUtPOXVJcwpHZXR5L09rMmJSUTZjcXFNbGdkTnozam1tcmJTbFlXbUlYSTB5SEdtQ2lTYXpIc1hWYkVGNkl3eTN0Y1IKNHZvWFdLSUNXUGgrQzJjVGdMbWVaMEV1ekZ4cTR3Wm5DZjQwd0tvQUo5aTFhd1NyQm5FOWpXdG5wNEY0CmhXbkpUcEdreTVkUkFMRTBsLzJBYnJsMzh3Z2ZNOHI0SW90bVBUaEZLbkZlSUhVN2JRMXJZQW9xcGJBaApDdjBCTjVQakFRUldNazZib28zZjBha1MwN25sWUlWcVhoeHFjWW5PZ3drZGxUdFg5TXFHSXEyNm44bjEKTldXd25tS09qTnNrNnFSbXVsRWdlR080dnhUdlNKWWIraFU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
+                "serial_number": "67955938755654933561614970125599055831405010529",
+                "valid_from": "2023-03-11T18:31:28Z"
+              }
+            ],
             "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1",
             "state": "Available"
           }

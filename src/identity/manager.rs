@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
-use std::fmt::Write;
+use std::fmt::{Formatter, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -104,7 +104,7 @@ impl Default for Identity {
 
 #[async_trait]
 pub trait CaClientTrait: Send + Sync {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error>;
+    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error>;
 }
 
 #[derive(PartialOrd, PartialEq, Eq, Ord, Debug, Copy, Clone)]
@@ -122,7 +122,7 @@ pub enum Priority {
 pub enum CertState {
     // Should happen only on the first request for an Identity.
     Initializing(Priority),
-    Available(tls::Certs),
+    Available(Arc<tls::WorkloadCertificate>),
     // The last attempt to fetch the certificate has failed and there is no previous certificate
     // available.
     //
@@ -332,7 +332,7 @@ impl Worker {
                             // Reset the backoff on success.
                             // [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
                             cert_backoff.reset();
-                            let certs: tls::Certs = certs; // Type annotation.
+                            let certs: tls::WorkloadCertificate = certs; // Type annotation.
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
                                 t.into()
@@ -347,7 +347,7 @@ impl Worker {
                                 // conversion here, so for now leaving the code as is.
                                 Instant::now()
                             };
-                            (CertState::Available(certs), refresh_at)
+                            (CertState::Available(Arc::new(certs)), refresh_at)
                         },
                     };
                     if self.update_certs(&id, state).await {
@@ -408,6 +408,7 @@ pub struct SecretManagerConfig {
 }
 
 /// SecretManager provides a wrapper around a CaClient with caching.
+#[derive(Clone)]
 pub struct SecretManager {
     worker: Arc<Worker>,
     // Channel to which certificate requests are sent to. The Identity for which request is being
@@ -416,11 +417,17 @@ pub struct SecretManager {
     requests: mpsc::Sender<Request>,
 }
 
+impl fmt::Debug for SecretManager {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretManager").finish()
+    }
+}
+
 impl SecretManager {
     pub async fn new(cfg: crate::config::Config) -> Result<Self, Error> {
         let caclient = CaClient::new(
             cfg.ca_address.unwrap(),
-            Box::new(tls::FileClientCertProviderImpl::RootCert(
+            Box::new(tls::ControlPlaneAuthentication::RootCert(
                 cfg.ca_root_cert.clone(),
             )),
             cfg.auth,
@@ -494,7 +501,10 @@ impl SecretManager {
         }
     }
 
-    async fn wait(&self, mut rx: watch::Receiver<CertState>) -> Result<tls::Certs, Error> {
+    async fn wait(
+        &self,
+        mut rx: watch::Receiver<CertState>,
+    ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
         loop {
             tokio::select! {
                 // Wait for the initial value if not ready yet.
@@ -520,14 +530,17 @@ impl SecretManager {
         &self,
         id: &Identity,
         pri: Priority,
-    ) -> Result<tls::Certs, Error> {
+    ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
         // This method is intentionally left simple, since unit tests are based on start_fetch
         // and wait. Any changes should go to one of those two methods, and if that proves
         // impossible - unit testing strategy may need to be rethinked.
         self.wait(self.start_fetch(id, pri).await?).await
     }
 
-    pub async fn fetch_certificate(&self, id: &Identity) -> Result<tls::Certs, Error> {
+    pub async fn fetch_certificate(
+        &self,
+        id: &Identity,
+    ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
         self.fetch_certificate_pri(id, Priority::RealTime).await
     }
 
@@ -557,6 +570,7 @@ fn init_pri(rx: &watch::Receiver<CertState>) -> Option<Priority> {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub mod mock {
     use std::{
         sync::Arc,
@@ -666,7 +680,7 @@ mod tests {
                 .await
                 .expect("Didn't get a cert as expected.");
 
-            if current_cert != new_cert {
+            if current_cert.cert.serial() != new_cert.cert.serial() {
                 total_updates += 1;
                 current_cert = new_cert;
             }
@@ -950,7 +964,7 @@ mod tests {
             .unwrap();
         for rx in rxs_iter {
             let got = test.secret_manager.wait(rx).await.unwrap();
-            assert_eq!(got, want);
+            assert!(Arc::ptr_eq(&want, &got));
         }
         assert_eq!(test.caclient.fetches().await.len(), 1);
 

@@ -17,13 +17,14 @@ use std::str::FromStr;
 
 use std::time::Instant;
 
-use boring::ssl::ConnectConfiguration;
 use bytes::Bytes;
 use drain::Watch;
 use http_body_util::Empty;
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
+
 use tokio::net::{TcpListener, TcpStream};
+
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
 use crate::config::ProxyMode;
@@ -280,10 +281,7 @@ impl OutboundConnection {
                         .then_some(remote_addr);
                     let id = &req.source.identity();
                     let cert = self.pi.cert_manager.fetch_certificate(id).await?;
-                    let connector = cert
-                        .connector(dst_identity)?
-                        .configure()
-                        .expect("configure");
+                    let connector = cert.outbound_connector(dst_identity)?;
                     let tcp_stream = super::freebind_connect(
                         local,
                         req.gateway,
@@ -291,7 +289,7 @@ impl OutboundConnection {
                     )
                     .await?;
                     tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
-                    let tls_stream = connect_tls(connector, tcp_stream).await?;
+                    let tls_stream = connector.connect(tcp_stream).await?;
                     let (request_sender, connection) = builder
                         .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
                         .await
@@ -564,15 +562,6 @@ enum RequestType {
     DirectLocal,
     /// Passthrough refers to requests with an unknown target
     Passthrough,
-}
-
-pub async fn connect_tls(
-    mut connector: ConnectConfiguration,
-    stream: TcpStream,
-) -> Result<tokio_boring::SslStream<TcpStream>, tokio_boring::HandshakeError<TcpStream>> {
-    connector.set_verify_hostname(false);
-    connector.set_use_server_name_indication(false);
-    tokio_boring::connect(connector, "", stream).await
 }
 
 #[cfg(test)]

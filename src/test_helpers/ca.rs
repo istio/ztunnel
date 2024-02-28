@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use hyper_util::rt::TokioIo;
+use itertools::Itertools;
 
 use tokio::sync::watch;
 
@@ -51,13 +52,13 @@ impl CaServer {
         let server = CaServer { response: rx };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        let certs = tls::generate_test_certs(
+        let certs = tls::mock::generate_test_certs(
             &server_addr.ip().into(),
             Duration::from_secs(0),
             Duration::from_secs(100),
         );
-        let root_cert = RootCert::Static(certs.chain().unwrap());
-        let acceptor = tls::ControlPlaneCertProvider(certs);
+        let root_cert = RootCert::Static(certs.chain.iter().map(|c| c.as_pem()).join("\n").into());
+        let acceptor = tls::mock::MockServerCertProvider::new(certs);
         let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
         let srv = IstioCertificateServiceServer::new(server);
         tokio::spawn(async move {
@@ -76,7 +77,7 @@ impl CaServer {
         });
         let client = CaClient::new(
             "https://".to_string() + &server_addr.to_string(),
-            Box::new(tls::FileClientCertProviderImpl::RootCert(root_cert)),
+            Box::new(tls::ControlPlaneAuthentication::RootCert(root_cert)),
             AuthSource::Token(
                 PathBuf::from(r"src/test_helpers/fake-jwt"),
                 "Kubernetes".to_string(),

@@ -5,11 +5,12 @@ edition = "2021"
 rust-version = "1.65"
 
 [features]
-default = ["fips"]
+default = ["tls-ring"]
 gperftools = ["dep:gperftools"]
 console = ["dep:console-subscriber"]
-fips = ["boring/fips", "hyper-boring/fips", "tokio-boring/fips"]
-testing = [] # Enables utilities supporting tests.
+tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only", "ztunnel/tls-boring"]
+tls-ring = ["dep:ring", "rustls/ring", "dep:rcgen", "ztunnel/tls-ring"]
+testing = ["dep:rcgen", "rcgen/x509-parser"] # Enables utilities supporting tests.
 
 [lib]
 path = "src/lib.rs"
@@ -25,70 +26,78 @@ name = "throughput"
 harness = false
 
 [dependencies]
-http-02 = { package = "http", version = "0.2.9" }
+# Enabled with 'tls-boring'
+boring-rustls-provider = { git = "https://github.com/janrueth/boring-rustls-provider", optional = true } #
+boring = { version = "4", optional = true }
+boring-sys = { version = "4", optional = true }
+
+# Enabled with 'tls-ring'
+ring = { version = "0.17", optional = true }
+
 anyhow = "1.0"
 async-stream = "0.3"
 async-trait = "0.1"
 atty = "0.2"
-# Fork will be dropped once Hyper goes 1.0.0
-hyper-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0-snapshot1" }
-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0-snapshot1" }
-tokio-boring = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0-snapshot1" }
-boring-sys = { git = "https://github.com/howardjohn/boring/", branch = "hyper-boring/adopt-hyper-1.0.0-snapshot1" }
+backoff = "0.4.0"
+base64 = "0.21"
+byteorder = "1.5"
 bytes = { version = "1.5", features = ["serde"] }
+chrono = "0.4"
 console-subscriber = { version = "0.2", optional = true }
 drain = "0.1"
+duration-str = "0.7"
 futures = "0.3"
-gperftools = { version = "0.2", features = ["heap"], optional = true }
-hyper = { version = "1.1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
-libc = "0.2"
-log = "0.4"
-once_cell = "1.19"
-pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion"] }
-prometheus-client = { version = "0.22" }
-prost = "0.12"
-prost-types = "0.12"
-rand = "0.8"
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-socket2 = { version = "0.5", features = ["all"] }
-byteorder = "1.5"
-thiserror = "1.0"
-tls-listener = { version = "0.9" }
-tokio = { "version" = "1.0", features = ["full", "test-util"] }
-tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.11", default-features = false, features = ["prost", "codegen"] }
-tower = { version = "0.4", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
-realm_io = "0.4"
-go-parse-duration = "0.1"
-prometheus-parse = "0.2"
-url = "2.2"
-itertools = "0.12"
-ipnet = { version = "2.9", features = ["serde"] }
-http-types = { version = "2.12", default-features = false }
-textnonce = { version = "1.0" }
-priority-queue = "1.4"
-http-body-util = "0.1"
-http-body-04 = { package = "http-body", version = "0.4" }
-http-body-1 = { package = "http-body", version = "1.0.0-rc.2" }
-tower-hyper-http-body-compat = { git = "https://github.com/howardjohn/tower-hyper-http-body-compat", branch = "deps/hyper-1.0.0-snapshot1", features = ["server", "http2"] }
-futures-util = "0.3"
-chrono = "0.4"
 futures-core = "0.3"
-nix = { version = "0.27", features = ["socket", "sched", "uio", "fs", "ioctl", "user"] }
+futures-util = "0.3"
+gperftools = { version = "0.2", features = ["heap"], optional = true }
 hashbrown = "0.14"
-backoff = "0.4.0"
-
-# DNS
 hickory-client = "0.24"
 hickory-proto = "0.24"
 hickory-resolver = "0.24"
 hickory-server = { version = "0.24", features = [ "hickory-resolver" ] }
-duration-str = "0.7"
+http-02 = { package = "http", version = "0.2.9" }
+http-body-04 = { package = "http-body", version = "0.4" }
+http-body-1 = { package = "http-body", version = "1.0.0-rc.2" }
+http-body-util = "0.1"
+http-types = { version = "2.12", default-features = false }
+hyper = { version = "1.1", features = ["full"] }
+hyper-rustls = { version = "0.26.0", features = ["http2"] }
+hyper-util = { version = "0.1", features = ["full"] }
+ipnet = { version = "2.9", features = ["serde"] }
+itertools = "0.12"
+libc = "0.2"
+log = "0.4"
+nix = { version = "0.27", features = ["socket", "sched", "uio", "fs", "ioctl", "user"] }
+once_cell = "1.19"
+pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion"] }
+priority-queue = "1.4"
+prometheus-client = { version = "0.22" }
+prometheus-parse = "0.2"
+prost = "0.12"
+prost-types = "0.12"
+rand = "0.8"
+rcgen = { version = "0.12", optional = true, features = ["pem"] }
+realm_io = "0.4"
+rustls = { version = "0.22"}
+rustls-native-certs = "0.7.0"
+rustls-pemfile = "2.1"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+socket2 = { version = "0.5", features = ["all"] }
+textnonce = { version = "1.0" }
+thiserror = "1.0"
+tls-listener = { version = "0.9" }
+tokio = { "version" = "1.0", features = ["full", "test-util"] }
+tokio-rustls = "0.25"
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.11", default-features = false, features = ["prost", "codegen"] }
+tower = { version = "0.4", features = ["full"] }
+tower-hyper-http-body-compat = { git = "https://github.com/howardjohn/tower-hyper-http-body-compat", branch = "deps/hyper-1.0.0-snapshot1", features = ["server", "http2"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
+url = "2.2"
+x509-parser = { version = "0.15", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
@@ -117,11 +126,13 @@ incremental = true
 
 [dev-dependencies]
 # Enable testing utils on this crate.
-ztunnel = { version = "0.0.0", path = ".", features = [ "testing" ] }
+ztunnel = { version = "0.0.0", path = ".", default-features = false, features = ["testing"] }
 
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 diff = "0.1"
 local-ip-address = "0.5"
 matches = "0.1"
 test-case = "3.3"
+oid-registry = "0.6.1"
+rcgen = { version = "0.12.1", features = ["pem", "x509-parser"] }
 #debug = true

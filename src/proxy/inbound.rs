@@ -25,20 +25,22 @@ use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+
 use tokio::net::{TcpListener, TcpStream};
+
 use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 use super::connection_manager::ConnectionManager;
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
-use crate::identity::SecretManager;
+use crate::identity::{Identity, SecretManager};
 use crate::metrics::Recorder;
-use crate::proxy;
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
 use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
+use crate::{proxy, tls};
 
 use crate::state::workload::{address, GatewayAddress, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -88,19 +90,19 @@ impl Inbound {
 
         let (sub_drain_signal, sub_drain) = drain::channel();
 
-        while let Some(socket) = stream.next().await {
+        while let Some(tls) = stream.next().await {
+            let (raw_socket, ssl) = tls.get_ref();
+            let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
+            let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
+            let src_ip = to_canonical(raw_socket.peer_addr().unwrap()).ip();
             let pi = self.pi.clone();
             let connection_manager = self.pi.connection_manager.clone();
             let drain = sub_drain.clone();
             let network = self.pi.cfg.network.clone();
             tokio::task::spawn(async move {
-                let dst = crate::socket::orig_dst_addr_or_default(socket.get_ref());
                 let conn = Connection {
-                    src_identity: socket
-                        .ssl()
-                        .peer_certificate()
-                        .and_then(|x| crate::tls::boring::extract_sans(&x).first().cloned()),
-                    src_ip: to_canonical(socket.get_ref().peer_addr().unwrap()).ip(),
+                    src_identity,
+                    src_ip,
                     dst_network: network, // inbound request must be on our network
                     dst,
                 };
@@ -111,7 +113,7 @@ impl Inbound {
                     .initial_connection_window_size(self.pi.cfg.connection_window_size)
                     .max_frame_size(self.pi.cfg.frame_size)
                     .serve_connection(
-                        hyper_util::rt::TokioIo::new(socket),
+                        hyper_util::rt::TokioIo::new(tls),
                         service_fn(move |req| {
                             Self::serve_connect(
                                 pi.clone(),
@@ -492,7 +494,7 @@ struct InboundCertProvider {
 
 #[async_trait::async_trait]
 impl crate::tls::ServerCertProvider for InboundCertProvider {
-    async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<boring::ssl::SslAcceptor, TlsError> {
+    async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<Arc<rustls::ServerConfig>, TlsError> {
         let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
         let identity = {
             let wip = NetworkAddress {
@@ -511,8 +513,7 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
             "fetching cert"
         );
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
-        let acc = cert.mtls_acceptor(Some(&identity))?;
-        Ok(acc)
+        Ok(Arc::new(cert.server_config()?))
     }
 }
 

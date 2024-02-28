@@ -26,6 +26,7 @@ mod namespaced {
 
     use hyper::Method;
     use hyper_util::rt::TokioIo;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpStream;
     use tokio::time::timeout;
@@ -552,18 +553,12 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
                         .unwrap();
                 let cert = app.cert_manager.fetch_certificate(id).await?;
-                let mut connector = cert
-                    .connector(vec![dst_id])
-                    .unwrap()
-                    .configure()
-                    .expect("configure");
-                connector.set_verify_hostname(false);
-                connector.set_use_server_name_indication(false);
+                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                // connector.set_verify_hostname(false);
+                // connector.set_use_server_name_indication(false);
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
-                let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
-                    .await
-                    .unwrap();
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
@@ -611,19 +606,13 @@ mod namespaced {
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
                         .unwrap();
                 let cert = app.cert_manager.fetch_certificate(id).await?;
-                let mut connector = cert
-                    .connector(vec![dst_id])
-                    .unwrap()
-                    .configure()
-                    .expect("configure");
-                connector.set_verify_hostname(false);
-                connector.set_use_server_name_indication(false);
+                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                // connector.set_verify_hostname(false);
+                // connector.set_use_server_name_indication(false);
                 let tcp_stream = TcpStream::connect(app.proxy_addresses.inbound)
                     .await
                     .unwrap();
-                let tls_stream = tokio_boring::connect(connector, "", tcp_stream)
-                    .await
-                    .unwrap();
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
