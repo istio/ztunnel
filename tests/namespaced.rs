@@ -60,8 +60,7 @@ mod namespaced {
                 if std::env::var("CI").is_ok() {
                     panic!("CI tests should run as root to have full coverage");
                 }
-                eprintln!("This test requires root; skipping");
-                return Ok(());
+                panic!("This test requires root - rerun with TEST_MODE=root; skipping");
             }
             initialize_telemetry();
             let f = function!()

@@ -2,7 +2,7 @@
 BUILD_WITH_CONTAINER ?= 1
 
 # Cannot run root tests in container unless the container is privileged,
-# and we cannot/should not run it as privileged by default - so communicate that.
+# so if you set both those flags we will attempt to run the build container as privileged.
 ifeq ($(TEST_MODE), root)
     ifeq ($(BUILD_WITH_CONTAINER), 1)
         $(info ***** NOTE ******)
