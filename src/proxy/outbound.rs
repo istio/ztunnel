@@ -397,17 +397,31 @@ impl OutboundConnection {
                 }
                 crate::state::workload::address::Address::Service(s) => {
                     if let Some(wp) = s.waypoint.clone() {
-                        let addr = match wp.destination {
+                        let waypoint_vip = match wp.destination {
                             Destination::Address(a) => a.address,
                             Destination::Hostname(_) => todo!(), // it has a waypoint with an invalid addy... error?
                         };
-                        let gateway = SocketAddr::new(addr, wp.hbone_mtls_port);
-                        let wp_upstream = self
+                        let waypoint_vip = SocketAddr::new(waypoint_vip, wp.hbone_mtls_port);
+                        let waypoint_us = self
                             .pi
                             .state
-                            .fetch_upstream(&self.pi.cfg.network, gateway)
+                            .fetch_upstream(&self.pi.cfg.network, waypoint_vip)
                             .await
                             .unwrap(); // ugh, TODO NOT OK
+
+                        let waypoint_workload = waypoint_us.workload;
+                        let waypoint_ip = self
+                            .pi
+                            .state
+                            .load_balance(
+                                &waypoint_workload,
+                                &source_workload,
+                                self.pi.metrics.clone(),
+                            )
+                            .await
+                            .unwrap(); // ugh, TODO NOT OK
+
+                        let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
                         let destination_service = ServiceDescription::try_from(&*s).ok();
 
                         return Ok(Request {
@@ -417,10 +431,10 @@ impl OutboundConnection {
                             destination: target,
                             destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
                             destination_service,
-                            expected_identity: Some(wp_upstream.workload.identity()),
-                            gateway,
+                            expected_identity: Some(waypoint_workload.identity()),
+                            gateway: wp_socket_addr,
                             request_type: RequestType::ToServerWaypoint,
-                            upstream_sans: wp_upstream.sans,
+                            upstream_sans: waypoint_us.sans,
                         });
                     }
                 }
