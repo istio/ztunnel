@@ -421,7 +421,8 @@ impl OutboundConnection {
                             .await
                             .unwrap(); // ugh, TODO NOT OK
 
-                        let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
+                        let waypoint_socket_address =
+                            SocketAddr::new(waypoint_ip, waypoint_us.port);
                         let destination_service = ServiceDescription::try_from(&*s).ok();
 
                         return Ok(Request {
@@ -432,7 +433,7 @@ impl OutboundConnection {
                             destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
                             destination_service,
                             expected_identity: Some(waypoint_workload.identity()),
-                            gateway: wp_socket_addr,
+                            gateway: waypoint_socket_address,
                             request_type: RequestType::ToServerWaypoint,
                             upstream_sans: waypoint_us.sans,
                         });
@@ -648,7 +649,10 @@ mod tests {
     use crate::proxy::connection_manager::ConnectionManager;
     use crate::test_helpers::helpers::test_proxy_metrics;
     use crate::test_helpers::new_proxy_state;
+    use crate::xds::istio::workload::address::Type as XdsAddressType;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
+    use crate::xds::istio::workload::Port;
+    use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::{identity, xds};
@@ -656,7 +660,7 @@ mod tests {
     async fn run_build_request(
         from: &str,
         to: &str,
-        xds: XdsWorkload,
+        xds: XdsAddressType,
         expect: Option<ExpectedRequest<'_>>,
     ) {
         let cfg = Config {
@@ -679,7 +683,10 @@ mod tests {
             node: "local-node".to_string(),
             ..Default::default()
         };
-        let state = new_proxy_state(&[source, waypoint, xds], &[], &[]);
+        let state = match xds {
+            XdsAddressType::Workload(wl) => new_proxy_state(&[source, waypoint, wl], &[], &[]),
+            XdsAddressType::Service(svc) => new_proxy_state(&[source, waypoint], &[svc], &[]),
+        };
         let outbound = OutboundConnection {
             pi: ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
@@ -719,11 +726,11 @@ mod tests {
         run_build_request(
             "127.0.0.1",
             "1.2.3.4:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/default/my-pod".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 ..Default::default()
-            },
+            }),
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
                 destination: "1.2.3.4:80",
@@ -739,7 +746,7 @@ mod tests {
         run_build_request(
             "127.0.0.1",
             "127.0.0.2:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/ns/test-tcp".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
@@ -747,7 +754,7 @@ mod tests {
                 tunnel_protocol: XdsProtocol::None as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
-            },
+            }),
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
                 destination: "127.0.0.2:80",
@@ -763,7 +770,7 @@ mod tests {
         run_build_request(
             "127.0.0.1",
             "127.0.0.2:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/ns/test-tcp".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
@@ -771,7 +778,7 @@ mod tests {
                 tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "remote-node".to_string(),
                 ..Default::default()
-            },
+            }),
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
                 destination: "127.0.0.2:80",
@@ -787,7 +794,7 @@ mod tests {
         run_build_request(
             "127.0.0.1",
             "127.0.0.2:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/ns/test-tcp".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
@@ -795,7 +802,7 @@ mod tests {
                 tunnel_protocol: XdsProtocol::None as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
-            },
+            }),
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
                 destination: "127.0.0.2:80",
@@ -811,7 +818,7 @@ mod tests {
         run_build_request(
             "127.0.0.1",
             "127.0.0.2:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/ns/test-tcp".to_string(),
                 name: "test-tcp".to_string(),
                 namespace: "ns".to_string(),
@@ -819,7 +826,7 @@ mod tests {
                 tunnel_protocol: XdsProtocol::Hbone as i32,
                 node: "local-node".to_string(),
                 ..Default::default()
-            },
+            }),
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
                 destination: "127.0.0.2:80",
@@ -835,11 +842,11 @@ mod tests {
         run_build_request(
             "1.2.3.4",
             "127.0.0.2:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/default/my-pod".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 ..Default::default()
-            },
+            }),
             None,
         )
         .await;
@@ -850,7 +857,7 @@ mod tests {
         run_build_request(
             "127.0.0.2",
             "127.0.0.1:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/default/my-pod".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 waypoint: Some(xds::istio::workload::GatewayAddress {
@@ -864,7 +871,7 @@ mod tests {
                     hbone_single_tls_port: 15003,
                 }),
                 ..Default::default()
-            },
+            }),
             // Even though source has a waypoint, we don't use it
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
@@ -880,7 +887,7 @@ mod tests {
         run_build_request(
             "127.0.0.1",
             "127.0.0.2:80",
-            XdsWorkload {
+            XdsAddressType::Workload(XdsWorkload {
                 uid: "cluster1//v1/Pod/default/my-pod".to_string(),
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 waypoint: Some(xds::istio::workload::GatewayAddress {
@@ -894,11 +901,48 @@ mod tests {
                     hbone_single_tls_port: 15003,
                 }),
                 ..Default::default()
-            },
+            }),
             // Should use the waypoint
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
                 destination: "127.0.0.2:80",
+                gateway: "127.0.0.10:15008",
+                request_type: RequestType::ToServerWaypoint,
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_destination_svc_waypoint() {
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            XdsAddressType::Service(XdsService {
+                addresses: vec![XdsNetworkAddress {
+                    network: "".to_string(),
+                    address: vec![127, 0, 0, 3],
+                }],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 8080,
+                }],
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: [127, 0, 0, 10].to_vec(),
+                        },
+                    )),
+                    hbone_mtls_port: 15008,
+                    hbone_single_tls_port: 15003,
+                }),
+                ..Default::default()
+            }),
+            // Should use the waypoint
+            Some(ExpectedRequest {
+                protocol: Protocol::HBONE,
+                destination: "127.0.0.3:80",
                 gateway: "127.0.0.10:15008",
                 request_type: RequestType::ToServerWaypoint,
             }),

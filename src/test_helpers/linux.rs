@@ -229,6 +229,19 @@ impl<'a> TestServiceBuilder<'a> {
         self
     }
 
+    /// Set the service waypoint
+    pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
+        self.s.waypoint = Some(GatewayAddress {
+            destination: gatewayaddress::Destination::Address(NetworkAddress {
+                network: "".to_string(),
+                address: waypoint,
+            }),
+            hbone_mtls_port: 15008,
+            hbone_single_tls_port: Some(15003),
+        });
+        self
+    }
+
     /// Finish building the service.
     pub fn register(self) -> anyhow::Result<()> {
         self.manager
