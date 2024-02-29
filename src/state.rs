@@ -730,7 +730,7 @@ impl ProxyStateManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
+    use std::{net::Ipv4Addr, time::Duration};
 
     use super::*;
     use crate::test_helpers;

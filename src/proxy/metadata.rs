@@ -121,7 +121,6 @@ async fn serve_request_helper<T>(
 mod tests {
     use http_body_util::{BodyExt, Empty};
     use hyper::Method;
-    use std::net::{Ipv4Addr, SocketAddrV4};
 
     use crate::rbac::Connection;
 

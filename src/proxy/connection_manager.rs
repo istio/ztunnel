@@ -195,7 +195,7 @@ impl PolicyWatcher {
 mod tests {
     use drain::Watch;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-    use std::net::{Ipv4Addr, SocketAddrV4};
+
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
