@@ -38,7 +38,6 @@ anyhow = "1.0"
 async-stream = "0.3"
 async-trait = "0.1"
 atty = "0.2"
-backoff = "0.4.0"
 base64 = "0.21"
 byteorder = "1.5"
 bytes = { version = "1.5", features = ["serde"] }
