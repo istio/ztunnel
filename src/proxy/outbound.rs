@@ -36,7 +36,7 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEP
 use crate::state::service::ServiceDescription;
 use crate::state::set_gateway_address;
 use crate::state::workload::gatewayaddress::Destination;
-use crate::state::workload::{NetworkAddress, Protocol, Workload};
+use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
 
 pub struct Outbound {
@@ -381,8 +381,8 @@ impl OutboundConnection {
             None => return Err(Error::UnknownSource(downstream)),
         };
 
-        // to Service with waypoint
-        if let Some(target_address) = self
+        // If this is to-service traffic check for a service waypoint
+        if let Some(Address::Service(s)) = self
             .pi
             .state
             .fetch_destination(&Destination::Address(NetworkAddress {
@@ -391,54 +391,47 @@ impl OutboundConnection {
             }))
             .await
         {
-            match target_address {
-                crate::state::workload::address::Address::Workload(_w) => {
-                    // this is to workload, fall through
-                }
-                crate::state::workload::address::Address::Service(s) => {
-                    if let Some(wp) = s.waypoint.clone() {
-                        let waypoint_vip = match wp.destination {
-                            Destination::Address(a) => a.address,
-                            Destination::Hostname(_) => todo!(), // it has a waypoint with an invalid addy... error?
-                        };
-                        let waypoint_vip = SocketAddr::new(waypoint_vip, wp.hbone_mtls_port);
-                        let waypoint_us = self
-                            .pi
-                            .state
-                            .fetch_upstream(&self.pi.cfg.network, waypoint_vip)
-                            .await
-                            .unwrap(); // ugh, TODO NOT OK
+            // if we have a waypoint for this svc, use it; otherwise route traffic normally
+            if let Some(wp) = s.waypoint.clone() {
+                let waypoint_vip = match wp.destination {
+                    Destination::Address(a) => a.address,
+                    Destination::Hostname(_) => todo!(), // it has a waypoint with an invalid addy... error?
+                };
+                let waypoint_vip = SocketAddr::new(waypoint_vip, wp.hbone_mtls_port);
+                let waypoint_us = self
+                    .pi
+                    .state
+                    .fetch_upstream(&self.pi.cfg.network, waypoint_vip)
+                    .await
+                    .ok_or(proxy::Error::UnknownWaypoint(
+                        "unable to determine waypoint upstream".to_string(),
+                    ))?;
 
-                        let waypoint_workload = waypoint_us.workload;
-                        let waypoint_ip = self
-                            .pi
-                            .state
-                            .load_balance(
-                                &waypoint_workload,
-                                &source_workload,
-                                self.pi.metrics.clone(),
-                            )
-                            .await
-                            .unwrap(); // ugh, TODO NOT OK
+                let waypoint_workload = waypoint_us.workload;
+                let waypoint_ip = self
+                    .pi
+                    .state
+                    .load_balance(
+                        &waypoint_workload,
+                        &source_workload,
+                        self.pi.metrics.clone(),
+                    )
+                    .await?; // if we can't load balance just return the error
 
-                        let waypoint_socket_address =
-                            SocketAddr::new(waypoint_ip, waypoint_us.port);
-                        let destination_service = ServiceDescription::try_from(&*s).ok();
+                let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
 
-                        return Ok(Request {
-                            protocol: Protocol::HBONE,
-                            direction: Direction::Inbound,
-                            source: source_workload,
-                            destination: target,
-                            destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
-                            destination_service,
-                            expected_identity: Some(waypoint_workload.identity()),
-                            gateway: waypoint_socket_address,
-                            request_type: RequestType::ToServerWaypoint,
-                            upstream_sans: waypoint_us.sans,
-                        });
-                    }
-                }
+                return Ok(Request {
+                    protocol: Protocol::HBONE,
+                    direction: Direction::Inbound,
+                    source: source_workload,
+                    destination: target,
+                    destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
+                    destination_service: Some(ServiceDescription::from(&*s)),
+                    expected_identity: Some(waypoint_workload.identity()),
+                    gateway: waypoint_socket_address,
+                    request_type: RequestType::ToServerWaypoint,
+                    upstream_sans: waypoint_us.sans,
+                });
             }
         }
 
