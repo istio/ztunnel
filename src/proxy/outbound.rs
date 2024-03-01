@@ -395,7 +395,11 @@ impl OutboundConnection {
             if let Some(wp) = s.waypoint.clone() {
                 let waypoint_vip = match wp.destination {
                     Destination::Address(a) => a.address,
-                    Destination::Hostname(_) => todo!(), // it has a waypoint with an invalid addy... error?
+                    Destination::Hostname(_) => {
+                        return Err(proxy::Error::UnknownWaypoint(
+                            "hostname lookup not supported yet".to_string(),
+                        ));
+                    }
                 };
                 let waypoint_vip = SocketAddr::new(waypoint_vip, wp.hbone_mtls_port);
                 let waypoint_us = self
@@ -436,7 +440,6 @@ impl OutboundConnection {
         }
 
         // TODO: we want a single lock for source and upstream probably...?
-        // TODO(ilrudie) where I put to svc logic probably makes this worse...
         let us = self
             .pi
             .state
