@@ -93,8 +93,8 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.11", default-features = false, features = ["prost", "codegen"] }
 tower = { version = "0.4", features = ["full"] }
 tower-hyper-http-body-compat = { git = "https://github.com/howardjohn/tower-hyper-http-body-compat", branch = "deps/hyper-1.0.0-snapshot1", features = ["server", "http2"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
+tracing = { version = "0.1"}
+tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "json"] }
 url = "2.2"
 x509-parser = { version = "0.15", default-features = false }
 
