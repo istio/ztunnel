@@ -223,24 +223,6 @@ pub mod mock {
             state.fetches.push(id.to_owned());
             Ok(certs)
         }
-
-        pub async fn set_error(&mut self, error: bool) {
-            if error {
-                let mut state = self.state.write().await;
-                state.fetches.push(Identity::Spiffe {
-                    trust_domain: "error".to_string(),
-                    namespace: "error".to_string(),
-                    service_account: "error".to_string(),
-                });
-            } else {
-                let mut state = self.state.write().await;
-                state.fetches.push(Identity::Spiffe {
-                    trust_domain: "success".to_string(),
-                    namespace: "success".to_string(),
-                    service_account: "success".to_string(),
-                });
-            }
-        }
     }
 
     #[async_trait]

@@ -31,9 +31,7 @@ use crate::tls;
 use super::CaClient;
 use super::Error::{self, Spiffe};
 
-use backoff::{backoff::Backoff, ExponentialBackoff};
-
-const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
+const CERT_REFRESH_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub enum Identity {
@@ -234,19 +232,6 @@ impl Worker {
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
         let mut pending: PriorityQueue<Identity, PendingPriority> = PriorityQueue::new();
-        // The backoff strategy used for retrying operations. Sets the initial values for the backoff.
-        // The values are chosen to be reasonable for the CA client to be able to recover from transient
-        // errors.
-        let mut cert_backoff = ExponentialBackoff {
-            initial_interval: Duration::from_millis(500),
-            current_interval: Duration::from_secs(1),
-            // The maximum interval is set to 150 seconds, which is the maximum time the backoff will
-            // wait to retry a cert again.
-            max_interval: CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL,
-            multiplier: 2.0,
-            randomization_factor: 0.2,
-            ..Default::default()
-        };
 
         'main: loop {
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
@@ -312,26 +297,10 @@ impl Worker {
                     }
                     let (state, refresh_at) = match res {
                         Err(err) => {
-                            // Use the next backoff to determine when to retry the fetch and default
-                            // to the constant value if the backoff has been reset. In the case of
-                            // None we'll use the max_interval to retry the fetch. The max_interval
-                            // is set to 150 seconds, otherwise next_backoff will increment the backoff
-                            // value based on the current_interval, the multiplier and the randomization_factor
-                            // defined earlier. In the case that we hit the max_interval, the 150 second wait
-                            // time will continue for a cert until the backoff is reset by a successful fetch.
-                            //
-                            // The exact formula for how next backoff is calculated, per the backoff crate
-                            // documentation (https://docs.rs/backoff/0.4.0/backoff/#enums), is as follows:
-                            //
-                            // randomized interval =
-                            //     retry_interval * (random value in range [1 - randomization_factor, 1 + randomization_factor])
-                            let refresh_at = Instant::now() + cert_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            let refresh_at = Instant::now() + CERT_REFRESH_FAILURE_RETRY_DELAY;
                             (CertState::Unavailable(err), refresh_at)
                         },
                         Ok(certs) => {
-                            // Reset the backoff on success.
-                            // [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
-                            cert_backoff.reset();
                             let certs: tls::WorkloadCertificate = certs; // Type annotation.
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
@@ -1011,25 +980,6 @@ mod tests {
             .await;
 
         assert_matches!(fetch.await.unwrap(), Err(Error::Forgotten));
-        test.tear_down().await;
-    }
-
-    #[tokio::test]
-    async fn test_backoff_resets_on_successful_fetch_after_failure() {
-        let mut test = setup(1);
-        let id = identity("test");
-        let sm = test.secret_manager.clone();
-        let fetch = tokio::spawn(async move { sm.fetch_certificate(&id).await });
-        tokio::time::sleep(SEC).await;
-        // The first fetch will fail, but the backoff should reset after the second fetch.
-        test.caclient.set_error(true).await;
-        tokio::time::sleep(SEC).await;
-        // The second fetch should fail.
-        test.caclient.set_error(true).await;
-        tokio::time::sleep(SEC).await;
-        // The third fetch should succeed.
-        test.caclient.set_error(false).await;
-        assert_matches!(fetch.await.unwrap(), Ok(_));
         test.tear_down().await;
     }
 
