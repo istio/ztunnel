@@ -1,3 +1,4 @@
+use std::env;
 use std::time::Instant;
 
 // Copyright Istio Authors
@@ -18,6 +19,7 @@ use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use thiserror::Error;
 use tracing::{error, info, warn};
+use tracing_subscriber::fmt::format;
 use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
@@ -38,32 +40,49 @@ pub fn setup_logging() {
     tracing_subscriber::registry().with(fmt_layer()).init();
 }
 
-fn fmt_layer() -> impl Layer<Registry> + Sized {
+fn json_fmt() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
+    let format = tracing_subscriber::fmt::format().json().flatten_event(true);
+    let format = tracing_subscriber::fmt::layer()
+        .event_format(format)
+        .fmt_fields(format::JsonFields::default());
+    Box::new(format)
+}
+
+fn plain_fmt() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
     let format = fmt::format();
     let format = if atty::isnt(Stream::Stdout) {
         format.with_ansi(false)
     } else {
         format
     };
-    let (filter_layer, reload_handle) = reload::Layer::new(
-        tracing_subscriber::fmt::layer()
-            .event_format(format)
-            .with_filter(default_env_filter()),
-    );
+    let format = tracing_subscriber::fmt::layer().event_format(format);
+    Box::new(format)
+}
+
+fn fmt_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
+    let format = if env::var("LOG_FORMAT").unwrap_or("plain".to_string()) == "json" {
+        json_fmt()
+    } else {
+        plain_fmt()
+    };
+    let filter = default_env_filter();
+    let (layer, reload) = reload::Layer::new(format.with_filter(filter));
     LOG_HANDLE
-        .set(reload_handle)
+        .set(reload)
         .map_or_else(|_| warn!("setup log handler failed"), |_| {});
-    filter_layer
+    Box::new(layer)
 }
 
 fn default_env_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env()
+    EnvFilter::builder()
+        .with_regex(false)
+        .try_from_env()
         .or_else(|_| EnvFilter::try_new("info"))
         .unwrap()
 }
 
 // a handle to get and set the log level
-type BoxLayer = fmt::Layer<Registry>;
+type BoxLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
 type FilteredLayer = filter::Filtered<BoxLayer, EnvFilter, Registry>;
 type LogHandle = reload::Handle<FilteredLayer, Registry>;
 
