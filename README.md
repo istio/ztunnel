@@ -78,3 +78,45 @@ cargo build
 This manual twiddling of environment vars is not ideal but given that the alternative is prefixing `cargo build` with these envs on every `cargo build/run`, for now we have chosen to hardcode these in `config.toml` - that may be revisited in the future depending on local pain and/or evolving `boring` upstream build flows.
 
 Note that the Dockerfiles used to build these vendored `boringssl` builds may be found in the respective vendor directories, and can serve as a reference for the build environment needed to generate FIPS-compliant ztunnel builds.
+
+## Metrics
+
+Ztunnel exposes a variety of metrics, at varying levels of stability.
+
+**Core** metrics are considered stable APIs
+**Unstable** metrics may be changed. This includes removal, semantic changes, and label changes.
+
+### Core metrics
+
+#### Traffic metrics
+
+- Tcp Bytes Sent (`istio_tcp_sent_bytes_total`): This is a `COUNTER` which measures the size of total bytes sent during response in case of a TCP connection.
+- Tcp Bytes Received (`istio_tcp_received_bytes_total`): This is a `COUNTER` which measures the size of total bytes received during request in case of a TCP connection.
+- Tcp Connections Opened (`istio_tcp_connections_opened_total`): This is a `COUNTER` incremented for every opened connection.
+- Tcp Connections Closed (`istio_tcp_connections_closed_total`): This is a `COUNTER` incremented for every closed connection.
+
+#### Meta metrics
+
+-Istio build information (`istio_build`)
+
+### Unstable metrics
+
+#### DNS metrics
+
+- DNS Requests (`istio_dns_requests_total`)
+- DNS Upstream Requests (`istio_dns_upstream_requests_total`)
+- DNS Upstream Failures (`istio_dns_upstream_failures_total`)
+- DNS Upstream Request Duration (`istio_dns_upstream_request_duration_seconds`)
+- On Demand DNS Requests (`istio_on_demand_dns_total`)
+- On Demand DNS Cache Misses (`istio_on_demand_dns_cache_misses_total`)
+
+#### In-Pod metrics
+
+- Active proxy count (`istio_active_proxy_count_total`)
+- Pending proxy count (`istio_pending_proxy_count_total`)
+- Proxies started (`istio_proxies_started_total`)
+- Proxies stopped (`istio_proxies_stopped_total`)
+
+#### XDS metrics
+
+- XDS Connection terminations (`istio_xds_connection_terminations_total`)

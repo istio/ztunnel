@@ -36,22 +36,22 @@ impl Metrics {
         let m = Self::default();
         registry.register(
             "active_proxy_count",
-            "The total number current workloads with active proxies",
+            "The total number current workloads with active proxies (unstable)",
             m.active_proxy_count.clone(),
         );
         registry.register(
             "pending_proxy_count",
-            "The total number current workloads with pending proxies",
+            "The total number current workloads with pending proxies (unstable)",
             m.pending_proxy_count.clone(),
         );
         registry.register(
             "proxies_started",
-            "The total number of proxies that were started",
+            "The total number of proxies that were started (unstable)",
             m.proxies_started.clone(),
         );
         registry.register(
             "proxies_stopped",
-            "The total number of proxies that were stopped",
+            "The total number of proxies that were stopped (unstable)",
             m.proxies_stopped.clone(),
         );
         m

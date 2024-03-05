@@ -40,8 +40,8 @@ impl Metrics {
     pub fn new(registry: &mut Registry) -> Self {
         let connection_terminations = Family::default();
         registry.register(
-            "connection_terminations",
-            "The total number of completed connections to xds server",
+            "xds_connection_terminations",
+            "The total number of completed connections to xds server (unstable)",
             connection_terminations.clone(),
         );
 

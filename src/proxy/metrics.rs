@@ -317,13 +317,13 @@ impl Metrics {
         let on_demand_dns = Family::default();
         registry.register(
             "on_demand_dns",
-            "The total number of requests that used on-demand DNS",
+            "The total number of requests that used on-demand DNS (unstable)",
             on_demand_dns.clone(),
         );
         let on_demand_dns_cache_misses = Family::default();
         registry.register(
             "on_demand_dns_cache_misses",
-            "The total number of cache misses for requests on-demand DNS",
+            "The total number of cache misses for requests on-demand DNS (unstable)",
             on_demand_dns_cache_misses.clone(),
         );
 
