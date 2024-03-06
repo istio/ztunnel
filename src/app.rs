@@ -296,7 +296,7 @@ fn mock_secret_manager() -> Arc<SecretManager> {
 
 #[cfg(not(feature = "testing"))]
 fn mock_secret_manager() -> Arc<SecretManager> {
-    unimplemented!("fake_ca requires --feature testing")
+    unimplemented!("fake_ca requires --features testing")
 }
 
 #[cfg(not(target_os = "linux"))]
