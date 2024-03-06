@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -290,20 +291,45 @@ async fn test_stats_exist() {
     testapp::with_app(test_config(), |app| async move {
         let metrics = app.metrics().await.unwrap();
         for metric in &[
+            // Meta
             ("istio_build"),
-            ("istio_connection_terminations"),
-            ("istio_tcp_connections_opened"),
-            ("istio_tcp_connections_closed"),
+            // Traffic
+            ("istio_tcp_connections_opened_total"),
+            ("istio_tcp_connections_closed_total"),
+            ("istio_tcp_received_bytes_total"),
+            ("istio_tcp_sent_bytes_total"),
+            // XDS
+            ("istio_xds_connection_terminations_total"),
             // DNS.
-            ("istio_dns_requests"),
-            ("istio_dns_upstream_requests"),
-            ("istio_dns_upstream_failures"),
+            ("istio_dns_requests_total"),
+            ("istio_dns_upstream_requests_total"),
+            ("istio_dns_upstream_failures_total"),
             ("istio_dns_upstream_request_duration_seconds"),
         ] {
             assert!(
                 metrics.query(metric, &Default::default()).is_some(),
                 "expected metric {metric}"
             );
+        }
+        let metric_info = metrics.metric_info();
+        // Note: this is referring to the HELP doc line
+        // This does NOT have the _total suffix
+        // See https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#counter-1
+        let stable_metrics = HashSet::from([
+            "istio_build",
+            "istio_tcp_connections_opened",
+            "istio_tcp_connections_closed",
+            "istio_tcp_received_bytes",
+            "istio_tcp_sent_bytes",
+        ]);
+        {
+            for (name, doc) in metric_info {
+                if stable_metrics.contains(&*name) {
+                    assert!(!doc.contains("unstable"), "{}: {}", name, doc);
+                } else {
+                    assert!(doc.contains("unstable"), "{}: {}", name, doc);
+                }
+            }
         }
     })
     .await;

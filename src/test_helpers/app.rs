@@ -308,6 +308,9 @@ impl ParsedMetrics {
         })
         .unwrap_or(0)
     }
+    pub fn metric_info(&self) -> HashMap<String, String> {
+        self.scrape.docs.clone()
+    }
     pub fn dump(&self) -> String {
         self.scrape
             .samples

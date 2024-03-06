@@ -17,7 +17,7 @@ use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
-use prometheus_client::registry::Registry;
+use prometheus_client::registry::{Registry, Unit};
 use std::time::Duration;
 
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Recorder};
@@ -36,30 +36,31 @@ impl Metrics {
         let requests = Family::default();
         registry.register(
             "dns_requests",
-            "Total number of DNS requests",
+            "Total number of DNS requests (unstable)",
             requests.clone(),
         );
 
         let forwarded_requests = Family::default();
         registry.register(
             "dns_upstream_requests",
-            "Total number of DNS requests forwarded to upstream",
+            "Total number of DNS requests forwarded to upstream (unstable)",
             forwarded_requests.clone(),
         );
 
         let forwarded_failures = Family::default();
         registry.register(
             "dns_upstream_failures",
-            "Total number of DNS requests forwarded to upstream",
+            "Total number of DNS requests forwarded to upstream (unstable)",
             forwarded_failures.clone(),
         );
 
         let forwarded_duration = Family::<DnsLabels, Histogram>::new_with_constructor(|| {
             Histogram::new(vec![0.005f64, 0.001, 0.01, 0.1, 1.0, 5.0].into_iter())
         });
-        registry.register(
-            "dns_upstream_request_duration_seconds",
-            "Total time in seconds Istio takes to get DNS response from upstream",
+        registry.register_with_unit(
+            "dns_upstream_request_duration",
+            "Total time in seconds Istio takes to get DNS response from upstream (unstable)",
+            Unit::Seconds,
             forwarded_duration.clone(),
         );
 
