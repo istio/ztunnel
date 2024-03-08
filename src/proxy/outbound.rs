@@ -426,7 +426,7 @@ impl OutboundConnection {
 
                 return Ok(Request {
                     protocol: Protocol::HBONE,
-                    direction: Direction::Inbound,
+                    direction: Direction::Outbound,
                     source: source_workload,
                     destination: target,
                     destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
