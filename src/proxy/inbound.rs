@@ -33,6 +33,7 @@ use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrumen
 use super::connection_manager::ConnectionManager;
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
+
 use crate::identity::{Identity, SecretManager};
 use crate::metrics::Recorder;
 use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
@@ -79,7 +80,6 @@ impl Inbound {
     }
 
     pub(super) async fn run(self) {
-        // let (tx, rx) = oneshot::channel();
         let acceptor = InboundCertProvider {
             state: self.pi.state.clone(),
             cert_manager: self.pi.cert_manager.clone(),
@@ -94,7 +94,7 @@ impl Inbound {
             let (raw_socket, ssl) = tls.get_ref();
             let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
-            let src_ip = to_canonical(raw_socket.peer_addr().unwrap()).ip();
+            let src = to_canonical(raw_socket.peer_addr().unwrap());
             let pi = self.pi.clone();
             let connection_manager = self.pi.connection_manager.clone();
             let drain = sub_drain.clone();
@@ -102,7 +102,7 @@ impl Inbound {
             tokio::task::spawn(async move {
                 let conn = Connection {
                     src_identity,
-                    src_ip,
+                    src,
                     dst_network: network, // inbound request must be on our network
                     dst,
                 };
@@ -126,7 +126,7 @@ impl Inbound {
                     );
                 // Wait for drain to signal or connection serving to complete
                 match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
-                    // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
+                    // We got a shutdown request. Start graceful shutdown and wait for the pending requests to complete.
                     futures_util::future::Either::Left((_shutdown, mut server)) => {
                         let drain = std::pin::Pin::new(&mut server);
                         drain.graceful_shutdown();
@@ -263,7 +263,7 @@ impl Inbound {
     #[allow(clippy::too_many_arguments)]
     #[instrument(name="inbound", skip_all, fields(
         id=%Self::extract_traceparent(&req),
-        peer_ip=%conn.src_ip,
+        peer_ip=%conn.src.ip(),
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
@@ -347,9 +347,9 @@ impl Inbound {
                     // For other request types, we can only trust the source from the connection.
                     // Since our own waypoint is in the same trust domain though, we can use Forwarded,
                     // which drops the requirement of spoofing IPs from waypoints
-                    super::get_original_src_from_fwded(&req).unwrap_or(rbac_ctx.conn.src_ip)
+                    super::get_original_src_from_fwded(&req).unwrap_or(rbac_ctx.conn.src.ip())
                 } else {
-                    rbac_ctx.conn.src_ip
+                    rbac_ctx.conn.src.ip()
                 };
 
                 let baggage =
@@ -561,13 +561,13 @@ mod test {
         };
         let from_gw_conn = Connection {
             src_identity: Some(gateawy_id),
-            src_ip: IpAddr::V4(mock_default_gateway_ipaddr()),
+            src: SocketAddr::V4(SocketAddrV4::new(mock_default_gateway_ipaddr(), 1234)),
             dst_network: "default".to_string(),
             dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 10), 80)),
         };
         let not_from_gw_conn = Connection {
             src_identity: Some(Identity::default()),
-            src_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            src: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 1234)),
             dst_network: "default".to_string(),
             dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 10), 80)),
         };

@@ -190,7 +190,7 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     info!("accepted connection from {remote_addr} to {host}");
     tokio::spawn(async move {
-        let res = oc.proxy_to(stream, remote_addr.ip(), host, true).await;
+        let res = oc.proxy_to(stream, remote_addr, host, true).await;
         match res {
             Ok(_) => {}
             Err(ref e) => warn!("outbound proxy failed: {}", e),
