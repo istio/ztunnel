@@ -579,3 +579,193 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Inbound;
+
+    use std::{
+        net::SocketAddr,
+        sync::{Arc, RwLock},
+    };
+
+    use crate::{
+        rbac::Connection,
+        state::{
+            self,
+            service::{endpoint_uid, Endpoint, Service},
+            workload::{
+                gatewayaddress::Destination, GatewayAddress, NamespacedHostname, NetworkAddress,
+                Protocol, Workload,
+            },
+            DemandProxyState,
+        },
+        test_helpers,
+    };
+
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use test_case::test_case;
+
+    const CLIENT_POD_IP: &str = "10.0.0.1";
+
+    const SERVER_POD_IP: &str = "10.0.0.2";
+    const SERVER_SVC_IP: &str = "10.10.0.1";
+
+    const WAYPOINT_POD_IP: &str = "10.0.0.3";
+    const WAYPOINT_SVC_IP: &str = "10.10.0.2";
+
+    const HBONE_TARGET_PORT: u16 = 8080;
+
+    // Regular zTunnel workload traffic inbound
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP , Some((SERVER_POD_IP, HBONE_TARGET_PORT)); "to workload no waypoint")]
+    // Waypoint is referenced directly by Pod IP
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to workload with waypoint pod")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to workload with waypoint svc")]
+    // Waypoint is referenced through it's service VIP
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to service with waypoint pod")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to service with waypoint svc")]
+    // Error cases
+    #[test_case(Waypoint::None, SERVER_POD_IP, CLIENT_POD_IP, None; "to server ip mismatch" )]
+    #[tokio::test]
+    async fn test_find_inbound_upstream<'a>(
+        target_waypoint: Waypoint<'a>,
+        connection_dst: &str,
+        hbone_dst: &str,
+        want: Option<(&str, u16)>,
+    ) {
+        let state = test_state(target_waypoint).expect("state setup");
+        let conn = Connection {
+            src_identity: None,
+            src_ip: CLIENT_POD_IP.parse().unwrap(),
+            dst_network: "".to_string(),
+            dst: format!("{connection_dst}:15008").parse().unwrap(),
+        };
+        let res = Inbound::find_inbound_upstream(
+            state,
+            &conn,
+            format!("{hbone_dst}:{HBONE_TARGET_PORT}").parse().unwrap(),
+        )
+        .await;
+
+        match want {
+            Some((ip, port)) => {
+                let got_addr = res.expect("found upstream").0;
+                assert_eq!(got_addr, SocketAddr::new(ip.parse().unwrap(), port))
+            }
+            None => {
+                res.expect_err("did not find upstream");
+            }
+        }
+    }
+
+    fn test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
+        let mut state = state::ProxyState::default();
+
+        let services = vec![
+            ("waypoint", WAYPOINT_SVC_IP, WAYPOINT_POD_IP, Waypoint::None),
+            ("server", SERVER_SVC_IP, SERVER_POD_IP, server_waypoint),
+        ]
+        .into_iter()
+        .map(|(name, vip, ep_ip, waypoint)| {
+            let ep_uid = format!("cluster1//v1/Pod/default/{name}");
+            let ep_addr = Some(NetworkAddress {
+                address: ep_ip.parse().unwrap(),
+                network: "".to_string(),
+            });
+            Service {
+                name: name.to_string(),
+                namespace: "default".to_string(),
+                hostname: format!("{name}.default.svc.cluster.local"),
+                vips: vec![NetworkAddress {
+                    address: vip.parse().unwrap(),
+                    network: "".to_string(),
+                }],
+                ports: std::collections::HashMap::new(),
+                endpoints: vec![(
+                    endpoint_uid(&ep_uid, ep_addr.as_ref()),
+                    Endpoint {
+                        workload_uid: ep_uid,
+                        service: NamespacedHostname {
+                            hostname: format!("{name}.default.svc.cluster.local"),
+                            namespace: "default".to_string(),
+                        },
+                        address: ep_addr,
+                        port: std::collections::HashMap::new(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                subject_alt_names: vec![format!("{name}.default.svc.cluster.local")],
+                waypoint: waypoint.service_attached(),
+            }
+        });
+
+        let workloads = vec![
+            ("waypoint", WAYPOINT_POD_IP, Waypoint::None),
+            ("client", CLIENT_POD_IP, Waypoint::None),
+            ("server", SERVER_POD_IP, server_waypoint),
+        ]
+        .into_iter()
+        .map(|(name, ip, waypoint): (&str, &str, Waypoint)| Workload {
+            workload_ips: vec![ip.parse().unwrap()],
+            waypoint: waypoint.workload_attached(),
+            protocol: Protocol::HBONE,
+            uid: format!("cluster1//v1/Pod/default/{name}"),
+            name: format!("workload-{name}"),
+            namespace: "default".to_string(),
+            service_account: format!("service-account-{name}"),
+            ..test_helpers::test_default_workload()
+        });
+
+        for svc in services {
+            state.services.insert(svc);
+        }
+        for wl in workloads {
+            state.workloads.insert(wl)?;
+        }
+
+        Ok(DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        ))
+    }
+
+    // tells the test if we're using workload-attached or svc-attached waypoints
+    #[derive(Copy, Clone)]
+    enum Waypoint<'a> {
+        None,
+        Service(&'a str),
+        Workload(&'a str),
+    }
+
+    impl<'a> Waypoint<'a> {
+        fn service_attached(&self) -> Option<GatewayAddress> {
+            let Waypoint::Service(s) = self else {
+                return None;
+            };
+            Some(GatewayAddress {
+                destination: Destination::Address(NetworkAddress {
+                    network: "".to_string(),
+                    address: s.parse().expect("a valid waypoint IP"),
+                }),
+                hbone_mtls_port: 15008,
+                hbone_single_tls_port: None,
+            })
+        }
+
+        fn workload_attached(&self) -> Option<GatewayAddress> {
+            let Waypoint::Workload(s) = self else {
+                return None;
+            };
+            Some(GatewayAddress {
+                destination: Destination::Address(NetworkAddress {
+                    network: "".to_string(),
+                    address: s.parse().expect("a valid waypoint IP"),
+                }),
+                hbone_mtls_port: 15008,
+                hbone_single_tls_port: None,
+            })
+        }
+    }
+}

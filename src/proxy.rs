@@ -629,11 +629,7 @@ mod tests {
             workload::gatewayaddress::Destination,
         },
     };
-    use std::{
-        collections::HashMap,
-        net::{Ipv4Addr, SocketAddrV4},
-        sync::RwLock,
-    };
+    use std::{collections::HashMap, net::Ipv4Addr, sync::RwLock};
 
     #[tokio::test]
     async fn check_gateway() {
