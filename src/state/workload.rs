@@ -356,7 +356,7 @@ impl TryFrom<&XdsWorkload> for Workload {
 #[allow(clippy::enum_variant_names)]
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum WaypointError {
-    #[error("failed to find waypoint for workload: {0}")]
+    #[error("failed to find waypoint for: {0}")]
     FindWaypointError(String),
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),

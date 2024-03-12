@@ -52,6 +52,10 @@ impl Service {
             hostname: self.hostname.clone(),
         }
     }
+
+    pub fn contains_endpoint(&self, wl: &Workload, addr: Option<&NetworkAddress>) -> bool {
+        self.endpoints.contains_key(&endpoint_uid(&wl.uid, addr))
+    }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
