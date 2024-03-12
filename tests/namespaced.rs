@@ -491,6 +491,45 @@ mod namespaced {
     }
 
     #[tokio::test]
+    async fn test_svc_waypoint() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!();
+        let waypoint_workload = manager
+            .workload_builder("waypoint", DEFAULT_NODE)
+            .hbone()
+            .register()?;
+        let ip = waypoint_workload.ip();
+        // in this case waypoint is basically just a dummy echo
+        // this means waypoint won't proxy traffic so a server isn't required
+        // we will test that traffic reaches the echo "waypoint"
+        run_hbone_server(waypoint_workload)?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()?;
+        // register a service that has our dummy waypoint's IP as the gateway
+        manager
+            .service_builder("svc")
+            .addresses(vec![NetworkAddress {
+                network: "".to_string(),
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, 80u16)]))
+            .waypoint(ip)
+            .register()?;
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
+
+        run_tcp_to_hbone_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
+
+        let metrics = [
+            (CONNECTIONS_OPENED, 1),
+            (CONNECTIONS_CLOSED, 1),
+            (BYTES_RECV, REQ_SIZE),
+            (BYTES_SENT, HBONE_REQ_SIZE),
+        ];
+        verify_metrics(&zt, &metrics, &source_labels()).await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_waypoint_hairpin() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!();
         let waypoint = manager.register_waypoint("waypoint", REMOTE_NODE)?;

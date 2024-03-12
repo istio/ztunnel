@@ -186,6 +186,7 @@ pub fn mock_default_service() -> Service {
         ports,
         endpoints,
         subject_alt_names: vec![],
+        waypoint: None,
     }
 }
 
@@ -288,6 +289,7 @@ fn test_custom_svc(
             },
         )]),
         subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".to_string()],
+        waypoint: None,
     })
 }
 

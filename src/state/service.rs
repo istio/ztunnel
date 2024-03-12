@@ -22,7 +22,8 @@ use tracing::trace;
 use xds::istio::workload::Service as XdsService;
 
 use crate::state::workload::{
-    byte_to_ip, network_addr, NamespacedHostname, NetworkAddress, Workload, WorkloadError,
+    byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
+    WorkloadError,
 };
 use crate::xds;
 use crate::xds::istio::workload::PortList;
@@ -41,6 +42,7 @@ pub struct Service {
     pub endpoints: HashMap<String, Endpoint>,
     #[serde(default)]
     pub subject_alt_names: Vec<String>,
+    pub waypoint: Option<GatewayAddress>,
 }
 
 impl Service {
@@ -106,6 +108,10 @@ impl TryFrom<&XdsService> for Service {
             );
             nw_addrs.push(network_address);
         }
+        let waypoint = match &s.waypoint {
+            Some(w) => Some(GatewayAddress::try_from(w)?),
+            None => None,
+        };
         let svc = Service {
             name: s.name.to_string(),
             namespace: s.namespace.to_string(),
@@ -117,6 +123,7 @@ impl TryFrom<&XdsService> for Service {
                 .into(),
             endpoints: Default::default(), // Will be populated once inserted into the store.
             subject_alt_names: s.subject_alt_names.clone(),
+            waypoint,
         };
         Ok(svc)
     }
