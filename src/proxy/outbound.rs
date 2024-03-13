@@ -470,12 +470,11 @@ impl OutboundConnection {
             )
             .await?;
 
-        // TODO src_id may not be enough; should also check addresses/uid
-        let src_id = Some(source_workload.identity());
         let from_waypoint = proxy::check_from_waypoint(
             self.pi.state.clone(),
             &mutable_us.workload,
-            src_id.as_ref(),
+            Some(&source_workload.identity()),
+            &downstream_network_addr.address,
         )
         .await;
 

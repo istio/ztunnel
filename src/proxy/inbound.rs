@@ -312,6 +312,7 @@ impl Inbound {
                     pi.state.clone(),
                     &upstream,
                     conn.src_identity.as_ref(),
+                    &conn.src_ip,
                 )
                 .await;
                 let from_gateway = proxy::check_from_network_gateway(
@@ -504,11 +505,16 @@ impl Inbound {
             Some(match target_waypoint {
                 Address::Service(svc) => {
                     if !svc.contains_endpoint(&conn_wl, Some(connection_dst)) {
+                        // target points to a different waypoint
                         return Some(None);
                     }
                     Some((conn_wl, vec![*svc]))
                 }
                 Address::Workload(wl) => {
+                    if !wl.workload_ips.contains(&conn.dst.ip()) {
+                        // target points to a different waypoint
+                        return Some(None);
+                    }
                     let svc = state.services.get_by_workload(&wl);
                     Some((*wl, svc))
                 }

@@ -11,9 +11,6 @@ endif
 test:
 	RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
 
-test.root:
-	CARGO_TARGET=`rustc -vV | sed -n 's|host: ||p' | tr [:lower:] [:upper:]| tr - _`_RUNNER='sudo -E' RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
-
 build:
 	cargo build $(FEATURES)
 
