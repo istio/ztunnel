@@ -470,44 +470,55 @@ impl OutboundConnection {
             )
             .await?;
 
-        // For case upstream server has enabled waypoint
-        match self
-            .pi
-            .state
-            .fetch_waypoint(&mutable_us.workload, workload_ip)
-            .await
-        {
-            Ok(None) => {} // workload doesn't have a waypoint; this is fine
-            Ok(Some(waypoint_us)) => {
-                let waypoint_workload = waypoint_us.workload;
-                let waypoint_ip = self
-                    .pi
-                    .state
-                    .load_balance(
-                        &waypoint_workload,
-                        &source_workload,
-                        self.pi.metrics.clone(),
-                    )
-                    .await?;
-                let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
-                return Ok(Request {
-                    // Always use HBONE here
-                    protocol: Protocol::HBONE,
-                    source: source_workload,
-                    // Use the original VIP, not translated
-                    destination: target,
-                    destination_workload: Some(mutable_us.workload),
-                    destination_service: mutable_us.destination_service.clone(),
-                    expected_identity: Some(waypoint_workload.identity()),
-                    gateway: wp_socket_addr,
-                    // Let the client remote know we are on the inbound path.
-                    direction: Direction::Inbound,
-                    request_type: RequestType::ToServerWaypoint,
-                    upstream_sans: mutable_us.sans,
-                });
+        let from_waypoint = proxy::check_from_waypoint(
+            self.pi.state.clone(),
+            &mutable_us.workload,
+            Some(&source_workload.identity()),
+            &downstream_network_addr.address,
+        )
+        .await;
+
+        // Don't traverse waypoint twice if the source is sandwich-outbound.
+        if !from_waypoint {
+            // For case upstream server has enabled waypoint
+            match self
+                .pi
+                .state
+                .fetch_waypoint(&mutable_us.workload, workload_ip)
+                .await
+            {
+                Ok(None) => {} // workload doesn't have a waypoint; this is fine
+                Ok(Some(waypoint_us)) => {
+                    let waypoint_workload = waypoint_us.workload;
+                    let waypoint_ip = self
+                        .pi
+                        .state
+                        .load_balance(
+                            &waypoint_workload,
+                            &source_workload,
+                            self.pi.metrics.clone(),
+                        )
+                        .await?;
+                    let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
+                    return Ok(Request {
+                        // Always use HBONE here
+                        protocol: Protocol::HBONE,
+                        source: source_workload,
+                        // Use the original VIP, not translated
+                        destination: target,
+                        destination_workload: Some(mutable_us.workload),
+                        destination_service: mutable_us.destination_service.clone(),
+                        expected_identity: Some(waypoint_workload.identity()),
+                        gateway: wp_socket_addr,
+                        // Let the client remote know we are on the inbound path.
+                        direction: Direction::Inbound,
+                        request_type: RequestType::ToServerWaypoint,
+                        upstream_sans: mutable_us.sans,
+                    });
+                }
+                // we expected the workload to have a waypoint, but could not find one
+                Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
             }
-            // we expected the workload to have a waypoint, but could not find one
-            Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
         }
 
         let us = match set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port) {
@@ -666,6 +677,7 @@ mod tests {
             namespace: "ns".to_string(),
             addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 10])],
             node: "local-node".to_string(),
+            service_account: "waypoint-sa".to_string(),
             ..Default::default()
         };
         let state = match xds {

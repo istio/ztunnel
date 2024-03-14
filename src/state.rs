@@ -631,7 +631,7 @@ impl DemandProxyState {
         self.state.read().unwrap().find_hostname(hostname)
     }
 
-    async fn fetch_on_demand(&self, key: String) {
+    pub async fn fetch_on_demand(&self, key: String) {
         if let Some(demand) = &self.demand {
             debug!(%key, "sending demand request");
             demand
