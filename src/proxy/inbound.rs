@@ -35,16 +35,17 @@ use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::identity::{Identity, SecretManager};
 use crate::metrics::Recorder;
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone};
+use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone, Proxy};
 use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::address::Address;
+use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{proxy, tls};
 
-use crate::state::workload::{NetworkAddress, Workload};
+use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::tls::TlsError;
 
@@ -96,7 +97,7 @@ impl Inbound {
             let (raw_socket, ssl) = tls.get_ref();
             let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
-            let src_ip = to_canonical(raw_socket.peer_addr().unwrap()).ip();
+            let src = to_canonical(raw_socket.peer_addr().unwrap());
             let pi = self.pi.clone();
             let connection_manager = self.pi.connection_manager.clone();
             let drain = sub_drain.clone();
@@ -104,7 +105,7 @@ impl Inbound {
             tokio::task::spawn(async move {
                 let conn = Connection {
                     src_identity,
-                    src_ip,
+                    src,
                     dst_network: network, // inbound request must be on our network
                     dst,
                 };
@@ -241,6 +242,31 @@ impl Inbound {
                                     error!(dur=?start.elapsed(), "No upgrade {e}");
                                 }
                             },
+                            Proxy(req, (src, dst), src_id) => match hyper::upgrade::on(req).await {
+                                Ok(mut upgraded) => {
+                                     if let Err(e) =
+                                        super::write_proxy_protocol(&mut stream, (src, dst), src_id)
+                                            .instrument(trace_span!("proxy protocol"))
+                                            .await
+                                    {
+                                        error!(dur=?start.elapsed(), "write proxy protocol: {}", e);
+                                    } else if let Err(e) = super::copy_hbone(
+                                        &mut upgraded,
+                                        &mut stream,
+                                        &metrics,
+                                        transferred_bytes,
+                                    )
+                                    .instrument(trace_span!("hbone server"))
+                                    .await
+                                    {
+                                        error!(dur=?start.elapsed(), "hbone server copy: {}", e);
+                                    }
+                                },
+                                Err(e) => {
+                                    // Not sure if this can even happen
+                                    error!(dur=?start.elapsed(), "No upgrade {e}");
+                                }
+                            }
                         }
                         connection_manager.release(&rbac_ctx).await;
                     })
@@ -265,7 +291,7 @@ impl Inbound {
     #[allow(clippy::too_many_arguments)]
     #[instrument(name="inbound", skip_all, fields(
         id=%Self::extract_traceparent(&req),
-        peer_ip=%conn.src_ip,
+        peer=%conn.src,
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
@@ -290,6 +316,7 @@ impl Inbound {
                     }
                 };
 
+                // Determine the next hop.
                 let (upstream_addr, upstream, upstream_service) =
                     match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
                         Ok(res) => res,
@@ -302,7 +329,20 @@ impl Inbound {
                         }
                     };
 
-                // Orig has 15008, swap with the real port
+                // Application tunnel may override the port.
+                let (upstream_addr, inbound_protocol) = match upstream.application_tunnel.clone() {
+                    Some(workload::ApplicationTunnel {
+                        port: Some(port),
+                        protocol,
+                    }) => (SocketAddr::new(upstream_addr.ip(), port), protocol),
+                    Some(workload::ApplicationTunnel {
+                        port: None,
+                        protocol,
+                    }) => (upstream_addr, protocol),
+                    None => (upstream_addr, workload::application_tunnel::Protocol::NONE),
+                };
+
+                // Connection has 15008, swap with the real port
                 let conn = Connection {
                     dst: upstream_addr,
                     ..conn
@@ -312,7 +352,7 @@ impl Inbound {
                     pi.state.clone(),
                     &upstream,
                     conn.src_identity.as_ref(),
-                    &conn.src_ip,
+                    &conn.src.ip(),
                 )
                 .await;
                 let from_gateway = proxy::check_from_network_gateway(
@@ -356,9 +396,9 @@ impl Inbound {
                     // For other request types, we can only trust the source from the connection.
                     // Since our own waypoint is in the same trust domain though, we can use Forwarded,
                     // which drops the requirement of spoofing IPs from waypoints
-                    super::get_original_src_from_fwded(&req).unwrap_or(rbac_ctx.conn.src_ip)
+                    super::get_original_src_from_fwded(&req).unwrap_or(rbac_ctx.conn.src.ip())
                 } else {
-                    rbac_ctx.conn.src_ip
+                    rbac_ctx.conn.src.ip()
                 };
 
                 let baggage =
@@ -394,8 +434,18 @@ impl Inbound {
                     connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                     destination_service: ds,
                 };
+
+                let request_type = match inbound_protocol {
+                    AppProtocol::PROXY => Proxy(
+                        req,
+                        (rbac_ctx.conn.src, rbac_ctx.conn.dst),
+                        rbac_ctx.conn.src_identity.clone(),
+                    ),
+                    _ => Hbone(req),
+                };
+
                 let status_code = match Self::handle_inbound(
-                    Hbone(req),
+                    request_type,
                     enable_original_source.then_some(source_ip),
                     upstream_addr,
                     pi.metrics,
@@ -551,6 +601,12 @@ pub(super) enum InboundConnect {
     DirectPath(TcpStream),
     /// Hbone is a standard HBONE request coming from the network.
     Hbone(Request<Incoming>),
+    // PROXY adds source and dest headers and source identity before forwarding bytes.
+    Proxy(
+        Request<Incoming>,
+        (SocketAddr, SocketAddr),
+        Option<Identity>,
+    ),
 }
 
 #[derive(Clone)]
@@ -641,7 +697,7 @@ mod tests {
         let state = test_state(target_waypoint).expect("state setup");
         let conn = Connection {
             src_identity: None,
-            src_ip: CLIENT_POD_IP.parse().unwrap(),
+            src: format!("{CLIENT_POD_IP:1234}").parse().unwrap(),
             dst_network: "".to_string(),
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };

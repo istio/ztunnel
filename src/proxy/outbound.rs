@@ -128,13 +128,13 @@ impl OutboundConnection {
     async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
         let peer = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
         let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
-        self.proxy_to(stream, peer.ip(), orig_dst_addr, false).await
+        self.proxy_to(stream, peer, orig_dst_addr, false).await
     }
 
     pub async fn proxy_to(
         &mut self,
         mut stream: TcpStream,
-        remote_addr: IpAddr,
+        remote_addr: SocketAddr,
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
     ) -> Result<(), Error> {
@@ -143,7 +143,7 @@ impl OutboundConnection {
         {
             return Err(Error::SelfCall);
         }
-        let req = self.build_request(remote_addr, orig_dst_addr).await?;
+        let req = self.build_request(remote_addr.ip(), orig_dst_addr).await?;
         debug!(
             "request from {} to {} via {} type {:#?} dir {:#?}",
             req.source.name, orig_dst_addr, req.gateway, req.request_type, req.direction
@@ -186,7 +186,7 @@ impl OutboundConnection {
             };
             let conn = rbac::Connection {
                 src_identity: Some(req.source.identity()),
-                src_ip: remote_addr,
+                src: remote_addr,
                 dst_network: req.source.network.clone(), // since this is node local, it's the same network
                 dst: req.destination,
             };
@@ -279,7 +279,7 @@ impl OutboundConnection {
                         .cfg
                         .enable_original_source
                         .unwrap_or_default()
-                        .then_some(remote_addr);
+                        .then_some(remote_addr.ip());
                     let id = &req.source.identity();
                     let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                     let connector = cert.outbound_connector(dst_identity)?;

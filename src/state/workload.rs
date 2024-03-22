@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
 use tracing::{error, trace};
+use xds::istio::workload::ApplicationTunnel as XdsApplicationTunnel;
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
 
@@ -86,6 +87,33 @@ pub mod gatewayaddress {
     pub enum Destination {
         Address(NetworkAddress),
         Hostname(NamespacedHostname),
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationTunnel {
+    pub protocol: application_tunnel::Protocol,
+    pub port: Option<u16>,
+}
+
+pub mod application_tunnel {
+    use crate::xds::istio::workload::application_tunnel::Protocol as XdsProtocol;
+
+    #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(untagged)]
+    pub enum Protocol {
+        NONE,
+        PROXY,
+    }
+
+    impl From<XdsProtocol> for Protocol {
+        fn from(value: XdsProtocol) -> Self {
+            match value {
+                XdsProtocol::None => Protocol::NONE,
+                XdsProtocol::Proxy => Protocol::PROXY,
+            }
+        }
     }
 }
 
@@ -145,6 +173,9 @@ pub struct Workload {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub native_tunnel: bool,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub application_tunnel: Option<ApplicationTunnel>,
+
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub authorization_policies: Vec<String>,
@@ -234,6 +265,23 @@ impl From<HashMap<u16, u16>> for PortList {
     }
 }
 
+impl TryFrom<&XdsApplicationTunnel> for ApplicationTunnel {
+    type Error = WorkloadError;
+
+    fn try_from(value: &XdsApplicationTunnel) -> Result<Self, Self::Error> {
+        Ok(ApplicationTunnel {
+            protocol: application_tunnel::Protocol::from(
+                xds::istio::workload::application_tunnel::Protocol::try_from(value.protocol)?,
+            ),
+            port: if value.port == 0 {
+                None
+            } else {
+                Some(value.port as u16)
+            },
+        })
+    }
+}
+
 impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
     type Error = WorkloadError;
 
@@ -290,6 +338,11 @@ impl TryFrom<&XdsWorkload> for Workload {
             None => None,
         };
 
+        let application_tunnel = match &resource.application_tunnel {
+            Some(ap) => Some(ApplicationTunnel::try_from(ap)?),
+            None => None,
+        };
+
         let addresses = resource
             .addresses
             .iter()
@@ -339,6 +392,8 @@ impl TryFrom<&XdsWorkload> for Workload {
             )?),
 
             native_tunnel: resource.native_tunnel,
+            application_tunnel,
+
             authorization_policies: resource.authorization_policies,
 
             cluster_id: {

@@ -68,6 +68,7 @@ libc = "0.2"
 log = "0.4"
 nix = { version = "0.27", features = ["socket", "sched", "uio", "fs", "ioctl", "user"] }
 once_cell = "1.19"
+ppp = "2.2"
 pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion"] }
 priority-queue = "1.4"
 prometheus-client = { version = "0.22" }

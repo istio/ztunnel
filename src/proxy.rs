@@ -308,6 +308,30 @@ pub async fn copy_hbone(
     Ok(())
 }
 
+const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
+
+pub async fn write_proxy_protocol<T>(
+    stream: &mut TcpStream,
+    addresses: T,
+    src_id: Option<Identity>,
+) -> io::Result<()>
+where
+    T: Into<ppp::v2::Addresses>,
+{
+    use ppp::v2::{Builder, Command, Protocol, Version};
+    use tokio::io::AsyncWriteExt;
+
+    let mut builder =
+        Builder::with_addresses(Version::Two | Command::Proxy, Protocol::Stream, addresses);
+
+    if let Some(id) = src_id {
+        builder = builder.write_tlv(PROXY_PROTOCOL_AUTHORITY_TLV, id.to_string().as_bytes())?;
+    }
+
+    let header = builder.build()?;
+    stream.write_all(&header).await
+}
+
 /// Represents a traceparent, as defined by https://www.w3.org/TR/trace-context/
 #[derive(Eq, PartialEq)]
 pub struct TraceParent {
@@ -716,6 +740,7 @@ mod tests {
 
             authorization_policies: Vec::new(),
             native_tunnel: false,
+            application_tunnel: None,
         }
     }
 
@@ -743,6 +768,7 @@ mod tests {
 
             authorization_policies: Vec::new(),
             native_tunnel: false,
+            application_tunnel: None,
         }
     }
 
