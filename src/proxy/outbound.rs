@@ -380,7 +380,8 @@ impl OutboundConnection {
         };
 
         // If this is to-service traffic check for a service waypoint
-        if let Some(Address::Service(s)) = self
+        // Capture result of whether or not this is svc addressed
+        let svc_addressed = if let Some(Address::Service(s)) = self
             .pi
             .state
             .fetch_destination(&Destination::Address(NetworkAddress {
@@ -435,7 +436,12 @@ impl OutboundConnection {
                     upstream_sans: waypoint_us.sans,
                 });
             }
-        }
+            // this was service addressed but we did not find a waypoint
+            true
+        } else {
+            // this wasn't service addressed
+            false
+        };
 
         // TODO: we want a single lock for source and upstream probably...?
         let us = self
@@ -479,7 +485,8 @@ impl OutboundConnection {
         .await;
 
         // Don't traverse waypoint twice if the source is sandwich-outbound.
-        if !from_waypoint {
+        // Don't traverse waypoint if traffic was addressed to a service which did not have a waypoint
+        if !from_waypoint || !svc_addressed {
             // For case upstream server has enabled waypoint
             match self
                 .pi

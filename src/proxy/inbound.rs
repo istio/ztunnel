@@ -343,6 +343,8 @@ impl Inbound {
                         .body(Empty::new())
                         .unwrap());
                 }
+                // This check should be removed in favor of an L4 policy check
+                // We should express as policy whether or not traffic is allowed to bypass a waypoint
                 if has_waypoint && !from_waypoint {
                     info!(%rbac_ctx.conn, "bypassed waypoint");
                     connection_manager.release(&rbac_ctx).await;
