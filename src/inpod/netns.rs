@@ -117,9 +117,8 @@ mod tests {
 
     #[test]
     fn test_run_works() {
-        if !crate::test_helpers::can_run_privilged_test() {
-            eprintln!("This test requires root; skipping");
-            return;
+        if !crate::test_helpers::can_run_privileged_test() {
+            panic!("This test requires root - rerun with TEST_MODE=root; skipping");
         }
 
         // start with new netns to not impact the current netns
