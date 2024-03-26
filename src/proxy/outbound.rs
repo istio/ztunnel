@@ -383,10 +383,10 @@ impl OutboundConnection {
         if let Some(Address::Service(s)) = self
             .pi
             .state
-            .fetch_destination(&Destination::Address(NetworkAddress {
+            .fetch_address(&NetworkAddress {
                 network: self.pi.cfg.network.clone(),
                 address: target.ip(),
-            }))
+            })
             .await
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally
