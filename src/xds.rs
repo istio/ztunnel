@@ -155,6 +155,7 @@ impl ProxyStateUpdateMutator {
     fn maybe_remove(&self, state: &mut ProxyState, xds_name: &String) {
         self.remove_internal(state, xds_name, false);
     }
+
     fn remove_internal(&self, state: &mut ProxyState, xds_name: &String, expected: bool) {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(xds_name) {
@@ -169,6 +170,17 @@ impl ProxyStateUpdateMutator {
                 state
                     .services
                     .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, None));
+            }
+
+            // if expected is true we are removing a workload, we should forget it
+            // if expected is false this is an update, no need to forget on update
+            if expected
+                // if the svc account still exists on the local node we should not forget
+                && !state
+                    .workloads
+                    .svc_account_match_on_node(&prev, &state.node)
+            {
+                self.cert_fetcher.forget(&prev);
             }
 
             // We removed a workload, no reason to attempt to remove a service with the same name
