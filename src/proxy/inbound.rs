@@ -279,7 +279,7 @@ impl Inbound {
             &Method::CONNECT => {
                 let uri = req.uri();
                 info!("got {} request to {}", req.method(), uri);
-                let hbone_addr: SocketAddr = match uri.to_string().as_str().parse() {
+                let target: SocketAddr = match uri.to_string().as_str().parse() {
                     Ok(parsed) => parsed,
                     Err(e) => {
                         info!("Sending 400, {}", e);
@@ -291,7 +291,7 @@ impl Inbound {
                 };
 
                 let (upstream_addr, upstream, upstream_service) =
-                    match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
+                    match Self::find_inbound_upstream(pi.state.clone(), &conn, target).await {
                         Ok(res) => res,
                         Err(e) => {
                             info!(%conn, "Sending 400, {}", e);
@@ -308,6 +308,7 @@ impl Inbound {
                     ..conn
                 };
                 let has_waypoint = upstream.waypoint.is_some();
+                // TODO: we already know this from find_inbound_upstream
                 let from_waypoint = proxy::check_from_waypoint(
                     pi.state.clone(),
                     &upstream,
@@ -431,33 +432,33 @@ impl Inbound {
     async fn find_inbound_upstream(
         state: DemandProxyState,
         conn: &Connection,
-        hbone_addr: SocketAddr,
+        target: SocketAddr,
     ) -> Result<(SocketAddr, Workload, Vec<Service>), Error> {
         let dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
-            address: hbone_addr.ip(),
+            address: target.ip(),
         };
 
         // If the IPs match, this is not sandwich.
-        if conn.dst.ip() == hbone_addr.ip() {
+        if conn.dst.ip() == target.ip() {
             let Some((us_wl, us_svc)) = state.fetch_workload_services(dst).await else {
-                return Err(Error::UnknownDestination(hbone_addr.ip()));
+                return Err(Error::UnknownDestination(target.ip()));
             };
-            return Ok((hbone_addr, us_wl, us_svc));
+            return Ok((target, us_wl, us_svc));
         }
 
-        if let Some((us_wl, us_svc)) = Self::find_sandwich_upstream(state, conn, hbone_addr).await {
-            let next_hop = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
+        if let Some((us_wl, us_svc)) = Self::find_sandwich_upstream(state, conn, target).await {
+            let next_hop = SocketAddr::new(conn.dst.ip(), target.port());
             return Ok((next_hop, us_wl, us_svc));
         }
 
-        Err(Error::IPMismatch(conn.dst.ip(), hbone_addr.ip()))
+        Err(Error::IPMismatch(conn.dst.ip(), target.ip()))
     }
 
     async fn find_sandwich_upstream(
         state: DemandProxyState,
         conn: &Connection,
-        hbone_addr: SocketAddr,
+        target: SocketAddr,
     ) -> Option<(Workload, Vec<Service>)> {
         let connection_dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
@@ -465,7 +466,7 @@ impl Inbound {
         };
         let hbone_dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
-            address: hbone_addr.ip(),
+            address: target.ip(),
         };
 
         // Outer option tells us whether or not we can retry
@@ -478,10 +479,10 @@ impl Inbound {
             let hbone_target = state.find_address(hbone_dst);
 
             // We can only sandwich a Workload waypoint
-            let conn_wl = state.workloads.find_address(connection_dst);
+            let waypoint_wl = state.workloads.find_address(connection_dst);
 
             // on-demand fetch then retry
-            let (Some(hbone_target), Some(conn_wl)) = (hbone_target, conn_wl) else {
+            let (Some(hbone_target), Some(conn_wl)) = (hbone_target, waypoint_wl) else {
                 return None;
             };
 
@@ -529,7 +530,7 @@ impl Inbound {
             state.fetch_on_demand(connection_dst.to_string()),
             state.fetch_on_demand(hbone_dst.to_string()),
         ];
-        lookup().flatten()
+        lookup()?
     }
 }
 
