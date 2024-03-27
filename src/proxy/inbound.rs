@@ -45,7 +45,7 @@ use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{proxy, tls};
 
-use crate::state::workload::{self, NetworkAddress, Workload};
+use crate::state::workload::{self, ApplicationTunnel, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::tls::TlsError;
 
@@ -316,8 +316,8 @@ impl Inbound {
                     }
                 };
 
-                // Determine the next hop.
-                let (upstream_addr, upstream, upstream_service) =
+                // Determine the next hop (the actual ip/port we'll send to; hbone target may differ)
+                let (upstream_addr, upstream, upstream_service, app_protocol) =
                     match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
                         Ok(res) => res,
                         Err(e) => {
@@ -328,19 +328,6 @@ impl Inbound {
                                 .unwrap());
                         }
                     };
-
-                // Application tunnel may override the port.
-                let (upstream_addr, inbound_protocol) = match upstream.application_tunnel.clone() {
-                    Some(workload::ApplicationTunnel {
-                        port: Some(port),
-                        protocol,
-                    }) => (SocketAddr::new(upstream_addr.ip(), port), protocol),
-                    Some(workload::ApplicationTunnel {
-                        port: None,
-                        protocol,
-                    }) => (upstream_addr, protocol),
-                    None => (upstream_addr, workload::application_tunnel::Protocol::NONE),
-                };
 
                 // Connection has 15008, swap with the real port
                 let conn = Connection {
@@ -435,7 +422,7 @@ impl Inbound {
                     destination_service: ds,
                 };
 
-                let request_type = match inbound_protocol {
+                let request_type = match app_protocol {
                     AppProtocol::PROXY => Proxy(
                         req,
                         (rbac_ctx.conn.src, rbac_ctx.conn.dst),
@@ -482,7 +469,15 @@ impl Inbound {
         state: DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Result<(SocketAddr, Workload, Vec<Service>), Error> {
+    ) -> Result<
+        (
+            SocketAddr,
+            Workload,
+            Vec<Service>,
+            workload::application_tunnel::Protocol,
+        ),
+        Error,
+    > {
         let dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
             address: hbone_addr.ip(),
@@ -493,12 +488,39 @@ impl Inbound {
             let Some((us_wl, us_svc)) = state.fetch_workload_services(dst).await else {
                 return Err(Error::UnknownDestination(hbone_addr.ip()));
             };
-            return Ok((hbone_addr, us_wl, us_svc));
+            return Ok((
+                hbone_addr,
+                us_wl,
+                us_svc,
+                workload::application_tunnel::Protocol::NONE,
+            ));
         }
 
-        if let Some((us_wl, us_svc)) = Self::find_sandwich_upstream(state, conn, hbone_addr).await {
-            let next_hop = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
-            return Ok((next_hop, us_wl, us_svc));
+        if let Some((us_wl, us_svc, app_tunnel)) =
+            Self::find_sandwich_upstream(state, conn, hbone_addr).await
+        {
+            // Application tunnel may override the port.
+            let (upstream_port, inbound_protocol) = match app_tunnel.clone() {
+                // port override
+                Some(workload::ApplicationTunnel {
+                    port: Some(port),
+                    protocol,
+                }) => (port, protocol),
+                // just protocol
+                Some(workload::ApplicationTunnel {
+                    port: None,
+                    protocol,
+                }) => (hbone_addr.port(), protocol),
+                // no app tunnel
+                None => (
+                    hbone_addr.port(),
+                    workload::application_tunnel::Protocol::NONE,
+                ),
+            };
+
+            let next_hop = SocketAddr::new(conn.dst.ip(), upstream_port);
+
+            return Ok((next_hop, us_wl, us_svc, inbound_protocol));
         }
 
         Err(Error::IPMismatch(conn.dst.ip(), hbone_addr.ip()))
@@ -508,7 +530,7 @@ impl Inbound {
         state: DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Option<(Workload, Vec<Service>)> {
+    ) -> Option<(Workload, Vec<Service>, Option<ApplicationTunnel>)> {
         let connection_dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
             address: conn.dst.ip(),
@@ -520,7 +542,7 @@ impl Inbound {
 
         // Outer option tells us whether or not we can retry
         // Some(None) means we have enough information to decide this isn't sandwich
-        let lookup = || -> Option<Option<(Workload, Vec<Service>)>> {
+        let lookup = || {
             let state = state.read();
 
             // TODO Allow HBONE address to be a hostname. We have to respect rules about
@@ -544,21 +566,20 @@ impl Inbound {
             };
 
             // Resolve the reference from our HBONE target
-            let target_waypoint = state.find_destination(&target_waypoint.destination);
-
-            let Some(target_waypoint) = target_waypoint else {
+            let Some(target_waypoint_addr) = state.find_destination(&target_waypoint.destination)
+            else {
                 // don't need to fetch/retry this; we found conn_wl and this must match conn_wl.
                 return Some(None);
             };
 
             // Validate that the HBONE target references the Waypoint we're connecting to
-            Some(match target_waypoint {
+            Some(match target_waypoint_addr {
                 Address::Service(svc) => {
                     if !svc.contains_endpoint(&conn_wl, Some(connection_dst)) {
                         // target points to a different waypoint
                         return Some(None);
                     }
-                    Some((conn_wl, vec![*svc]))
+                    Some((conn_wl, vec![*svc], target_waypoint.application_tunnel))
                 }
                 Address::Workload(wl) => {
                     if !wl.workload_ips.contains(&conn.dst.ip()) {
@@ -566,7 +587,7 @@ impl Inbound {
                         return Some(None);
                     }
                     let svc = state.services.get_by_workload(&wl);
-                    Some((*wl, svc))
+                    Some((*wl, svc, target_waypoint.application_tunnel))
                 }
             })
         };
@@ -656,8 +677,9 @@ mod tests {
             self,
             service::{endpoint_uid, Endpoint, Service},
             workload::{
-                gatewayaddress::Destination, GatewayAddress, NamespacedHostname, NetworkAddress,
-                Protocol, Workload,
+                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
+                ApplicationTunnel, GatewayAddress, NamespacedHostname, NetworkAddress, Protocol,
+                Workload,
             },
             DemandProxyState,
         },
@@ -675,18 +697,30 @@ mod tests {
     const WAYPOINT_POD_IP: &str = "10.0.0.3";
     const WAYPOINT_SVC_IP: &str = "10.10.0.2";
 
-    const HBONE_TARGET_PORT: u16 = 8080;
+    const PROXY_PORT: u16 = 15088;
+    const TARGET_PORT: u16 = 8080;
+
+    const APP_TUNNEL_PROXY: Option<ApplicationTunnel> = Some(ApplicationTunnel {
+        port: Some(PROXY_PORT),
+        protocol: AppProtocol::PROXY,
+    });
 
     // Regular zTunnel workload traffic inbound
-    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP , Some((SERVER_POD_IP, HBONE_TARGET_PORT)); "to workload no waypoint")]
-    // Waypoint is referenced directly by Pod IP
-    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to workload with waypoint pod")]
-    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to workload with waypoint svc")]
-    // Waypoint is referenced through it's service VIP
-    #[test_case(Waypoint::Service(WAYPOINT_POD_IP), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to service with waypoint pod")]
-    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, HBONE_TARGET_PORT)); "to service with waypoint svc")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT)); "to workload no waypoint")]
+    // to workload traffic
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by pod")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by vip")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, PROXY_PORT)); "to workload with app tunnel")]
+    // to service traffic
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to service with waypoint referenced by pod")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to service with waypint referenced by vip")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, PROXY_PORT)); "to service with app tunnel")]
+    // Override port via app_protocol
     // Error cases
     #[test_case(Waypoint::None, SERVER_POD_IP, CLIENT_POD_IP, None; "to server ip mismatch" )]
+    #[test_case(Waypoint::None, WAYPOINT_POD_IP, CLIENT_POD_IP, None; "to waypoint without attachment" )]
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
     #[tokio::test]
     async fn test_find_inbound_upstream<'a>(
         target_waypoint: Waypoint<'a>,
@@ -694,17 +728,17 @@ mod tests {
         hbone_dst: &str,
         want: Option<(&str, u16)>,
     ) {
-        let state = test_state(target_waypoint).expect("state setup");
+        let state = setup_test_state(target_waypoint).expect("state setup");
         let conn = Connection {
             src_identity: None,
-            src: format!("{CLIENT_POD_IP:1234}").parse().unwrap(),
+            src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
             dst_network: "".to_string(),
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };
         let res = Inbound::find_inbound_upstream(
             state,
             &conn,
-            format!("{hbone_dst}:{HBONE_TARGET_PORT}").parse().unwrap(),
+            format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap(),
         )
         .await;
 
@@ -719,12 +753,17 @@ mod tests {
         }
     }
 
-    fn test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
+    fn setup_test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
         let mut state = state::ProxyState::default();
 
         let services = vec![
             ("waypoint", WAYPOINT_SVC_IP, WAYPOINT_POD_IP, Waypoint::None),
-            ("server", SERVER_SVC_IP, SERVER_POD_IP, server_waypoint),
+            (
+                "server",
+                SERVER_SVC_IP,
+                SERVER_POD_IP,
+                server_waypoint.clone(),
+            ),
         ]
         .into_iter()
         .map(|(name, vip, ep_ip, waypoint)| {
@@ -794,39 +833,41 @@ mod tests {
     }
 
     // tells the test if we're using workload-attached or svc-attached waypoints
-    #[derive(Copy, Clone)]
+    #[derive(Clone)]
     enum Waypoint<'a> {
         None,
-        Service(&'a str),
-        Workload(&'a str),
+        Service(&'a str, Option<ApplicationTunnel>),
+        Workload(&'a str, Option<ApplicationTunnel>),
     }
 
     impl<'a> Waypoint<'a> {
         fn service_attached(&self) -> Option<GatewayAddress> {
-            let Waypoint::Service(s) = self else {
+            let Waypoint::Service(ip, application_tunnel) = self.clone() else {
                 return None;
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
                     network: "".to_string(),
-                    address: s.parse().expect("a valid waypoint IP"),
+                    address: ip.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
                 hbone_single_tls_port: None,
+                application_tunnel,
             })
         }
 
         fn workload_attached(&self) -> Option<GatewayAddress> {
-            let Waypoint::Workload(s) = self else {
+            let Waypoint::Workload(ip, application_tunnel) = self.clone() else {
                 return None;
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
                     network: "".to_string(),
-                    address: s.parse().expect("a valid waypoint IP"),
+                    address: ip.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
                 hbone_single_tls_port: None,
+                application_tunnel,
             })
         }
     }

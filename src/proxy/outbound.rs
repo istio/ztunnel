@@ -866,6 +866,7 @@ mod tests {
                     )),
                     hbone_mtls_port: 15008,
                     hbone_single_tls_port: 15003,
+                    application_tunnel: None,
                 }),
                 ..Default::default()
             }),
@@ -896,6 +897,7 @@ mod tests {
                     )),
                     hbone_mtls_port: 15008,
                     hbone_single_tls_port: 15003,
+                    application_tunnel: None,
                 }),
                 ..Default::default()
             }),
@@ -933,6 +935,7 @@ mod tests {
                     )),
                     hbone_mtls_port: 15008,
                     hbone_single_tls_port: 15003,
+                    application_tunnel: None,
                 }),
                 ..Default::default()
             }),

@@ -78,6 +78,8 @@ pub struct GatewayAddress {
     pub destination: gatewayaddress::Destination,
     pub hbone_mtls_port: u16,
     pub hbone_single_tls_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub application_tunnel: Option<ApplicationTunnel>,
 }
 
 pub mod gatewayaddress {
@@ -173,9 +175,6 @@ pub struct Workload {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub native_tunnel: bool,
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub application_tunnel: Option<ApplicationTunnel>,
-
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub authorization_policies: Vec<String>,
@@ -286,6 +285,10 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
     type Error = WorkloadError;
 
     fn try_from(value: &xds::istio::workload::GatewayAddress) -> Result<Self, Self::Error> {
+        let application_tunnel = match &value.application_tunnel {
+            Some(ap) => Some(ApplicationTunnel::try_from(ap)?),
+            None => None,
+        };
         let gw_addr: GatewayAddress = match &value.destination {
             Some(a) => match a {
                 xds::istio::workload::gateway_address::Destination::Address(addr) => {
@@ -300,6 +303,7 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                         } else {
                             Some(value.hbone_single_tls_port as u16)
                         },
+                        application_tunnel,
                     }
                 }
                 xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
@@ -314,6 +318,7 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                         } else {
                             Some(value.hbone_single_tls_port as u16)
                         },
+                        application_tunnel,
                     }
                 }
             },
@@ -335,11 +340,6 @@ impl TryFrom<&XdsWorkload> for Workload {
 
         let network_gw = match &resource.network_gateway {
             Some(w) => Some(GatewayAddress::try_from(w)?),
-            None => None,
-        };
-
-        let application_tunnel = match &resource.application_tunnel {
-            Some(ap) => Some(ApplicationTunnel::try_from(ap)?),
             None => None,
         };
 
@@ -392,7 +392,6 @@ impl TryFrom<&XdsWorkload> for Workload {
             )?),
 
             native_tunnel: resource.native_tunnel,
-            application_tunnel,
 
             authorization_policies: resource.authorization_policies,
 
