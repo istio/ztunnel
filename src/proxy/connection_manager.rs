@@ -187,7 +187,7 @@ mod tests {
         let rbac_ctx1 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(192, 168, 0, 1).into(), 80),
                 dst_network: "".to_string(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),
@@ -243,7 +243,7 @@ mod tests {
         let rbac_ctx2 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3)),
+                src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(192, 168, 0, 3).into(), 80),
                 dst_network: "".to_string(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),
@@ -300,7 +300,7 @@ mod tests {
         let conn1 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(192, 168, 0, 1).into(), 80),
                 dst_network: "".to_string(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),
@@ -313,7 +313,7 @@ mod tests {
         let conn2 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3)),
+                src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(192, 168, 0, 3).into(), 80),
                 dst_network: "".to_string(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),
@@ -422,7 +422,7 @@ mod tests {
         let conn1 = crate::state::ProxyRbacContext {
             conn: Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(192, 168, 0, 1).into(), 80),
                 dst_network: "".to_string(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),

@@ -644,6 +644,7 @@ mod tests {
                 })),
                 hbone_mtls_port: 15008,
                 hbone_single_tls_port: 15003,
+                application_tunnel: None,
             }),
             network_gateway: Some(XdsGatewayAddress {
                 destination: Some(XdsDestination::Address(XdsNetworkAddress {
@@ -652,6 +653,7 @@ mod tests {
                 })),
                 hbone_mtls_port: 15008,
                 hbone_single_tls_port: 15003,
+                application_tunnel: None,
             }),
             tunnel_protocol: Default::default(),
             uid: "uid".to_string(),

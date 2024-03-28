@@ -238,6 +238,7 @@ impl<'a> TestServiceBuilder<'a> {
             }),
             hbone_mtls_port: 15008,
             hbone_single_tls_port: Some(15003),
+            application_tunnel: None,
         });
         self
     }
@@ -305,6 +306,7 @@ impl<'a> TestWorkloadBuilder<'a> {
             }),
             hbone_mtls_port: 15008,
             hbone_single_tls_port: Some(15003),
+            application_tunnel: None,
         });
         self
     }
