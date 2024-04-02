@@ -408,14 +408,12 @@ async fn handle_jemalloc_pprof_heapgen(_req: Request<Incoming>) -> Response<Full
             .body("jemalloc not enabled".into())
             .unwrap()
     } else {
-        let pprof = prof_ctl
-            .dump_pprof()
-            .map_err(|err| {
-                Response::builder()
+        let pprof = prof_ctl.dump_pprof().map_err(|err| {
+            Response::builder()
                 .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
                 .body(err)
                 .unwrap()
-            });
+        });
         Response::builder()
             .status(hyper::StatusCode::OK)
             .body(Bytes::from(pprof.unwrap()).into())
