@@ -366,7 +366,6 @@ pub fn local_xds_config(
                     }),
                     hbone_mtls_port: 15008,
                     hbone_single_tls_port: Some(15003),
-                    application_tunnel: None,
                 }),
                 ..test_default_workload()
             },

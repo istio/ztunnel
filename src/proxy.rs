@@ -740,6 +740,7 @@ mod tests {
 
             authorization_policies: Vec::new(),
             native_tunnel: false,
+            application_tunnel: None,
         }
     }
 
@@ -767,6 +768,7 @@ mod tests {
 
             authorization_policies: Vec::new(),
             native_tunnel: false,
+            application_tunnel: None,
         }
     }
 
@@ -815,7 +817,6 @@ mod tests {
             }),
             hbone_mtls_port: 15008,
             hbone_single_tls_port: Some(15003),
-            application_tunnel: None,
         }
     }
 
@@ -827,7 +828,6 @@ mod tests {
             }),
             hbone_mtls_port: 15008,
             hbone_single_tls_port: Some(15003),
-            application_tunnel: None,
         }
     }
 
