@@ -508,7 +508,7 @@ mod tests {
                 namespace: "a".to_string(),
                 service_account: "account".to_string(),
             }),
-            src: "127.0.0.1:1234".parse.unwrap(),
+            src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));

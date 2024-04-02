@@ -176,7 +176,6 @@ pub struct Workload {
     #[serde(default, skip_serializing_if = "is_default")]
     pub application_tunnel: Option<ApplicationTunnel>,
 
-
     #[serde(default, skip_serializing_if = "is_default")]
     pub authorization_policies: Vec<String>,
 

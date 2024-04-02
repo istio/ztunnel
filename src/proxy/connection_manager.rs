@@ -189,7 +189,6 @@ mod tests {
                 src_identity: None,
                 src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(192, 168, 0, 1).into(), 80),
                 dst_network: "".to_string(),
-                dst_network: "".to_string(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),
                     8080,
