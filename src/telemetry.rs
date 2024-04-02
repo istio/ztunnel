@@ -1,4 +1,6 @@
 use std::env;
+use std::fmt::Debug;
+
 use std::time::Instant;
 
 // Copyright Istio Authors
@@ -14,15 +16,18 @@ use std::time::Instant;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use atty::Stream;
+
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{error, field, info, warn, Event, Subscriber};
 
-use tracing_subscriber::fmt::format;
-use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Layer, Registry};
+use tracing_subscriber::fmt::format::Writer;
+
+use tracing_subscriber::fmt::{format, FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{filter, filter::EnvFilter, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
@@ -41,13 +46,9 @@ fn json_fmt() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
 }
 
 fn plain_fmt() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
-    let format = fmt::format();
-    let format = if atty::isnt(Stream::Stdout) {
-        format.with_ansi(false)
-    } else {
-        format
-    };
-    let format = tracing_subscriber::fmt::layer().event_format(format);
+    let format = tracing_subscriber::fmt::layer()
+        .event_format(IstioFormat())
+        .fmt_fields(IstioFormat());
     Box::new(format)
 }
 
@@ -125,4 +126,111 @@ pub enum Error {
     Reload(#[from] reload::Error),
     #[error("logging is not initialized")]
     Uninitialized,
+}
+
+// IstioFormat encodes logs in the "standard" Istio formatting used in the rest of the code
+struct IstioFormat();
+
+struct Visitor<'writer> {
+    res: std::fmt::Result,
+    is_empty: bool,
+    writer: Writer<'writer>,
+}
+
+impl<'writer> Visitor<'writer> {
+    fn write_padded(&mut self, value: &impl Debug) -> std::fmt::Result {
+        let padding = if self.is_empty {
+            self.is_empty = false;
+            ""
+        } else {
+            " "
+        };
+        write!(self.writer, "{}{:?}", padding, value)
+    }
+}
+
+impl field::Visit for Visitor<'_> {
+    fn record_str(&mut self, field: &field::Field, value: &str) {
+        if self.res.is_err() {
+            return;
+        }
+
+        self.record_debug(field, &value)
+    }
+
+    fn record_debug(&mut self, field: &field::Field, val: &dyn std::fmt::Debug) {
+        self.res = match field.name() {
+            // For the message, write out the message and a tab to separate the future fields
+            "message" => write!(self.writer, "{:?}\t", val),
+            // For the rest, k=v.
+            _ => self.write_padded(&format_args!("{}={:?}", field.name(), val)),
+        }
+    }
+}
+
+impl<'writer> FormatFields<'writer> for IstioFormat {
+    fn format_fields<R: tracing_subscriber::field::RecordFields>(
+        &self,
+        writer: Writer<'writer>,
+        fields: R,
+    ) -> std::fmt::Result {
+        let mut visitor = Visitor {
+            writer,
+            res: Ok(()),
+            is_empty: true,
+        };
+        fields.record(&mut visitor);
+        visitor.res
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for IstioFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        use tracing_log::NormalizeEvent;
+        use tracing_subscriber::fmt::time::FormatTime;
+        use tracing_subscriber::fmt::time::SystemTime;
+        let normalized_meta = event.normalized_metadata();
+        SystemTime.format_time(&mut writer)?;
+        let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
+        write!(
+            writer,
+            "\t{}\t",
+            meta.level().to_string().to_ascii_lowercase()
+        )?;
+
+        let target = meta.target();
+        // No need to prefix everything
+        let target = target.strip_prefix("ztunnel::").unwrap_or(target);
+        write!(writer, "{}", target)?;
+
+        // Write out span fields. Istio logging outside of Rust doesn't really have this concept
+        if let Some(scope) = ctx.event_scope() {
+            for span in scope.from_root() {
+                write!(writer, ":{}", span.metadata().name())?;
+                let ext = span.extensions();
+                if let Some(fields) = &ext.get::<FormattedFields<N>>() {
+                    if !fields.is_empty() {
+                        write!(writer, "{{{}}}", fields)?;
+                    }
+                }
+            }
+        };
+        // Insert tab only if there is fields
+        if event.fields().any(|_| true) {
+            write!(writer, "\t")?;
+        }
+
+        ctx.format_fields(writer.by_ref(), event)?;
+
+        writeln!(writer)
+    }
 }

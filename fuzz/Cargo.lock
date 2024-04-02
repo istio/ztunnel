@@ -3250,6 +3250,7 @@ dependencies = [
  "tower",
  "tower-hyper-http-body-compat",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "url",
  "x509-parser",

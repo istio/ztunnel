@@ -153,6 +153,12 @@ pub async fn build_with_cert(
             }),
         })?;
     } else {
+        tracing::info_span!("my-span", foo = "bar", "other key" = 2).in_scope(|| {
+            tracing::info!("in span");
+            tracing::info_span!("my-inner-span", foo = "barz").in_scope(|| {
+                tracing::info!("in inner span");
+            });
+        });
         tracing::info!("proxy mode enabled");
         let proxies = proxy_gen.new_proxies().await?;
         match proxies.proxy {
