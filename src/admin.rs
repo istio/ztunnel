@@ -37,9 +37,6 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::time;
 use tracing::{error, info, warn};
 
-#[cfg(feature = "jemalloc")]
-use tokio::fs::File;
-
 pub trait AdminHandler: Sync + Send {
     fn path(&self) -> &'static str;
     fn description(&self) -> &'static str;
@@ -397,10 +394,6 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
 
 #[cfg(feature = "jemalloc")]
 async fn handle_jemalloc_pprof_heapgen(_req: Request<Incoming>) -> Response<Full<Bytes>> {
-    const FILE_PATH: &str = "/tmp/jemalloc-pprof-heap.prof";
-    // make sure the file exists/is writable before handing to gprof
-    File::create(FILE_PATH).await.unwrap();
-
     let mut prof_ctl = jemalloc_pprof::PROF_CTL.as_ref().unwrap().lock().await;
     if !prof_ctl.activated() {
         Response::builder()
