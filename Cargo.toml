@@ -6,7 +6,7 @@ rust-version = "1.65"
 
 [features]
 default = ["tls-ring"]
-gperftools = ["dep:gperftools"]
+jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 console = ["dep:console-subscriber"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only", "ztunnel/tls-boring"]
 tls-ring = ["dep:ring", "rustls/ring", "dep:rcgen", "ztunnel/tls-ring"]
@@ -48,7 +48,8 @@ duration-str = "0.7"
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-gperftools = { version = "0.2", features = ["heap"], optional = true }
+jemalloc_pprof = { version = "0.1.0", optional = true }
+tikv-jemallocator = { version = "0.5.4", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 hashbrown = "0.14"
 hickory-client = "0.24"
 hickory-proto = "0.24"
