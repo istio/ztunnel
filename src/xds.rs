@@ -140,7 +140,7 @@ impl ProxyStateUpdateMutator {
         self.cert_fetcher.prefetch_cert(&workload);
 
         // Lock and upstate the stores.
-        state.workloads.insert(workload)?;
+        state.workloads.insert(workload);
         while let Some(endpoint) = endpoints.pop() {
             state.services.insert_endpoint(endpoint);
         }
@@ -396,7 +396,7 @@ impl LocalClient {
         let num_policies = r.policies.len();
         for wl in r.workloads {
             trace!("inserting local workload {}", &wl.workload.uid);
-            state.workloads.insert(wl.workload.clone())?;
+            state.workloads.insert(wl.workload.clone());
             self.cert_fetcher.prefetch_cert(&wl.workload);
 
             let services: HashMap<String, PortList> = wl

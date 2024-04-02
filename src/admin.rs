@@ -447,6 +447,8 @@ mod tests {
     use crate::xds::istio::security::StringMatch as XdsStringMatch;
     use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
     use crate::xds::istio::workload::GatewayAddress as XdsGatewayAddress;
+    use crate::xds::istio::workload::LoadBalancing as XdsLoadBalancing;
+    use crate::xds::istio::workload::Locality as XdsLocality;
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;
@@ -637,6 +639,11 @@ mod tests {
                     }],
                 },
             )]),
+            locality: Some(XdsLocality {
+                region: "region".to_string(),
+                zone: "zone".to_string(),
+                subzone: "subezone".to_string(),
+            }),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
@@ -654,7 +661,10 @@ mod tests {
             }],
             subject_alt_names: vec!["SAN1".to_string(), "SAN2".to_string()],
             waypoint: None,
-            // ..Default::default() // intentionally don't default. we want all fields populated
+            load_balancing: Some(XdsLoadBalancing {
+                routing_preference: vec![1, 2],
+                mode: 1,
+            }), // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
         let auth = XdsAuthorization {

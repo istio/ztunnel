@@ -16,7 +16,7 @@ use crate::identity::SecretManager;
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
-use crate::state::service::ServiceStore;
+use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerTargets, ServiceStore};
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
@@ -206,7 +206,12 @@ impl ProxyState {
         }
     }
 
-    pub fn find_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
+    pub fn find_upstream(
+        &self,
+        network: &str,
+        source_workload: &Workload,
+        addr: SocketAddr,
+    ) -> Option<Upstream> {
         if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
                 debug!(
@@ -218,7 +223,7 @@ impl ProxyState {
             };
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
-            let Some((_, ep)) = svc.endpoints.iter().choose(&mut rand::thread_rng()) else {
+            let Some(ep) = self.load_balance(source_workload, &svc) else {
                 debug!("VIP {} has no healthy endpoints", addr);
                 return None;
             };
@@ -249,6 +254,60 @@ impl ProxyState {
             return Some(us);
         }
         None
+    }
+
+    fn load_balance<'a>(&self, src: &Workload, svc: &'a Service) -> Option<&'a Endpoint> {
+        match svc.load_balancer {
+            None => svc.endpoints.values().choose(&mut rand::thread_rng()),
+            Some(ref lb) => {
+                let ranks = svc
+                    .endpoints
+                    .iter()
+                    .filter_map(|(_, ep)| {
+                        let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
+                            debug!("failed to fetch workload for {}", ep.workload_uid);
+                            return None;
+                        };
+                        // Load balancer will define N targets we want to match
+                        // Consider [network, region, zone]
+                        // Rank = 3 means we match all of them
+                        // Rank = 2 means network and region match
+                        // Rank = 0 means none match
+                        let mut rank = 0;
+                        for target in &lb.targets {
+                            let matches = match target {
+                                LoadBalancerTargets::Region => {
+                                    src.locality.region == wl.locality.region
+                                }
+                                LoadBalancerTargets::Zone => src.locality.zone == wl.locality.zone,
+                                LoadBalancerTargets::Subzone => {
+                                    src.locality.subzone == wl.locality.subzone
+                                }
+                                LoadBalancerTargets::Node => src.node == wl.node,
+                                LoadBalancerTargets::Cluster => src.cluster_id == wl.cluster_id,
+                                LoadBalancerTargets::Network => src.network == wl.network,
+                            };
+                            if matches {
+                                rank += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        // Doesn't match all, and required to. Do not select this endpoint
+                        if lb.mode == LoadBalancerMode::Strict && rank != lb.targets.len() {
+                            return None;
+                        }
+                        Some((rank, ep))
+                    })
+                    .collect::<Vec<_>>();
+                let max = *ranks.iter().map(|(rank, _ep)| rank).max()?;
+                ranks
+                    .into_iter()
+                    .filter(|(rank, _ep)| *rank == max)
+                    .map(|(_, ep)| ep)
+                    .choose(&mut rand::thread_rng())
+            }
+        }
     }
 }
 
@@ -355,7 +414,7 @@ impl DemandProxyState {
     }
 
     // this should only be called once per request (for the workload itself and potentially its waypoint)
-    pub async fn load_balance(
+    pub async fn pick_workload_destination(
         &self,
         dst_workload: &Workload,
         src_workload: &Workload,
@@ -551,9 +610,17 @@ impl DemandProxyState {
         self.state.read().unwrap().workloads.find_uid(uid)
     }
 
-    pub async fn fetch_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
+    pub async fn fetch_upstream(
+        &self,
+        network: &str,
+        source_workload: &Workload,
+        addr: SocketAddr,
+    ) -> Option<Upstream> {
         self.fetch_address(&network_addr(network, addr.ip())).await;
-        self.state.read().unwrap().find_upstream(network, addr)
+        self.state
+            .read()
+            .unwrap()
+            .find_upstream(network, source_workload, addr)
     }
 
     pub async fn fetch_waypoint(
@@ -575,8 +642,8 @@ impl DemandProxyState {
             }
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
-        match self
-            .fetch_upstream(&wp_nw_addr.network, wp_socket_addr)
+        match self // THIS IS THE WRONG WORKLOAD
+            .fetch_upstream(&wp_nw_addr.network, wl, wp_socket_addr)
             .await
         {
             Some(mut upstream) => {
@@ -734,14 +801,14 @@ mod tests {
 
     use super::*;
     use crate::test_helpers;
+    use crate::test_helpers::TEST_SERVICE_NAMESPACE;
 
     #[tokio::test]
     async fn lookup_address() {
         let mut state = ProxyState::default();
         state
             .workloads
-            .insert(test_helpers::test_default_workload())
-            .unwrap();
+            .insert(test_helpers::test_default_workload());
         state.services.insert(test_helpers::mock_default_service());
 
         let mock_proxy_state = DemandProxyState::new(
@@ -815,7 +882,7 @@ mod tests {
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
             ..test_helpers::test_default_workload()
         };
-        state.workloads.insert(wl).unwrap();
+        state.workloads.insert(wl);
 
         let mock_proxy_state = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
@@ -873,5 +940,40 @@ mod tests {
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
             assert!(!mock_proxy_state.assert_rbac(&ctx).await);
         }
+    }
+
+    #[tokio::test]
+    async fn test_load_balance() {
+        let mut state = ProxyState::default();
+        let wl = Workload {
+            name: "test".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "defaultacct".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
+            ..test_helpers::test_default_workload()
+        };
+        let svc = Service {
+            endpoints: HashMap::from([(
+                "cluster1//v1/Pod/default/test".to_string(),
+                Endpoint {
+                    workload_uid: "cluster1//v1/Pod/default/test".to_string(),
+                    service: NamespacedHostname {
+                        namespace: TEST_SERVICE_NAMESPACE.to_string(),
+                        hostname: "example.com".to_string(),
+                    },
+                    address: Some(NetworkAddress {
+                        address: "192.168.0.2".parse().unwrap(),
+                        network: "".to_string(),
+                    }),
+                    port: HashMap::from([(80u16, 80u16)]),
+                },
+            )]),
+            ..test_helpers::mock_default_service()
+        };
+        state.workloads.insert(wl);
+        state.services.insert(svc);
+
+        // state.load_balance()
     }
 }

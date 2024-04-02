@@ -661,9 +661,7 @@ mod tests {
         let w = mock_default_gateway_workload();
         let s = mock_default_gateway_service();
         let mut state = state::ProxyState::default();
-        if let Err(err) = state.workloads.insert(w) {
-            panic!("received error inserting workload: {}", err);
-        }
+        state.workloads.insert(w);
         state.services.insert(s);
         let state = state::DemandProxyState::new(
             Arc::new(RwLock::new(state)),
@@ -741,6 +739,7 @@ mod tests {
             authorization_policies: Vec::new(),
             native_tunnel: false,
             application_tunnel: None,
+            locality: Default::default(),
         }
     }
 
@@ -769,6 +768,7 @@ mod tests {
             authorization_policies: Vec::new(),
             native_tunnel: false,
             application_tunnel: None,
+            locality: Default::default(),
         }
     }
 
@@ -806,6 +806,7 @@ mod tests {
             endpoints,
             subject_alt_names: vec![],
             waypoint: None,
+            load_balancer: None,
         }
     }
 
