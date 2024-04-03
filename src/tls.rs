@@ -29,7 +29,7 @@ pub use crate::tls::workload::*;
 use hyper::http::uri::InvalidUri;
 use rustls::server::VerifierBuilderError;
 
-#[derive(thiserror::Error, Debug, Clone)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("invalid root certificate: {0}")]
     InvalidRootCert(String),
@@ -53,6 +53,10 @@ pub enum Error {
     #[cfg(feature = "tls-boring")]
     SslError(#[from] boring::error::ErrorStack),
 
+    #[error("invalid certificate generation: {0:?}")]
+    #[cfg(feature = "tls-ring")]
+    RcgenError(Arc<rcgen::Error>),
+
     #[error("failed to build server verifier: {0}")]
     ServerVerifierBuilderError(#[from] VerifierBuilderError),
 }
@@ -60,5 +64,12 @@ pub enum Error {
 impl From<InvalidUri> for Error {
     fn from(err: InvalidUri) -> Self {
         Error::InvalidUri(Arc::new(err))
+    }
+}
+
+#[cfg(feature = "tls-ring")]
+impl From<rcgen::Error> for Error {
+    fn from(err: rcgen::Error) -> Self {
+        Error::RcgenError(Arc::new(err))
     }
 }

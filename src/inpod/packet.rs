@@ -34,7 +34,7 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     let addr = UnixAddr::new(path)?;
 
     nixbind(socket.as_raw_fd(), &addr)?;
-    listen(&socket, 1024)?;
+    listen(&socket, nix::sys::socket::Backlog::new(1024)?)?;
 
     let std_socket = std::os::unix::net::UnixListener::from(socket);
     UnixListener::from_std(std_socket)

@@ -112,7 +112,6 @@ pub mod tests {
         // intermediary cert is used..
         let roots: Vec<String> = std::str::from_utf8(TEST_CERT)
             .unwrap()
-            .to_string()
             .split("-----END CERTIFICATE-----")
             .filter(|x| !x.trim().is_empty())
             .map(|x| format!("{}{}", x, "-----END CERTIFICATE-----"))
