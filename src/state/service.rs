@@ -93,7 +93,7 @@ impl TryFrom<XdsScope> for LoadBalancerScopes {
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoadBalancer {
-    pub targets: Vec<LoadBalancerScopes>,
+    pub routing_preferences: Vec<LoadBalancerScopes>,
     pub mode: LoadBalancerMode,
 }
 
@@ -170,7 +170,7 @@ impl TryFrom<&XdsService> for Service {
         };
         let lb = if let Some(lb) = &s.load_balancing {
             Some(LoadBalancer {
-                targets: lb
+                routing_preferences: lb
                     .routing_preference
                     .iter()
                     .map(|r| {
