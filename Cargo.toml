@@ -87,7 +87,7 @@ serde_yaml = "0.9"
 socket2 = { version = "0.5", features = ["all"] }
 textnonce = { version = "1.0" }
 thiserror = "1.0"
-tls-listener = { version = "0.9" }
+tls-listener = { version = "0.10" }
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-stream = { version = "0.1", features = ["net"] }
