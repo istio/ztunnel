@@ -36,7 +36,6 @@ use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
 use crate::state::service::ServiceDescription;
-use crate::state::set_gateway_address;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::{hyper_util, proxy, rbac, socket};
@@ -534,41 +533,39 @@ impl OutboundConnection {
         };
 
         // TODO: we want a single lock for source and upstream probably...?
-        let us = self
+        let us = match self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, &source_workload, target)
-            .await;
-        if us.is_none() {
-            // For case no upstream found, passthrough it
-            return Ok(Request {
-                protocol: Protocol::TCP,
-                source: source_workload,
-                destination: target,
-                destination_workload: None,
-                destination_service: None,
-                expected_identity: None,
-                gateway: target,
-                direction: Direction::Outbound,
-                request_type: RequestType::Passthrough,
-                upstream_sans: vec![],
-            });
-        }
+            .fetch_upstream(&source_workload.network, target)
+            .await
+        {
+            Some(us) => us,
+            None => {
+                // For case no upstream found, passthrough it
+                return Ok(Request {
+                    protocol: Protocol::TCP,
+                    source: source_workload,
+                    destination: target,
+                    destination_workload: None,
+                    destination_service: None,
+                    expected_identity: None,
+                    gateway: target,
+                    direction: Direction::Outbound,
+                    request_type: RequestType::Passthrough,
+                    upstream_sans: vec![],
+                });
+            }
+        };
 
-        let mut mutable_us = us.expect("option is verified above");
-        let workload_ip = self
-            .pi
-            .state
-            .pick_workload_destination(
-                &mutable_us.workload,
-                &source_workload,
-                self.pi.metrics.clone(),
-            )
-            .await?;
+        let workload_ip = self.pi.state.pick_workload_destination(
+            &us.workload,
+            &source_workload,
+            self.pi.metrics.clone(),
+        );
 
         let from_waypoint = proxy::check_from_waypoint(
             self.pi.state.clone(),
-            &mutable_us.workload,
+            &us.workload,
             Some(&source_workload.identity()),
             &downstream_network_addr.address,
         )
@@ -576,12 +573,12 @@ impl OutboundConnection {
 
         // Don't traverse waypoint twice if the source is sandwich-outbound.
         // Don't traverse waypoint if traffic was addressed to a service which did not have a waypoint
-        if !from_waypoint || !svc_addressed {
+        if !from_waypoint && !svc_addressed {
             // For case upstream server has enabled waypoint
             match self
                 .pi
                 .state
-                .fetch_waypoint(&mutable_us.workload, &source_workload, workload_ip)
+                .fetch_waypoint(&us.workload, &source_workload, workload_ip)
                 .await
             {
                 Ok(None) => {} // workload doesn't have a waypoint; this is fine
@@ -603,14 +600,14 @@ impl OutboundConnection {
                         source: source_workload,
                         // Use the original VIP, not translated
                         destination: target,
-                        destination_workload: Some(mutable_us.workload),
-                        destination_service: mutable_us.destination_service.clone(),
+                        destination_workload: Some(us.workload),
+                        destination_service: us.destination_service.clone(),
                         expected_identity: Some(waypoint_workload.identity()),
                         gateway: wp_socket_addr,
                         // Let the client remote know we are on the inbound path.
                         direction: Direction::Inbound,
                         request_type: RequestType::ToServerWaypoint,
-                        upstream_sans: mutable_us.sans,
+                        upstream_sans: us.sans,
                     });
                 }
                 // we expected the workload to have a waypoint, but could not find one
@@ -618,17 +615,12 @@ impl OutboundConnection {
             }
         }
 
-        let us = match set_gateway_address(&mut mutable_us, workload_ip, self.pi.hbone_port) {
-            Ok(_) => mutable_us,
-            Err(e) => {
-                debug!(%mutable_us.workload.workload_name, "failed to set gateway address for upstream: {}", e);
-                return Err(Error::UnknownWaypoint(mutable_us.workload.workload_name));
-            }
+        // only change the port if we're sending HBONE
+        let gw_addr = match us.workload.protocol {
+            Protocol::HBONE => SocketAddr::from((workload_ip, self.pi.hbone_port)),
+            Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
         };
 
-        if us.workload.gateway_address.is_none() {
-            return Err(Error::NoGatewayAddress(Box::new(us.workload)));
-        }
         // For case source client and upstream server are on the same node.
         // This is disabled in inpod mode, as each pod processes connections in its own netns.
         // so if we use direct local here, the destination pod will see the connection as inbound
@@ -651,13 +643,7 @@ impl OutboundConnection {
                 destination_workload: Some(us.workload.clone()),
                 destination_service: us.destination_service.clone(),
                 expected_identity: Some(us.workload.identity()),
-                gateway: SocketAddr::from((
-                    us.workload
-                        .gateway_address
-                        .expect("gateway address confirmed")
-                        .ip(),
-                    self.pi.hbone_port,
-                )),
+                gateway: SocketAddr::from((gw_addr.ip(), self.pi.hbone_port)),
                 direction: Direction::Outbound,
                 // Sending to a node on the same node (ourselves).
                 // In the future this could be optimized to avoid a full network traversal.
@@ -673,10 +659,7 @@ impl OutboundConnection {
             destination_workload: Some(us.workload.clone()),
             destination_service: us.destination_service.clone(),
             expected_identity: Some(us.workload.identity()),
-            gateway: us
-                .workload
-                .gateway_address
-                .expect("gateway address confirmed"),
+            gateway: gw_addr,
             direction: Direction::Outbound,
             request_type: RequestType::Direct,
             upstream_sans: us.sans,
