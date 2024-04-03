@@ -37,15 +37,6 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::time;
 use tracing::{error, info, warn};
 
-#[cfg(feature = "gperftools")]
-use gperftools::heap_profiler::HEAP_PROFILER;
-#[cfg(feature = "gperftools")]
-use gperftools::profiler::PROFILER;
-#[cfg(feature = "gperftools")]
-use tokio::fs::File;
-#[cfg(feature = "gperftools")]
-use tokio::io::AsyncReadExt;
-
 pub trait AdminHandler: Sync + Send {
     fn path(&self) -> &'static str;
     fn description(&self) -> &'static str;
@@ -132,8 +123,7 @@ impl Service {
         self.s.spawn(|state, req| async move {
             match req.uri().path() {
                 "/debug/pprof/profile" => Ok(handle_pprof(req).await),
-                "/debug/gprof/profile" => Ok(handle_gprof(req).await),
-                "/debug/gprof/heap" => Ok(handle_gprof_heap(req).await),
+                "/debug/pprof/heap" => Ok(handle_jemalloc_pprof_heapgen(req).await),
                 "/quitquitquit" => Ok(handle_server_shutdown(
                     state.shutdown_trigger.clone(),
                     req,
@@ -181,12 +171,8 @@ async fn handle_dashboard(
             "build profile using the pprof profiler (if supported)",
         ),
         (
-            "debug/gprof/profile",
-            "build profile using the gperftools profiler (if supported)",
-        ),
-        (
-            "debug/gprof/heap",
-            "collect heap profiling data (if supported)",
+            "debug/pprof/heap",
+            "collect heap profiling data (if supported, requires jmalloc)",
         ),
         ("quitquitquit", "shut down the server"),
         ("config_dump", "dump the current Ztunnel configuration"),
@@ -406,61 +392,33 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
     }
 }
 
-#[cfg(feature = "gperftools")]
-async fn handle_gprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
-    const FILE_PATH: &str = "/tmp/profile.prof";
-    PROFILER.lock().unwrap().start(FILE_PATH).unwrap();
-
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    PROFILER.lock().unwrap().stop().unwrap();
-
-    let mut buffer = Vec::new();
-    File::open(FILE_PATH)
-        .await
-        .unwrap()
-        .read_to_end(&mut buffer)
-        .await
-        .unwrap();
-    Response::builder()
-        .status(hyper::StatusCode::OK)
-        .body(buffer.into())
-        .unwrap()
+#[cfg(feature = "jemalloc")]
+async fn handle_jemalloc_pprof_heapgen(_req: Request<Incoming>) -> Response<Full<Bytes>> {
+    let mut prof_ctl = jemalloc_pprof::PROF_CTL.as_ref().unwrap().lock().await;
+    if !prof_ctl.activated() {
+        Response::builder()
+            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+            .body("jemalloc not enabled".into())
+            .unwrap()
+    } else {
+        let pprof = prof_ctl.dump_pprof().map_err(|err| {
+            Response::builder()
+                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(err)
+                .unwrap()
+        });
+        Response::builder()
+            .status(hyper::StatusCode::OK)
+            .body(Bytes::from(pprof.unwrap()).into())
+            .unwrap()
+    }
 }
 
-#[cfg(not(feature = "gperftools"))]
-async fn handle_gprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
+#[cfg(not(feature = "jemalloc"))]
+async fn handle_jemalloc_pprof_heapgen(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     Response::builder()
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-        .body("gperftools not enabled".into())
-        .unwrap()
-}
-
-#[cfg(feature = "gperftools")]
-async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
-    const FILE_PATH: &str = "/tmp/profile.prof";
-    HEAP_PROFILER.lock().unwrap().start(FILE_PATH).unwrap();
-
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    HEAP_PROFILER.lock().unwrap().stop().unwrap();
-
-    let mut buffer = Vec::new();
-    File::open(FILE_PATH)
-        .await
-        .unwrap()
-        .read_to_end(&mut buffer)
-        .await
-        .unwrap();
-    Response::builder()
-        .status(hyper::StatusCode::OK)
-        .body(buffer.into())
-        .unwrap()
-}
-
-#[cfg(not(feature = "gperftools"))]
-async fn handle_gprof_heap(_req: Request<Incoming>) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-        .body("gperftools not enabled".into())
+        .body("jemalloc not enabled".into())
         .unwrap()
 }
 

@@ -13,17 +13,20 @@
 // limitations under the License.
 
 extern crate core;
-#[cfg(feature = "gperftools")]
-extern crate gperftools;
 
 use tracing::info;
 use ztunnel::*;
 
-// #[global_allocator]
-// static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+#[cfg(feature = "jemalloc")]
+use tikv_jemallocator;
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// #[global_allocator]
-// static GLOBAL: tcmalloc::TCMalloc = tcmalloc::TCMalloc;
+#[cfg(feature = "jemalloc")]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
