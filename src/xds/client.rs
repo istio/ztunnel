@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use itertools::Itertools;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
@@ -134,13 +135,25 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         let type_url = res.type_url.clone();
         let removes = &res.removed_resources;
 
-        let updates: Vec<XdsUpdate<T>> = res
+        // Keep track of any failures but keep going
+        let (updates, decode_failures): (Vec<_>, Vec<_>) = res
             .resources
             .iter()
-            .map(|raw| decode_proto::<T>(raw).unwrap())
-            .map(XdsUpdate::Update)
-            .chain(removes.iter().cloned().map(XdsUpdate::Remove))
-            .collect();
+            .map(|raw| {
+                decode_proto::<T>(raw).map_err(|err| RejectedConfig {
+                    name: raw.name.clone(),
+                    reason: err.into(),
+                })
+            })
+            .map_ok(XdsUpdate::Update)
+            .chain(
+                removes
+                    .iter()
+                    .cloned()
+                    .map(XdsUpdate::Remove)
+                    .map(Result::Ok),
+            )
+            .partition_result();
 
         // First, call handlers that update the proxy state.
         // other wise on-demand notifications might observe a cache without their resource
@@ -170,7 +183,16 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
             state.add_resource(key.type_url, key.name);
         }
 
-        result
+        // Either can fail. Merge the results
+        match (result, decode_failures.is_empty()) {
+            (Ok(()), true) => Ok(()),
+            (Ok(_), false) => Err(decode_failures),
+            (r @ Err(_), true) => r,
+            (Err(mut rejects), false) => {
+                rejects.extend(decode_failures);
+                Err(rejects)
+            }
+        }
     }
 }
 
@@ -218,7 +240,10 @@ impl Config {
         tls_builder: Box<dyn tls::ClientCertProvider>,
     ) -> Config {
         Config {
-            address: config.xds_address.clone().unwrap(),
+            address: config
+                .xds_address
+                .clone()
+                .expect("xds_address must be set to use xds"),
             tls_builder,
             auth: config.auth,
             handlers: HashMap::new(),
@@ -426,7 +451,8 @@ impl Demander {
         self.demand
             .send((tx, ResourceKey { name, type_url }))
             .await
-            .unwrap();
+            // TODO: is this guaranteed? How can we handle the failure
+            .expect("demand channel should not close");
         Demanded { b: rx }
     }
 }
