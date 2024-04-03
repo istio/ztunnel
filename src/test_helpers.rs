@@ -214,6 +214,7 @@ pub fn test_default_workload() -> Workload {
 
         authorization_policies: Vec::new(),
         native_tunnel: false,
+        application_tunnel: None,
     }
 }
 

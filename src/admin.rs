@@ -626,6 +626,7 @@ mod tests {
             cluster_id: "Kubernetes".to_string(),
             authorization_policies: Vec::new(),
             native_tunnel: false,
+            application_tunnel: None,
             workload_type: XdsWorkloadType::Deployment.into(),
             services: HashMap::from([(
                 "ns/svc1.ns.svc.cluster.local".to_string(),

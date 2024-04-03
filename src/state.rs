@@ -834,7 +834,10 @@ mod tests {
         let mut ctx = crate::state::ProxyRbacContext {
             conn: rbac::Connection {
                 src_identity: None,
-                src_ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+                src: std::net::SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 168, 0, 1),
+                    1234,
+                )),
                 dst_network: "".to_string(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),
