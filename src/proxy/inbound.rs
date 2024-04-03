@@ -115,6 +115,9 @@ impl Inbound {
                     .initial_stream_window_size(self.pi.cfg.window_size)
                     .initial_connection_window_size(self.pi.cfg.connection_window_size)
                     .max_frame_size(self.pi.cfg.frame_size)
+                    // 64KB max; default is 16MB driven from Golang's defaults
+                    // Since we know we are going to recieve a bounded set of headers, more is overkill.
+                    .max_header_list_size(65536)
                     .serve_connection(
                         hyper_util::rt::TokioIo::new(tls),
                         service_fn(move |req| {
