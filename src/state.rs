@@ -16,7 +16,7 @@ use crate::identity::SecretManager;
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
-use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerTargets, ServiceStore};
+use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerScopes, ServiceStore};
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
@@ -276,16 +276,16 @@ impl ProxyState {
                         let mut rank = 0;
                         for target in &lb.targets {
                             let matches = match target {
-                                LoadBalancerTargets::Region => {
+                                LoadBalancerScopes::Region => {
                                     src.locality.region == wl.locality.region
                                 }
-                                LoadBalancerTargets::Zone => src.locality.zone == wl.locality.zone,
-                                LoadBalancerTargets::Subzone => {
+                                LoadBalancerScopes::Zone => src.locality.zone == wl.locality.zone,
+                                LoadBalancerScopes::Subzone => {
                                     src.locality.subzone == wl.locality.subzone
                                 }
-                                LoadBalancerTargets::Node => src.node == wl.node,
-                                LoadBalancerTargets::Cluster => src.cluster_id == wl.cluster_id,
-                                LoadBalancerTargets::Network => src.network == wl.network,
+                                LoadBalancerScopes::Node => src.node == wl.node,
+                                LoadBalancerScopes::Cluster => src.cluster_id == wl.cluster_id,
+                                LoadBalancerScopes::Network => src.network == wl.network,
                             };
                             if matches {
                                 rank += 1;

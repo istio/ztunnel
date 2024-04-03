@@ -26,7 +26,7 @@ use crate::state::workload::{
     WorkloadError,
 };
 use crate::xds;
-use crate::xds::istio::workload::load_balancing::Targets;
+use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::PortList;
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -58,14 +58,16 @@ impl From<xds::istio::workload::load_balancing::Mode> for LoadBalancerMode {
     fn from(value: xds::istio::workload::load_balancing::Mode) -> Self {
         match value {
             xds::istio::workload::load_balancing::Mode::Strict => LoadBalancerMode::Strict,
-            xds::istio::workload::load_balancing::Mode::UnspecifieDx => LoadBalancerMode::Failover,
+            xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
+                LoadBalancerMode::Failover
+            }
             xds::istio::workload::load_balancing::Mode::Failover => LoadBalancerMode::Failover,
         }
     }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-pub enum LoadBalancerTargets {
+pub enum LoadBalancerScopes {
     Region,
     Zone,
     Subzone,
@@ -74,16 +76,16 @@ pub enum LoadBalancerTargets {
     Network,
 }
 
-impl TryFrom<Targets> for LoadBalancerTargets {
+impl TryFrom<XdsScope> for LoadBalancerScopes {
     type Error = WorkloadError;
-    fn try_from(value: Targets) -> Result<Self, Self::Error> {
+    fn try_from(value: XdsScope) -> Result<Self, Self::Error> {
         match value {
-            Targets::Region => Ok(LoadBalancerTargets::Region),
-            Targets::Zone => Ok(LoadBalancerTargets::Zone),
-            Targets::Subzone => Ok(LoadBalancerTargets::Subzone),
-            Targets::Node => Ok(LoadBalancerTargets::Node),
-            Targets::Cluster => Ok(LoadBalancerTargets::Cluster),
-            Targets::Network => Ok(LoadBalancerTargets::Network),
+            XdsScope::Region => Ok(LoadBalancerScopes::Region),
+            XdsScope::Zone => Ok(LoadBalancerScopes::Zone),
+            XdsScope::Subzone => Ok(LoadBalancerScopes::Subzone),
+            XdsScope::Node => Ok(LoadBalancerScopes::Node),
+            XdsScope::Cluster => Ok(LoadBalancerScopes::Cluster),
+            XdsScope::Network => Ok(LoadBalancerScopes::Network),
             _ => Err(WorkloadError::EnumParse("invalid target".to_string())),
         }
     }
@@ -91,7 +93,7 @@ impl TryFrom<Targets> for LoadBalancerTargets {
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoadBalancer {
-    pub targets: Vec<LoadBalancerTargets>,
+    pub targets: Vec<LoadBalancerScopes>,
     pub mode: LoadBalancerMode,
 }
 
@@ -172,11 +174,11 @@ impl TryFrom<&XdsService> for Service {
                     .routing_preference
                     .iter()
                     .map(|r| {
-                        xds::istio::workload::load_balancing::Targets::try_from(*r)
+                        xds::istio::workload::load_balancing::Scope::try_from(*r)
                             .map_err(WorkloadError::DecodeError)
                             .and_then(|r| r.try_into())
                     })
-                    .collect::<Result<Vec<LoadBalancerTargets>, WorkloadError>>()?,
+                    .collect::<Result<Vec<LoadBalancerScopes>, WorkloadError>>()?,
                 mode: xds::istio::workload::load_balancing::Mode::try_from(lb.mode)?.into(),
             })
         } else {
