@@ -119,9 +119,6 @@ pub fn generate_test_certs_at(
     let mut p = CertificateParams::default();
     p.not_before = not_before.into();
     p.not_after = not_after.into();
-    let kp = KeyPair::from_pem(std::str::from_utf8(TEST_PKEY).unwrap()).unwrap();
-    let key = kp.serialize_pem();
-    p.key_pair = Some(kp);
     p.serial_number = Some(SerialNumber::from_slice(&serial_number));
     let mut dn = DistinguishedName::new();
     dn.push(DnType::OrganizationName, "cluster.local");
@@ -135,12 +132,15 @@ pub fn generate_test_certs_at(
         ExtendedKeyUsagePurpose::ClientAuth,
     ];
     p.subject_alt_names = vec![match id {
-        TestIdentity::Identity(i) => SanType::URI(i.to_string()),
+        TestIdentity::Identity(i) => SanType::URI(Ia5String::try_from(i.to_string()).unwrap()),
         TestIdentity::Ip(i) => SanType::IpAddress(*i),
     }];
 
-    let cert = Certificate::from_params(p).unwrap();
-    let cert = cert.serialize_pem_with_signer(&ca_cert).unwrap();
+    let kp = KeyPair::from_pem(std::str::from_utf8(TEST_PKEY).unwrap()).unwrap();
+    let ca_kp = KeyPair::from_pem(std::str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
+    let key = kp.serialize_pem();
+    let cert = p.signed_by(&kp, &ca_cert, &ca_kp).unwrap();
+    let cert = cert.pem();
     let mut workload =
         WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
     // Certificates do not allow sub-millisecond, but we need this for tests.
@@ -161,8 +161,8 @@ pub fn generate_test_certs(
 fn test_ca() -> Certificate {
     let key = KeyPair::from_pem(std::str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
     let ca_param =
-        CertificateParams::from_ca_cert_pem(std::str::from_utf8(TEST_ROOT).unwrap(), key).unwrap();
-    Certificate::from_params(ca_param).unwrap()
+        CertificateParams::from_ca_cert_pem(std::str::from_utf8(TEST_ROOT).unwrap()).unwrap();
+    ca_param.self_signed(&key).unwrap()
 }
 
 #[derive(Debug, Clone)]

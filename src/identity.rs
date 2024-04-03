@@ -14,6 +14,7 @@
 
 use crate::tls;
 use std::str::Utf8Error;
+use std::sync::Arc;
 
 mod caclient;
 pub use caclient::*;
@@ -35,7 +36,7 @@ pub mod mock {
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
     #[error("failed to create CSR: {0}")]
-    Signing(#[from] tls::Error),
+    Signing(Arc<tls::Error>),
     #[error("signing gRPC error ({}): {}", .0.code(), .0.message())]
     SigningRequest(#[from] tonic::Status),
     #[error("failed to process string: {0}")]
@@ -48,4 +49,10 @@ pub enum Error {
     Spiffe(String),
     #[error("the identity is no longer needed")]
     Forgotten,
+}
+
+impl From<tls::Error> for Error {
+    fn from(value: tls::Error) -> Self {
+        Error::Signing(Arc::new(value))
+    }
 }
