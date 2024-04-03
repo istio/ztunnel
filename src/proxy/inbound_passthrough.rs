@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, trace, warn, Instrument};
+use tracing::{error, info, trace, Instrument};
 
 use crate::config::ProxyMode;
 use crate::proxy::connection_manager::ConnectionManager;
@@ -62,36 +63,37 @@ impl InboundPassthrough {
 
     pub(super) async fn run(self) {
         let accept = async move {
-        loop {
-            // Asynchronously wait for an inbound socket.
-            let socket = self.listener.accept().await;
-            let pi = self.pi.clone();
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                let pi = self.pi.clone();
 
-            let connection_manager = self.pi.connection_manager.clone();
-            match socket {
-                Ok((stream, remote)) => {
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::proxy_inbound_plaintext(
-                            pi, // pi cloned above; OK to move
-                            socket::to_canonical(remote),
-                            stream,
-                            connection_manager,
-                        )
-                        .await
-                        {
-                            warn!(source=%socket::to_canonical(remote), component="inbound plaintext", "proxying failed: {}", e)
-                        }
-                    }.in_current_span());
-                }
-                Err(e) => {
-                    if util::is_runtime_shutdown(&e) {
-                        return;
+                let connection_manager = self.pi.connection_manager.clone();
+                match socket {
+                    Ok((stream, remote)) => {
+                        tokio::spawn(
+                            async move {
+                                Self::proxy_inbound_plaintext(
+                                    pi, // pi cloned above; OK to move
+                                    socket::to_canonical(remote),
+                                    stream,
+                                    connection_manager,
+                                )
+                                .await
+                            }
+                            .in_current_span(),
+                        );
                     }
-                    error!("Failed TCP handshake {}", e);
+                    Err(e) => {
+                        if util::is_runtime_shutdown(&e) {
+                            return;
+                        }
+                        error!("Failed TCP handshake {}", e);
+                    }
                 }
             }
         }
-      }.in_current_span();
+        .in_current_span();
         // Stop accepting once we drain.
         // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
         // this, but will need some timeout period, as we have no back-pressure mechanism on connections.
@@ -105,82 +107,61 @@ impl InboundPassthrough {
 
     async fn proxy_inbound_plaintext(
         pi: ProxyInputs,
-        source: SocketAddr,
-        mut inbound: TcpStream,
+        source_addr: SocketAddr,
+        mut inbound_stream: TcpStream,
         connection_manager: ConnectionManager,
-    ) -> Result<(), Error> {
-        let orig = socket::orig_dst_addr_or_default(&inbound);
+    ) {
+        let start = Instant::now();
+        let dest_addr = socket::orig_dst_addr_or_default(&inbound_stream);
         // Check if it is a recursive call when proxy mode is Node.
-        if pi.cfg.proxy_mode == ProxyMode::Shared && Some(orig.ip()) == pi.cfg.local_ip {
-            return Err(Error::SelfCall);
+        if pi.cfg.proxy_mode == ProxyMode::Shared && Some(dest_addr.ip()) == pi.cfg.local_ip {
+            metrics::log_early_deny(
+                source_addr,
+                dest_addr,
+                Reporter::destination,
+                Error::SelfCall,
+            );
+            return;
         }
-        info!(%source, destination=%orig, component="inbound plaintext", "accepted connection");
         let network_addr = NetworkAddress {
             network: pi.cfg.network.clone(), // inbound request must be on our network
-            address: orig.ip(),
+            address: dest_addr.ip(),
         };
         let Some((upstream, upstream_service)) =
             pi.state.fetch_workload_services(&network_addr).await
         else {
-            return Err(Error::UnknownDestination(orig.ip()));
-        };
-
-        let conn = rbac::Connection {
-            src_identity: None,
-            src: source,
-            // inbound request must be on our network since this is passthrough
-            // rather than HBONE, which can be tunneled across networks through gateways.
-            // by definition, without the gateway our source must be on our network.
-            dst_network: pi.cfg.network.clone(),
-            dst: orig,
+            metrics::log_early_deny(
+                source_addr,
+                dest_addr,
+                Reporter::destination,
+                Error::UnknownDestination(dest_addr.ip()),
+            );
+            return;
         };
 
         let rbac_ctx = crate::state::ProxyRbacContext {
-            conn,
+            conn: rbac::Connection {
+                src_identity: None,
+                src: source_addr,
+                // inbound request must be on our network since this is passthrough
+                // rather than HBONE, which can be tunneled across networks through gateways.
+                // by definition, without the gateway our source must be on our network.
+                dst_network: pi.cfg.network.clone(),
+                dst: dest_addr,
+            },
             dest_workload_info: pi.proxy_workload_info.clone(),
         };
 
-        //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-        connection_manager.register(&rbac_ctx);
-        if !pi.state.assert_rbac(&rbac_ctx).await {
-            info!(%rbac_ctx.conn, "RBAC rejected");
-            connection_manager.release(&rbac_ctx);
-            return Ok(());
-        }
-        let close = match connection_manager.track(&rbac_ctx) {
-            Some(c) => c,
-            None => {
-                // this seems unlikely but could occur if policy changes while track awaits lock
-                error!(%rbac_ctx.conn, "RBAC rejected");
-                return Ok(());
-            }
-        };
-        let source_ip = super::get_original_src_from_stream(&inbound);
-        let orig_src = pi
-            .cfg
-            .enable_original_source
-            .unwrap_or_default()
-            .then_some(source_ip)
-            .flatten();
-        trace!(%source, destination=%orig, component="inbound plaintext", "connect to {orig:?} from {orig_src:?}");
-
-        let mut outbound =
-            super::freebind_connect(orig_src, orig, pi.socket_factory.as_ref()).await?;
-
-        trace!(%source, destination=%orig, component="inbound plaintext", "connected");
-
         // Find source info. We can lookup by XDS or from connection attributes
-        let source_workload = if let Some(source_ip) = source_ip {
+        let source_workload = {
             let network_addr_srcip = NetworkAddress {
                 // inbound request must be on our network since this is passthrough
                 // rather than HBONE, which can be tunneled across networks through gateways.
                 // by definition, without the gateway our source must be on our network.
                 network: pi.cfg.network.clone(),
-                address: source_ip,
+                address: source_addr.ip(),
             };
             pi.state.fetch_workload(&network_addr_srcip).await
-        } else {
-            None
         };
         let derived_source = metrics::DerivedWorkload {
             identity: rbac_ctx.conn.src_identity.clone(),
@@ -195,18 +176,56 @@ impl InboundPassthrough {
             connection_security_policy: metrics::SecurityPolicy::unknown,
             destination_service: ds,
         };
-        let _connection_close = pi
-            .metrics
-            .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
-        let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
-        tokio::select! {
-            err =  proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes) => {
-                connection_manager.release(&rbac_ctx);
-                err?;
-            }
-            _signaled = close.signaled() => {}
+        let result_tracker = metrics::ConnectionResult::new(
+            source_addr,
+            dest_addr,
+            None,
+            start,
+            &connection_metrics,
+            pi.metrics,
+        );
+
+        //register before assert_rbac to ensure the connection is tracked during it's entire valid span
+        connection_manager.register(&rbac_ctx);
+        if !pi.state.assert_rbac(&rbac_ctx).await {
+            connection_manager.release(&rbac_ctx);
+            result_tracker.record(Err(Error::AuthorizationPolicyRejection));
+            return;
         }
-        info!(%source, destination=%orig, component="inbound plaintext", "connection complete");
-        Ok(())
+        let close = match connection_manager.track(&rbac_ctx) {
+            Some(c) => c,
+            None => {
+                // this seems unlikely but could occur if policy changes while track awaits lock
+                result_tracker.record(Err(Error::AuthorizationPolicyRejection));
+                return;
+            }
+        };
+
+        let orig_src = if pi.cfg.enable_original_source.unwrap_or_default() {
+            Some(source_addr.ip())
+        } else {
+            None
+        };
+
+        let send = async {
+            trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
+
+            let mut outbound =
+                super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref())
+                    .await
+                    .map_err(Error::ConnectionFailed)?;
+
+            trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
+            proxy::relay(&mut outbound, &mut inbound_stream).await
+        };
+
+        let res = tokio::select! {
+            res = send => {
+                connection_manager.release(&rbac_ctx);
+                res
+            }
+            _signaled = close.signaled() => Err(Error::AuthorizationPolicyLateRejection)
+        };
+        result_tracker.record(res);
     }
 }

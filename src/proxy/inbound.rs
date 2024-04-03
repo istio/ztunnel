@@ -21,6 +21,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use drain::Watch;
 use futures::stream::StreamExt;
+use futures_util::{FutureExt, TryFutureExt};
 use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -29,15 +30,15 @@ use hyper::{Method, Request, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
-use tracing::{debug, error, info, instrument, trace_span, warn, Instrument};
+use tracing::{debug, error, info, instrument, trace_span, Instrument};
 
 use super::connection_manager::ConnectionManager;
-use super::{Error, SocketFactory};
+use super::{ConnectionResult, Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::identity::{Identity, SecretManager};
 
 use crate::proxy::inbound::InboundConnect::{Hbone, Proxy};
-use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
+use crate::proxy::metrics::{ConnectionOpen, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
@@ -129,6 +130,13 @@ impl Inbound {
                                 req,
                                 connection_manager.clone(),
                             )
+                            .map(|status| {
+                                let resp: Response<Empty<Bytes>> = Response::builder()
+                                    .status(status)
+                                    .body(Empty::new())
+                                    .expect("builder with known status code should not fail");
+                                Ok::<_, hyper::Error>(resp)
+                            })
                         }),
                     );
                 // Wait for drain to signal or connection serving to complete
@@ -173,104 +181,79 @@ impl Inbound {
         request_type: InboundConnect,
         orig_src: Option<IpAddr>,
         addr: SocketAddr,
-        metrics: Arc<Metrics>,
-        connection_metrics: ConnectionOpen,
-        extra_connection_metrics: Option<ConnectionOpen>,
+        result_tracker: ConnectionResult,
         socket_factory: &(dyn SocketFactory + Send + Sync),
         connection_manager: ConnectionManager,
         rbac_ctx: crate::state::ProxyRbacContext,
-    ) -> Result<(), std::io::Error> {
-        let start = Instant::now();
-        let out_stream = super::freebind_connect(orig_src, addr, socket_factory).await;
-        match out_stream {
+    ) -> Result<(), ()> {
+        let stream = super::freebind_connect(orig_src, addr, socket_factory)
+            .await
+            .and_then(|s| {
+                s.set_nodelay(true)?;
+                Ok(s)
+            });
+        let mut stream = match stream {
             Err(err) => {
-                warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
-                Err(err)
+                result_tracker.record(Err(err));
+                return Err(());
             }
-            Ok(mut stream) => {
-                stream.set_nodelay(true)?;
-                debug!(dur=?start.elapsed(), "connected to: {addr}");
-                tokio::task::spawn(
-                    (async move {
-                        let close = match connection_manager.track(&rbac_ctx) {
-                            Some(c) => c,
-                            None => {
-                                // if track returns None it means the connection was closed due to policy change
-                                // between the intial assertion of policy and the spawinging of the task
-                                error!(dur=?start.elapsed(), "internal server copy: connection close");
-                                return;
-                            }
-                        };
-                        let _connection_close = metrics
-                            .increment_defer::<_, metrics::ConnectionClose>(&connection_metrics);
+            Ok(stream) => stream,
+        };
+        debug!("connected to: {addr}");
 
-                        let _extra_conn_close = extra_connection_metrics
-                            .as_ref()
-                            .map(|co| metrics.increment_defer::<_, metrics::ConnectionClose>(co));
-
-                        let transferred_bytes =
-                            metrics::BytesTransferred::from(&connection_metrics);
-                        match request_type {
-                            Hbone(req) => match hyper::upgrade::on(req).await {
-                                Ok(mut upgraded) => {
-                                    let res = tokio::select! {
-                                        r =  super::copy_hbone(
-                                        &mut upgraded,
-                                        &mut stream,
-                                        &metrics,
-                                        transferred_bytes,
-                                        ).instrument(trace_span!("hbone server")) => {r}
-                                        _c = close.signaled() => {
-                                            error!(dur=?start.elapsed(), "internal server copy: connection close received");
-                                            Ok(())
-                                        }
-                                    };
-                                    if let Err(e) = res
-                                    {
-                                        error!(dur=?start.elapsed(), "hbone server copy: {}", e);
-                                    }
-                                }
-                                Err(e) => {
-                                    // Not sure if this can even happen
-                                    error!(dur=?start.elapsed(), "No upgrade {e}");
-                                }
-                            },
-                            Proxy(req, (src, dst), src_id) => match hyper::upgrade::on(req).await {
-                                Ok(mut upgraded) => {
-                                     if let Err(e) =
-                                        super::write_proxy_protocol(&mut stream, (src, dst), src_id)
-                                            .instrument(trace_span!("proxy protocol"))
-                                            .await
-                                    {
-                                        error!(dur=?start.elapsed(), "write proxy protocol: {}", e);
-                                    } else if let Err(e) = super::copy_hbone(
-                                        &mut upgraded,
-                                        &mut stream,
-                                        &metrics,
-                                        transferred_bytes,
-                                    )
-                                    .instrument(trace_span!("hbone server"))
-                                    .await
-                                    {
-                                        error!(dur=?start.elapsed(), "hbone server copy: {}", e);
-                                    }
-                                },
-                                Err(e) => {
-                                    // Not sure if this can even happen
-                                    error!(dur=?start.elapsed(), "No upgrade {e}");
-                                }
-                            }
+        tokio::task::spawn(
+            (async move {
+                let close = match connection_manager.track(&rbac_ctx) {
+                    Some(c) => c,
+                    None => {
+                        // if track returns None it means the connection was closed due to policy change
+                        // between the intial assertion of policy and the spawinging of the task
+                        result_tracker.record(Err(Error::AuthorizationPolicyRejection));
+                        return;
+                    }
+                };
+                let send = async {
+                    match request_type {
+                        Hbone(req) => {
+                            hyper::upgrade::on(req)
+                                .map_err(Error::NoUpgrade)
+                                .and_then(|mut upgraded| async move {
+                                    super::copy_hbone(&mut upgraded, &mut stream)
+                                        .instrument(trace_span!("hbone server"))
+                                        .await
+                                })
+                                .await
                         }
+                        Proxy(req, (src, dst), src_id) => {
+                            hyper::upgrade::on(req)
+                                .map_err(Error::NoUpgrade)
+                                .and_then(|mut upgraded| async move {
+                                    super::write_proxy_protocol(&mut stream, (src, dst), src_id)
+                                        .instrument(trace_span!("proxy protocol"))
+                                        .await?;
+                                    super::copy_hbone(&mut upgraded, &mut stream)
+                                        .instrument(trace_span!("hbone server"))
+                                        .await
+                                })
+                                .await
+                        }
+                    }
+                };
+                let res = tokio::select! {
+                     res = send => {
                         connection_manager.release(&rbac_ctx);
-                    })
-                    .in_current_span(),
-                );
-                // Send back our 200. We do this regardless of if our spawned task copies the data;
-                // we need to respond with headers immediately once connection is established for the
-                // stream of bytes to begin.
-                Ok(())
-            }
-        }
+                        res
+                    }
+                    _c = close.signaled() => Err(Error::AuthorizationPolicyLateRejection)
+                };
+                result_tracker.record(res);
+            })
+            .in_current_span(),
+        );
+        // Send back our 200. We do this regardless of if our spawned task copies the data;
+        // we need to respond with headers immediately once connection is established for the
+        // stream of bytes to begin.
+        Ok(())
     }
 
     fn extract_traceparent(req: &Request<Incoming>) -> TraceParent {
@@ -293,142 +276,137 @@ impl Inbound {
         enable_original_source: bool,
         req: Request<Incoming>,
         connection_manager: ConnectionManager,
-    ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
-        match req.method() {
-            &Method::CONNECT => {
-                let uri = req.uri();
-                info!("got {} request to {}", req.method(), uri);
-                let hbone_addr: SocketAddr = match uri.to_string().as_str().parse() {
-                    Ok(parsed) => parsed,
-                    Err(e) => {
-                        info!("Sending 400, {}", e);
-                        return Ok(Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Empty::new())
-                            .expect("builder with known status code"));
-                    }
+    ) -> StatusCode {
+        if req.method() != Method::CONNECT {
+            metrics::log_early_deny(
+                conn.src,
+                conn.dst,
+                Reporter::destination,
+                Error::NonConnectMethod(req.method().to_string()),
+            );
+            return StatusCode::NOT_FOUND;
+        }
+        let start = Instant::now();
+        let Ok(hbone_addr) = req.uri().to_string().as_str().parse::<SocketAddr>() else {
+            metrics::log_early_deny(
+                conn.src,
+                conn.dst,
+                Reporter::destination,
+                Error::ConnectAddress(req.uri().to_string()),
+            );
+            return StatusCode::BAD_REQUEST;
+        };
+
+        // Determine the next hop.
+        let Ok((upstream_addr, inbound_protocol, upstream, upstream_service)) =
+            Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await
+        else {
+            metrics::log_early_deny(
+                conn.src,
+                conn.dst,
+                Reporter::destination,
+                Error::UnknownDestination(hbone_addr.ip()),
+            );
+            return StatusCode::BAD_REQUEST;
+        };
+
+        // Connection has 15008, swap with the real port
+        let conn = Connection {
+            dst: upstream_addr,
+            ..conn
+        };
+        let from_gateway = proxy::check_from_network_gateway(
+            pi.state.clone(),
+            &upstream,
+            conn.src_identity.as_ref(),
+        )
+        .await;
+
+        if from_gateway {
+            debug!("request from gateway");
+        }
+
+        let rbac_ctx = crate::state::ProxyRbacContext {
+            conn,
+            dest_workload_info: pi.proxy_workload_info.clone(),
+        };
+
+        let source_ip = rbac_ctx.conn.src.ip();
+
+        let baggage =
+            parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
+
+        let source = match from_gateway {
+            true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
+            false => {
+                let src_network_addr = NetworkAddress {
+                    // we can assume source network is our network because we did not traverse a gateway
+                    network: rbac_ctx.conn.dst_network.to_string(),
+                    address: source_ip,
                 };
-
-                // Determine the next hop.
-                let (upstream_addr, inbound_protocol, upstream, upstream_service) =
-                    match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
-                        Ok(res) => res,
-                        Err(e) => {
-                            info!(%conn, "Sending 400, {}", e);
-                            return Ok(Response::builder()
-                                .status(StatusCode::BAD_REQUEST)
-                                .body(Empty::new())
-                                .expect("builder with known status code"));
-                        }
-                    };
-
-                // Connection has 15008, swap with the real port
-                let conn = Connection {
-                    dst: upstream_addr,
-                    ..conn
-                };
-                let from_gateway = proxy::check_from_network_gateway(
-                    pi.state.clone(),
-                    &upstream,
-                    conn.src_identity.as_ref(),
-                )
-                .await;
-
-                if from_gateway {
-                    debug!("request from gateway");
-                }
-
-                let rbac_ctx = crate::state::ProxyRbacContext {
-                    conn,
-                    dest_workload_info: pi.proxy_workload_info.clone(),
-                };
-
-                //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-                connection_manager.register(&rbac_ctx);
-                if !pi.state.assert_rbac(&rbac_ctx).await {
-                    info!(%rbac_ctx.conn, "RBAC rejected");
-                    connection_manager.release(&rbac_ctx);
-                    return Ok(Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Empty::new())
-                        .expect("builder with known status code should not fail"));
-                }
-                let source_ip = rbac_ctx.conn.src.ip();
-
-                let baggage =
-                    parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
-
-                let source = match from_gateway {
-                    true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
-                    false => {
-                        let src_network_addr = NetworkAddress {
-                            // we can assume source network is our network because we did not traverse a gateway
-                            network: rbac_ctx.conn.dst_network.to_string(),
-                            address: source_ip,
-                        };
-                        // Find source info. We can lookup by XDS or from connection attributes
-                        pi.state.fetch_workload(&src_network_addr).await
-                    }
-                };
-
-                let derived_source = metrics::DerivedWorkload {
-                    identity: rbac_ctx.conn.src_identity.clone(),
-                    cluster_id: baggage.cluster_id,
-                    namespace: baggage.namespace,
-                    workload_name: baggage.workload_name,
-                    revision: baggage.revision,
-                    ..Default::default()
-                };
-                let ds = proxy::guess_inbound_service(&rbac_ctx.conn, upstream_service, &upstream);
-                let connection_metrics = ConnectionOpen {
-                    reporter: Reporter::destination,
-                    source,
-                    derived_source: Some(derived_source),
-                    destination: Some(upstream),
-                    connection_security_policy: metrics::SecurityPolicy::mutual_tls,
-                    destination_service: ds,
-                };
-
-                let request_type = match inbound_protocol {
-                    AppProtocol::PROXY => Proxy(
-                        req,
-                        (rbac_ctx.conn.src, rbac_ctx.conn.dst),
-                        rbac_ctx.conn.src_identity.clone(),
-                    ),
-                    _ => Hbone(req),
-                };
-
-                let status_code = match Self::handle_inbound(
-                    request_type,
-                    enable_original_source.then_some(source_ip),
-                    upstream_addr,
-                    pi.metrics,
-                    connection_metrics,
-                    None,
-                    pi.socket_factory.as_ref(),
-                    connection_manager,
-                    rbac_ctx,
-                )
-                .in_current_span()
-                .await
-                {
-                    Ok(_) => StatusCode::OK,
-                    Err(_) => StatusCode::SERVICE_UNAVAILABLE,
-                };
-
-                Ok(Response::builder()
-                    .status(status_code)
-                    .body(Empty::new())
-                    .expect("builder with known status code should not fail"))
+                // Find source info. We can lookup by XDS or from connection attributes
+                pi.state.fetch_workload(&src_network_addr).await
             }
-            // Return the 404 Not Found for other routes.
-            method => {
-                info!("Sending 404, got {method}");
-                Ok(Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Empty::new())
-                    .expect("builder with known status code should not fail"))
-            }
+        };
+
+        let derived_source = metrics::DerivedWorkload {
+            identity: rbac_ctx.conn.src_identity.clone(),
+            cluster_id: baggage.cluster_id,
+            namespace: baggage.namespace,
+            workload_name: baggage.workload_name,
+            revision: baggage.revision,
+            ..Default::default()
+        };
+        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, upstream_service, &upstream);
+        let connection_metrics = ConnectionOpen {
+            reporter: Reporter::destination,
+            source,
+            derived_source: Some(derived_source),
+            destination: Some(upstream),
+            connection_security_policy: metrics::SecurityPolicy::mutual_tls,
+            destination_service: ds,
+        };
+        let result_tracker = metrics::ConnectionResult::new(
+            rbac_ctx.conn.src,
+            rbac_ctx.conn.dst,
+            Some(hbone_addr),
+            start,
+            &connection_metrics,
+            pi.metrics,
+        );
+
+        //register before assert_rbac to ensure the connection is tracked during it's entire valid span
+        connection_manager.register(&rbac_ctx);
+        if !pi.state.assert_rbac(&rbac_ctx).await {
+            info!(%rbac_ctx.conn, "RBAC rejected");
+            connection_manager.release(&rbac_ctx);
+            result_tracker.record(Err(Error::AuthorizationPolicyRejection));
+            return StatusCode::UNAUTHORIZED;
+        }
+
+        let request_type = match inbound_protocol {
+            AppProtocol::PROXY => Proxy(
+                req,
+                (rbac_ctx.conn.src, rbac_ctx.conn.dst),
+                rbac_ctx.conn.src_identity.clone(),
+            ),
+            _ => Hbone(req),
+        };
+
+        match Self::handle_inbound(
+            request_type,
+            enable_original_source.then_some(source_ip),
+            upstream_addr,
+            result_tracker,
+            pi.socket_factory.as_ref(),
+            connection_manager,
+            rbac_ctx,
+        )
+        .in_current_span()
+        .await
+        {
+            Ok(_) => StatusCode::OK,
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 

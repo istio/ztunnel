@@ -20,7 +20,7 @@ use std::net::{IpAddr, SocketAddr};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent};
@@ -206,13 +206,8 @@ async fn handle(
             true => Some(out_drain),
             false => None,
         };
-        let res = oc
-            .proxy_to_cancellable(stream, remote_addr, host, true, drain)
+        oc.proxy_to_cancellable(stream, remote_addr, host, true, drain)
             .await;
-        match res {
-            Ok(_) => {}
-            Err(ref e) => warn!("outbound proxy failed: {}", e),
-        };
     });
     Ok(())
 }

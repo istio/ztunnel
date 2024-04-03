@@ -30,7 +30,7 @@ use inbound::Inbound;
 pub use metrics::*;
 
 use crate::identity::{Identity, SecretManager};
-use crate::metrics::Recorder;
+
 use crate::proxy::connection_manager::{ConnectionManager, PolicyWatcher};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
@@ -208,9 +208,16 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] io::Error),
-    //
-    // #[error("dropped")]
-    // Dropped,
+
+    #[error("connection failed: {0}")]
+    ConnectionFailed(io::Error),
+
+    #[error("connection closed due to policy change")]
+    AuthorizationPolicyLateRejection,
+
+    #[error("connection closed due to policy rejection")]
+    AuthorizationPolicyRejection,
+
     #[error("pool is already connecting")]
     PoolAlreadyConnecting,
 
@@ -226,8 +233,17 @@ pub enum Error {
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
 
+    #[error("no upgrade available: {0}")]
+    NoUpgrade(hyper::Error),
+
     #[error("http status: {0}")]
     HttpStatus(hyper::StatusCode),
+
+    #[error("expected method CONNECT, got {0}")]
+    NonConnectMethod(String),
+
+    #[error("invalid CONNECT address {0}")]
+    ConnectAddress(String),
 
     #[error("tls error: {0}")]
     Tls(#[from] tls::Error),
@@ -274,9 +290,7 @@ const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
 pub async fn copy_hbone(
     upgraded: &mut hyper::upgrade::Upgraded,
     stream: &mut TcpStream,
-    metrics: impl AsRef<Metrics>,
-    transferred_bytes: BytesTransferred<'_>,
-) -> Result<(), Error> {
+) -> Result<(u64, u64), Error> {
     use tokio::io::AsyncWriteExt;
     let (mut ri, mut wi) = tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
     let (mut ro, mut wo) = stream.split();
@@ -302,10 +316,7 @@ pub async fn copy_hbone(
     tokio::try_join!(client_to_server, server_to_client)?;
 
     trace!(sent, recv = received, "copy hbone complete");
-    metrics
-        .as_ref()
-        .record(&transferred_bytes, (sent, received));
-    Ok(())
+    Ok((sent, received))
 }
 
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
@@ -483,15 +494,12 @@ pub async fn freebind_connect(
 }
 
 pub async fn relay(
-    downstream: &mut tokio::net::TcpStream,
-    upstream: &mut tokio::net::TcpStream,
-    metrics: impl AsRef<Metrics>,
-    transferred_bytes: BytesTransferred<'_>,
+    downstream: &mut TcpStream,
+    upstream: &mut TcpStream,
 ) -> Result<(u64, u64), Error> {
     match socket::relay(downstream, upstream).await {
         Ok(transferred) => {
             trace!(sent = transferred.0, recv = transferred.1, "relay complete");
-            metrics.as_ref().record(&transferred_bytes, transferred);
             Ok(transferred)
         }
         Err(e) => Err(Error::Io(e)),
