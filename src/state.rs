@@ -628,6 +628,7 @@ impl DemandProxyState {
     pub async fn fetch_waypoint(
         &self,
         wl: &Workload,
+        source_workload: &Workload,
         workload_ip: IpAddr,
     ) -> Result<Option<Upstream>, WaypointError> {
         let Some(gw_address) = &wl.waypoint else {
@@ -644,8 +645,8 @@ impl DemandProxyState {
             }
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
-        match self // THIS IS THE WRONG WORKLOAD
-            .fetch_upstream(&wp_nw_addr.network, wl, wp_socket_addr)
+        match self
+            .fetch_upstream(&wp_nw_addr.network, source_workload, wp_socket_addr)
             .await
         {
             Some(mut upstream) => {

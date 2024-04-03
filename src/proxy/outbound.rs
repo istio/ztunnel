@@ -491,7 +491,7 @@ impl OutboundConnection {
             match self
                 .pi
                 .state
-                .fetch_waypoint(&mutable_us.workload, workload_ip)
+                .fetch_waypoint(&mutable_us.workload, &source_workload, workload_ip)
                 .await
             {
                 Ok(None) => {} // workload doesn't have a waypoint; this is fine
