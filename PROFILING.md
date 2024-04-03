@@ -14,7 +14,7 @@ k port-forward -n istio-system ztunnel-qkvdj 15000:15000
 curl localhost:15000/debug/pprof/profile > profile.prof
 ```
 
-1. Observe in your tooling of choice, such as https://flamegraph.com/
+1. Observe in your tooling of choice, such as [flamegraph](https://flamegraph.com/)
 
 ## Memory
 
@@ -40,6 +40,7 @@ kubectl cp kube-system/ztunnel-qkvdj:/usr/local/bin/ztunnel ../../ztunnel-libs-p
 # stdlibs (optional)
 kubectl cp kube-system/ztunnel-qkvdj:/usr/lib/$BINARY_COMPILED_ARCH/ ../../ztunnel-libs-pprof/
 ```
+
 1. Observe in your tooling of choice, such as golang's `pprof`:
 
 ```sh
