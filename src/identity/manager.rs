@@ -50,6 +50,15 @@ impl EncodeLabelValue for Identity {
     }
 }
 
+impl serde::Serialize for Identity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
 impl FromStr for Identity {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {

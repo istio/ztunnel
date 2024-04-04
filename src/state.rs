@@ -73,7 +73,7 @@ impl fmt::Display for Upstream {
 
 // Workload information that a specific proxy instance represents. This is used to cross check
 // with the workload fetched using destination address when making RBAC decisions.
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub struct WorkloadInfo {
     pub name: String,
     pub namespace: String,
@@ -114,9 +114,10 @@ impl WorkloadInfo {
     }
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub struct ProxyRbacContext {
     pub conn: rbac::Connection,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dest_workload_info: Option<Arc<WorkloadInfo>>,
 }
 

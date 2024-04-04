@@ -16,9 +16,11 @@ use crate::proxy::error;
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
 use drain;
+use serde::{Serialize, Serializer};
 use std::collections::HashMap;
+use std::fmt::Formatter;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 use tracing::info;
 
 struct ConnectionDrain {
@@ -50,7 +52,13 @@ pub struct ConnectionManager {
     drains: Arc<RwLock<HashMap<ProxyRbacContext, ConnectionDrain>>>,
 }
 
-impl std::default::Default for ConnectionManager {
+impl std::fmt::Debug for ConnectionManager {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionManager").finish()
+    }
+}
+
+impl Default for ConnectionManager {
     fn default() -> Self {
         ConnectionManager {
             drains: Arc::new(RwLock::new(HashMap::new())),
@@ -63,10 +71,10 @@ impl ConnectionManager {
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
     // even no tasks have a receiver channel yet
-    pub async fn register(&self, c: &ProxyRbacContext) {
+    pub fn register(&self, c: &ProxyRbacContext) {
         self.drains
             .write()
-            .await
+            .expect("mutex")
             .entry(c.clone())
             .or_insert(ConnectionDrain::new());
     }
@@ -74,11 +82,11 @@ impl ConnectionManager {
     // get a channel to receive close on for your connection
     // requires that the connection be registered first
     // if you receive None this connection is invalid and should close
-    pub async fn track(&self, c: &ProxyRbacContext) -> Option<drain::Watch> {
+    pub fn track(&self, c: &ProxyRbacContext) -> Option<drain::Watch> {
         match self
             .drains
             .write()
-            .await
+            .expect("mutex")
             .entry(c.to_owned())
             .and_modify(|cd| cd.count += 1)
         {
@@ -92,8 +100,8 @@ impl ConnectionManager {
 
     // releases tracking on a connection
     // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
-    pub async fn release(&self, c: &ProxyRbacContext) {
-        let mut drains = self.drains.write().await;
+    pub fn release(&self, c: &ProxyRbacContext) {
+        let mut drains = self.drains.write().expect("mutex");
         if let Some((k, mut v)) = drains.remove_entry(c) {
             if v.count > 1 {
                 // something else is tracking this connection, decrement count but retain
@@ -105,7 +113,8 @@ impl ConnectionManager {
 
     // signal all connections listening to this channel to take action (typically terminate traffic)
     async fn close(&self, c: &ProxyRbacContext) {
-        if let Some(cd) = self.drains.write().await.remove(c) {
+        let drain = { self.drains.write().expect("mutex").remove(c) };
+        if let Some(cd) = drain {
             cd.drain().await;
         } else {
             // this is bad, possibly drain called twice
@@ -114,9 +123,19 @@ impl ConnectionManager {
     }
 
     //  get a list of all connections being tracked
-    async fn connections(&self) -> Vec<ProxyRbacContext> {
-        // potentially large copy under read lock, could require optomization
-        self.drains.read().await.keys().cloned().collect()
+    pub fn connections(&self) -> Vec<ProxyRbacContext> {
+        // potentially large copy under read lock, could require optimization
+        self.drains.read().expect("mutex").keys().cloned().collect()
+    }
+}
+
+impl Serialize for ConnectionManager {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let conns = self.connections();
+        conns.serialize(serializer)
     }
 }
 
@@ -147,7 +166,7 @@ impl PolicyWatcher {
                     break;
                 }
                 _ = policies_changed.changed() => {
-                    let connections = self.connection_manager.connections().await;
+                    let connections = self.connection_manager.connections();
                     for conn in connections {
                         if !self.state.assert_rbac(&conn).await {
                             self.connection_manager.close(&conn).await;
@@ -180,8 +199,8 @@ mod tests {
         // setup a new ConnectionManager
         let connection_manager = ConnectionManager::default();
         // ensure drains is empty
-        assert_eq!(connection_manager.drains.read().await.len(), 0);
-        assert_eq!(connection_manager.connections().await.len(), 0);
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 0);
+        assert_eq!(connection_manager.connections().len(), 0);
 
         // track a new connection
         let rbac_ctx1 = crate::state::ProxyRbacContext {
@@ -198,46 +217,35 @@ mod tests {
         };
 
         // assert that tracking an unregistered connection is None
-        let close1 = connection_manager.track(&rbac_ctx1).await;
+        let close1 = connection_manager.track(&rbac_ctx1);
         assert!(close1.is_none());
-        assert_eq!(connection_manager.drains.read().await.len(), 0);
-        assert_eq!(connection_manager.connections().await.len(), 0);
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 0);
+        assert_eq!(connection_manager.connections().len(), 0);
 
-        connection_manager.register(&rbac_ctx1).await;
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
-        assert_eq!(
-            connection_manager.connections().await,
-            vec!(rbac_ctx1.clone())
-        );
+        connection_manager.register(&rbac_ctx1);
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
+        assert_eq!(connection_manager.connections(), vec!(rbac_ctx1.clone()));
 
         let close1 = connection_manager
             .track(&rbac_ctx1)
-            .await
             .expect("should not be None");
 
         // ensure drains contains exactly 1 item
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
-        assert_eq!(
-            connection_manager.connections().await,
-            vec!(rbac_ctx1.clone())
-        );
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
+        assert_eq!(connection_manager.connections(), vec!(rbac_ctx1.clone()));
 
         // setup a second track on the same connection
         let another_conn1 = rbac_ctx1.clone();
         let another_close1 = connection_manager
             .track(&another_conn1)
-            .await
             .expect("should not be None");
 
         // ensure drains contains exactly 1 item
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
-        assert_eq!(
-            connection_manager.connections().await,
-            vec!(rbac_ctx1.clone())
-        );
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
+        assert_eq!(connection_manager.connections(), vec!(rbac_ctx1.clone()));
 
         // track a second connection
         let rbac_ctx2 = crate::state::ProxyRbacContext {
@@ -253,16 +261,15 @@ mod tests {
             dest_workload_info: None,
         };
 
-        connection_manager.register(&rbac_ctx2).await;
+        connection_manager.register(&rbac_ctx2);
         let close2 = connection_manager
             .track(&rbac_ctx2)
-            .await
             .expect("should not be None");
 
         // ensure drains contains exactly 2 items
-        assert_eq!(connection_manager.drains.read().await.len(), 2);
-        assert_eq!(connection_manager.connections().await.len(), 2);
-        let mut connections = connection_manager.connections().await;
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 2);
+        assert_eq!(connection_manager.connections().len(), 2);
+        let mut connections = connection_manager.connections();
         connections.sort(); // ordering cannot be guaranteed without sorting
         assert_eq!(connections, vec![rbac_ctx1.clone(), rbac_ctx2.clone()]);
 
@@ -272,20 +279,17 @@ mod tests {
         // close rbac_ctx1
         connection_manager.close(&rbac_ctx1).await;
         // ensure drains contains exactly 1 item
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
-        assert_eq!(
-            connection_manager.connections().await,
-            vec!(rbac_ctx2.clone())
-        );
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
+        assert_eq!(connection_manager.connections(), vec!(rbac_ctx2.clone()));
 
         // spawn a task to assert that we close in a timely manner for rbac_ctx2
         tokio::spawn(assert_close(close2));
         // close rbac_ctx2
         connection_manager.close(&rbac_ctx2).await;
         // assert that drains is empty again
-        assert_eq!(connection_manager.drains.read().await.len(), 0);
-        assert_eq!(connection_manager.connections().await.len(), 0);
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 0);
+        assert_eq!(connection_manager.connections().len(), 0);
     }
 
     #[tokio::test]
@@ -293,8 +297,8 @@ mod tests {
         // setup a new ConnectionManager
         let connection_manager = ConnectionManager::default();
         // ensure drains is empty
-        assert_eq!(connection_manager.drains.read().await.len(), 0);
-        assert_eq!(connection_manager.connections().await.len(), 0);
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 0);
+        assert_eq!(connection_manager.connections().len(), 0);
 
         // create a new connection
         let conn1 = crate::state::ProxyRbacContext {
@@ -324,74 +328,70 @@ mod tests {
         };
         let another_conn1 = conn1.clone();
 
-        connection_manager.register(&conn1).await;
+        connection_manager.register(&conn1);
 
         // watch the connections
         let close1 = connection_manager
             .track(&conn1)
-            .await
             .expect("should not be None");
         let another_close1 = connection_manager
             .track(&another_conn1)
-            .await
             .expect("should not be None");
         // ensure drains contains exactly 1 item
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
-        assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
+        assert_eq!(connection_manager.connections(), vec!(conn1.clone()));
 
         // release conn1's clone
         drop(another_close1);
-        connection_manager.release(&another_conn1).await;
+        connection_manager.release(&another_conn1);
         // ensure drains still contains exactly 1 item
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
-        assert_eq!(connection_manager.connections().await, vec!(conn1.clone()));
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
+        assert_eq!(connection_manager.connections(), vec!(conn1.clone()));
 
-        connection_manager.register(&conn2).await;
+        connection_manager.register(&conn2);
         // track conn2
         let close2 = connection_manager
             .track(&conn2)
-            .await
             .expect("should not be None");
         // ensure drains contains exactly 2 items
-        assert_eq!(connection_manager.drains.read().await.len(), 2);
-        assert_eq!(connection_manager.connections().await.len(), 2);
-        let mut connections = connection_manager.connections().await;
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 2);
+        assert_eq!(connection_manager.connections().len(), 2);
+        let mut connections = connection_manager.connections();
         connections.sort(); // ordering cannot be guaranteed without sorting
         assert_eq!(connections, vec![conn1.clone(), conn2.clone()]);
 
         // release conn1
         drop(close1);
-        connection_manager.release(&conn1).await;
+        connection_manager.release(&conn1);
         // ensure drains contains exactly 1 item
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
-        assert_eq!(connection_manager.connections().await, vec!(conn2.clone()));
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
+        assert_eq!(connection_manager.connections(), vec!(conn2.clone()));
 
         // clone conn2 and track it
         let another_conn2 = conn2.clone();
         let another_close2 = connection_manager
             .track(&another_conn2)
-            .await
             .expect("should not be None");
         drop(close2);
         // release tracking on conn2
-        connection_manager.release(&conn2).await;
+        connection_manager.release(&conn2);
         // ensure drains still contains exactly 1 item
-        assert_eq!(connection_manager.drains.read().await.len(), 1);
-        assert_eq!(connection_manager.connections().await.len(), 1);
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 1);
+        assert_eq!(connection_manager.connections().len(), 1);
         assert_eq!(
-            connection_manager.connections().await,
+            connection_manager.connections(),
             vec!(another_conn2.clone())
         );
 
         // release tracking on conn2's clone
         drop(another_close2);
-        connection_manager.release(&another_conn2).await;
+        connection_manager.release(&another_conn2);
         // ensure drains contains exactly 0 items
-        assert_eq!(connection_manager.drains.read().await.len(), 0);
-        assert_eq!(connection_manager.connections().await.len(), 0);
+        assert_eq!(connection_manager.drains.read().unwrap().len(), 0);
+        assert_eq!(connection_manager.connections().len(), 0);
     }
 
     #[tokio::test]
@@ -432,10 +432,9 @@ mod tests {
             dest_workload_info: None,
         };
         // watch the connection
-        connection_manager.register(&conn1).await;
+        connection_manager.register(&conn1);
         let close1 = connection_manager
             .track(&conn1)
-            .await
             .expect("should not be None");
 
         // generate policy which denies everything

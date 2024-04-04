@@ -197,9 +197,9 @@ impl OutboundConnection {
                 // Note that fastpath is disabled in the inpod mode, so that's not a concern.
                 dest_workload_info: None,
             };
-            self.pi.connection_manager.register(&rbac_ctx).await;
+            self.pi.connection_manager.register(&rbac_ctx);
             if !self.pi.state.assert_rbac(&rbac_ctx).await {
-                self.pi.connection_manager.release(&rbac_ctx).await;
+                self.pi.connection_manager.release(&rbac_ctx);
                 info!(%rbac_ctx, "RBAC rejected");
                 return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
             }

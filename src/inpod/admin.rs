@@ -19,6 +19,7 @@ use hyper::{Request, Response};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
+use crate::proxy::connection_manager::ConnectionManager;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -32,10 +33,25 @@ pub enum State {
 pub struct ProxyState {
     pub state: State,
 
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "always_none",
+        default
+    )]
+    pub connections: Option<ConnectionManager>,
+
     // using reference counts to account for possible race between the proxy task that notifies us
     // that a proxy is down, and the proxy factory task that notifies us when it is up.
     #[serde(skip)]
     count: usize,
+}
+
+fn always_none<'de, D>(_deserializer: D) -> Result<Option<ConnectionManager>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(_deserializer)?;
+    Ok(None)
 }
 
 #[derive(Default)]
@@ -57,25 +73,28 @@ impl WorkloadManagerAdminHandler {
                     uid.clone(),
                     ProxyState {
                         state: State::Pending,
+                        connections: None,
                         count: 0,
                     },
                 );
             }
         }
     }
-    pub fn proxy_up(&self, uid: &crate::inpod::WorkloadUid) {
+    pub fn proxy_up(&self, uid: &crate::inpod::WorkloadUid, cm: Option<ConnectionManager>) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
             Some(key) => {
                 key.count += 1;
                 key.state = State::Up;
+                key.connections = cm;
             }
             None => {
                 state.insert(
                     uid.clone(),
                     ProxyState {
                         state: State::Up,
+                        connections: cm,
                         count: 1,
                     },
                 );
@@ -153,7 +172,7 @@ mod test {
         let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
         handler.proxy_pending(&uid1);
         assert_eq!(data(), "{\"uid1\":{\"state\":\"Pending\"}}");
-        handler.proxy_up(&uid1);
+        handler.proxy_up(&uid1, None);
         assert_eq!(data(), "{\"uid1\":{\"state\":\"Up\"}}");
         handler.proxy_down(&uid1);
         assert_eq!(data(), "{}");
