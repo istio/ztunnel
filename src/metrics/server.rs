@@ -61,8 +61,13 @@ async fn handle_metrics(
     _req: Request<Incoming>,
 ) -> Response<Full<Bytes>> {
     let mut buf = String::new();
-    let reg = reg.lock().unwrap();
-    encode(&mut buf, &reg).unwrap();
+    let reg = reg.lock().expect("mutex");
+    if let Err(err) = encode(&mut buf, &reg) {
+        return Response::builder()
+            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(err.to_string().into())
+            .expect("builder with known status code should not fail");
+    }
 
     Response::builder()
         .status(hyper::StatusCode::OK)
@@ -71,5 +76,5 @@ async fn handle_metrics(
             "application/openmetrics-text;charset=utf-8;version=1.0.0",
         )
         .body(buf.into())
-        .unwrap()
+        .expect("builder with known status code should not fail")
 }

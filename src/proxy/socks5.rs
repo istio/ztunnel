@@ -40,7 +40,7 @@ impl Socks5 {
             .map_err(|e| Error::Bind(pi.cfg.socks5_addr, e))?;
 
         info!(
-            address=%listener.local_addr().unwrap(),
+            address=%listener.local_addr().expect("local_addr available"),
             component="socks5",
             "listener established",
         );
@@ -53,7 +53,7 @@ impl Socks5 {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().unwrap()
+        self.listener.local_addr().expect("local_addr available")
     }
 
     pub async fn run(self) {

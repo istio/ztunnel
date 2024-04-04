@@ -176,12 +176,17 @@ impl tower::Service<http_02::Request<BoxBody>> for TlsGrpcChannel {
 
     fn call(&mut self, req: http_02::Request<BoxBody>) -> Self::Future {
         let mut req = http02_request_to_http1(req.map(HttpBody04ToHttpBody1::new));
-        let uri = Uri::builder()
-            .scheme(self.uri.scheme().unwrap().to_owned())
-            .authority(self.uri.authority().unwrap().to_owned())
-            .path_and_query(req.uri().path_and_query().unwrap().to_owned())
-            .build()
-            .unwrap();
+        let mut uri = Uri::builder();
+        if let Some(scheme) = self.uri.scheme() {
+            uri = uri.scheme(scheme.to_owned());
+        }
+        if let Some(authority) = self.uri.authority() {
+            uri = uri.authority(authority.to_owned());
+        }
+        if let Some(path_and_query) = req.uri().path_and_query() {
+            uri = uri.path_and_query(path_and_query.to_owned());
+        }
+        let uri = uri.build().expect("uri must be valid");
         *req.uri_mut() = uri;
         let future = self.client.request(req);
         Box::pin(async move {

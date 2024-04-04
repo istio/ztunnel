@@ -30,6 +30,7 @@ use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
 use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -122,25 +123,24 @@ impl Service {
     pub fn spawn(self) {
         self.s.spawn(|state, req| async move {
             match req.uri().path() {
-                "/debug/pprof/profile" => Ok(handle_pprof(req).await),
-                "/debug/pprof/heap" => Ok(handle_jemalloc_pprof_heapgen(req).await),
+                "/debug/pprof/profile" => handle_pprof(req).await,
+                "/debug/pprof/heap" => handle_jemalloc_pprof_heapgen(req).await,
                 "/quitquitquit" => Ok(handle_server_shutdown(
                     state.shutdown_trigger.clone(),
                     req,
                     state.config.self_termination_deadline,
                 )
                 .await),
-                "/config_dump" => Ok(handle_config_dump(
-                    ConfigDump {
+                "/config_dump" => {
+                    handle_config_dump(ConfigDump {
                         proxy_state: state.proxy_state.clone(),
                         static_config: Default::default(),
                         version: BuildInfo::new(),
                         config: state.config.clone(),
                         certificates: dump_certs(state.cert_manager.borrow()).await,
-                    },
-                    // req, // bring this back if we start using it
-                )
-                .await),
+                    })
+                    .await
+                }
                 "/logging" => Ok(handle_logging(req).await),
                 "/" => Ok(handle_dashboard(req, &state.handlers).await),
                 _ => match Self::find_handler(state.as_ref(), req.uri().path()) {
@@ -245,30 +245,22 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     dump
 }
 
-async fn handle_pprof(_req: Request<Incoming>) -> Response<Full<Bytes>> {
+async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(1000)
         // .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-        .build()
-        .unwrap();
+        .build()?;
 
     tokio::time::sleep(Duration::from_secs(10)).await;
-    match guard.report().build() {
-        Ok(report) => {
-            let profile = report.pprof().unwrap();
+    let report = guard.report().build()?;
+    let profile = report.pprof()?;
 
-            let body = profile.write_to_bytes().unwrap();
+    let body = profile.write_to_bytes()?;
 
-            Response::builder()
-                .status(hyper::StatusCode::OK)
-                .body(body.into())
-                .unwrap()
-        }
-        Err(err) => plaintext_response(
-            hyper::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to build profile: {err}\n"),
-        ),
-    }
+    Ok(Response::builder()
+        .status(hyper::StatusCode::OK)
+        .body(body.into())
+        .expect("builder with known status code should not fail"))
 }
 
 async fn handle_server_shutdown(
@@ -291,10 +283,7 @@ async fn handle_server_shutdown(
     }
 }
 
-async fn handle_config_dump(
-    mut dump: ConfigDump,
-    // _req: Request<Incoming>,
-) -> Response<Full<Bytes>> {
+async fn handle_config_dump(mut dump: ConfigDump) -> anyhow::Result<Response<Full<Bytes>>> {
     if let Some(cfg) = dump.config.local_xds_config.clone() {
         match cfg.read_to_string().await {
             Ok(data) => match serde_yaml::from_str(&data) {
@@ -311,11 +300,11 @@ async fn handle_config_dump(
         }
     }
 
-    let body = serde_json::to_string_pretty(&dump).unwrap();
-    Response::builder()
+    let body = serde_json::to_string_pretty(&dump)?;
+    Ok(Response::builder()
         .status(hyper::StatusCode::OK)
         .body(body.into())
-        .unwrap()
+        .expect("builder with known status code should not fail"))
 }
 
 //mirror envoy's behavior: https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--logging
@@ -393,33 +382,31 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
 }
 
 #[cfg(feature = "jemalloc")]
-async fn handle_jemalloc_pprof_heapgen(_req: Request<Incoming>) -> Response<Full<Bytes>> {
-    let mut prof_ctl = jemalloc_pprof::PROF_CTL.as_ref().unwrap().lock().await;
+async fn handle_jemalloc_pprof_heapgen(
+    _req: Request<Incoming>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    let mut prof_ctl = jemalloc_pprof::PROF_CTL.as_ref()?.lock().await;
     if !prof_ctl.activated() {
-        Response::builder()
+        return Ok(Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
             .body("jemalloc not enabled".into())
-            .unwrap()
-    } else {
-        let pprof = prof_ctl.dump_pprof().map_err(|err| {
-            Response::builder()
-                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                .body(err)
-                .unwrap()
-        });
-        Response::builder()
-            .status(hyper::StatusCode::OK)
-            .body(Bytes::from(pprof.unwrap()).into())
-            .unwrap()
+            .expect("builder with known status code should not fail"));
     }
+    let pprof = prof_ctl.dump_pprof()?;
+    Ok(Response::builder()
+        .status(hyper::StatusCode::OK)
+        .body(Bytes::from(pprof?).into())
+        .expect("builder with known status code should not fail"))
 }
 
 #[cfg(not(feature = "jemalloc"))]
-async fn handle_jemalloc_pprof_heapgen(_req: Request<Incoming>) -> Response<Full<Bytes>> {
-    Response::builder()
+async fn handle_jemalloc_pprof_heapgen(
+    _req: Request<Incoming>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
         .body("jemalloc not enabled".into())
-        .unwrap()
+        .expect("builder with known status code should not fail"))
 }
 
 fn base64_encode(data: String) -> String {
@@ -732,7 +719,7 @@ mod tests {
         //
         // this could happen for a variety of reasons; for example some types
         // may need custom serialize/deserialize to be keys in a map, like NetworkAddress
-        let resp = handle_config_dump(dump).await;
+        let resp = handle_config_dump(dump).await.unwrap();
 
         let resp_bytes = resp
             .body()

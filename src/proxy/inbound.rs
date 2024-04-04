@@ -65,7 +65,7 @@ impl Inbound {
         // Override with our explicitly configured setting
         pi.cfg.enable_original_source = Some(transparent);
         info!(
-            address=%listener.local_addr().unwrap(),
+            address=%listener.local_addr().expect("local_addr available"),
             component="inbound",
             transparent,
             "listener established",
@@ -78,7 +78,7 @@ impl Inbound {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().unwrap()
+        self.listener.local_addr().expect("local_addr available")
     }
 
     pub(super) async fn run(self) {
@@ -97,7 +97,7 @@ impl Inbound {
             let (raw_socket, ssl) = tls.get_ref();
             let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
-            let src = to_canonical(raw_socket.peer_addr().unwrap());
+            let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
             let pi = self.pi.clone();
             let connection_manager = self.pi.connection_manager.clone();
             let drain = sub_drain.clone();
@@ -315,7 +315,7 @@ impl Inbound {
                         return Ok(Response::builder()
                             .status(StatusCode::BAD_REQUEST)
                             .body(Empty::new())
-                            .unwrap());
+                            .expect("builder with known status code"));
                     }
                 };
 
@@ -328,7 +328,7 @@ impl Inbound {
                             return Ok(Response::builder()
                                 .status(StatusCode::BAD_REQUEST)
                                 .body(Empty::new())
-                                .unwrap());
+                                .expect("builder with known status code"));
                         }
                     };
 
@@ -371,7 +371,7 @@ impl Inbound {
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
-                        .unwrap());
+                        .expect("builder with known status code should not fail"));
                 }
                 // This check should be removed in favor of an L4 policy check
                 // We should express as policy whether or not traffic is allowed to bypass a waypoint
@@ -381,7 +381,7 @@ impl Inbound {
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
-                        .unwrap());
+                        .expect("builder with known status code should not fail"));
                 }
                 let source_ip = if from_waypoint {
                     // If the request is from our waypoint, trust the Forwarded header.
@@ -457,7 +457,7 @@ impl Inbound {
                 Ok(Response::builder()
                     .status(status_code)
                     .body(Empty::new())
-                    .unwrap())
+                    .expect("builder with known status code should not fail"))
             }
             // Return the 404 Not Found for other routes.
             method => {
@@ -465,7 +465,7 @@ impl Inbound {
                 Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
                     .body(Empty::new())
-                    .unwrap())
+                    .expect("builder with known status code should not fail"))
             }
         }
     }

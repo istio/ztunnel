@@ -49,7 +49,7 @@ impl InboundPassthrough {
         pi.cfg.enable_original_source = Some(transparent);
 
         info!(
-            address=%listener.local_addr().unwrap(),
+            address=%listener.local_addr().expect("local_addr available"),
             component="inbound plaintext",
             transparent,
             "listener established",
