@@ -63,6 +63,23 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
+#[derive(Default, Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Locality {
+    pub region: String,
+    pub zone: String,
+    pub subzone: String,
+}
+
+impl From<xds::istio::workload::Locality> for Locality {
+    fn from(value: xds::istio::workload::Locality) -> Self {
+        Locality {
+            region: value.region,
+            zone: value.zone,
+            subzone: value.subzone,
+        }
+    }
+}
+
 impl From<xds::istio::workload::WorkloadStatus> for HealthStatus {
     fn from(value: xds::istio::workload::WorkloadStatus) -> Self {
         match value {
@@ -184,6 +201,9 @@ pub struct Workload {
 
     #[serde(default)]
     pub cluster_id: String,
+
+    #[serde(default)]
+    pub locality: Locality,
 }
 
 fn is_default<T: Default + PartialEq>(t: &T) -> bool {
@@ -395,6 +415,8 @@ impl TryFrom<&XdsWorkload> for Workload {
 
             authorization_policies: resource.authorization_policies,
 
+            locality: resource.locality.map(Locality::from).unwrap_or_default(),
+
             cluster_id: {
                 let result = resource.cluster_id;
                 if result.is_empty() {
@@ -562,7 +584,7 @@ pub struct WorkloadStore {
 }
 
 impl WorkloadStore {
-    pub fn insert(&mut self, w: Workload) -> anyhow::Result<()> {
+    pub fn insert(&mut self, w: Workload) {
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove(w.uid.as_str());
 
@@ -575,7 +597,6 @@ impl WorkloadStore {
             self.by_hostname.insert(w.hostname.clone(), w.clone());
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
-        Ok(())
     }
 
     pub fn remove(&mut self, uid: &str) -> Option<Workload> {
@@ -855,6 +876,7 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    load_balancing: None,
                 },
             )
             .unwrap();
@@ -886,6 +908,7 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    load_balancing: None,
                 },
             )
             .unwrap();
@@ -940,6 +963,7 @@ mod tests {
                     }],
                     subject_alt_names: vec![],
                     waypoint: None,
+                    load_balancing: None,
                 },
             )
             .unwrap();
@@ -1171,12 +1195,19 @@ mod tests {
         let mut found: HashSet<String> = HashSet::new();
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
+        let wl: Workload = (&XdsWorkload {
+            name: "some name".to_string(),
+            ..Default::default()
+        })
+            .try_into()
+            .unwrap();
         for _ in 0..1000 {
-            if let Some(us) = state
-                .state
-                .read()
-                .unwrap()
-                .find_upstream("", "127.0.1.1:80".parse().unwrap())
+            if let Some(us) =
+                state
+                    .state
+                    .read()
+                    .unwrap()
+                    .find_upstream("", &wl, "127.0.1.1:80".parse().unwrap())
             {
                 let n = &us.workload.name; // borrow name instead of cloning
                 found.insert(n.to_owned()); // insert an owned copy of the borrowed n
@@ -1219,12 +1250,12 @@ mod tests {
             .find_address(&network_addr("", "127.0.0.1".parse().unwrap()));
         // Make sure we get a valid workload
         assert!(wl.is_some());
-        assert_eq!(wl.unwrap().service_account, "default");
-        let us = demand
-            .state
-            .read()
-            .unwrap()
-            .find_upstream("", "127.10.0.1:80".parse().unwrap());
+        assert_eq!(wl.as_ref().unwrap().service_account, "default");
+        let us = demand.state.read().unwrap().find_upstream(
+            "",
+            wl.as_ref().unwrap(),
+            "127.10.0.1:80".parse().unwrap(),
+        );
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.clone().unwrap().port, 8080);
@@ -1234,11 +1265,11 @@ mod tests {
         );
 
         // test that we can have a service in another network than workloads it selects
-        let us = demand
-            .state
-            .read()
-            .unwrap()
-            .find_upstream("remote", "127.10.0.2:80".parse().unwrap());
+        let us = demand.state.read().unwrap().find_upstream(
+            "remote",
+            wl.as_ref().unwrap(),
+            "127.10.0.2:80".parse().unwrap(),
+        );
         // Make sure we get a valid VIP
         assert!(us.is_some());
         assert_eq!(us.unwrap().port, 8080);

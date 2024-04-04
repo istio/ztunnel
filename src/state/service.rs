@@ -26,6 +26,7 @@ use crate::state::workload::{
     WorkloadError,
 };
 use crate::xds;
+use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::PortList;
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -43,6 +44,57 @@ pub struct Service {
     #[serde(default)]
     pub subject_alt_names: Vec<String>,
     pub waypoint: Option<GatewayAddress>,
+
+    pub load_balancer: Option<LoadBalancer>,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub enum LoadBalancerMode {
+    Strict,
+    Failover,
+}
+
+impl From<xds::istio::workload::load_balancing::Mode> for LoadBalancerMode {
+    fn from(value: xds::istio::workload::load_balancing::Mode) -> Self {
+        match value {
+            xds::istio::workload::load_balancing::Mode::Strict => LoadBalancerMode::Strict,
+            xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
+                LoadBalancerMode::Failover
+            }
+            xds::istio::workload::load_balancing::Mode::Failover => LoadBalancerMode::Failover,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub enum LoadBalancerScopes {
+    Region,
+    Zone,
+    Subzone,
+    Node,
+    Cluster,
+    Network,
+}
+
+impl TryFrom<XdsScope> for LoadBalancerScopes {
+    type Error = WorkloadError;
+    fn try_from(value: XdsScope) -> Result<Self, Self::Error> {
+        match value {
+            XdsScope::Region => Ok(LoadBalancerScopes::Region),
+            XdsScope::Zone => Ok(LoadBalancerScopes::Zone),
+            XdsScope::Subzone => Ok(LoadBalancerScopes::Subzone),
+            XdsScope::Node => Ok(LoadBalancerScopes::Node),
+            XdsScope::Cluster => Ok(LoadBalancerScopes::Cluster),
+            XdsScope::Network => Ok(LoadBalancerScopes::Network),
+            _ => Err(WorkloadError::EnumParse("invalid target".to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LoadBalancer {
+    pub routing_preferences: Vec<LoadBalancerScopes>,
+    pub mode: LoadBalancerMode,
 }
 
 impl Service {
@@ -116,6 +168,22 @@ impl TryFrom<&XdsService> for Service {
             Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,
         };
+        let lb = if let Some(lb) = &s.load_balancing {
+            Some(LoadBalancer {
+                routing_preferences: lb
+                    .routing_preference
+                    .iter()
+                    .map(|r| {
+                        xds::istio::workload::load_balancing::Scope::try_from(*r)
+                            .map_err(WorkloadError::DecodeError)
+                            .and_then(|r| r.try_into())
+                    })
+                    .collect::<Result<Vec<LoadBalancerScopes>, WorkloadError>>()?,
+                mode: xds::istio::workload::load_balancing::Mode::try_from(lb.mode)?.into(),
+            })
+        } else {
+            None
+        };
         let svc = Service {
             name: s.name.to_string(),
             namespace: s.namespace.to_string(),
@@ -128,6 +196,7 @@ impl TryFrom<&XdsService> for Service {
             endpoints: Default::default(), // Will be populated once inserted into the store.
             subject_alt_names: s.subject_alt_names.clone(),
             waypoint,
+            load_balancer: lb,
         };
         Ok(svc)
     }

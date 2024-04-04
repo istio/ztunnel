@@ -785,6 +785,7 @@ mod tests {
                 .collect(),
                 subject_alt_names: vec![format!("{name}.default.svc.cluster.local")],
                 waypoint: waypoint.service_attached(),
+                load_balancer: None,
             }
         });
 
@@ -816,7 +817,7 @@ mod tests {
             state.services.insert(svc);
         }
         for wl in workloads {
-            state.workloads.insert(wl)?;
+            state.workloads.insert(wl);
         }
 
         Ok(DemandProxyState::new(

@@ -16,7 +16,7 @@ use crate::identity::SecretManager;
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::state::policy::PolicyStore;
-use crate::state::service::ServiceStore;
+use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerScopes, ServiceStore};
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
@@ -206,7 +206,12 @@ impl ProxyState {
         }
     }
 
-    pub fn find_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
+    pub fn find_upstream(
+        &self,
+        network: &str,
+        source_workload: &Workload,
+        addr: SocketAddr,
+    ) -> Option<Upstream> {
         if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
                 debug!(
@@ -218,7 +223,7 @@ impl ProxyState {
             };
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
-            let Some((_, ep)) = svc.endpoints.iter().choose(&mut rand::thread_rng()) else {
+            let Some(ep) = self.load_balance(source_workload, &svc) else {
                 debug!("VIP {} has no healthy endpoints", addr);
                 return None;
             };
@@ -249,6 +254,62 @@ impl ProxyState {
             return Some(us);
         }
         None
+    }
+
+    fn load_balance<'a>(&self, src: &Workload, svc: &'a Service) -> Option<&'a Endpoint> {
+        match svc.load_balancer {
+            None => svc.endpoints.values().choose(&mut rand::thread_rng()),
+            Some(ref lb) => {
+                let ranks = svc
+                    .endpoints
+                    .iter()
+                    .filter_map(|(_, ep)| {
+                        let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
+                            debug!("failed to fetch workload for {}", ep.workload_uid);
+                            return None;
+                        };
+                        // Load balancer will define N targets we want to match
+                        // Consider [network, region, zone]
+                        // Rank = 3 means we match all of them
+                        // Rank = 2 means network and region match
+                        // Rank = 0 means none match
+                        let mut rank = 0;
+                        for target in &lb.routing_preferences {
+                            let matches = match target {
+                                LoadBalancerScopes::Region => {
+                                    src.locality.region == wl.locality.region
+                                }
+                                LoadBalancerScopes::Zone => src.locality.zone == wl.locality.zone,
+                                LoadBalancerScopes::Subzone => {
+                                    src.locality.subzone == wl.locality.subzone
+                                }
+                                LoadBalancerScopes::Node => src.node == wl.node,
+                                LoadBalancerScopes::Cluster => src.cluster_id == wl.cluster_id,
+                                LoadBalancerScopes::Network => src.network == wl.network,
+                            };
+                            if matches {
+                                rank += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        // Doesn't match all, and required to. Do not select this endpoint
+                        if lb.mode == LoadBalancerMode::Strict
+                            && rank != lb.routing_preferences.len()
+                        {
+                            return None;
+                        }
+                        Some((rank, ep))
+                    })
+                    .collect::<Vec<_>>();
+                let max = *ranks.iter().map(|(rank, _ep)| rank).max()?;
+                ranks
+                    .into_iter()
+                    .filter(|(rank, _ep)| *rank == max)
+                    .map(|(_, ep)| ep)
+                    .choose(&mut rand::thread_rng())
+            }
+        }
     }
 }
 
@@ -355,7 +416,7 @@ impl DemandProxyState {
     }
 
     // this should only be called once per request (for the workload itself and potentially its waypoint)
-    pub async fn load_balance(
+    pub async fn pick_workload_destination(
         &self,
         dst_workload: &Workload,
         src_workload: &Workload,
@@ -551,14 +612,23 @@ impl DemandProxyState {
         self.state.read().unwrap().workloads.find_uid(uid)
     }
 
-    pub async fn fetch_upstream(&self, network: &str, addr: SocketAddr) -> Option<Upstream> {
+    pub async fn fetch_upstream(
+        &self,
+        network: &str,
+        source_workload: &Workload,
+        addr: SocketAddr,
+    ) -> Option<Upstream> {
         self.fetch_address(&network_addr(network, addr.ip())).await;
-        self.state.read().unwrap().find_upstream(network, addr)
+        self.state
+            .read()
+            .unwrap()
+            .find_upstream(network, source_workload, addr)
     }
 
     pub async fn fetch_waypoint(
         &self,
         wl: &Workload,
+        source_workload: &Workload,
         workload_ip: IpAddr,
     ) -> Result<Option<Upstream>, WaypointError> {
         let Some(gw_address) = &wl.waypoint else {
@@ -576,7 +646,7 @@ impl DemandProxyState {
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
         match self
-            .fetch_upstream(&wp_nw_addr.network, wp_socket_addr)
+            .fetch_upstream(&wp_nw_addr.network, source_workload, wp_socket_addr)
             .await
         {
             Some(mut upstream) => {
@@ -730,18 +800,20 @@ impl ProxyStateManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::state::service::LoadBalancer;
+    use crate::state::workload::Locality;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use super::*;
     use crate::test_helpers;
+    use crate::test_helpers::TEST_SERVICE_NAMESPACE;
 
     #[tokio::test]
     async fn lookup_address() {
         let mut state = ProxyState::default();
         state
             .workloads
-            .insert(test_helpers::test_default_workload())
-            .unwrap();
+            .insert(test_helpers::test_default_workload());
         state.services.insert(test_helpers::mock_default_service());
 
         let mock_proxy_state = DemandProxyState::new(
@@ -815,7 +887,7 @@ mod tests {
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
             ..test_helpers::test_default_workload()
         };
-        state.workloads.insert(wl).unwrap();
+        state.workloads.insert(wl);
 
         let mock_proxy_state = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
@@ -873,5 +945,201 @@ mod tests {
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
             assert!(!mock_proxy_state.assert_rbac(&ctx).await);
         }
+    }
+
+    #[tokio::test]
+    async fn test_load_balance() {
+        let mut state = ProxyState::default();
+        let wl_no_locality = Workload {
+            uid: "cluster1//v1/Pod/default/wl_no_locality".to_string(),
+            name: "wl_no_locality".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))],
+            ..test_helpers::test_default_workload()
+        };
+        let wl_match = Workload {
+            uid: "cluster1//v1/Pod/default/wl_match".to_string(),
+            name: "wl_match".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
+            network: "network".to_string(),
+            locality: Locality {
+                region: "reg".to_string(),
+                zone: "zone".to_string(),
+                subzone: "".to_string(),
+            },
+            ..test_helpers::test_default_workload()
+        };
+        let wl_almost = Workload {
+            uid: "cluster1//v1/Pod/default/wl_almost".to_string(),
+            name: "wl_almost".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3))],
+            network: "network".to_string(),
+            locality: Locality {
+                region: "reg".to_string(),
+                zone: "not-zone".to_string(),
+                subzone: "".to_string(),
+            },
+            ..test_helpers::test_default_workload()
+        };
+        let _ep_almost = Workload {
+            uid: "cluster1//v1/Pod/default/ep_almost".to_string(),
+            name: "wl_almost".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 4))],
+            network: "network".to_string(),
+            locality: Locality {
+                region: "reg".to_string(),
+                zone: "other-not-zone".to_string(),
+                subzone: "".to_string(),
+            },
+            ..test_helpers::test_default_workload()
+        };
+        let _ep_no_match = Workload {
+            uid: "cluster1//v1/Pod/default/ep_no_match".to_string(),
+            name: "wl_almost".to_string(),
+            namespace: "default".to_string(),
+            trust_domain: "cluster.local".to_string(),
+            service_account: "default".to_string(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))],
+            network: "not-network".to_string(),
+            locality: Locality {
+                region: "not-reg".to_string(),
+                zone: "unmatched-zone".to_string(),
+                subzone: "".to_string(),
+            },
+            ..test_helpers::test_default_workload()
+        };
+        let endpoints = HashMap::from([
+            (
+                "cluster1//v1/Pod/default/ep_almost".to_string(),
+                Endpoint {
+                    workload_uid: "cluster1//v1/Pod/default/ep_almost".to_string(),
+                    service: NamespacedHostname {
+                        namespace: TEST_SERVICE_NAMESPACE.to_string(),
+                        hostname: "example.com".to_string(),
+                    },
+                    address: Some(NetworkAddress {
+                        address: "192.168.0.4".parse().unwrap(),
+                        network: "".to_string(),
+                    }),
+                    port: HashMap::from([(80u16, 80u16)]),
+                },
+            ),
+            (
+                "cluster1//v1/Pod/default/ep_no_match".to_string(),
+                Endpoint {
+                    workload_uid: "cluster1//v1/Pod/default/ep_almost".to_string(),
+                    service: NamespacedHostname {
+                        namespace: TEST_SERVICE_NAMESPACE.to_string(),
+                        hostname: "example.com".to_string(),
+                    },
+                    address: Some(NetworkAddress {
+                        address: "192.168.0.5".parse().unwrap(),
+                        network: "".to_string(),
+                    }),
+                    port: HashMap::from([(80u16, 80u16)]),
+                },
+            ),
+            (
+                "cluster1//v1/Pod/default/wl_match".to_string(),
+                Endpoint {
+                    workload_uid: "cluster1//v1/Pod/default/wl_match".to_string(),
+                    service: NamespacedHostname {
+                        namespace: TEST_SERVICE_NAMESPACE.to_string(),
+                        hostname: "example.com".to_string(),
+                    },
+                    address: Some(NetworkAddress {
+                        address: "192.168.0.2".parse().unwrap(),
+                        network: "".to_string(),
+                    }),
+                    port: HashMap::from([(80u16, 80u16)]),
+                },
+            ),
+        ]);
+        let strict_svc = Service {
+            endpoints: endpoints.clone(),
+            load_balancer: Some(LoadBalancer {
+                mode: LoadBalancerMode::Strict,
+                routing_preferences: vec![
+                    LoadBalancerScopes::Network,
+                    LoadBalancerScopes::Region,
+                    LoadBalancerScopes::Zone,
+                ],
+            }),
+            ..test_helpers::mock_default_service()
+        };
+        let failover_svc = Service {
+            endpoints,
+            load_balancer: Some(LoadBalancer {
+                mode: LoadBalancerMode::Failover,
+                routing_preferences: vec![
+                    LoadBalancerScopes::Network,
+                    LoadBalancerScopes::Region,
+                    LoadBalancerScopes::Zone,
+                ],
+            }),
+            ..test_helpers::mock_default_service()
+        };
+        state.workloads.insert(wl_no_locality.clone());
+        state.workloads.insert(wl_match.clone());
+        state.workloads.insert(wl_almost.clone());
+        state.services.insert(strict_svc.clone());
+        state.services.insert(failover_svc.clone());
+
+        let assert_endpoint = |src: &Workload, svc: &Service, ips: Vec<&str>, desc: &str| {
+            let got = state
+                .load_balance(src, svc)
+                .and_then(|ep| ep.address.clone())
+                .map(|addr| addr.address.to_string());
+            if ips.is_empty() {
+                assert!(got.is_none(), "{}", desc);
+            } else {
+                let want: Vec<String> = ips.iter().map(ToString::to_string).collect();
+                assert!(want.contains(&got.unwrap()), "{}", desc);
+            }
+        };
+
+        assert_endpoint(
+            &wl_no_locality,
+            &strict_svc,
+            vec![],
+            "strict no match should not select",
+        );
+        assert_endpoint(
+            &wl_almost,
+            &strict_svc,
+            vec![],
+            "strict no match should not select",
+        );
+        assert_endpoint(&wl_match, &strict_svc, vec!["192.168.0.2"], "strict match");
+
+        assert_endpoint(
+            &wl_no_locality,
+            &failover_svc,
+            vec!["192.168.0.2", "192.168.0.4", "192.168.0.5"],
+            "failover no match can select any endpoint",
+        );
+        assert_endpoint(
+            &wl_almost,
+            &failover_svc,
+            vec!["192.168.0.2", "192.168.0.4"],
+            "failover almost match can select any close matches",
+        );
+        assert_endpoint(
+            &wl_match,
+            &failover_svc,
+            vec!["192.168.0.2"],
+            "failover full match selects closest match",
+        );
     }
 }

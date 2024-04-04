@@ -404,7 +404,7 @@ impl OutboundConnection {
                 let waypoint_us = self
                     .pi
                     .state
-                    .fetch_upstream(&self.pi.cfg.network, waypoint_vip)
+                    .fetch_upstream(&self.pi.cfg.network, &source_workload, waypoint_vip)
                     .await
                     .ok_or(proxy::Error::UnknownWaypoint(
                         "unable to determine waypoint upstream".to_string(),
@@ -414,7 +414,7 @@ impl OutboundConnection {
                 let waypoint_ip = self
                     .pi
                     .state
-                    .load_balance(
+                    .pick_workload_destination(
                         &waypoint_workload,
                         &source_workload,
                         self.pi.metrics.clone(),
@@ -447,7 +447,7 @@ impl OutboundConnection {
         let us = self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, target)
+            .fetch_upstream(&source_workload.network, &source_workload, target)
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
@@ -469,7 +469,7 @@ impl OutboundConnection {
         let workload_ip = self
             .pi
             .state
-            .load_balance(
+            .pick_workload_destination(
                 &mutable_us.workload,
                 &source_workload,
                 self.pi.metrics.clone(),
@@ -491,7 +491,7 @@ impl OutboundConnection {
             match self
                 .pi
                 .state
-                .fetch_waypoint(&mutable_us.workload, workload_ip)
+                .fetch_waypoint(&mutable_us.workload, &source_workload, workload_ip)
                 .await
             {
                 Ok(None) => {} // workload doesn't have a waypoint; this is fine
@@ -500,7 +500,7 @@ impl OutboundConnection {
                     let waypoint_ip = self
                         .pi
                         .state
-                        .load_balance(
+                        .pick_workload_destination(
                             &waypoint_workload,
                             &source_workload,
                             self.pi.metrics.clone(),
