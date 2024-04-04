@@ -392,14 +392,14 @@ impl Inbound {
                 }
                 // This check should be removed in favor of an L4 policy check
                 // We should express as policy whether or not traffic is allowed to bypass a waypoint
-                if has_waypoint && !from_waypoint {
-                    info!(%rbac_ctx.conn, "bypassed waypoint");
-                    connection_manager.release(&rbac_ctx);
-                    return Ok(Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Empty::new())
-                        .expect("builder with known status code should not fail"));
-                }
+                // if has_waypoint && !from_waypoint {
+                //     info!(%rbac_ctx.conn, "bypassed waypoint");
+                //     connection_manager.release(&rbac_ctx).await;
+                //     return Ok(Response::builder()
+                //         .status(StatusCode::UNAUTHORIZED)
+                //         .body(Empty::new())
+                //         .unwrap());
+                // }
                 let source_ip = rbac_ctx.conn.src.ip();
 
                 let baggage =

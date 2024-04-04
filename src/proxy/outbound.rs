@@ -536,7 +536,7 @@ impl OutboundConnection {
         let us = match self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, target)
+            .fetch_upstream(&source_workload.network, &source_workload, target)
             .await
         {
             Some(us) => us,
@@ -557,11 +557,11 @@ impl OutboundConnection {
             }
         };
 
-        let workload_ip = self.pi.state.pick_workload_destination(
-            &us.workload,
-            &source_workload,
-            self.pi.metrics.clone(),
-        );
+        let workload_ip = self
+            .pi
+            .state
+            .pick_workload_destination(&us.workload, &source_workload, self.pi.metrics.clone())
+            .await?;
 
         let from_waypoint = proxy::check_from_waypoint(
             self.pi.state.clone(),
