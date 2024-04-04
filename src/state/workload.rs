@@ -118,7 +118,6 @@ pub mod application_tunnel {
     use crate::xds::istio::workload::application_tunnel::Protocol as XdsProtocol;
 
     #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-    #[serde(untagged)]
     pub enum Protocol {
         NONE,
         PROXY,
