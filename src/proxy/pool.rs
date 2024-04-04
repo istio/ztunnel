@@ -90,6 +90,9 @@ pub struct Key {
     // In theory we can just use src,dst,node. However, the dst has a check that
     // the L3 destination IP matches the HBONE IP. This could be loosened to just assert they are the same identity maybe.
     pub dst: SocketAddr,
+    // Because we spoof the source IP, we need to key on this as well. Note: for in-pod its already per-pod
+    // pools anyways.
+    pub src: SocketAddr,
 }
 
 #[derive(Debug)]
@@ -204,6 +207,7 @@ mod test {
         let key = Key {
             src_id: Identity::default(),
             dst_id: vec![Identity::default()],
+            src: SocketAddr::from(([127, 0, 0, 2], 1234)),
             dst: addr,
         };
         let connect = || async {

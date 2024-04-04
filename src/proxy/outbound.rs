@@ -261,6 +261,7 @@ impl OutboundConnection {
                 let pool_key = pool::Key {
                     src_id: req.source.identity(),
                     dst_id: dst_identity.clone(),
+                    src: remote_addr,
                     dst: req.gateway,
                 };
 
