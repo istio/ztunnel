@@ -1262,6 +1262,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyed_priority_queue"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ee7893dab2e44ae5f9d0173f26ff4aa327c10b01b06a72b52dd9405b628640d"
+dependencies = [
+ "indexmap 2.2.3",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1731,17 +1740,6 @@ checksum = "a41cf62165e97c7f814d2221421dbb9afcbcdb0a88068e5ea206e19951c2cbb5"
 dependencies = [
  "proc-macro2",
  "syn",
-]
-
-[[package]]
-name = "priority-queue"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "509354d8a769e8d0b567d6821b84495c60213162761a732d68ce87c964bd347f"
-dependencies = [
- "autocfg",
- "equivalent",
- "indexmap 2.2.3",
 ]
 
 [[package]]
@@ -3215,6 +3213,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "itertools 0.12.1",
+ "keyed_priority_queue",
  "libc",
  "log",
  "netns-rs",
@@ -3222,7 +3221,6 @@ dependencies = [
  "once_cell",
  "ppp",
  "pprof",
- "priority-queue",
  "prometheus-client",
  "prometheus-parse",
  "prost",
