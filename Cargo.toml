@@ -7,7 +7,6 @@ rust-version = "1.65"
 [features]
 default = ["tls-ring"]
 jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
-console = ["dep:console-subscriber"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only", "ztunnel/tls-boring"]
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen", "ztunnel/tls-ring"]
 testing = ["dep:rcgen", "rcgen/x509-parser"] # Enables utilities supporting tests.
@@ -42,7 +41,6 @@ base64 = "0.22"
 byteorder = "1.5"
 bytes = { version = "1.5", features = ["serde"] }
 chrono = "0.4"
-console-subscriber = { version = "0.2", optional = true }
 drain = "0.1"
 duration-str = "0.7"
 futures = "0.3"
@@ -60,7 +58,7 @@ http-body-04 = { package = "http-body", version = "0.4" }
 http-body-1 = { package = "http-body", version = "1.0.0-rc.2" }
 http-body-util = "0.1"
 http-types = { version = "2.12", default-features = false }
-hyper = { version = "1.1", features = ["full"] }
+hyper = { version = "1.2", features = ["full"] }
 hyper-rustls = { version = "0.27.0", default-features = false, features = ["logging", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 ipnet = { version = "2.9", features = ["serde"] }
@@ -79,7 +77,7 @@ prost-types = "0.12"
 rand = "0.8"
 rcgen = { version = "0.13", optional = true, features = ["pem"] }
 realm_io = "0.4"
-rustls = { version = "0.23", default-features = false}
+rustls = { version = "0.23", default-features = false }
 rustls-native-certs = "0.7.0"
 rustls-pemfile = "2.1"
 serde = { version = "1.0", features = ["derive", "rc"] }

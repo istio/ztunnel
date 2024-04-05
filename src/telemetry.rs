@@ -25,16 +25,6 @@ use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Lay
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
 
-#[cfg(feature = "console")]
-pub fn setup_logging() {
-    Lazy::force(&APPLICATION_START_TIME);
-    tracing_subscriber::registry()
-        .with(fmt_layer())
-        .with(console_subscriber::spawn())
-        .init();
-}
-
-#[cfg(not(feature = "console"))]
 pub fn setup_logging() {
     Lazy::force(&APPLICATION_START_TIME);
     tracing_subscriber::registry().with(fmt_layer()).init();
