@@ -148,8 +148,8 @@ impl Inbound {
                             Err(e) => {
                                 error!("inbound serve drain err: {e}");
                                 Ok(())
-                            },
-                         };
+                            }
+                        };
                         debug!("inbound serve drain done");
                         res
                     }
