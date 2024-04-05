@@ -16,7 +16,6 @@ build:
 
 # Test that all important features build
 check-features:
-	cargo check --features console
 	cargo check --no-default-features -F tls-boring
 	(cd fuzz; cargo check)
 
