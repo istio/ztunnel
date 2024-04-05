@@ -29,11 +29,15 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::tls;
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tokio_rustls::client;
 use tracing::{debug, trace};
+
+const TLS_HANDSHAKE_TIMEOUT: u64 = 10;
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -146,12 +150,14 @@ where
         let mut acceptor = self.provider.clone();
         Box::pin(async move {
             let tls = acceptor.fetch_cert(&conn).await?;
-            tokio_rustls::TlsAcceptor::from(tls)
+            let tls_accept = tokio_rustls::TlsAcceptor::from(tls)
                 .accept(conn)
-                .map_err(TlsError::Handshake)
-                .await
-        })
-    }
+                .map_err(TlsError::Handshake);
+            timeout(Duration::from_secs(TLS_HANDSHAKE_TIMEOUT), tls_accept).map_err(move |e| {
+                TlsError::Handshake(e.into())
+            }).await?
+    })
+}
 }
 
 #[derive(Clone, Debug)]
@@ -166,7 +172,8 @@ impl OutboundConnector {
     ) -> Result<client::TlsStream<TcpStream>, io::Error> {
         let dest = ServerName::IpAddress(stream.peer_addr().unwrap().ip().into());
         let c = tokio_rustls::TlsConnector::from(self.client_config);
-        c.connect(dest, stream).await
+
+        timeout(Duration::from_secs(TLS_HANDSHAKE_TIMEOUT), c.connect(dest, stream)).await?
     }
 }
 
