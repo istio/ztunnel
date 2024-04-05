@@ -100,7 +100,7 @@ impl Connection {
         &mut self,
         req: Request<Empty<Bytes>>,
     ) -> impl Future<Output = hyper::Result<Response<Incoming>>> {
-        self.0.0.send_request(req)
+        self.0 .0.send_request(req)
     }
 }
 
@@ -143,18 +143,12 @@ impl Pool {
                     request_sender
                 }
                 // Connect won, checkout can just be dropped.
-                Either::Right((Err(err), checkout)) => {
-                    debug!(
-                        ?key,
-                        "connect won, but wait for existing pooled connection to establish"
-                    );
-                    match err {
-                        // Connect won but we already had an in-flight connection, so use that.
-                        Error::PoolAlreadyConnecting => checkout.await?,
-                        // Some other connection error
-                        err => return Err(err),
-                    }
-                }
+                Either::Right((Err(err), checkout)) => match err {
+                    // Connect won but we already had an in-flight connection, so use that.
+                    Error::PoolAlreadyConnecting => checkout.await?,
+                    // Some other connection error
+                    err => return Err(err),
+                },
             };
 
         Ok(Connection(request_sender))
