@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Formatter, Write};
+use std::hash::{Hash, RandomState};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ use super::CaClient;
 use super::Error::{self, Spiffe};
 
 use backoff::{backoff::Backoff, ExponentialBackoff};
+use keyed_priority_queue::KeyedPriorityQueue;
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
 
@@ -43,6 +45,23 @@ pub enum Identity {
         service_account: String,
     },
 }
+
+// struct PrioritizedFetch {
+//     identity: Identity,
+//     priority: Priority
+// }
+//
+// impl Ord for PrioritizedFetch {
+//     fn cmp(&self, other: &Self) -> Ordering {
+//         self.cmp(other)
+//     }
+// }
+//
+// impl PartialOrd for PrioritizedFetch {
+//     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+//         Some(self.cmp(other))
+//     }
+// }
 
 impl EncodeLabelValue for Identity {
     fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
@@ -211,7 +230,6 @@ impl Worker {
     async fn run(&self, mut requests: mpsc::Receiver<Request>) {
         use futures::stream::FuturesUnordered;
         use futures::StreamExt;
-        use priority_queue::PriorityQueue;
 
         #[derive(Eq, PartialEq)]
         enum Fetch {
@@ -233,7 +251,7 @@ impl Worker {
         // the future, for all other priorities Instant::now() is used as the scheduled time of the
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
-        let mut pending: PriorityQueue<Identity, PendingPriority> = PriorityQueue::new();
+        let mut pending: KeyedPriorityQueue<Identity, PendingPriority> = KeyedPriorityQueue::new();
         // The backoff strategy used for retrying operations. Sets the initial values for the backoff.
         // The values are chosen to be reasonable for the CA client to be able to recover from transient
         // errors.
@@ -273,7 +291,7 @@ impl Worker {
                         }
                         match processing.get(&id) {
                             None => {
-                                pending.push_increase(id, PendingPriority(pri, Instant::now()));
+                                push_increase(&mut pending, id, PendingPriority(pri, Instant::now()));
                             },
                             Some(Fetch::Forgetting) => {
                                 // Once the associated future completes, the result will be dropped
@@ -351,7 +369,7 @@ impl Worker {
                         },
                     };
                     if self.update_certs(&id, state).await {
-                        pending.push_increase(id, PendingPriority(Priority::Background, refresh_at));
+                        push_increase(&mut pending, id, PendingPriority(Priority::Background, refresh_at));
                     }
                 },
                 // Initiate the next fetch.
@@ -405,6 +423,18 @@ enum Request {
 pub struct SecretManagerConfig {
     time_conv: crate::time::Converter,
     concurrency: u16,
+}
+
+// push_increase pushes an item onto the queue if its not present, otherwise updates the priority to the
+// max of (current, new).
+fn push_increase<TKey: Hash + Eq, TPriority: Ord>(
+    kp: &mut KeyedPriorityQueue<TKey, TPriority, RandomState>,
+    key: TKey,
+    priority: TPriority,
+) {
+    if kp.get_priority(&key).map_or(true, |p| priority > *p) {
+        kp.push(key, priority);
+    }
 }
 
 /// SecretManager provides a wrapper around a CaClient with caching.
