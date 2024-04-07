@@ -374,7 +374,7 @@ impl Worker {
                 },
                 // Initiate the next fetch.
                 true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
-                    let (id, _) = pending.pop().unwrap();
+                    let (id, _) = pending.pop().expect("pending should always have an element at this point");
                     processing.insert(id.to_owned(), Fetch::Processing);
                     fetches.push(async move {
                         let res = self.client.fetch_certificate(&id).await;
@@ -456,7 +456,7 @@ impl fmt::Debug for SecretManager {
 impl SecretManager {
     pub async fn new(cfg: crate::config::Config) -> Result<Self, Error> {
         let caclient = CaClient::new(
-            cfg.ca_address.unwrap(),
+            cfg.ca_address.expect("ca_address must be set to use CA"),
             Box::new(tls::ControlPlaneAuthentication::RootCert(
                 cfg.ca_root_cert.clone(),
             )),

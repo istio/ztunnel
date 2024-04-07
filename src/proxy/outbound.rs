@@ -57,7 +57,7 @@ impl Outbound {
         pi.cfg.enable_original_source = Some(transparent);
 
         info!(
-            address=%listener.local_addr().unwrap(),
+            address=%listener.local_addr().expect("local_addr available"),
             component="outbound",
             transparent,
             "listener established",
@@ -70,7 +70,7 @@ impl Outbound {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().unwrap()
+        self.listener.local_addr().expect("local_addr available")
     }
 
     pub(super) async fn run(self) {
@@ -255,7 +255,11 @@ impl OutboundConnection {
                     }
                 }
 
-                allowed_sans.push(req.expected_identity.clone().unwrap());
+                allowed_sans.push(
+                    req.expected_identity
+                        .clone()
+                        .expect("HBONE request must have expected identity"),
+                );
                 let dst_identity = allowed_sans;
 
                 let pool_key = pool::Key {
@@ -316,10 +320,10 @@ impl OutboundConnection {
                         BAGGAGE_HEADER,
                         baggage(&req, self.pi.cfg.cluster_id.clone()),
                     )
-                    .header(FORWARDED, f.value().unwrap())
+                    .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
                     .header(TRACEPARENT_HEADER, self.id.header())
                     .body(Empty::<Bytes>::new())
-                    .unwrap();
+                    .expect("builder with known status code should not fail");
 
                 let response = connection.send_request(request).await?;
 
@@ -465,7 +469,7 @@ impl OutboundConnection {
             });
         }
 
-        let mut mutable_us = us.unwrap();
+        let mut mutable_us = us.expect("option is verified above");
         let workload_ip = self
             .pi
             .state

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -23,6 +24,7 @@ use std::{
 
 use bytes::Bytes;
 use drain::Watch;
+use futures_util::TryFutureExt;
 use http_body_util::Full;
 use hyper::client;
 use hyper::rt::Sleep;
@@ -205,7 +207,7 @@ impl<S> Server<S> {
     where
         S: Send + Sync + 'static,
         F: Fn(Arc<S>, Request<hyper::body::Incoming>) -> R + Send + Sync + 'static,
-        R: Future<Output = Result<Response<Full<Bytes>>, hyper::Error>> + Send + Sync + 'static,
+        R: Future<Output = Result<Response<Full<Bytes>>, anyhow::Error>> + Send + Sync + 'static,
     {
         use futures_util::StreamExt as OtherStreamExt;
         let address = self.address();
@@ -229,18 +231,25 @@ impl<S> Server<S> {
                 let f = f.clone();
                 let state = state.clone();
                 tokio::spawn(async move {
-                    let serve = http1_server()
-                        .half_close(true)
-                        .header_read_timeout(Duration::from_secs(2))
-                        .max_buf_size(8 * 1024)
-                        .serve_connection(
-                            hyper_util::rt::TokioIo::new(socket),
-                            hyper::service::service_fn(move |req| {
-                                let state = state.clone();
+                    let serve =
+                        http1_server()
+                            .half_close(true)
+                            .header_read_timeout(Duration::from_secs(2))
+                            .max_buf_size(8 * 1024)
+                            .serve_connection(
+                                hyper_util::rt::TokioIo::new(socket),
+                                hyper::service::service_fn(move |req| {
+                                    let state = state.clone();
 
-                                f(state, req)
-                            }),
-                        );
+                                    // Failures would abort the whole connection; we just want to return an HTTP error
+                                    f(state, req).or_else(|err| async move {
+                                        Ok::<Response<Full<Bytes>>, Infallible>(Response::builder()
+                                        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(err.to_string().into())
+                                        .expect("builder with known status code should not fail"))
+                                    })
+                                }),
+                            );
                     // Wait for drain to signal or connection serving to complete
                     match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
                         // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.

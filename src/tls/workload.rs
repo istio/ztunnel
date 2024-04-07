@@ -164,7 +164,13 @@ impl OutboundConnector {
         self,
         stream: TcpStream,
     ) -> Result<client::TlsStream<TcpStream>, io::Error> {
-        let dest = ServerName::IpAddress(stream.peer_addr().unwrap().ip().into());
+        let dest = ServerName::IpAddress(
+            stream
+                .peer_addr()
+                .expect("peer_addr must be set")
+                .ip()
+                .into(),
+        );
         let c = tokio_rustls::TlsConnector::from(self.client_config);
         c.connect(dest, stream).await
     }
