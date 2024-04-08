@@ -1,27 +1,84 @@
+[graph]
+# Test supported features and targets
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+features = ["tls-boring", "tls-ring"]
+
+[advisories]
+version = 2
+ignore = [
+    { id = "RUSTSEC-2021-0145", reason = "TODO(https://github.com/istio/ztunnel/issues/878)" },
+]
+
 [licenses]
+version = 2
 allow = ["Apache-2.0",
-"CC-BY-3.0",
-"ISC",
-"AFL-2.1",
-"AFL-3.0",
-"Artistic-1.0",
-"Artistic-2.0",
-"Apache-1.1",
-"BSD-1-Clause",
-"BSD-2-Clause",
-"BSD-3-Clause",
-"0BSD",
-"FTL",
-"LPL-1.02",
-"MS-PL",
-"MIT",
-"NCSA",
-"OpenSSL",
-"PHP-3.0",
-"TCP-wrappers",
-"W3C",
-"Xnet",
-"Zlib",
-"Unicode-DFS-2016"]
+    "CC-BY-3.0",
+    "ISC",
+    "AFL-2.1",
+    "AFL-3.0",
+    "Artistic-1.0",
+    "Artistic-2.0",
+    "Apache-1.1",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "FTL",
+    "LPL-1.02",
+    "MS-PL",
+    "MIT",
+    "NCSA",
+    "OpenSSL",
+    "PHP-3.0",
+    "TCP-wrappers",
+    "W3C",
+    "Xnet",
+    "Zlib",
+    "Unicode-DFS-2016"]
 unused-allowed-license = "allow"
-copyleft = "deny"
+
+# TOOD: https://github.com/istio/ztunnel/issues/877
+exceptions = [
+    { crate = "priority-queue", allow = ["MPL-2.0"] },
+]
+
+# Deny cannot detect ring properly. Directly assign
+[[licenses.clarify]]
+name = "ring"
+version = "*"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+[bans]
+skip = [
+    { crate = "rand_core", version = "0.5.1", reason = "acceptable duplicate" },
+    { crate = "rand", version = "0.7.3", reason = "acceptable duplicate" },
+    { crate = "regex-syntax", version = "0.6.29", reason = "acceptable duplicate" },
+    { crate = "regex-automata", version = "0.1.10", reason = "acceptable duplicate" },
+    { crate = "rand_chacha", version = " 0.2.2", reason = "acceptable duplicate" },
+    { crate = "base64" },
+    { crate = "bitflags" },
+    { crate = "fastrand" },
+    { crate = "getrandom" },
+    { crate = "hashbrown" },
+    { crate = "http" },
+    { crate = "http-body" },
+    { crate = "idna" },
+    { crate = "indexmap" },
+    { crate = "itertools" },
+    { crate = "memoffset" },
+    { crate = "nix" },
+    { crate = "atty" },
+]
+
+[sources]
+
+allow-git = [
+    "https://github.com/janrueth/boring-rustls-provider",
+    "https://github.com/howardjohn/tower-hyper-http-body-compat"
+]
