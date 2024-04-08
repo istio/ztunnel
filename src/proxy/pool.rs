@@ -24,6 +24,7 @@ use hyper_util::client::legacy::pool;
 use hyper_util::client::legacy::pool::{Pool as HyperPool, Poolable, Pooled, Reservation};
 use hyper_util::rt::TokioTimer;
 use std::future::Future;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::debug;
@@ -92,7 +93,7 @@ pub struct Key {
     pub dst: SocketAddr,
     // Because we spoof the source IP, we need to key on this as well. Note: for in-pod its already per-pod
     // pools anyways.
-    pub src: SocketAddr,
+    pub src: IpAddr,
 }
 
 #[derive(Debug)]
@@ -207,7 +208,7 @@ mod test {
         let key = Key {
             src_id: Identity::default(),
             dst_id: vec![Identity::default()],
-            src: SocketAddr::from(([127, 0, 0, 2], 1234)),
+            src: IpAddr::from([127, 0, 0, 2]),
             dst: addr,
         };
         let connect = || async {
