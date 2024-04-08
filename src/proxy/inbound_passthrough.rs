@@ -62,11 +62,13 @@ impl InboundPassthrough {
     }
 
     pub(super) async fn run(self) {
+        let inner_drain = self.drain.clone();
         let accept = async move {
         loop {
             // Asynchronously wait for an inbound socket.
             let socket = self.listener.accept().await;
             let pi = self.pi.clone();
+            let stream_drain = inner_drain.clone();
 
             let connection_manager = self.pi.connection_manager.clone();
             match socket {
@@ -77,6 +79,7 @@ impl InboundPassthrough {
                             socket::to_canonical(remote),
                             stream,
                             connection_manager,
+                            stream_drain,
                         )
                         .await
                         {
@@ -109,6 +112,7 @@ impl InboundPassthrough {
         source: SocketAddr,
         mut inbound: TcpStream,
         connection_manager: ConnectionManager,
+        outbound_conn_drain: Watch,
     ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(&inbound);
         // Check if it is a recursive call when proxy mode is Node.
@@ -138,7 +142,9 @@ impl InboundPassthrough {
             // Spoofing the source IP only works when the destination or the source are on our node.
             // In this case, the source and the destination might both be remote, so we need to disable it.
             oc.pi.cfg.enable_original_source = Some(false);
-            return oc.proxy_to(inbound, source, orig, false).await;
+            return oc
+                .proxy_to_cancellable(inbound, source, orig, false, Some(outbound_conn_drain))
+                .await;
         }
 
         // We enforce RBAC only for non-hairpin cases. This is because we may not be able to properly

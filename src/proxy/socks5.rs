@@ -57,10 +57,13 @@ impl Socks5 {
     }
 
     pub async fn run(self) {
+        let inner_drain = self.drain.clone();
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
+                let inpod = self.pi.cfg.inpod_enabled;
+                let stream_drain = inner_drain.clone();
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
@@ -69,7 +72,7 @@ impl Socks5 {
                             id: TraceParent::new(),
                         };
                         tokio::spawn(async move {
-                            if let Err(err) = handle(oc, stream).await {
+                            if let Err(err) = handle(oc, stream, stream_drain, inpod).await {
                                 log::error!("handshake error: {}", err);
                             }
                         });
@@ -87,6 +90,7 @@ impl Socks5 {
         tokio::select! {
             res = accept => { res }
             _ = self.drain.signaled() => {
+                // out_drain_signal.drain().await;
                 info!("socks5 drained");
             }
         }
@@ -97,7 +101,12 @@ impl Socks5 {
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
-async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
+async fn handle(
+    mut oc: OutboundConnection,
+    mut stream: TcpStream,
+    out_drain: Watch,
+    is_inpod: bool,
+) -> Result<(), anyhow::Error> {
     // Version(5), Number of auth methods
     let mut version = [0u8; 2];
     stream.read_exact(&mut version).await?;
@@ -189,8 +198,17 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     stream.write_all(&buf).await?;
 
     info!("accepted connection from {remote_addr} to {host}");
+    // For inpod, we want this `spawn` to guaranteed-terminate when we drain - the workload is gone.
+    // For non-inpod (shared instance for all workloads), let the spawned task run until the proxy process
+    // itself is killed, or the connection terminates normally.
     tokio::spawn(async move {
-        let res = oc.proxy_to(stream, remote_addr, host, true).await;
+        let drain = match is_inpod {
+            true => Some(out_drain),
+            false => None,
+        };
+        let res = oc
+            .proxy_to_cancellable(stream, remote_addr, host, true, drain)
+            .await;
         match res {
             Ok(_) => {}
             Err(ref e) => warn!("outbound proxy failed: {}", e),
