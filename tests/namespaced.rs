@@ -111,13 +111,9 @@ mod namespaced {
             .workload_builder("client", DEFAULT_NODE)
             .register()?;
 
-        let mut lb_clients = Vec::new();
-        for i in 0..15 {
-            let lb_client = manager
-                .workload_builder(format!("client_{}", i).as_str(), DEFAULT_NODE)
-                .register()?;
-            lb_clients.push(lb_client);
-        }
+        let lb_client = manager
+            .workload_builder("lb_client", DEFAULT_NODE)
+            .register()?;
 
         let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
         let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
@@ -204,9 +200,7 @@ mod namespaced {
         };
 
         // run 15 requests so chance of flake here is 1/2^15 = ~0.003%
-        for lb_client in lb_clients {
-            run_tcp_client(lb_client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
-        }
+        run_tcp_client_iters(lb_client, 15, manager.resolver(), &format!("{TEST_VIP}:80"))?;
 
         let updated_local_metrics = local.metrics().await.unwrap();
         assert!(
@@ -683,20 +677,31 @@ mod namespaced {
 
     /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
     fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
+        run_tcp_client_iters(client, 1, resolver, target)
+    }
+
+    fn run_tcp_client_iters(
+        client: Namespace,
+        iters: usize,
+        resolver: Resolver,
+        target: &str,
+    ) -> anyhow::Result<()> {
         let srv = resolve_target(resolver, target);
         client
             .run(move || async move {
-                info!("Running client to {srv}");
-                let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
+                for attempt in 0..iters {
+                    info!("Running client attempt {attempt} to {srv}");
+                    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    timeout(
+                        Duration::from_secs(5),
+                        double_read_write_stream(&mut stream),
+                    )
                     .await
-                    .unwrap()
                     .unwrap();
-                timeout(
-                    Duration::from_secs(5),
-                    double_read_write_stream(&mut stream),
-                )
-                .await
-                .unwrap();
+                }
                 Ok(())
             })?
             .join()
