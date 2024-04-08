@@ -91,15 +91,17 @@ impl ProxyFactory {
 
         // Optionally create the HBONE proxy.
         if self.config.proxy {
+            let cm = ConnectionManager::default();
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
                 self.cert_manager.clone(),
-                ConnectionManager::default(),
+                cm.clone(),
                 self.state.clone(),
                 self.proxy_metrics.clone().unwrap(),
                 socket_factory.clone(),
                 proxy_workload_info,
             );
+            result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain.clone()).await?);
         }
 
@@ -127,4 +129,5 @@ impl ProxyFactory {
 pub struct ProxyResult {
     pub proxy: Option<Proxy>,
     pub dns_proxy: Option<dns::Server>,
+    pub connection_manager: Option<ConnectionManager>,
 }

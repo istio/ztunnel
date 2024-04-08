@@ -161,13 +161,13 @@ impl InboundPassthrough {
         };
 
         //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-        connection_manager.register(&rbac_ctx).await;
+        connection_manager.register(&rbac_ctx);
         if !pi.state.assert_rbac(&rbac_ctx).await {
             info!(%rbac_ctx.conn, "RBAC rejected");
-            connection_manager.release(&rbac_ctx).await;
+            connection_manager.release(&rbac_ctx);
             return Ok(());
         }
-        let close = match connection_manager.track(&rbac_ctx).await {
+        let close = match connection_manager.track(&rbac_ctx) {
             Some(c) => c,
             None => {
                 // this seems unlikely but could occur if policy changes while track awaits lock
@@ -221,7 +221,7 @@ impl InboundPassthrough {
         let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
         tokio::select! {
             err =  proxy::relay(&mut outbound, &mut inbound, &pi.metrics, transferred_bytes) => {
-                connection_manager.release(&rbac_ctx).await;
+                connection_manager.release(&rbac_ctx);
                 err?;
             }
             _signaled = close.signaled() => {}

@@ -39,12 +39,12 @@ pub struct Authorization {
     pub rules: Vec<Vec<Vec<RbacMatch>>>,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub struct Connection {
-    pub src_identity: Option<Identity>,
     pub src: SocketAddr,
-    pub dst_network: String,
     pub dst: SocketAddr,
+    pub src_identity: Option<Identity>,
+    pub dst_network: String,
 }
 
 struct OptionDisplay<'a, T>(&'a Option<T>);

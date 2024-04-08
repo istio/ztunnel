@@ -192,7 +192,7 @@ impl Inbound {
                 debug!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
-                        let close = match connection_manager.track(&rbac_ctx).await {
+                        let close = match connection_manager.track(&rbac_ctx) {
                             Some(c) => c,
                             None => {
                                 // if track returns None it means the connection was closed due to policy change
@@ -288,7 +288,7 @@ impl Inbound {
                                 }
                             }
                         }
-                        connection_manager.release(&rbac_ctx).await;
+                        connection_manager.release(&rbac_ctx);
                     })
                     .in_current_span(),
                 );
@@ -379,12 +379,12 @@ impl Inbound {
                 };
 
                 //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-                connection_manager.register(&rbac_ctx).await;
+                connection_manager.register(&rbac_ctx);
                 if from_waypoint {
                     debug!("request from waypoint, skipping policy");
                 } else if !pi.state.assert_rbac(&rbac_ctx).await {
                     info!(%rbac_ctx.conn, "RBAC rejected");
-                    connection_manager.release(&rbac_ctx).await;
+                    connection_manager.release(&rbac_ctx);
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
@@ -394,7 +394,7 @@ impl Inbound {
                 // We should express as policy whether or not traffic is allowed to bypass a waypoint
                 if has_waypoint && !from_waypoint {
                     info!(%rbac_ctx.conn, "bypassed waypoint");
-                    connection_manager.release(&rbac_ctx).await;
+                    connection_manager.release(&rbac_ctx);
                     return Ok(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Empty::new())
