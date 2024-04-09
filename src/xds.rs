@@ -126,7 +126,7 @@ impl ProxyStateUpdateMutator {
         let workload = Workload::try_from(&w)?;
 
         // First, remove the entry entirely to make sure things are cleaned up properly.
-        self.maybe_remove(state, &w.uid);
+        self.remove_for_insert(state, &w.uid);
 
         // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
         // But we shouldn't include them in load balancing we do to Services.
@@ -149,13 +149,14 @@ impl ProxyStateUpdateMutator {
     }
 
     pub fn remove(&self, state: &mut ProxyState, xds_name: &String) {
+        self.remove_internal(state, xds_name, false);
+    }
+
+    fn remove_for_insert(&self, state: &mut ProxyState, xds_name: &String) {
         self.remove_internal(state, xds_name, true);
     }
 
-    fn maybe_remove(&self, state: &mut ProxyState, xds_name: &String) {
-        self.remove_internal(state, xds_name, false);
-    }
-    fn remove_internal(&self, state: &mut ProxyState, xds_name: &String, expected: bool) {
+    fn remove_internal(&self, state: &mut ProxyState, xds_name: &String, for_insert: bool) {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(xds_name) {
             // Also remove service endpoints for the workload.
@@ -171,13 +172,18 @@ impl ProxyStateUpdateMutator {
                     .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, None));
             }
 
+            // This is a real removal (not a removal before insertion), and nothing else references the cert
+            // Clear it out
+            if !for_insert && !state.workloads.has_identity(&prev.identity()) {
+                self.cert_fetcher.clear_cert(&prev.identity());
+            }
             // We removed a workload, no reason to attempt to remove a service with the same name
             return;
         }
 
         let Ok(name) = NamespacedHostname::from_str(xds_name) else {
             // we don't have namespace/hostname xds primary key for service
-            if expected {
+            if !for_insert {
                 warn!(
                     "tried to remove service keyed by {} but it did not have the expected namespace/hostname format",
                     xds_name
@@ -198,7 +204,7 @@ impl ProxyStateUpdateMutator {
             );
             return;
         }
-        if state.services.remove(&name).is_none() && expected {
+        if state.services.remove(&name).is_none() && !for_insert {
             warn!("tried to remove service keyed by {name}, but it was not found");
         }
     }
