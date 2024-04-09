@@ -19,7 +19,7 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use drain::Watch;
-use hyper::{header, Request};
+
 use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -417,30 +417,6 @@ pub(super) fn maybe_set_transparent(
     })
 }
 
-fn parse_socket_or_ip(i: &str) -> Option<IpAddr> {
-    // Remove square brackets around IPv6 address.
-    let i = i
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(i);
-    i.parse::<SocketAddr>()
-        .ok()
-        .map(|i| i.ip())
-        .or_else(|| i.parse::<IpAddr>().ok())
-}
-
-pub fn get_original_src_from_fwded<T>(req: &Request<T>) -> Option<IpAddr> {
-    req.headers()
-        .get(header::FORWARDED)
-        .and_then(|rh| rh.to_str().ok())
-        .and_then(|rh| http_types::proxies::Forwarded::parse(rh).ok())
-        .and_then(|ph| {
-            ph.forwarded_for()
-                .last()
-                .and_then(|f| parse_socket_or_ip(f))
-        })
-}
-
 pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
     stream
         .peer_addr()
@@ -611,36 +587,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::assert_eq;
-
-    use bytes::Bytes;
-    use http_body_util::Empty;
-    use hyper::http::request;
-    use test_case::test_case;
-
     use super::*;
-
-    #[test_case(r#""#, None; "empty")]
-    #[test_case(r#"proto=https"#, None; "no for")]
-    #[test_case(r#"abc"#, None; "malformed")]
-    #[test_case(r#"for=192.0.2.43"#, Some("192.0.2.43"); "ipv4")]
-    #[test_case(r#"for="192.0.2.43""#, Some("192.0.2.43"); "quoted ipv4")]
-    #[test_case(r#"for="192.0.2.43:80""#, Some("192.0.2.43"); "ipv4 port")]
-    #[test_case(r#"for=192.0.2.43:80"#, None; "unquoted ipv4 port")]
-    #[test_case(r#"for="[2001:db8:cafe::17]""#, Some("2001:db8:cafe::17"); "ipv6")]
-    #[test_case(r#"for=[2001:db8:cafe::17]"#, None; "unquoted ipv6")]
-    #[test_case(r#"for="[2001:db8:cafe::17]:80""#, Some("2001:db8:cafe::17"); "ipv6 port")]
-    #[test_case(r#"for=192.0.2.43;proto=https"#, Some("192.0.2.43"); "sections")]
-    #[test_case(r#"for=192.0.2.43, for="[2001:db8:cafe::17]";proto=https"#, Some("2001:db8:cafe::17"); "multiple")]
-    #[test_case(r#"for=192.0.2.43, for="[2001:db8:cafe::17]", for=unknown;proto=https"#, None; "multiple unmatched")]
-    fn string_match(header: &str, expect: Option<&str>) {
-        let headers = request::Builder::new()
-            .header(header::FORWARDED, header)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-        let expect = expect.map(|i| i.parse::<IpAddr>().unwrap());
-        assert_eq!(get_original_src_from_fwded(&headers), expect)
-    }
 
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
