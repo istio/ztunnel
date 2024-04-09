@@ -81,6 +81,10 @@ This manual twiddling of environment vars is not ideal but given that the altern
 
 Note that the Dockerfiles used to build these vendored `boringssl` builds may be found in the respective vendor directories, and can serve as a reference for the build environment needed to generate FIPS-compliant ztunnel builds.
 
+## Development
+
+Please refer to [this](./LOCAL.md).
+
 ## Metrics
 
 Ztunnel exposes a variety of metrics, at varying levels of stability.
