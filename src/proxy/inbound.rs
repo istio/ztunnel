@@ -354,7 +354,6 @@ impl Inbound {
                     dst: upstream_addr,
                     ..conn
                 };
-                let has_waypoint = upstream.waypoint.is_some();
                 let from_waypoint = proxy::check_from_waypoint(
                     pi.state.clone(),
                     &upstream,
@@ -380,9 +379,8 @@ impl Inbound {
 
                 //register before assert_rbac to ensure the connection is tracked during it's entire valid span
                 connection_manager.register(&rbac_ctx);
-                if from_waypoint {
-                    debug!("request from waypoint, skipping policy");
-                } else if !pi.state.assert_rbac(&rbac_ctx).await {
+
+                if !pi.state.assert_rbac(&rbac_ctx).await {
                     info!(%rbac_ctx.conn, "RBAC rejected");
                     connection_manager.release(&rbac_ctx);
                     return Ok(Response::builder()
@@ -390,16 +388,6 @@ impl Inbound {
                         .body(Empty::new())
                         .expect("builder with known status code should not fail"));
                 }
-                // This check should be removed in favor of an L4 policy check
-                // We should express as policy whether or not traffic is allowed to bypass a waypoint
-                // if has_waypoint && !from_waypoint {
-                //     info!(%rbac_ctx.conn, "bypassed waypoint");
-                //     connection_manager.release(&rbac_ctx).await;
-                //     return Ok(Response::builder()
-                //         .status(StatusCode::UNAUTHORIZED)
-                //         .body(Empty::new())
-                //         .unwrap());
-                // }
                 let source_ip = rbac_ctx.conn.src.ip();
 
                 let baggage =
