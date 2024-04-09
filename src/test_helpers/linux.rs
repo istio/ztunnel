@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::config::ConfigSource;
+use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{gatewayaddress, Workload};
 use crate::test_helpers::app::TestApp;
@@ -37,6 +38,8 @@ pub struct WorkloadManager {
     workloads: Vec<LocalWorkload>,
     /// services that we have constructed. VIP -> SVC
     services: HashMap<NamespacedHostname, Service>,
+    /// Configured policies
+    policies: Vec<Authorization>,
     /// Node to IPs on the node that are captured
     captured_workloads: HashMap<String, Vec<IpAddr>>,
     waypoints: Vec<IpAddr>,
@@ -49,6 +52,7 @@ impl WorkloadManager {
             namespaces: netns::NamespaceManager::new(name)?,
             workloads: vec![],
             services: HashMap::new(),
+            policies: vec![],
             captured_workloads: Default::default(),
             waypoints: vec![],
         })
@@ -81,7 +85,7 @@ impl WorkloadManager {
         let veth = ns.interface();
         let lc = LocalConfig {
             workloads: self.workloads.clone(),
-            policies: vec![],
+            policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
         let mut b = bytes::BytesMut::new().writer();
@@ -180,9 +184,19 @@ impl WorkloadManager {
         let ns = TestWorkloadBuilder::new(name, self)
             .hbone()
             .on_node(node)
+            // TODO: way to add certs for other identities to the cert manager
+            // .identity(identity::Identity::Spiffe {
+            //     trust_domain: "cluster.local".to_string(),
+            //     namespace: "default".to_string(),
+            //     service_account: name.to_string(),
+            // })
             .register()?;
         self.waypoints.push(ns.ip());
         Ok(ns)
+    }
+
+    pub fn add_policy(&mut self, p: Authorization) {
+        self.policies.push(p);
     }
 
     pub fn resolver(&self) -> Resolver {
