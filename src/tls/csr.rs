@@ -65,12 +65,14 @@ impl CsrOptions {
 
     #[cfg(feature = "tls-ring")]
     pub fn generate(&self) -> Result<CertSign, Error> {
-        use rcgen::{CertificateParams, SanType};
+        use rcgen::{CertificateParams, DistinguishedName, SanType};
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
         let private_key = kp.serialize_pem();
         let mut params = CertificateParams::default();
         params.subject_alt_names = vec![SanType::URI(self.san.clone().try_into()?)];
         params.key_identifier_method = rcgen::KeyIdMethod::Sha256;
+        // Avoid setting CN
+        params.distinguished_name = DistinguishedName::new();
         let csr = params.serialize_request(&kp)?.pem()?;
 
         Ok(CertSign {
