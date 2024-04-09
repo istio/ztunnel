@@ -354,13 +354,6 @@ impl Inbound {
                     dst: upstream_addr,
                     ..conn
                 };
-                let from_waypoint = proxy::check_from_waypoint(
-                    pi.state.clone(),
-                    &upstream,
-                    conn.src_identity.as_ref(),
-                    &conn.src.ip(),
-                )
-                .await;
                 let from_gateway = proxy::check_from_network_gateway(
                     pi.state.clone(),
                     &upstream,
@@ -379,7 +372,6 @@ impl Inbound {
 
                 //register before assert_rbac to ensure the connection is tracked during it's entire valid span
                 connection_manager.register(&rbac_ctx);
-
                 if !pi.state.assert_rbac(&rbac_ctx).await {
                     info!(%rbac_ctx.conn, "RBAC rejected");
                     connection_manager.release(&rbac_ctx);
