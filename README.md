@@ -19,6 +19,8 @@ Explicitly out of scope for ztunnel include:
 In general, ztunnel does not aim to be a generic extensible proxy; Envoy is better suited for that task.
 If a feature is not directly used to implement the node proxy component in ambient mesh, it is unlikely to be accepted.
 
+The details of architecture is [here](./ARCHITECTURE.md).
+
 ## Building
 
 ### TLS/Crypto provider
