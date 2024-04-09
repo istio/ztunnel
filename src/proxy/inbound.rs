@@ -400,15 +400,7 @@ impl Inbound {
                         .body(Empty::new())
                         .expect("builder with known status code should not fail"));
                 }
-                let source_ip = if from_waypoint {
-                    // If the request is from our waypoint, trust the Forwarded header.
-                    // For other request types, we can only trust the source from the connection.
-                    // Since our own waypoint is in the same trust domain though, we can use Forwarded,
-                    // which drops the requirement of spoofing IPs from waypoints
-                    super::get_original_src_from_fwded(&req).unwrap_or(rbac_ctx.conn.src.ip())
-                } else {
-                    rbac_ctx.conn.src.ip()
-                };
+                let source_ip = rbac_ctx.conn.src.ip();
 
                 let baggage =
                     parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
