@@ -97,6 +97,8 @@ url = "2.2"
 x509-parser = { version = "0.16", default-features = false }
 tracing-log = "0.2"
 backoff = "0.4.0"
+pin-project-lite = "0.2"
+pingora-pool = "0.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
