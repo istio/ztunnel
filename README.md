@@ -23,6 +23,8 @@ The details of architecture is [here](./ARCHITECTURE.md).
 
 ## Building
 
+Please use Rust 1.70+.
+
 ### TLS/Crypto provider
 
 Ztunnel's TLS is built on [rustls](https://github.com/rustls/rustls).
