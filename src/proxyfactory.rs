@@ -100,6 +100,12 @@ impl ProxyFactory {
                 self.proxy_metrics.clone().unwrap(),
                 socket_factory.clone(),
                 proxy_workload_info,
+                crate::proxy::pool::WorkloadHBONEPool::new(
+                    self.config.clone(),
+                    socket_factory.clone(),
+                    self.cert_manager.clone(),
+                    drain.clone(),
+                ),
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain.clone()).await?);

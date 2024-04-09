@@ -117,6 +117,8 @@ impl fmt::Display for Identity {
     }
 }
 
+// TODO we shouldn't have a "default identity" outside of tests
+// #[cfg(test)]
 impl Default for Identity {
     fn default() -> Self {
         const TRUST_DOMAIN: &str = "cluster.local";

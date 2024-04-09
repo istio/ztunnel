@@ -49,6 +49,7 @@ const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
@@ -124,6 +125,19 @@ pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
     pub frame_size: u32,
+
+    // The limit of how many streams a single HBONE pool connection will be limited to, before
+    // spawning a new conn rather than reusing an existing one, even to a dest that already has an open connection.
+    //
+    // This can be used to effect flow control for "connection storms" when workload clients
+    // (such as loadgen clients) open many connections all at once.
+    //
+    // Note that this will only be checked and inner conns rebalanced accordingly when a new connection
+    // is requested from the pool, and not on every stream queue on that connection.
+    // So if you request a single connection from a pool configured wiht a max streamcount of 200,
+    // and queue 500 streams on it, you will still exceed this limit and are at the mercy of hyper's
+    // default stream queuing.
+    pub pool_max_streams_per_conn: u16,
 
     pub socks5_addr: Option<SocketAddr>,
     pub admin_addr: SocketAddr,
@@ -321,6 +335,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .get(DNS_CAPTURE_METADATA)
             .map_or(false, |value| value.to_lowercase() == "true"),
 
+        pool_max_streams_per_conn: parse_default(POOL_MAX_STREAMS_PER_CONNECTION, 250)?,
+
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
@@ -342,7 +358,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
 
-        socks5_addr,
+        socks5_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080),
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),

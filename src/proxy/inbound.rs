@@ -117,6 +117,7 @@ impl Inbound {
                 debug!(%conn, "accepted connection");
                 let enable_original_source = self.pi.cfg.enable_original_source;
                 let serve = crate::hyper_util::http2_server()
+                    // .max_concurrent_streams(100) // TODO BML test
                     .initial_stream_window_size(self.pi.cfg.window_size)
                     .initial_connection_window_size(self.pi.cfg.connection_window_size)
                     .max_frame_size(self.pi.cfg.frame_size)
