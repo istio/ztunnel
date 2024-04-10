@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::proxy::connection_manager::ConnectionManager;
+use crate::state::WorkloadInfo;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -39,6 +40,9 @@ pub struct ProxyState {
         default
     )]
     pub connections: Option<ConnectionManager>,
+
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub info: Option<WorkloadInfo>,
 
     // using reference counts to account for possible race between the proxy task that notifies us
     // that a proxy is down, and the proxy factory task that notifies us when it is up.
@@ -60,7 +64,11 @@ pub struct WorkloadManagerAdminHandler {
 }
 
 impl WorkloadManagerAdminHandler {
-    pub fn proxy_pending(&self, uid: &crate::inpod::WorkloadUid) {
+    pub fn proxy_pending(
+        &self,
+        uid: &crate::inpod::WorkloadUid,
+        workload_info: &Option<WorkloadInfo>,
+    ) {
         let mut state = self.state.write().unwrap();
 
         // don't increment count here, as it is only for up and down. see comment in count.
@@ -75,12 +83,18 @@ impl WorkloadManagerAdminHandler {
                         state: State::Pending,
                         connections: None,
                         count: 0,
+                        info: workload_info.clone(),
                     },
                 );
             }
         }
     }
-    pub fn proxy_up(&self, uid: &crate::inpod::WorkloadUid, cm: Option<ConnectionManager>) {
+    pub fn proxy_up(
+        &self,
+        uid: &crate::inpod::WorkloadUid,
+        workload_info: &Option<WorkloadInfo>,
+        cm: Option<ConnectionManager>,
+    ) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
@@ -88,6 +102,7 @@ impl WorkloadManagerAdminHandler {
                 key.count += 1;
                 key.state = State::Up;
                 key.connections = cm;
+                key.info = workload_info.clone();
             }
             None => {
                 state.insert(
@@ -96,6 +111,7 @@ impl WorkloadManagerAdminHandler {
                         state: State::Up,
                         connections: cm,
                         count: 1,
+                        info: workload_info.clone(),
                     },
                 );
             }
@@ -170,10 +186,22 @@ mod test {
         let data = || String::from_utf8_lossy(&handler.to_bytes()).to_string();
 
         let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
-        handler.proxy_pending(&uid1);
+        handler.proxy_pending(&uid1, &None);
         assert_eq!(data(), "{\"uid1\":{\"state\":\"Pending\"}}");
-        handler.proxy_up(&uid1, None);
-        assert_eq!(data(), "{\"uid1\":{\"state\":\"Up\"}}");
+        handler.proxy_up(
+            &uid1,
+            &Some(crate::state::WorkloadInfo {
+                name: "name".to_string(),
+                namespace: "ns".to_string(),
+                trust_domain: "td".to_string(),
+                service_account: "sa".to_string(),
+            }),
+            None,
+        );
+        assert_eq!(
+            data(),
+            r#"{"uid1":{"state":"Up","info":{"name":"name","namespace":"ns","trust_domain":"td","service_account":"sa"}}}"#
+        );
         handler.proxy_down(&uid1);
         assert_eq!(data(), "{}");
 
