@@ -524,35 +524,6 @@ mod namespaced {
         Ok(())
     }
 
-    // #[tokio::test]
-    // async fn test_waypoint_hairpin() -> anyhow::Result<()> {
-    //     let mut manager = setup_netns_test!();
-    //     let waypoint = manager.register_waypoint("waypoint", REMOTE_NODE)?;
-    //     let ip = waypoint.ip();
-    //     run_hbone_server(waypoint)?;
-    //     manager
-    //         .workload_builder("server", DEFAULT_NODE)
-    //         .hbone()
-    //         .waypoint(ip)
-    //         .register()?;
-    //     let client = manager
-    //         .workload_builder("client", REMOTE_NODE)
-    //         .uncaptured()
-    //         .register()?;
-    //     let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
-
-    //     run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
-
-    //     let metrics = [
-    //         (CONNECTIONS_OPENED, 1),
-    //         (CONNECTIONS_CLOSED, 1),
-    //         (BYTES_RECV, REQ_SIZE),
-    //         (BYTES_SENT, HBONE_REQ_SIZE),
-    //     ];
-    //     verify_metrics(&zt, &metrics, &source_labels()).await;
-    //     Ok(())
-    // }
-
     #[tokio::test]
     async fn test_waypoint_bypass() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!();
