@@ -513,18 +513,17 @@ impl OutboundConnection {
 
                 let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
 
-                return Ok(Request {
-                    protocol: Protocol::HBONE,
-                    direction: Direction::Outbound,
-                    source: source_workload,
-                    destination: target,
-                    destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
-                    destination_service: Some(ServiceDescription::from(&*s)),
-                    expected_identity: Some(waypoint_workload.identity()),
-                    gateway: waypoint_socket_address,
-                    request_type: RequestType::ToServerWaypoint,
-                    upstream_sans: waypoint_us.sans,
-                });
+                return Ok(Request::builder()
+                    .protocol(Protocol::HBONE)
+                    .direction(Direction::Outbound)
+                    .source(source_workload)
+                    .destination(target)
+                    .destination_service(Some(ServiceDescription::from(&*s)))
+                    .expected_identity(Some(waypoint_workload.identity()))
+                    .gateway(waypoint_socket_address)
+                    .request_type(RequestType::ToServerWaypoint)
+                    .upstream_sans(waypoint_us.sans)
+                    .build());
             }
             // this was service addressed but we did not find a waypoint
             true
@@ -541,18 +540,14 @@ impl OutboundConnection {
             .await;
         if us.is_none() {
             // For case no upstream found, passthrough it
-            return Ok(Request {
-                protocol: Protocol::TCP,
-                source: source_workload,
-                destination: target,
-                destination_workload: None,
-                destination_service: None,
-                expected_identity: None,
-                gateway: target,
-                direction: Direction::Outbound,
-                request_type: RequestType::Passthrough,
-                upstream_sans: vec![],
-            });
+            return Ok(Request::builder()
+                .protocol(Protocol::TCP)
+                .direction(Direction::Outbound)
+                .source(source_workload)
+                .destination(target)
+                .gateway(target)
+                .request_type(RequestType::Passthrough)
+                .build());
         }
 
         let mut mutable_us = us.expect("option is verified above");
@@ -597,21 +592,21 @@ impl OutboundConnection {
                         )
                         .await?;
                     let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
-                    return Ok(Request {
+                    return Ok(Request::builder()
                         // Always use HBONE here
-                        protocol: Protocol::HBONE,
-                        source: source_workload,
-                        // Use the original VIP, not translated
-                        destination: target,
-                        destination_workload: Some(mutable_us.workload),
-                        destination_service: mutable_us.destination_service.clone(),
-                        expected_identity: Some(waypoint_workload.identity()),
-                        gateway: wp_socket_addr,
+                        .protocol(Protocol::HBONE)
                         // Let the client remote know we are on the inbound path.
-                        direction: Direction::Inbound,
-                        request_type: RequestType::ToServerWaypoint,
-                        upstream_sans: mutable_us.sans,
-                    });
+                        .direction(Direction::Inbound)
+                        .source(source_workload)
+                        // Use the original VIP, not translated
+                        .destination(target)
+                        .destination_workload(Some(mutable_us.workload))
+                        .destination_service(mutable_us.destination_service.clone())
+                        .expected_identity(Some(waypoint_workload.identity()))
+                        .gateway(wp_socket_addr)
+                        .request_type(RequestType::ToServerWaypoint)
+                        .upstream_sans(mutable_us.sans)
+                        .build());
                 }
                 // we expected the workload to have a waypoint, but could not find one
                 Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
@@ -644,43 +639,42 @@ impl OutboundConnection {
                 "select {:?}",
                 RequestType::DirectLocal
             );
-            return Ok(Request {
-                protocol: Protocol::HBONE,
-                source: source_workload,
-                destination: SocketAddr::from((workload_ip, us.port)),
-                destination_workload: Some(us.workload.clone()),
-                destination_service: us.destination_service.clone(),
-                expected_identity: Some(us.workload.identity()),
-                gateway: SocketAddr::from((
+            return Ok(Request::builder()
+                .protocol(Protocol::HBONE)
+                .direction(Direction::Outbound)
+                .source(source_workload)
+                .destination(SocketAddr::from((workload_ip, us.port)))
+                .destination_workload(Some(us.workload.clone()))
+                .destination_service(us.destination_service.clone())
+                .expected_identity(Some(us.workload.identity()))
+                .gateway(SocketAddr::from((
                     us.workload
                         .gateway_address
                         .expect("gateway address confirmed")
                         .ip(),
                     self.pi.hbone_port,
-                )),
-                direction: Direction::Outbound,
-                // Sending to a node on the same node (ourselves).
-                // In the future this could be optimized to avoid a full network traversal.
-                request_type: RequestType::DirectLocal,
-                upstream_sans: us.sans,
-            });
+                )))
+                .request_type(RequestType::DirectLocal)
+                .upstream_sans(us.sans)
+                .build());
         }
         // For case no waypoint for both side and direct to remote node proxy
-        Ok(Request {
-            protocol: us.workload.protocol,
-            source: source_workload,
-            destination: SocketAddr::from((workload_ip, us.port)),
-            destination_workload: Some(us.workload.clone()),
-            destination_service: us.destination_service.clone(),
-            expected_identity: Some(us.workload.identity()),
-            gateway: us
-                .workload
-                .gateway_address
-                .expect("gateway address confirmed"),
-            direction: Direction::Outbound,
-            request_type: RequestType::Direct,
-            upstream_sans: us.sans,
-        })
+        Ok(Request::builder()
+            .protocol(us.workload.protocol)
+            .direction(Direction::Outbound)
+            .source(source_workload)
+            .destination(SocketAddr::from((workload_ip, us.port)))
+            .destination_workload(Some(us.workload.clone()))
+            .destination_service(us.destination_service.clone())
+            .expected_identity(Some(us.workload.identity()))
+            .gateway(
+                us.workload
+                    .gateway_address
+                    .expect("gateway address confirmed"),
+            )
+            .request_type(RequestType::Direct)
+            .upstream_sans(us.sans)
+            .build())
     }
 }
 
@@ -694,7 +688,7 @@ fn baggage(r: &Request, cluster: String) -> String {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, typed_builder::TypedBuilder)]
 struct Request {
     protocol: Protocol,
     direction: Direction,
@@ -702,14 +696,18 @@ struct Request {
     destination: SocketAddr,
     // The intended destination workload. This is always the original intended target, even in the case
     // of other proxies along the path.
+    #[builder(default=None)]
     destination_workload: Option<Workload>,
+    #[builder(default=None)]
     destination_service: Option<ServiceDescription>,
     // The identity we will assert for the next hop; this may not be the same as destination_workload
     // in the case of proxies along the path.
+    #[builder(default=None)]
     expected_identity: Option<Identity>,
     gateway: SocketAddr,
     request_type: RequestType,
 
+    #[builder(default)]
     upstream_sans: Vec<String>,
 }
 
@@ -803,12 +801,14 @@ mod tests {
         if let Some(r) = req {
             assert_eq!(
                 expect,
-                Some(ExpectedRequest {
-                    protocol: r.protocol,
-                    destination: &r.destination.to_string(),
-                    gateway: &r.gateway.to_string(),
-                    request_type: r.request_type,
-                })
+                Some(
+                    ExpectedRequest::builder()
+                        .protocol(r.protocol)
+                        .destination(&r.destination.to_string())
+                        .gateway(&r.gateway.to_string())
+                        .request_type(r.request_type)
+                        .build()
+                )
             );
         } else {
             assert_eq!(expect, None);
@@ -825,12 +825,14 @@ mod tests {
                 addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
                 ..Default::default()
             }),
-            Some(ExpectedRequest {
-                protocol: Protocol::TCP,
-                destination: "1.2.3.4:80",
-                gateway: "1.2.3.4:80",
-                request_type: RequestType::Passthrough,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::TCP)
+                    .destination("1.2.3.4:80")
+                    .gateway("1.2.3.4:80")
+                    .request_type(RequestType::Passthrough)
+                    .build(),
+            ),
         )
         .await;
     }
@@ -849,12 +851,14 @@ mod tests {
                 node: "remote-node".to_string(),
                 ..Default::default()
             }),
-            Some(ExpectedRequest {
-                protocol: Protocol::TCP,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:80",
-                request_type: RequestType::Direct,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::TCP)
+                    .destination("127.0.0.2:80")
+                    .gateway("127.0.0.2:80")
+                    .request_type(RequestType::Direct)
+                    .build(),
+            ),
         )
         .await;
     }
@@ -873,12 +877,14 @@ mod tests {
                 node: "remote-node".to_string(),
                 ..Default::default()
             }),
-            Some(ExpectedRequest {
-                protocol: Protocol::HBONE,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:15008",
-                request_type: RequestType::Direct,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::HBONE)
+                    .destination("127.0.0.2:80")
+                    .gateway("127.0.0.2:15008")
+                    .request_type(RequestType::Direct)
+                    .build(),
+            ),
         )
         .await;
     }
@@ -897,12 +903,14 @@ mod tests {
                 node: "local-node".to_string(),
                 ..Default::default()
             }),
-            Some(ExpectedRequest {
-                protocol: Protocol::TCP,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:80",
-                request_type: RequestType::Direct,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::TCP)
+                    .destination("127.0.0.2:80")
+                    .gateway("127.0.0.2:80")
+                    .request_type(RequestType::Direct)
+                    .build(),
+            ),
         )
         .await;
     }
@@ -921,12 +929,14 @@ mod tests {
                 node: "local-node".to_string(),
                 ..Default::default()
             }),
-            Some(ExpectedRequest {
-                protocol: Protocol::HBONE,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:15008",
-                request_type: RequestType::DirectLocal,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::HBONE)
+                    .destination("127.0.0.2:80")
+                    .gateway("127.0.0.2:15008")
+                    .request_type(RequestType::DirectLocal)
+                    .build(),
+            ),
         )
         .await;
     }
@@ -967,12 +977,14 @@ mod tests {
                 ..Default::default()
             }),
             // Even though source has a waypoint, we don't use it
-            Some(ExpectedRequest {
-                protocol: Protocol::TCP,
-                destination: "127.0.0.1:80",
-                gateway: "127.0.0.1:80",
-                request_type: RequestType::Direct,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::TCP)
+                    .destination("127.0.0.1:80")
+                    .gateway("127.0.0.1:80")
+                    .request_type(RequestType::Direct)
+                    .build(),
+            ),
         )
         .await;
     }
@@ -997,12 +1009,14 @@ mod tests {
                 ..Default::default()
             }),
             // Should use the waypoint
-            Some(ExpectedRequest {
-                protocol: Protocol::HBONE,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.10:15008",
-                request_type: RequestType::ToServerWaypoint,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::HBONE)
+                    .destination("127.0.0.2:80")
+                    .gateway("127.0.0.10:15008")
+                    .request_type(RequestType::ToServerWaypoint)
+                    .build(),
+            ),
         )
         .await;
     }
@@ -1034,17 +1048,19 @@ mod tests {
                 ..Default::default()
             }),
             // Should use the waypoint
-            Some(ExpectedRequest {
-                protocol: Protocol::HBONE,
-                destination: "127.0.0.3:80",
-                gateway: "127.0.0.10:15008",
-                request_type: RequestType::ToServerWaypoint,
-            }),
+            Some(
+                ExpectedRequest::builder()
+                    .protocol(Protocol::HBONE)
+                    .destination("127.0.0.3:80")
+                    .gateway("127.0.0.10:15008")
+                    .request_type(RequestType::ToServerWaypoint)
+                    .build(),
+            ),
         )
         .await;
     }
 
-    #[derive(PartialEq, Debug)]
+    #[derive(PartialEq, Debug, typed_builder::TypedBuilder)]
     struct ExpectedRequest<'a> {
         protocol: Protocol,
         destination: &'a str,

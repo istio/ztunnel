@@ -98,6 +98,7 @@ tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "j
 url = "2.2"
 x509-parser = { version = "0.16", default-features = false }
 backoff = "0.4.0"
+typed-builder = "0.18.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
