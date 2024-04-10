@@ -21,9 +21,8 @@ use tracing::{error, info, trace, warn, Instrument};
 use crate::config::ProxyMode;
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::metrics::Reporter;
-use crate::proxy::outbound::OutboundConnection;
+use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
-use crate::proxy::{Error, TraceParent};
 use crate::rbac;
 use crate::state::workload::NetworkAddress;
 use crate::{proxy, socket};
@@ -62,13 +61,11 @@ impl InboundPassthrough {
     }
 
     pub(super) async fn run(self) {
-        let inner_drain = self.drain.clone();
         let accept = async move {
         loop {
             // Asynchronously wait for an inbound socket.
             let socket = self.listener.accept().await;
             let pi = self.pi.clone();
-            let stream_drain = inner_drain.clone();
 
             let connection_manager = self.pi.connection_manager.clone();
             match socket {
@@ -79,7 +76,6 @@ impl InboundPassthrough {
                             socket::to_canonical(remote),
                             stream,
                             connection_manager,
-                            stream_drain,
                         )
                         .await
                         {
@@ -112,7 +108,6 @@ impl InboundPassthrough {
         source: SocketAddr,
         mut inbound: TcpStream,
         connection_manager: ConnectionManager,
-        outbound_conn_drain: Watch,
     ) -> Result<(), Error> {
         let orig = socket::orig_dst_addr_or_default(&inbound);
         // Check if it is a recursive call when proxy mode is Node.
@@ -129,28 +124,7 @@ impl InboundPassthrough {
         else {
             return Err(Error::UnknownDestination(orig.ip()));
         };
-        if upstream.waypoint.is_some() {
-            // This is an inbound request not over HBONE, but we have a waypoint.
-            // The request needs to go through the waypoint for policy enforcement.
-            // This can happen from clients that are not part of the mesh; they won't know to send
-            // to the waypoint.
-            // To handle this, we forward it to the waypoint ourselves, which will hairpin back to us.
-            let mut oc = OutboundConnection {
-                pi: pi.clone(),
-                id: TraceParent::new(),
-            };
-            // Spoofing the source IP only works when the destination or the source are on our node.
-            // In this case, the source and the destination might both be remote, so we need to disable it.
-            oc.pi.cfg.enable_original_source = Some(false);
-            return oc
-                .proxy_to_cancellable(inbound, source, orig, false, Some(outbound_conn_drain))
-                .await;
-        }
 
-        // We enforce RBAC only for non-hairpin cases. This is because we may not be able to properly
-        // enforce the policy (for example, if it has L7 attributes), while waypoint will.
-        // Instead, we skip enforcement and forward to the waypoint to enforce.
-        // On the inbound HBONE side, we will validate it came from the waypoint (and therefor had enforcemen).
         let conn = rbac::Connection {
             src_identity: None,
             src: source,
