@@ -49,7 +49,10 @@ default:
 shell:
 	@$(RUN) /bin/bash
 
-.PHONY: default shell
+rust-version:
+	@$(RUN) /usr/bin/rustc -vV
+
+.PHONY: default shell rust-version
 
 else
 

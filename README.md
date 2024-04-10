@@ -23,7 +23,10 @@ The details of architecture is [here](./ARCHITECTURE.md).
 
 ## Building
 
-Please use Rust 1.70+.
+Please use the same Rust version as the below command output:
+```
+$ make rust-version
+```
 
 ### TLS/Crypto provider
 
