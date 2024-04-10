@@ -129,28 +129,30 @@ impl InboundPassthrough {
         else {
             return Err(Error::UnknownDestination(orig.ip()));
         };
-        if upstream.waypoint.is_some() {
-            // This is an inbound request not over HBONE, but we have a waypoint.
-            // The request needs to go through the waypoint for policy enforcement.
-            // This can happen from clients that are not part of the mesh; they won't know to send
-            // to the waypoint.
-            // To handle this, we forward it to the waypoint ourselves, which will hairpin back to us.
-            let mut oc = OutboundConnection {
-                pi: pi.clone(),
-                id: TraceParent::new(),
-            };
-            // Spoofing the source IP only works when the destination or the source are on our node.
-            // In this case, the source and the destination might both be remote, so we need to disable it.
-            oc.pi.cfg.enable_original_source = Some(false);
-            return oc
-                .proxy_to_cancellable(inbound, source, orig, false, Some(outbound_conn_drain))
-                .await;
-        }
 
+        // REMOVE THIS
+        // if upstream.waypoint.is_some() {
+        //     // This is an inbound request not over HBONE, but we have a waypoint.
+        //     // The request needs to go through the waypoint for policy enforcement.
+        //     // This can happen from clients that are not part of the mesh; they won't know to send
+        //     // to the waypoint.
+        //     // To handle this, we forward it to the waypoint ourselves, which will hairpin back to us.
+        //     let mut oc = OutboundConnection {
+        //         pi: pi.clone(),
+        //         id: TraceParent::new(),
+        //     };
+        //     // Spoofing the source IP only works when the destination or the source are on our node.
+        //     // In this case, the source and the destination might both be remote, so we need to disable it.
+        //     oc.pi.cfg.enable_original_source = Some(false);
+        //     return oc
+        //         .proxy_to_cancellable(inbound, source, orig, false, Some(outbound_conn_drain))
+        //         .await;
+        // }
         // We enforce RBAC only for non-hairpin cases. This is because we may not be able to properly
         // enforce the policy (for example, if it has L7 attributes), while waypoint will.
         // Instead, we skip enforcement and forward to the waypoint to enforce.
         // On the inbound HBONE side, we will validate it came from the waypoint (and therefor had enforcemen).
+
         let conn = rbac::Connection {
             src_identity: None,
             src: source,
