@@ -25,7 +25,7 @@ The details of architecture is [here](./ARCHITECTURE.md).
 
 Please use the same Rust version as the below command output:
 
-```
+```shell
 $ make rust-version
 ```
 
