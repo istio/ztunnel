@@ -16,7 +16,7 @@ There are a variety of config options that can be used to replace components wit
 * `NODE_NAME=local` - configures which node the ztunnel is running as.
   This impacts the networking path of requests. In the `localhost.yaml` example, `NODE_NAME=local` would make localhost use the in-memory fast path; without it HBONE would be used.
 
-Together, `FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run --features testing,tls-ring` (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
+Together, `FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run --features testing` (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
 
 ## Local in-pod testing
 
