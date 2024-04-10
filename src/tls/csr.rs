@@ -65,17 +65,48 @@ impl CsrOptions {
 
     #[cfg(feature = "tls-ring")]
     pub fn generate(&self) -> Result<CertSign, Error> {
-        use rcgen::{CertificateParams, SanType};
+        use rcgen::{CertificateParams, DistinguishedName, SanType};
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
         let private_key = kp.serialize_pem();
         let mut params = CertificateParams::default();
         params.subject_alt_names = vec![SanType::URI(self.san.clone().try_into()?)];
         params.key_identifier_method = rcgen::KeyIdMethod::Sha256;
+        // Avoid setting CN. rcgen defaults it to "rcgen self signed cert" which we don't want
+        params.distinguished_name = DistinguishedName::new();
         let csr = params.serialize_request(&kp)?.pem()?;
 
         Ok(CertSign {
             csr,
             private_key: private_key.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tls;
+
+    #[test]
+    fn test_csr() {
+        use x509_parser::prelude::FromDer;
+        let csr = tls::csr::CsrOptions {
+            san: "spiffe://td/ns/ns1/sa/sa1".to_string(),
+        }
+        .generate()
+        .unwrap();
+        let (_, der) = x509_parser::pem::parse_x509_pem(csr.csr.as_bytes()).unwrap();
+
+        let (_, cert) =
+            x509_parser::certification_request::X509CertificationRequest::from_der(&der.contents)
+                .unwrap();
+        cert.verify_signature().unwrap();
+        let attr = cert
+            .certification_request_info
+            .iter_attributes()
+            .next()
+            .unwrap();
+        // SAN is encoded in some format I don't understand how to parse; this could be improved.
+        // but make sure it's there in a hacky manner
+        assert!(attr.value.ends_with(b"spiffe://td/ns/ns1/sa/sa1"));
     }
 }
