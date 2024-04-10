@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
 use std::net::{IpAddr, SocketAddr};
@@ -580,6 +580,8 @@ pub struct WorkloadStore {
     by_uid: HashMap<String, Arc<Workload>>,
     /// byHostname maps workload hostname to workloads.
     by_hostname: HashMap<String, Arc<Workload>>,
+    // Identity->Set of UIDs
+    by_identity: HashMap<Identity, HashSet<String>>,
 }
 
 impl WorkloadStore {
@@ -609,6 +611,14 @@ impl WorkloadStore {
                     self.by_addr.remove(&network_addr(&prev.network, *wip));
                 }
                 self.by_hostname.remove(prev.hostname.as_str());
+
+                let id = prev.identity();
+                if let Some(set) = self.by_identity.get_mut(&id) {
+                    set.remove(&prev.uid);
+                    if set.is_empty() {
+                        self.by_identity.remove(&id);
+                    }
+                }
                 Some(prev.deref().clone())
             }
         }
@@ -629,6 +639,10 @@ impl WorkloadStore {
     /// Finds the workload by uid.
     pub fn find_uid(&self, uid: &str) -> Option<Workload> {
         self.by_uid.get(uid).map(|wl| wl.deref().clone())
+    }
+
+    pub fn has_identity(&self, identity: &Identity) -> bool {
+        self.by_identity.get(identity).is_some()
     }
 }
 

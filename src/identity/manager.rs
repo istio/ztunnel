@@ -424,7 +424,7 @@ async fn maybe_sleep_until(till: Option<Instant>) -> bool {
     }
 }
 
-enum Request {
+pub enum Request {
     Fetch(Identity, Priority),
     Forget(Identity),
 }
@@ -584,6 +584,8 @@ impl SecretManager {
     }
 
     pub async fn forget_certificate(&self, id: &Identity) {
+        // TODO: consider keeping the cert around for a minute or so to avoid churn
+        // We would ideally drop any pending or new requests to rotate.
         if self.worker.certs.lock().await.remove(id).is_some() {
             self.post(Request::Forget(id.clone())).await;
         }
@@ -1049,7 +1051,25 @@ mod tests {
             .forget_certificate(&identity("test"))
             .await;
 
+        assert_eq!(test.secret_manager.cache_len().await, 0);
         assert_matches!(fetch.await.unwrap(), Err(Error::Forgotten));
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_forget() {
+        let test = setup(1);
+        let _start = Instant::now();
+        let sm = test.secret_manager.clone();
+
+        let fetch = tokio::spawn(async move { sm.fetch_certificate(&identity("test")).await });
+        let _ = fetch.await.unwrap();
+        assert_eq!(test.secret_manager.cache_len().await, 1);
+        test.secret_manager
+            .forget_certificate(&identity("test"))
+            .await;
+
+        assert_eq!(test.secret_manager.cache_len().await, 0);
         test.tear_down().await;
     }
 
