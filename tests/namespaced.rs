@@ -23,6 +23,7 @@ mod namespaced {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
+    use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 
     use hyper::Method;
     use hyper_util::rt::TokioIo;
@@ -556,6 +557,24 @@ mod namespaced {
     async fn test_waypoint_bypass() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!();
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
+        // create a policy to ensure traffic is from the waypoint
+        // TODO: this test is testing bypass from uncaptured workloads but other forms of bypass should be tested
+        //    - service addressed traffic without a svc-attached waypoint
+        //    - workload addressed traffic without a wl-attached waypoint
+        manager.add_policy(Authorization {
+            name: "deny_bypass".to_string(),
+            namespace: "default".to_string(),
+            scope: ztunnel::rbac::RbacScope::Namespace,
+            action: ztunnel::rbac::RbacAction::Allow,
+            rules: vec![vec![vec![RbacMatch {
+                principals: vec![StringMatch::Exact(
+                    identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/waypoint")
+                        .unwrap()
+                        .to_string(),
+                )],
+                ..Default::default()
+            }]]],
+        });
         let ip = waypoint.ip();
         run_hbone_server(waypoint)?;
         let _ = manager
