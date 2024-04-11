@@ -3,10 +3,11 @@
 ## Contribute
 
 Before you submit your PRs, please ensure no error with following command:
-- `make presubmit`
-- `make test`
 
-To do more comprehensive testing, please refer to [Local Testing](#Local-Testing).
+* `make presubmit`
+* `make test`
+
+To do more comprehensive testing, please refer to [Local Testing](#local-testing).
 
 ## Local Testing
 
@@ -19,15 +20,12 @@ This doc covers ztunnel specifically, for general Istio local development see
 
 There are a variety of config options that can be used to replace components with mocked ones:
 
-* `FAKE_CA="true"` - this will use self-signed fake certificates, eliminating a dependency on a CA
-* `XDS_ADDRESS=""` - disables XDS client completely
-* `LOCAL_XDS_PATH=./examples/localhost.yaml` - read XDS config from a file.
-  This example adds a workload for `127.0.0.1`, allowing us to send requests to/from localhost.
-* `NODE_NAME=local` - configures which node the ztunnel is running as.
-  This impacts the networking path of requests.
-  In the `localhost.yaml` example:
-  - with `NODE_NAME=local`: use the in-memory fast path
-  - without `NODE_NAME=local`: use the HBONE path
+* `FAKE_CA="true"`: this will use self-signed fake certificates, eliminating a dependency on a CA
+* `XDS_ADDRESS=""`: disables XDS client completely
+* `LOCAL_XDS_PATH=./examples/localhost.yaml`: read XDS config from a file.
+* `NODE_NAME=local`: configures which node the ztunnel is running as.This impacts the networking path of requests
+    * with `NODE_NAME=local`: use the in-memory fast path
+    * without `NODE_NAME=local`: use the HBONE path
 
 Together, `FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run --features testing` (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
 
