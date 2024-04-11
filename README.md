@@ -83,7 +83,7 @@ Note that the Dockerfiles used to build these vendored `boringssl` builds may be
 
 ## Development
 
-Please refer to [this](./LOCAL.md).
+Please refer to [this](./Development.md).
 
 ## Metrics
 
