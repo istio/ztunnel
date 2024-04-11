@@ -17,8 +17,10 @@ use std::time::Instant;
 use atty::Stream;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
+
 use thiserror::Error;
 use tracing::{error, info, warn};
+
 use tracing_subscriber::fmt::format;
 use tracing_subscriber::{filter, filter::EnvFilter, fmt, prelude::*, reload, Layer, Registry};
 
@@ -64,11 +66,12 @@ fn fmt_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
 }
 
 fn default_env_filter() -> EnvFilter {
-    EnvFilter::builder()
-        .with_regex(false)
-        .try_from_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap()
+    // Read from env var, but prefix with setting DNS logs to warn as they are noisy; they can be explicitly overriden
+    let var: String = env::var(EnvFilter::DEFAULT_ENV)
+        .map_err(|_| ())
+        .map(|v| "hickory_server::server::server_future=off,".to_string() + v.as_str())
+        .unwrap_or("hickory_server::server::server_future=off,info".to_string());
+    EnvFilter::builder().with_regex(false).parse(var).unwrap()
 }
 
 // a handle to get and set the log level
