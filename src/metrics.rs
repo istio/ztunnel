@@ -102,6 +102,15 @@ where
 // DefaultedUnknown is a wrapper around an Option that encodes as "unknown" when missing, rather than ""
 pub struct DefaultedUnknown<T>(Option<T>);
 
+impl<T> DefaultedUnknown<T> {
+    pub fn inner(self) -> Option<T> {
+        self.0
+    }
+    pub fn as_ref(&self) -> Option<&T> {
+        self.0.as_ref()
+    }
+}
+
 impl From<String> for DefaultedUnknown<String> {
     fn from(t: String) -> Self {
         if t.is_empty() {
@@ -115,6 +124,12 @@ impl From<String> for DefaultedUnknown<String> {
 impl<T> From<Option<T>> for DefaultedUnknown<T> {
     fn from(t: Option<T>) -> Self {
         DefaultedUnknown(t)
+    }
+}
+
+impl<T> From<DefaultedUnknown<T>> for Option<T> {
+    fn from(val: DefaultedUnknown<T>) -> Self {
+        val.0
     }
 }
 

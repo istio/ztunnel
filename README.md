@@ -122,3 +122,25 @@ Ztunnel exposes a variety of metrics, at varying levels of stability.
 #### XDS metrics
 
 - XDS Connection terminations (`istio_xds_connection_terminations_total`)
+
+## Logging
+
+Ztunnel exposes a variety of logs, both operational and "access logs".
+
+Logs are controlled by the `RUST_LOG` variable.
+This can set all levels, or a specific target. For instance, `RUST_LOG=error,ztunnel::proxy=warn`.
+Access logs are under the `access` target.
+
+An example access log looks like (with newlines for readability; the real logs are on one line):
+
+```text
+2024-04-11T15:38:42.182974Z  INFO access: connection complete
+    src.addr=10.244.0.24:46238 src.workload="shell-6d8bcd654d-t88gp" src.namespace="default" src.identity="spiffe://cluster.local/ns/default/sa/default"
+    dst.addr=10.244.0.42:15008 dst.hbone_addr="10.96.108.116:80" dst.service="echo.default.svc.cluster.local"
+    direction="outbound" bytes_sent=67 bytes_recv=490 duration="13ms"
+```
+
+Access logs are emitted upon _completion_ of each connection.
+Logs for connect _establishment_ are also logged (with less information) at `debug` level.
+
+Currently, the access log format is considered unstable and subject to changes.

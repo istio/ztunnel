@@ -13,14 +13,20 @@
 // limitations under the License.
 
 use std::fmt::Write;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
 
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
+use tracing::event;
+
 use crate::identity::Identity;
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorder, Recorder};
+
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
 
@@ -104,10 +110,6 @@ pub enum SecurityPolicy {
     mutual_tls,
 }
 
-pub struct ConnectionClose<'a>(&'a ConnectionOpen);
-
-pub struct BytesTransferred<'a>(&'a ConnectionOpen);
-
 #[derive(Clone, Debug, Default)]
 pub struct DerivedWorkload {
     pub workload_name: Option<String>,
@@ -126,18 +128,6 @@ pub struct ConnectionOpen {
     pub destination: Option<Workload>,
     pub destination_service: Option<ServiceDescription>,
     pub connection_security_policy: SecurityPolicy,
-}
-
-impl<'a> From<&'a ConnectionOpen> for ConnectionClose<'a> {
-    fn from(c: &'a ConnectionOpen) -> Self {
-        ConnectionClose(c)
-    }
-}
-
-impl<'a> From<&'a ConnectionOpen> for BytesTransferred<'a> {
-    fn from(c: &'a ConnectionOpen) -> Self {
-        BytesTransferred(c)
-    }
 }
 
 impl CommonTrafficLabels {
@@ -190,12 +180,6 @@ impl CommonTrafficLabels {
         self.destination_service_name = w.name.clone().into();
         self.destination_service_namespace = w.namespace.clone().into();
         self
-    }
-}
-
-impl From<BytesTransferred<'_>> for CommonTrafficLabels {
-    fn from(c: BytesTransferred) -> Self {
-        c.0.into()
     }
 }
 
@@ -346,31 +330,187 @@ impl Recorder<ConnectionOpen, u64> for Metrics {
     }
 }
 
-impl Recorder<ConnectionClose<'_>, u64> for Metrics {
-    fn record(&self, reason: &ConnectionClose, count: u64) {
-        self.connection_close
-            .get_or_create(&CommonTrafficLabels::from(reason.0))
-            .inc_by(count);
-    }
+/// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
+pub struct ConnectionResult {
+    // Src address and name
+    src: (SocketAddr, Option<String>),
+    // Dst address and name
+    dst: (SocketAddr, Option<String>),
+    hbone_target: Option<SocketAddr>,
+    start: Instant,
+    tl: CommonTrafficLabels,
+    metrics: Arc<Metrics>,
 }
 
-impl Recorder<BytesTransferred<'_>, (u64, u64)> for super::Metrics {
-    fn record(&self, event: &BytesTransferred<'_>, m: (u64, u64)) {
-        let (sent, recv) = if event.0.reporter == Reporter::source {
-            // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
-            (m.1, m.0)
-        } else {
-            (m.0, m.1)
-        };
-        if sent != 0 {
-            self.sent_bytes
-                .get_or_create(&CommonTrafficLabels::from(event.0))
-                .inc_by(sent);
+// log_early_deny allows logging a connection is denied before we have enough information to emit proper
+// access logs/metrics
+pub fn log_early_deny<E: std::error::Error>(
+    src: SocketAddr,
+    dst: SocketAddr,
+    reporter: Reporter,
+    err: E,
+) {
+    event!(
+            target: "access",
+            parent: None,
+            tracing::Level::WARN,
+
+            src.addr = %src,
+            dst.addr = %dst,
+
+            direction = if reporter == Reporter::source {
+                "outbound"
+            } else {
+                "inbound"
+            },
+
+            error = %err,
+
+            "connection failed"
+    );
+}
+
+macro_rules! access_log {
+    ($res:expr, $($fields:tt)*) => {
+        let err = $res.as_ref().err().map(|e| e.to_string());
+        match $res {
+            Ok(_) => {
+                event!(
+                    target: "access",
+                    parent: None,
+                    tracing::Level::INFO,
+                    $($fields)*
+                    "connection complete"
+                );
+            }
+            Err(_) => {
+                event!(
+                    target: "access",
+                    parent: None,
+                    tracing::Level::ERROR,
+                    $($fields)*
+                    error = err,
+                    "connection complete"
+                );
+            }
         }
-        if recv != 0 {
-            self.received_bytes
-                .get_or_create(&CommonTrafficLabels::from(event.0))
-                .inc_by(recv);
+    };
+}
+impl ConnectionResult {
+    pub fn new(
+        src: SocketAddr,
+        dst: SocketAddr,
+        // If using hbone, the inner HBONE address
+        // That is, dst is the L4 address, while is the :authority.
+        hbone_target: Option<SocketAddr>,
+        start: Instant,
+        conn: &ConnectionOpen,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        let tl = CommonTrafficLabels::from(conn);
+        metrics.connection_opens.get_or_create(&tl).inc();
+        let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
+        // for src and dest, try to get pod name but fall back to "canonical service"
+        let src = (
+            src,
+            conn.source
+                .as_ref()
+                .map(|wl| wl.name.clone())
+                .or(tl.source_canonical_service.clone().inner()),
+        );
+        let dst = (
+            dst,
+            conn.destination
+                .as_ref()
+                .map(|wl| wl.name.clone())
+                .or(tl.destination_canonical_service.clone().inner()),
+        );
+        event!(
+            target: "access",
+            parent: None,
+            tracing::Level::DEBUG,
+
+            src.addr = %src.0,
+            src.workload = src.1,
+            src.namespace = tl.source_workload_namespace.as_ref(),
+            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+
+            dst.addr = %dst.0,
+            dst.hbone_addr = hbone_target.map(|r| r.to_string()),
+            dst.workload = dst.1,
+            dst.namespace = tl.destination_canonical_service.as_ref(),
+            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+
+            direction = if tl.reporter == Reporter::source {
+                "outbound"
+            } else {
+                "inbound"
+            },
+
+            "connection opened"
+        );
+        Self {
+            src,
+            dst,
+            hbone_target,
+            start,
+            tl,
+            metrics,
         }
+    }
+
+    pub fn record<E: std::error::Error>(self, res: Result<(u64, u64), E>) {
+        let tl = self.tl;
+
+        // Unconditionally record the connection was closed
+        self.metrics.connection_close.get_or_create(&tl).inc();
+
+        // If the connection succeeded, record bytes sent/recv
+        if let Ok((sent, recv)) = res {
+            let (sent, recv) = if tl.reporter == Reporter::source {
+                // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
+                (recv, sent)
+            } else {
+                (sent, recv)
+            };
+            if sent != 0 {
+                self.metrics.sent_bytes.get_or_create(&tl).inc_by(sent);
+            }
+            if recv != 0 {
+                self.metrics.received_bytes.get_or_create(&tl).inc_by(recv);
+            }
+        }
+
+        // Unconditionally write out an access log
+        let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
+        let bytes = res.as_ref().ok();
+        let dur = format!("{}ms", self.start.elapsed().as_millis());
+        // We use our own macro to allow setting the level dynamically
+        access_log!(
+            res,
+
+            src.addr = %self.src.0,
+            src.workload = self.src.1,
+            src.namespace = tl.source_workload_namespace.as_ref(),
+            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+
+            dst.addr = %self.dst.0,
+            dst.hbone_addr = self.hbone_target.map(|r| r.to_string()),
+            dst.service = tl.destination_service.as_ref(),
+            dst.workload = self.dst.1,
+            dst.namespace = tl.destination_canonical_service.as_ref(),
+            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+
+            direction = if tl.reporter == Reporter::source {
+                "outbound"
+            } else {
+                "inbound"
+            },
+
+            // Note: here we are *not* inverting them, which was only to comply with legacy decisions
+            bytes_sent = bytes.map(|r| r.0),
+            bytes_recv = bytes.map(|r| r.1),
+            duration = dur,
+        );
     }
 }
