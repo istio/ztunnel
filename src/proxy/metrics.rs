@@ -370,6 +370,32 @@ pub fn log_early_deny<E: std::error::Error>(
     );
 }
 
+macro_rules! access_log {
+    ($res:expr, $($fields:tt)*) => {
+        let err = $res.as_ref().err().map(|e| e.to_string());
+        match $res {
+            Ok(_) => {
+                event!(
+                    target: "access",
+                    parent: None,
+                    tracing::Level::INFO,
+                    $($fields)*
+                    "connection complete"
+                );
+            }
+            Err(_) => {
+                event!(
+                    target: "access",
+                    parent: None,
+                    tracing::Level::ERROR,
+                    $($fields)*
+                    error = err,
+                    "connection complete"
+                );
+            }
+        }
+    };
+}
 impl ConnectionResult {
     pub fn new(
         src: SocketAddr,
@@ -459,73 +485,32 @@ impl ConnectionResult {
         let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
         let bytes = res.as_ref().ok();
         let dur = format!("{}ms", self.start.elapsed().as_millis());
-        let err = res.as_ref().err().map(|e| e.to_string());
-        // TODO: we want to set the level based on the result. Tracing expects a const.
-        // Duplicating everything here sucks. Maybe a macro of our own could do equivalent.
-        if res.is_ok() {
-            event!(
-                target: "access",
-                parent: None,
-                tracing::Level::INFO,
+        // We use our own macro to allow setting the level dynamically
+        access_log!(
+            res,
 
-                src.addr = %self.src.0,
-                src.workload = self.src.1,
-                src.namespace = tl.source_workload_namespace.as_ref(),
-                src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+            src.addr = %self.src.0,
+            src.workload = self.src.1,
+            src.namespace = tl.source_workload_namespace.as_ref(),
+            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
-                dst.addr = %self.dst.0,
-                dst.hbone_addr = self.hbone_target.map(|r| r.to_string()),
-                dst.service = tl.destination_service.as_ref(),
-                dst.workload = self.dst.1,
-                dst.namespace = tl.destination_canonical_service.as_ref(),
-                dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+            dst.addr = %self.dst.0,
+            dst.hbone_addr = self.hbone_target.map(|r| r.to_string()),
+            dst.service = tl.destination_service.as_ref(),
+            dst.workload = self.dst.1,
+            dst.namespace = tl.destination_canonical_service.as_ref(),
+            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
-                direction = if tl.reporter == Reporter::source {
-                    "outbound"
-                } else {
-                    "inbound"
-                },
+            direction = if tl.reporter == Reporter::source {
+                "outbound"
+            } else {
+                "inbound"
+            },
 
-                // Note: here we are *not* inverting them, which was only to comply with legacy decisions
-                bytes_sent = bytes.map(|r| r.0),
-                bytes_recv = bytes.map(|r| r.1),
-                duration = dur,
-                error = err,
-
-                "connection complete"
-            );
-        } else {
-            event!(
-                target: "access",
-                parent: None,
-                tracing::Level::WARN,
-
-                src.addr = %self.src.0,
-                src.workload = self.src.1,
-                src.namespace = tl.source_workload_namespace.as_ref(),
-                src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
-
-                dst.addr = %self.dst.0,
-                dst.hbone_addr = self.hbone_target.map(|r| r.to_string()),
-                dst.service = tl.destination_service.as_ref(),
-                dst.workload = self.dst.1,
-                dst.namespace = tl.destination_canonical_service.as_ref(),
-                dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
-
-                direction = if tl.reporter == Reporter::source {
-                    "outbound"
-                } else {
-                    "inbound"
-                },
-
-                // Note: here we are *not* inverting them, which was only to comply with legacy decisions
-                bytes_sent = bytes.map(|r| r.0),
-                bytes_recv = bytes.map(|r| r.1),
-                duration = dur,
-                error = err,
-
-                "connection complete"
-            );
-        };
+            // Note: here we are *not* inverting them, which was only to comply with legacy decisions
+            bytes_sent = bytes.map(|r| r.0),
+            bytes_recv = bytes.map(|r| r.1),
+            duration = dur,
+        );
     }
 }
