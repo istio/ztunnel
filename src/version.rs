@@ -22,12 +22,14 @@ const BUILD_GIT_REVISION: &str = env!("ZTUNNEL_BUILD_buildGitRevision");
 const BUILD_STATUS: &str = env!("ZTUNNEL_BUILD_buildStatus");
 const BUILD_TAG: &str = env!("ZTUNNEL_BUILD_buildTag");
 const BUILD_RUST_VERSION: &str = env!("ZTUNNEL_BUILD_RUSTC_VERSION");
+const BUILD_RUST_PROFILE: &str = env!("ZTUNNEL_BUILD_PROFILE_NAME");
 
 #[derive(serde::Serialize, Clone, Debug, Default)]
 pub struct BuildInfo {
     version: String,
     git_revision: String,
     rust_version: String,
+    build_profile: String,
     build_status: String,
     git_tag: String,
     pub istio_version: String,
@@ -39,6 +41,7 @@ impl BuildInfo {
             version: BUILD_VERSION.to_string(),
             git_revision: BUILD_GIT_REVISION.to_string(),
             rust_version: BUILD_RUST_VERSION.to_string(),
+            build_profile: BUILD_RUST_PROFILE.to_string(),
             build_status: BUILD_STATUS.to_string(),
             git_tag: BUILD_TAG.to_string(),
             istio_version: env::var("ISTIO_VERSION").unwrap_or_else(|_| "unknown".to_string()),
@@ -48,7 +51,7 @@ impl BuildInfo {
 
 impl Display for BuildInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
-        self.version, self.git_revision, self.rust_version, self.build_status, self.git_tag, self.istio_version)
+        write!(f, "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildProfile:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
+        self.version, self.git_revision, self.rust_version, self.build_profile, self.build_status, self.git_tag, self.istio_version)
     }
 }
