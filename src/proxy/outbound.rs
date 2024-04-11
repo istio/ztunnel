@@ -22,15 +22,14 @@ use drain::Watch;
 use http_body_util::Empty;
 use hyper::client::conn::http2;
 use hyper::header::FORWARDED;
-use hyper::StatusCode;
 
 use tokio::net::{TcpListener, TcpStream};
 
-use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
-use crate::proxy::inbound::{Inbound, InboundConnect};
+
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
@@ -38,7 +37,7 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEP
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
-use crate::{hyper_util, proxy, rbac, socket};
+use crate::{hyper_util, proxy, socket};
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -207,13 +206,6 @@ impl OutboundConnection {
             // domains. But for socks5
             return Err(Error::UnknownDestination(req.destination.ip()));
         }
-        let can_fastpath = self.pi.cfg.proxy_mode == ProxyMode::Shared
-            && req.protocol == Protocol::HBONE
-            && !req
-                .destination_workload
-                .as_ref()
-                .map(|w| w.native_tunnel)
-                .unwrap_or(false);
         let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::source,
             derived_source: None,
@@ -226,64 +218,6 @@ impl OutboundConnection {
             },
             destination_service: req.destination_service.clone(),
         };
-
-        if req.request_type == RequestType::DirectLocal && can_fastpath {
-            // For same node, we just access it directly rather than making a full network connection.
-            // Pass our `stream` over to the inbound handler, which will process as usual
-            // We *could* apply this to all traffic, rather than just for destinations that are "captured"
-            // However, we would then get inconsistent behavior where only node-local pods have RBAC enforced.
-            info!("proxying to {} using node local fast path", req.destination);
-            let origin_src = if self.pi.cfg.enable_original_source.unwrap_or_default() {
-                super::get_original_src_from_stream(&stream)
-            } else {
-                None
-            };
-            let conn = rbac::Connection {
-                src_identity: Some(req.source.identity()),
-                src: remote_addr,
-                dst_network: req.source.network.clone(), // since this is node local, it's the same network
-                dst: req.destination,
-            };
-
-            let rbac_ctx = crate::state::ProxyRbacContext {
-                conn,
-                // Note: here we can't use `pi.proxy_workload_info` as the proxy instance presents the source and not the dest.
-                // Note that fastpath is disabled in the inpod mode, so that's not a concern.
-                dest_workload_info: None,
-            };
-            self.pi.connection_manager.register(&rbac_ctx);
-            if !self.pi.state.assert_rbac(&rbac_ctx).await {
-                self.pi.connection_manager.release(&rbac_ctx);
-                info!(%rbac_ctx, "RBAC rejected");
-                return Err(Error::HttpStatus(StatusCode::UNAUTHORIZED));
-            }
-            // same as above but inverted, this is the "inbound" metric
-            let inbound_connection_metrics = metrics::ConnectionOpen {
-                reporter: Reporter::destination,
-                derived_source: None,
-                source: Some(req.source.clone()),
-                destination: req.destination_workload.clone(),
-                connection_security_policy: if req.protocol == Protocol::HBONE {
-                    metrics::SecurityPolicy::mutual_tls
-                } else {
-                    metrics::SecurityPolicy::unknown
-                },
-                destination_service: req.destination_service,
-            };
-            return Inbound::handle_inbound(
-                InboundConnect::DirectPath(stream),
-                origin_src,
-                req.destination,
-                self.pi.metrics.to_owned(), // self is a borrow so this clone is to return an owned
-                connection_metrics,
-                Some(inbound_connection_metrics),
-                self.pi.socket_factory.as_ref(),
-                self.pi.connection_manager.clone(),
-                rbac_ctx,
-            )
-            .await
-            .map_err(Error::Io);
-        }
 
         let transferred_bytes = metrics::BytesTransferred::from(&connection_metrics);
 
@@ -621,36 +555,6 @@ impl OutboundConnection {
             Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
         };
 
-        // For case source client and upstream server are on the same node.
-        // This is disabled in inpod mode, as each pod processes connections in its own netns.
-        // so if we use direct local here, the destination pod will see the connection as inbound
-        // plain text and may wrongly reject it depending on policy.
-        if !self.pi.cfg.inpod_enabled
-            && !us.workload.node.is_empty()
-            && self.pi.cfg.local_node.as_ref() == Some(&us.workload.node) // looks weird but in Rust borrows can be compared and will behave the same as owned (https://doc.rust-lang.org/std/primitive.reference.html)
-            && us.workload.protocol == Protocol::HBONE
-        {
-            trace!(
-                workload_node = us.workload.node,
-                local_node = self.pi.cfg.local_node,
-                "select {:?}",
-                RequestType::DirectLocal
-            );
-            return Ok(Request {
-                protocol: Protocol::HBONE,
-                source: source_workload,
-                destination: SocketAddr::from((workload_ip, us.port)),
-                destination_workload: Some(us.workload.clone()),
-                destination_service: us.destination_service.clone(),
-                expected_identity: Some(us.workload.identity()),
-                gateway: SocketAddr::from((gw_addr.ip(), self.pi.hbone_port)),
-                direction: Direction::Outbound,
-                // Sending to a node on the same node (ourselves).
-                // In the future this could be optimized to avoid a full network traversal.
-                request_type: RequestType::DirectLocal,
-                upstream_sans: us.sans,
-            });
-        }
         // For case no waypoint for both side and direct to remote node proxy
         Ok(Request {
             protocol: us.workload.protocol,
@@ -708,8 +612,6 @@ enum RequestType {
     ToServerWaypoint,
     /// Direct requests are made directly to a intended backend pod
     Direct,
-    /// DirectLocal requests are made directly to an intended backend pod *on the same node*
-    DirectLocal,
     /// Passthrough refers to requests with an unknown target
     Passthrough,
 }
@@ -908,7 +810,7 @@ mod tests {
                 protocol: Protocol::HBONE,
                 destination: "127.0.0.2:80",
                 gateway: "127.0.0.2:15008",
-                request_type: RequestType::DirectLocal,
+                request_type: RequestType::Direct,
             }),
         )
         .await;

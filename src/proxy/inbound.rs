@@ -35,8 +35,8 @@ use super::connection_manager::ConnectionManager;
 use super::{Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::identity::{Identity, SecretManager};
-use crate::metrics::Recorder;
-use crate::proxy::inbound::InboundConnect::{DirectPath, Hbone, Proxy};
+
+use crate::proxy::inbound::InboundConnect::{Hbone, Proxy};
 use crate::proxy::metrics::{ConnectionOpen, Metrics, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
@@ -211,33 +211,6 @@ impl Inbound {
                         let transferred_bytes =
                             metrics::BytesTransferred::from(&connection_metrics);
                         match request_type {
-                            DirectPath(mut incoming) => {
-                                let res = tokio::select! {
-                                r = proxy::relay(
-                                    &mut incoming,
-                                    &mut stream,
-                                    &metrics,
-                                    transferred_bytes,
-                                ) => {r}
-                                _c = close.signaled() => {
-                                        error!(dur=?start.elapsed(), "internal server copy: connection close received");
-                                        Ok((0,0))
-                                    }
-                                };
-                                match res {
-                                    Ok(transferred) => {
-                                        if let Some(co) = extra_connection_metrics.as_ref() {
-                                            metrics.record(
-                                                &metrics::BytesTransferred::from(co),
-                                                transferred,
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!(dur=?start.elapsed(), "internal server copy: {}", e)
-                                    }
-                                }
-                            }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
                                     let res = tokio::select! {
@@ -593,10 +566,6 @@ impl<'a, T: Display> Display for OptionDisplay<'a, T> {
 }
 
 pub(super) enum InboundConnect {
-    /// DirectPath is an optimization when we are connecting to an endpoint on the same node.
-    /// Rather than doing a full HBONE connection over the localhost network, we just pass the outbound
-    /// context directly to the inbound handling in memory.
-    DirectPath(TcpStream),
     /// Hbone is a standard HBONE request coming from the network.
     Hbone(Request<Incoming>),
     // PROXY adds source and dest headers and source identity before forwarding bytes.
