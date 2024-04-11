@@ -475,15 +475,15 @@ impl OutboundConnection {
                     .await?; // if we can't load balance just return the error
 
                 let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
-
+                let id = waypoint_workload.identity();
                 return Ok(Request {
                     protocol: Protocol::HBONE,
                     direction: Direction::Outbound,
                     source: source_workload,
                     destination: target,
-                    destination_workload: None, // this is to Service traffic with a wp... gateway will handle workload selection
+                    destination_workload: Some(waypoint_workload),
                     destination_service: Some(ServiceDescription::from(&*s)),
-                    expected_identity: Some(waypoint_workload.identity()),
+                    expected_identity: Some(id),
                     gateway: waypoint_socket_address,
                     request_type: RequestType::ToServerWaypoint,
                     upstream_sans: waypoint_us.sans,
