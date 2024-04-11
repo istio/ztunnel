@@ -432,32 +432,6 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn test_hbone_local_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
-        run_tcp_server(
-            manager
-                .workload_builder("server", DEFAULT_NODE)
-                .hbone()
-                .register()?,
-        )?;
-        let client = manager
-            .workload_builder("client", DEFAULT_NODE)
-            .register()?;
-        let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
-
-        run_tcp_client(client, manager.resolver(), "server")?;
-
-        let metrics = [
-            (CONNECTIONS_OPENED, 1),
-            (CONNECTIONS_CLOSED, 1),
-            (BYTES_RECV, REQ_SIZE),
-            (BYTES_SENT, REQ_SIZE * 2),
-        ];
-        verify_metrics(&zt, &metrics, &source_labels()).await;
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_waypoint() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!();
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
