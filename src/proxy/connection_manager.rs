@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::proxy::error;
+use crate::rbac;
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
 use drain;
@@ -127,6 +128,19 @@ impl ConnectionManager {
         // potentially large copy under read lock, could require optimization
         self.drains.read().expect("mutex").keys().cloned().collect()
     }
+
+    // get a dump (for admin API) for connects.
+    // This just avoids the redundant dest_workload_info
+    pub fn connections_dump(&self) -> Vec<rbac::Connection> {
+        // potentially large copy under read lock, could require optimization
+        self.drains
+            .read()
+            .expect("mutex")
+            .keys()
+            .cloned()
+            .map(|c| c.conn)
+            .collect()
+    }
 }
 
 impl Serialize for ConnectionManager {
@@ -134,7 +148,7 @@ impl Serialize for ConnectionManager {
     where
         S: Serializer,
     {
-        let conns = self.connections();
+        let conns = self.connections_dump();
         conns.serialize(serializer)
     }
 }

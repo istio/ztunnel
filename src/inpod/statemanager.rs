@@ -229,7 +229,8 @@ impl WorkloadProxyManagerState {
                 return Ok(());
             }
         }
-        self.admin_handler.proxy_pending(workload_uid);
+        self.admin_handler
+            .proxy_pending(workload_uid, workload_info);
 
         debug!(
             workload=?workload_uid,
@@ -255,7 +256,7 @@ impl WorkloadProxyManagerState {
         let uid = workload_uid.clone();
 
         self.admin_handler
-            .proxy_up(&uid, proxies.connection_manager);
+            .proxy_up(&uid, workload_info, proxies.connection_manager);
 
         let metrics = self.metrics.clone();
         let admin_handler = self.admin_handler.clone();
