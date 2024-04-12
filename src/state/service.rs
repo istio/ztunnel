@@ -21,6 +21,7 @@ use tracing::trace;
 
 use xds::istio::workload::Service as XdsService;
 
+use crate::state::workload::is_default;
 use crate::state::workload::{
     byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
     WorkloadError,
@@ -43,8 +44,11 @@ pub struct Service {
     pub endpoints: HashMap<String, Endpoint>,
     #[serde(default)]
     pub subject_alt_names: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "is_default")]
     pub waypoint: Option<GatewayAddress>,
 
+    #[serde(default, skip_serializing_if = "is_default")]
     pub load_balancer: Option<LoadBalancer>,
 }
 
@@ -92,6 +96,7 @@ impl TryFrom<XdsScope> for LoadBalancerScopes {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoadBalancer {
     pub routing_preferences: Vec<LoadBalancerScopes>,
     pub mode: LoadBalancerMode,

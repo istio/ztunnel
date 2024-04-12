@@ -201,11 +201,11 @@ pub struct Workload {
     #[serde(default)]
     pub cluster_id: String,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub locality: Locality,
 }
 
-fn is_default<T: Default + PartialEq>(t: &T) -> bool {
+pub fn is_default<T: Default + PartialEq>(t: &T) -> bool {
     *t == Default::default()
 }
 
