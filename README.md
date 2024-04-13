@@ -94,9 +94,11 @@ Please refer to [this](./Development.md).
 
 ## Metrics
 
-Ztunnel exposes a variety of metrics, at varying levels of stability.
+Ztunnel exposes a variety of metrics, at varying levels of stability.  They are
+accessible by making an HTTP request to either "/stats/prometheus" or "/metrics" on port 15020.
 
-**Core** metrics are considered stable APIs
+**Core** metrics are considered stable APIs.
+
 **Unstable** metrics may be changed. This includes removal, semantic changes, and label changes.
 
 ### Core metrics
@@ -110,7 +112,7 @@ Ztunnel exposes a variety of metrics, at varying levels of stability.
 
 #### Meta metrics
 
--Istio build information (`istio_build`)
+- Istio build information (`istio_build`)
 
 ### Unstable metrics
 
