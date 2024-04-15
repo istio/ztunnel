@@ -15,6 +15,7 @@
 use crate::identity::SecretManager;
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
+use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
 use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerScopes, ServiceStore};
 use crate::state::service::{Service, ServiceDescription};
@@ -33,6 +34,7 @@ use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioAsyncResolver;
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
+use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
@@ -76,6 +78,7 @@ impl fmt::Display for Upstream {
 #[derive(
     Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
 )]
+#[serde(rename_all = "camelCase")]
 pub struct WorkloadInfo {
     pub name: String,
     pub namespace: String,
@@ -133,23 +136,43 @@ impl fmt::Display for ProxyRbacContext {
     }
 }
 /// The current state information for this proxy.
-#[derive(serde::Serialize, Default, Debug)]
+#[derive(Default, Debug)]
 pub struct ProxyState {
-    #[serde(flatten)]
     pub workloads: WorkloadStore,
 
-    #[serde(flatten)]
     pub services: ServiceStore,
 
-    #[serde(flatten)]
     pub policies: PolicyStore,
 
-    #[serde(flatten)]
     pub resolved_dns: ResolvedDnsStore,
 }
 
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ProxyStateSerialization<'a> {
+    workloads: &'a HashMap<NetworkAddress, Arc<Workload>>,
+    services: &'a HashMap<NetworkAddress, Arc<Service>>,
+    staged_services: &'a HashMap<NamespacedHostname, HashMap<String, Endpoint>>,
+    policies: &'a HashMap<String, Authorization>,
+}
+
+impl serde::Serialize for ProxyState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let serializable = ProxyStateSerialization {
+            workloads: &self.workloads.by_addr,
+            services: &self.services.by_vip,
+            staged_services: &self.services.staged_services,
+            policies: &self.policies.by_key,
+        };
+        serializable.serialize(serializer)
+    }
+}
+
 /// A ResolvedDnsStore encapsulates all resolved DNS information for workloads in the mesh
-#[derive(serde::Serialize, Default, Debug)]
+#[derive(Default, Debug)]
 pub struct ResolvedDnsStore {
     // by_hostname is a map from hostname to resolved IP addresses for now.
     //

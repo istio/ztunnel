@@ -31,6 +31,7 @@ pub enum State {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProxyState {
     pub state: State,
 
@@ -200,7 +201,7 @@ mod test {
         );
         assert_eq!(
             data(),
-            r#"{"uid1":{"state":"Up","info":{"name":"name","namespace":"ns","trust_domain":"td","service_account":"sa"}}}"#
+            r#"{"uid1":{"state":"Up","info":{"name":"name","namespace":"ns","trustDomain":"td","serviceAccount":"sa"}}}"#
         );
         handler.proxy_down(&uid1);
         assert_eq!(data(), "{}");
