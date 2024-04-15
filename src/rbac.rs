@@ -195,6 +195,7 @@ impl Authorization {
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RbacMatch {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub namespaces: Vec<StringMatch>,
