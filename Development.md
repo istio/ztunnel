@@ -198,7 +198,7 @@ When running locally, ztunnel will automatically connect to an Istiod running on
 
 Istiod can be run locally as simply as `go run ./pilot/cmd/pilot-discovery discovery`.
 
-### Request testing setup
+### Requests testing setup
 
 Ztunnel expects requests to be redirected with iptables. The following functions can help do this:
 
