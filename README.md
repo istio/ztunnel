@@ -23,6 +23,13 @@ The details of architecture is [here](./ARCHITECTURE.md).
 
 ## Building
 
+Please use the same Rust version as the [`build-tools`](https://github.com/istio/tools/tree/master/docker/build-tools) image.
+You can determine the version that the `build-tools` image uses by running the below command:
+
+```shell
+$ BUILD_WITH_CONTAINER=1 make rust-version
+```
+
 ### TLS/Crypto provider
 
 Ztunnel's TLS is built on [rustls](https://github.com/rustls/rustls).
