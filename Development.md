@@ -70,7 +70,7 @@ ip netns exec pod1 ./scripts/ztunnel-redirect-inpod.sh
 
 To get traffic to work you may need to adjust the IPs in localhost.yaml and start processes in the pod netns.
 
-### In-pod mode with istiod on kind steup
+### In-pod mode with istiod on kind setup
 
 Run ztunnel on from your terminal. With istiod and workloads running in KinD. This works on Linux only.
 This approach will have traffic running through your local ztunnel - running outside of k8s as a regular, non-containerized userspace process. This can make certain kinds of debugging and local development flows faster/simpler.
