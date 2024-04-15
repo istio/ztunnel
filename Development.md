@@ -23,9 +23,6 @@ There are a variety of config options that can be used to replace components wit
 * `FAKE_CA="true"`: this will use self-signed fake certificates, eliminating a dependency on a CA
 * `XDS_ADDRESS=""`: disables XDS client completely
 * `LOCAL_XDS_PATH=./examples/localhost.yaml`: read XDS config from a file.
-* `NODE_NAME=local`: configures which node the ztunnel is running as.This impacts the networking path of requests
-    * with `NODE_NAME=local`: use the in-memory fast path
-    * without `NODE_NAME=local`: use the HBONE path
 
 Together, `FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run --features testing` (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
 
@@ -165,7 +162,6 @@ INPOD_ENABLED="true"
 ISTIO_META_DNS_CAPTURE="true"
 ISTIO_META_DNS_PROXY_ADDR="127.0.0.1:15053"
 SERVICE_ACCOUNT=ztunnel
-NODE_NAME=ambient-worker
 POD_NAMESPACE=istio-system
 POD_NAME=ztunnel-worker1
 CA_ROOT_CA=/tmp/istio-root.pem
