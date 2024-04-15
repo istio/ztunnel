@@ -17,15 +17,14 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::watch;
 
 /// A PolicyStore encapsulates all policy information about workloads in the mesh
-#[derive(serde::Serialize, Default, Debug)]
+#[derive(Default, Debug)]
 pub struct PolicyStore {
     /// policies maintains a mapping of ns/name to policy.
-    by_key: HashMap<String, Authorization>,
+    pub(super) by_key: HashMap<String, Authorization>,
 
     /// policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
     by_namespace: HashMap<String, HashSet<String>>,
 
-    #[serde(skip)]
     notifier: PolicyStoreNotify,
 }
 

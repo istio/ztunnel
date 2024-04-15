@@ -572,10 +572,10 @@ pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
 }
 
 /// A WorkloadStore encapsulates all information about workloads in the mesh
-#[derive(serde::Serialize, Default, Debug)]
+#[derive(Default, Debug)]
 pub struct WorkloadStore {
     /// byAddress maps workload network addresses to workloads
-    by_addr: HashMap<NetworkAddress, Arc<Workload>>,
+    pub(super) by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
     by_uid: HashMap<String, Arc<Workload>>,
     /// byHostname maps workload hostname to workloads.

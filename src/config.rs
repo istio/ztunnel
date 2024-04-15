@@ -106,6 +106,7 @@ pub enum ProxyMode {
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     /// If true, the HBONE proxy will be used.
     pub proxy: bool,
