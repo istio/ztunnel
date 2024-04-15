@@ -320,7 +320,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ),
         stats_addr: SocketAddr::new(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            pc.status_port.unwrap_or(DEFAULT_STATS_PORT),
+            pc.stats_port.unwrap_or(DEFAULT_STATS_PORT),
         ),
         readiness_addr: SocketAddr::new(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
@@ -417,7 +417,7 @@ pub struct MeshConfig {
 pub struct ProxyConfig {
     pub discovery_address: Option<String>,
     pub proxy_admin_port: Option<u16>,
-    pub status_port: Option<u16>,
+    pub stats_port: Option<u16>,
     pub concurrency: Option<u16>,
     pub termination_drain_duration: Option<Duration>,
     pub proxy_metadata: HashMap<String, String>,
@@ -427,7 +427,7 @@ impl ProxyConfig {
     fn merge(mut self, other: Self) -> Self {
         self.discovery_address = other.discovery_address.or(self.discovery_address); // clone not required; self is moved and discovery_address is an owned type
         self.proxy_admin_port = other.proxy_admin_port.or(self.proxy_admin_port);
-        self.status_port = other.status_port.or(self.status_port);
+        self.stats_port = other.stats_port.or(self.stats_port);
         self.concurrency = other.concurrency.or(self.concurrency);
         self.proxy_metadata.extend(other.proxy_metadata);
         self.termination_drain_duration = other
