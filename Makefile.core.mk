@@ -55,3 +55,6 @@ presubmit: check-features test lint gen-check
 
 clean:
 	cargo clean $(FEATURES)
+
+rust-version:
+	./common/scripts/run.sh /usr/bin/rustc -vV

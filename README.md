@@ -27,7 +27,7 @@ Please use the same Rust version as the [`build-tools`](https://github.com/istio
 You can determine the version that the `build-tools` image uses by running the below command:
 
 ```shell
-$ make rust-version
+$ BUILD_WITH_CONTAINER=1 make rust-version
 ```
 
 ### TLS/Crypto provider
