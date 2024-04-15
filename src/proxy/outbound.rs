@@ -31,7 +31,7 @@ use crate::config::ProxyMode;
 use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
-use crate::proxy::{metrics, pool, ConnectionOpen};
+use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
 use crate::state::service::ServiceDescription;
@@ -193,8 +193,12 @@ impl OutboundConnection {
         outer_conn_drain: Option<Watch>,
     ) {
         let start = Instant::now();
+
+        // Block calls to ourselve (ztunnel), to attempt to stop looping attacks. Ignored if inpod is used;
+        // in this case
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(dest_addr.ip()) == self.pi.cfg.local_ip
+            && !self.pi.cfg.inpod_enabled
         {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
@@ -240,11 +244,11 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(&mut source_stream, source_addr, outer_conn_drain, &req)
+                self.proxy_to_hbone(&mut source_stream, source_addr, outer_conn_drain, &req, &result_tracker)
                     .await
             }
             Protocol::TCP => {
-                self.proxy_to_tcp(&mut source_stream, source_addr, outer_conn_drain, &req)
+                self.proxy_to_tcp(&mut source_stream, source_addr, outer_conn_drain, &req, &result_tracker)
                     .await
             }
         };
@@ -257,6 +261,7 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         outer_conn_drain: Option<Watch>,
         req: &Request,
+        x: &ConnectionResult,
     ) -> Result<(u64, u64), Error> {
         debug!(
             "proxy to {} using HBONE via {} type {:#?}",
@@ -376,16 +381,18 @@ impl OutboundConnection {
         }
         let mut upgraded = hyper::upgrade::on(response).await?;
 
-        super::copy_hbone(&mut upgraded, stream)
+        super::copy_hbone2(&mut ::hyper_util::rt::TokioIo::new(upgraded), stream, x)
             .instrument(trace_span!("hbone client"))
             .await
     }
+    
     async fn proxy_to_tcp(
         &mut self,
         stream: &mut TcpStream,
         _remote_addr: SocketAddr,
         _outer_conn_drain: Option<Watch>,
         req: &Request,
+        x: &ConnectionResult,
     ) -> Result<(u64, u64), Error> {
         info!(
             "Proxying to {} using TCP via {} type {:?}",
@@ -400,7 +407,7 @@ impl OutboundConnection {
         let mut outbound =
             super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref()).await?;
         // Proxying data between downstrean and upstream
-        proxy::relay(stream, &mut outbound).await
+        proxy::copy_hbone2(stream, &mut outbound, x).await
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {

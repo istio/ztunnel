@@ -459,6 +459,28 @@ impl ConnectionResult {
         }
     }
 
+    pub fn increment_send(&self, res: u64) {
+        let tl = &self.tl;
+
+        // If the connection succeeded, record bytes sent/recv
+        if &tl.reporter == &Reporter::source {
+            // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
+            self.metrics.received_bytes.get_or_create(&tl).inc_by(res);
+        } else {
+            self.metrics.sent_bytes.get_or_create(&tl).inc_by(res);
+        }
+    }
+    pub fn increment_recv(&self, res: u64) {
+        let tl = &self.tl;
+
+        // If the connection succeeded, record bytes sent/recv
+        if &tl.reporter == &Reporter::source {
+            // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
+            self.metrics.sent_bytes.get_or_create(&tl).inc_by(res);
+        } else {
+            self.metrics.received_bytes.get_or_create(&tl).inc_by(res);
+        }
+    }
     pub fn record<E: std::error::Error>(self, res: Result<(u64, u64), E>) {
         let tl = self.tl;
 

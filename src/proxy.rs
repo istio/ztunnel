@@ -17,10 +17,15 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use drain::Watch;
+use futures_core::ready;
 
 use rand::Rng;
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite};
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
@@ -317,6 +322,96 @@ pub async fn copy_hbone(
 
     trace!(sent, recv = received, "copy hbone complete");
     Ok((sent, received))
+}
+
+pub async fn copy_hbone2<A, B>(
+    upgraded: &mut A,
+    stream: &mut B,
+    x: &ConnectionResult,
+) -> Result<(u64, u64), Error> where
+A: AsyncRead + AsyncWrite+ Unpin ,
+B: AsyncRead + AsyncWrite+ Unpin , {
+    use tokio::io::AsyncWriteExt;
+    let (mut ri, mut wi) = tokio::io::split(upgraded);
+    let (mut ro, mut wo) = tokio::io::split(stream);
+
+    let (mut sent, mut received): (u64, u64) = (0, 0);
+
+    let client_to_server = async {
+        let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
+        let res = copy_buf(&mut ri, &mut wo, &x, false).await;
+        trace!(?res, "hbone -> tcp");
+        received = res?;
+        wo.shutdown().await
+    };
+
+    let server_to_client = async {
+        let mut ro = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ro);
+        let res = copy_buf(&mut ro, &mut wi, x, true).await;
+        trace!(?res, "tcp -> hbone");
+        sent = res?;
+        wi.shutdown().await
+    };
+
+    tokio::try_join!(client_to_server, server_to_client)?;
+
+    trace!(sent, recv = received, "copy hbone complete");
+    Ok((sent, received))
+}
+
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
+    send: bool,
+    reader: &'a mut R,
+    writer: &'a mut W,
+    x: &'a ConnectionResult,
+    amt: u64,
+}
+
+async fn copy_buf<'a, R, W>(reader: &'a mut R, writer: &'a mut W, x: &ConnectionResult, send: bool) -> io::Result<u64>
+where
+    R: tokio::io::AsyncBufRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    CopyBuf {
+        send,
+        reader,
+        writer,
+        x,
+        amt: 0,
+    }
+    .await
+}
+
+impl<R, W> Future for CopyBuf<'_, R, W>
+    where
+        R: AsyncBufRead + Unpin + ?Sized,
+        W: AsyncWrite + Unpin + ?Sized,
+{
+    type Output = io::Result<u64>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            let me = &mut *self;
+            let buffer = ready!(Pin::new(&mut *me.reader).poll_fill_buf(cx))?;
+            if buffer.is_empty() {
+                ready!(Pin::new(&mut self.writer).poll_flush(cx))?;
+                return Poll::Ready(Ok(self.amt));
+            }
+
+            let i = ready!(Pin::new(&mut *me.writer).poll_write(cx, buffer))?;
+            if i == 0 {
+                return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+            }
+            if me.send {
+                me.x.increment_send(i as u64);
+            } else {
+                me.x.increment_recv(i as u64);
+            }
+            self.amt += i as u64;
+            Pin::new(&mut *self.reader).consume(i);
+        }
+    }
 }
 
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
