@@ -78,6 +78,12 @@ impl Outbound {
         //
         // So use a drain to nuke tasks that might be stuck sending.
         let (sub_drain_signal, sub_drain) = drain::channel();
+
+        let pool = proxy::pool::WorkloadHBONEPool::new(
+                    self.pi.cfg.clone(),
+                    self.pi.socket_factory.clone(),
+                    self.pi.cert_manager.clone(),
+                    sub_drain.clone());
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -89,6 +95,7 @@ impl Outbound {
                         let mut oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
+                            pool: pool.clone(),
                         };
                         let span = info_span!("outbound", id=%oc.id);
                         tokio::spawn(
@@ -133,6 +140,7 @@ impl Outbound {
 pub(super) struct OutboundConnection {
     pub(super) pi: ProxyInputs,
     pub(super) id: TraceParent,
+    pub(super) pool: proxy::pool::WorkloadHBONEPool,
 }
 
 impl OutboundConnection {
@@ -296,7 +304,11 @@ impl OutboundConnection {
             dst: req.gateway,
         };
 
-        let mut connection = self.pi.pool.connect(pool_key.clone()).await?;
+        debug!("outbound - connection get START");
+        let mut connection = self.pool.connect(pool_key.clone())
+                                         .instrument(trace_span!("get pool conn"))
+                                         .await?;
+        debug!("outbound - connection get END");
 
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
@@ -318,11 +330,14 @@ impl OutboundConnection {
         // There are scenarios (upstream hangup, etc) where this "send" will simply get stuck.
         // As in, stream processing deadlocks, and `send_request` never resolves to anything.
         // Probably related to https://github.com/hyperium/hyper/issues/3623
-        let response = connection.send_request(request).await?;
+        let response = connection.send_request(request)
+                                 .instrument(trace_span!("send pool conn"))
+                                 .await?;
         debug!("outbound - connection send END");
 
         let code = response.status();
         if code != 200 {
+            debug!("outbound - connection send FAIL: {code}");
             return Err(Error::HttpStatus(code));
         }
         let upgraded = hyper::upgrade::on(response).await?;

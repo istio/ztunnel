@@ -105,7 +105,6 @@ pub(super) struct ProxyInputs {
     hbone_port: u16,
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
-    pool: pool::WorkloadHBONEPool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     proxy_workload_info: Option<Arc<WorkloadInfo>>,
 }
@@ -120,7 +119,6 @@ impl ProxyInputs {
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         proxy_workload_info: Option<WorkloadInfo>,
-        pool: pool::WorkloadHBONEPool,
     ) -> Self {
         Self {
             cfg,
@@ -128,7 +126,6 @@ impl ProxyInputs {
             cert_manager,
             metrics,
             connection_manager,
-            pool,
             hbone_port: 0,
             socket_factory,
             proxy_workload_info: proxy_workload_info.map(Arc::new),
@@ -147,19 +144,12 @@ impl Proxy {
         let metrics = Arc::new(metrics);
         let socket_factory = Arc::new(DefaultSocketFactory);
 
-        let pool = pool::WorkloadHBONEPool::new(
-            cfg.clone(),
-            socket_factory.clone(),
-            cert_manager.clone(),
-            drain.clone(),
-        );
         let pi = ProxyInputs {
             cfg,
             state,
             cert_manager,
             connection_manager: ConnectionManager::default(),
             metrics,
-            pool,
             hbone_port: 0,
             socket_factory,
             proxy_workload_info: None,

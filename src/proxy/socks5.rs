@@ -65,12 +65,18 @@ impl Socks5 {
                 let socket = self.listener.accept().await;
                 let inpod = self.pi.cfg.inpod_enabled;
                 let stream_drain = inner_drain.clone();
+                let pool = crate::proxy::pool::WorkloadHBONEPool::new(
+                            self.pi.cfg.clone(),
+                            self.pi.socket_factory.clone(),
+                            self.pi.cert_manager.clone(),
+                            stream_drain.clone());
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
                         let oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
+                            pool,
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream, stream_drain, inpod).await {

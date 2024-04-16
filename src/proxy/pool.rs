@@ -102,6 +102,7 @@ impl WorkloadHBONEPool {
     // If many `connects` request a connection  to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
     pub async fn connect(&mut self, key: WorkloadKey) -> Result<Client, Error> {
+        debug!("pool connect START");
         // TODO BML this may not be collision resistant/slow. It should be resistant enough for workloads tho.
         let mut s = DefaultHasher::new();
         key.hash(&mut s);
@@ -111,6 +112,7 @@ impl WorkloadHBONEPool {
             GLOBAL_CONN_COUNT.fetch_add(1, Ordering::Relaxed),
         );
 
+        debug!("pool connect GET EXISTING");
         // First, see if we can naively just check out a connection.
         // This should be the common case, except for the first establishment of a new connection/key.
         // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
@@ -125,6 +127,7 @@ impl WorkloadHBONEPool {
             .first_checkout_conn_from_pool(&key, hash_key, &pool_key)
             .await;
 
+        debug!("pool connect GOT EXISTING");
         if existing_conn.is_some() {
             debug!("using existing conn, connect future will be dropped on the floor");
             Ok(existing_conn.unwrap())
@@ -146,7 +149,9 @@ impl WorkloadHBONEPool {
             // this is is the ONLY block where we should hold a writelock on the whole mutex map
             // for the rest, a readlock (nonexclusive) is sufficient.
             {
+                debug!("pool connect MAP OUTER WRITELOCK START");
                 let mut map_write_lock = self.established_conn_writelock.write().await;
+                debug!("pool connect MAP OUTER WRITELOCK END");
                 match map_write_lock.get(&hash_key) {
                     Some(_) => {
                         debug!("already have conn for key {:#?}", hash_key);
@@ -180,9 +185,12 @@ impl WorkloadHBONEPool {
             // to block other parallel tasks from trying to spawn a connection if we are already doing so)
             //
             // BEGIN take outer readlock
+            debug!("pool connect MAP OUTER READLOCK START");
             let map_read_lock = self.established_conn_writelock.read().await;
+            debug!("pool connect MAP OUTER READLOCK END");
             let exist_conn_lock = map_read_lock.get(&hash_key).unwrap();
             // BEGIN take inner writelock
+            debug!("pool connect MAP INNER WRITELOCK START");
             let found_conn = match exist_conn_lock.as_ref().unwrap().try_lock() {
                 Ok(_guard) => {
                     // If we get here, it means the following are true:
@@ -240,6 +248,7 @@ impl WorkloadHBONEPool {
                                             debug!("found existing conn for key {:#?}, but streamcount is maxed", key);
                                             break None;
                                         }
+                                        debug!("pool connect LOOP END");
                                         break Some(e_conn);
                                     }
                                 }
@@ -303,9 +312,11 @@ impl WorkloadHBONEPool {
         hash_key: u64,
         pool_key: &pingora_pool::ConnectionMeta,
     ) -> Option<Client> {
+        debug!("first checkout READLOCK");
         let map_read_lock = self.established_conn_writelock.read().await;
         match map_read_lock.get(&hash_key) {
             Some(exist_conn_lock) => {
+                debug!("first checkout INNER WRITELOCK");
                 let _conn_lock = exist_conn_lock.as_ref().unwrap().lock().await;
 
                 debug!("getting conn for key {:#?} and hash {:#?}", key, hash_key);
