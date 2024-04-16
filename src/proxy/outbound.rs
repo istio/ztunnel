@@ -244,12 +244,24 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(&mut source_stream, source_addr, outer_conn_drain, &req, &result_tracker)
-                    .await
+                self.proxy_to_hbone(
+                    &mut source_stream,
+                    source_addr,
+                    outer_conn_drain,
+                    &req,
+                    &result_tracker,
+                )
+                .await
             }
             Protocol::TCP => {
-                self.proxy_to_tcp(&mut source_stream, source_addr, outer_conn_drain, &req, &result_tracker)
-                    .await
+                self.proxy_to_tcp(
+                    &mut source_stream,
+                    source_addr,
+                    outer_conn_drain,
+                    &req,
+                    &result_tracker,
+                )
+                .await
             }
         };
         result_tracker.record(res)
@@ -261,7 +273,7 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         outer_conn_drain: Option<Watch>,
         req: &Request,
-        x: &ConnectionResult,
+        connection_stats: &ConnectionResult,
     ) -> Result<(u64, u64), Error> {
         debug!(
             "proxy to {} using HBONE via {} type {:#?}",
@@ -379,20 +391,24 @@ impl OutboundConnection {
         if code != 200 {
             return Err(Error::HttpStatus(code));
         }
-        let mut upgraded = hyper::upgrade::on(response).await?;
+        let upgraded = hyper::upgrade::on(response).await?;
 
-        super::copy_hbone2(&mut ::hyper_util::rt::TokioIo::new(upgraded), stream, x)
-            .instrument(trace_span!("hbone client"))
-            .await
+        socket::copy_bidirectional(
+            &mut ::hyper_util::rt::TokioIo::new(upgraded),
+            stream,
+            connection_stats,
+        )
+        .instrument(trace_span!("hbone client"))
+        .await
     }
-    
+
     async fn proxy_to_tcp(
         &mut self,
         stream: &mut TcpStream,
         _remote_addr: SocketAddr,
         _outer_conn_drain: Option<Watch>,
         req: &Request,
-        x: &ConnectionResult,
+        connection_stats: &ConnectionResult,
     ) -> Result<(u64, u64), Error> {
         info!(
             "Proxying to {} using TCP via {} type {:?}",
@@ -406,8 +422,8 @@ impl OutboundConnection {
         };
         let mut outbound =
             super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref()).await?;
-        // Proxying data between downstrean and upstream
-        proxy::copy_hbone2(stream, &mut outbound, x).await
+        // Proxying data between downstream and upstream
+        socket::copy_bidirectional(&mut outbound, stream, connection_stats).await
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use drain::Watch;
@@ -207,7 +208,9 @@ impl InboundPassthrough {
             None
         };
 
+        let result_tracker = Arc::new(result_tracker);
         let send = async {
+            let result_tracker = result_tracker.clone();
             trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
 
             let mut outbound =
@@ -216,7 +219,7 @@ impl InboundPassthrough {
                     .map_err(Error::ConnectionFailed)?;
 
             trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
-            proxy::relay(&mut outbound, &mut inbound_stream).await
+            socket::copy_bidirectional( &mut inbound_stream, &mut outbound, &result_tracker).await
         };
 
         let res = tokio::select! {

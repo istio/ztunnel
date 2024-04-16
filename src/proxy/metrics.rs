@@ -22,7 +22,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
-use tracing::event;
+use tracing::{error, event};
 
 use crate::identity::Identity;
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorder, Recorder};
@@ -461,47 +461,47 @@ impl ConnectionResult {
 
     pub fn increment_send(&self, res: u64) {
         let tl = &self.tl;
-
+        error!("increment send {:?} {res}", tl.reporter);
         // If the connection succeeded, record bytes sent/recv
         if &tl.reporter == &Reporter::source {
             // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
-            self.metrics.received_bytes.get_or_create(&tl).inc_by(res);
+            self.metrics.received_bytes.get_or_create(tl).inc_by(res);
         } else {
-            self.metrics.sent_bytes.get_or_create(&tl).inc_by(res);
+            self.metrics.sent_bytes.get_or_create(tl).inc_by(res);
         }
     }
     pub fn increment_recv(&self, res: u64) {
         let tl = &self.tl;
-
+        error!("increment recv {:?} {res}", tl.reporter);
         // If the connection succeeded, record bytes sent/recv
         if &tl.reporter == &Reporter::source {
             // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
-            self.metrics.sent_bytes.get_or_create(&tl).inc_by(res);
+            self.metrics.sent_bytes.get_or_create(tl).inc_by(res);
         } else {
-            self.metrics.received_bytes.get_or_create(&tl).inc_by(res);
+            self.metrics.received_bytes.get_or_create(tl).inc_by(res);
         }
     }
-    pub fn record<E: std::error::Error>(self, res: Result<(u64, u64), E>) {
-        let tl = self.tl;
+    pub fn record<E: std::error::Error>(&self, res: Result<(u64, u64), E>) {
+        let tl = &self.tl;
 
         // Unconditionally record the connection was closed
-        self.metrics.connection_close.get_or_create(&tl).inc();
+        self.metrics.connection_close.get_or_create(tl).inc();
 
         // If the connection succeeded, record bytes sent/recv
-        if let Ok((sent, recv)) = res {
-            let (sent, recv) = if tl.reporter == Reporter::source {
-                // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
-                (recv, sent)
-            } else {
-                (sent, recv)
-            };
-            if sent != 0 {
-                self.metrics.sent_bytes.get_or_create(&tl).inc_by(sent);
-            }
-            if recv != 0 {
-                self.metrics.received_bytes.get_or_create(&tl).inc_by(recv);
-            }
-        }
+        // if let Ok((sent, recv)) = res {
+        //     let (sent, recv) = if &tl.reporter == &Reporter::source {
+        //         // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
+        //         (recv, sent)
+        //     } else {
+        //         (sent, recv)
+        //     };
+        //     if sent != 0 {
+        //         self.metrics.sent_bytes.get_or_create(&tl).inc_by(sent);
+        //     }
+        //     if recv != 0 {
+        //         self.metrics.received_bytes.get_or_create(&tl).inc_by(recv);
+        //     }
+        // }
 
         // Unconditionally write out an access log
         let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
