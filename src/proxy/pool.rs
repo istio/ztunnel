@@ -634,11 +634,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pool_100_clients_singleconn() {
-        let _cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            ..crate::config::parse_config().unwrap()
-        };
-
         // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
@@ -684,11 +679,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pool_100_clients_100_srcs() {
-        let _cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            ..crate::config::parse_config().unwrap()
-        };
-
         // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
@@ -741,11 +731,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pool_1000_clients_3_srcs() {
-        let _cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            ..crate::config::parse_config().unwrap()
-        };
-
         // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
@@ -871,7 +856,7 @@ mod test {
         }
 
         let conn_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let _drop_conn_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        // let _drop_conn_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
 
         // We create a TcpListener and bind it to 127.0.0.1:3000
         let listener = TcpListener::bind(addr).await.unwrap();
