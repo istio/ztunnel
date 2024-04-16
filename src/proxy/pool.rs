@@ -207,7 +207,7 @@ impl WorkloadHBONEPool {
                                 }
                             }
                             Err(_) => {
-                                break None
+                                return Err(Error::WorkloadHBONEPoolDraining)
                             }
                         }
                     }
@@ -526,7 +526,7 @@ mod test {
 
     #[tokio::test]
     async fn test_pool_100_clients_streamexhaust() {
-        crate::telemetry::setup_logging();
+        // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
         let (server_addr, server_handle) = spawn_server(server_drain.clone()).await;
@@ -683,14 +683,14 @@ mod test {
             ..crate::config::parse_config().unwrap()
         };
 
-        crate::telemetry::setup_logging();
+        // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
         let (server_addr, server_handle) = spawn_server(server_drain.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 100,
+            pool_max_streams_per_conn: 1000,
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);

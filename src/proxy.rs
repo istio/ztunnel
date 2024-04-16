@@ -258,6 +258,9 @@ pub enum Error {
     #[error("connection streams maxed out")]
     WorkloadHBONEPoolConnStreamsMaxed,
 
+    #[error("pool draining")]
+    WorkloadHBONEPoolDraining,
+
     // #[error("pool: {0}")]
     // WorkloadHBONEPool(#[from] custom_http2_pool::Error),
     #[error("{0}")]
