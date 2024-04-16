@@ -194,11 +194,8 @@ impl OutboundConnection {
     ) {
         let start = Instant::now();
 
-        // Block calls to ourselve (ztunnel), to attempt to stop looping attacks. Ignored if inpod is used;
-        // in this case
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(dest_addr.ip()) == self.pi.cfg.local_ip
-            && !self.pi.cfg.inpod_enabled
         {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
@@ -254,14 +251,8 @@ impl OutboundConnection {
                 .await
             }
             Protocol::TCP => {
-                self.proxy_to_tcp(
-                    &mut source_stream,
-                    source_addr,
-                    outer_conn_drain,
-                    &req,
-                    &result_tracker,
-                )
-                .await
+                self.proxy_to_tcp(&mut source_stream, &req, &result_tracker)
+                    .await
             }
         };
         result_tracker.record(res)
@@ -405,8 +396,6 @@ impl OutboundConnection {
     async fn proxy_to_tcp(
         &mut self,
         stream: &mut TcpStream,
-        _remote_addr: SocketAddr,
-        _outer_conn_drain: Option<Watch>,
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(u64, u64), Error> {
