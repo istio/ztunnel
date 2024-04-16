@@ -147,6 +147,11 @@ spec:
           path: istio-token
 EOF
 ```
+add `istiod.istio-system.svc` to `hosts` file, make [`verify_is_valid_for_subject_name`](https://crates.io/crates/rustls-webpki) works
+
+```shell
+echo "127.0.0.1 istiod.istio-system.svc" >> /etc/hosts
+```
 
 Now, port forward istiod, copy over the token and run ztunnel (under sudo):
 
@@ -166,6 +171,8 @@ POD_NAMESPACE=istio-system
 POD_NAME=ztunnel-worker1
 CA_ROOT_CA=/tmp/istio-root.pem
 XDS_ROOT_CA=/tmp/istio-root.pem
+CA_ADDRESS=https://istiod.istio-system.svc:15012
+XDS_ADDRESS=https://istiod.istio-system.svc:15012
 CARGO_TARGET_$(rustc -vV | sed -n 's|host: ||p' | tr '[:lower:]' '[:upper:]'| tr - _)_RUNNER="sudo -E"
 cargo run proxy ztunnel
 EOF
