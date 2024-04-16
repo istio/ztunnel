@@ -50,7 +50,7 @@ impl Metrics {
         let forwarded_failures = Family::default();
         registry.register(
             "dns_upstream_failures",
-            "Total number of DNS requests forwarded to upstream (unstable)",
+            "Total number of DNS requests that failed to forward upstream (unstable)",
             forwarded_failures.clone(),
         );
 
