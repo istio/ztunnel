@@ -109,7 +109,7 @@ impl WorkloadHBONEPool {
 
         if existing_conn.is_some() {
             debug!("using existing conn, connect future will be dropped on the floor");
-            return Ok(existing_conn.unwrap());
+            Ok(existing_conn.unwrap())
         } else {
             // critical block - this writelocks the entire pool for all tasks/threads
             // as we check to see if anyone has inserted a sharded mutex for this key.
@@ -213,7 +213,7 @@ impl WorkloadHBONEPool {
                 Some(f_conn) => {
                     self.connected_pool.put(&pool_key, f_conn.clone());
                     let _ = self.pool_notifier.send(true);
-                    return Ok(f_conn);
+                    Ok(f_conn)
                 }
 
                 None => {
@@ -226,7 +226,7 @@ impl WorkloadHBONEPool {
                     );
                     self.connected_pool.put(&pool_key, r_conn.clone());
                     let _ = self.pool_notifier.send(true);
-                    return Ok(r_conn);
+                    Ok(r_conn)
                 }
             }
         }
@@ -249,9 +249,8 @@ impl WorkloadHBONEPool {
                     if e_conn.at_max_streamcount() {
                         debug!("got conn for key {:#?}, but streamcount is maxed", key);
                         None
-                        // Some(Err(Error::WorkloadHBONEPoolConnStreamsMaxed))
                     } else {
-                        self.connected_pool.put(&pool_key, e_conn.clone());
+                        self.connected_pool.put(pool_key, e_conn.clone());
                         let _ = self.pool_notifier.send(true);
                         Some(e_conn)
                     }
@@ -408,9 +407,9 @@ mod test {
         let real_conncount = server_handle.await.unwrap();
         assert!(real_conncount == 1, "actual conncount was {real_conncount}");
 
-        assert!(!client1.is_err());
-        assert!(!client2.is_err());
-        assert!(!client3.is_err());
+        assert!(client1.is_ok());
+        assert!(client2.is_ok());
+        assert!(client3.is_ok());
     }
 
     #[tokio::test]
@@ -450,8 +449,8 @@ mod test {
         let real_conncount = server_handle.await.unwrap();
         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
 
-        assert!(!client1.is_err());
-        assert!(!client2.is_err()); // expect this to panic - we used a new key
+        assert!(client1.is_ok());
+        assert!(client2.is_ok()); // expect this to panic - we used a new key
     }
 
     #[tokio::test]
@@ -483,8 +482,8 @@ mod test {
         let real_conncount = server_handle.await.unwrap();
         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
 
-        assert!(!client1.is_err());
-        assert!(!client2.is_err()); // expect this to panic - same key, but stream limit of 3
+        assert!(client1.is_ok());
+        assert!(client2.is_ok()); // expect this to panic - same key, but stream limit of 3
     }
 
     #[tokio::test]
@@ -517,8 +516,8 @@ mod test {
         let real_conncount = server_handle.await.unwrap();
         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
 
-        assert!(!client1.is_err());
-        assert!(!client2.is_err());
+        assert!(client1.is_ok());
+        assert!(client2.is_ok());
     }
 
     #[tokio::test]
@@ -644,7 +643,7 @@ mod test {
             let key1 = WorkloadKey {
                 src_id: Identity::default(),
                 dst_id: vec![Identity::default()],
-                src: IpAddr::from([127, 0, 0, count.into()]),
+                src: IpAddr::from([127, 0, 0, count]),
                 dst: server_addr,
             };
             // key1.src = IpAddr::from([127, 0, 0, count]);
@@ -847,7 +846,7 @@ mod test {
                 }
             };
 
-            return conn_count.load(Ordering::Relaxed);
+            conn_count.load(Ordering::Relaxed)
         });
 
         (bound_addr, srv_handle)
