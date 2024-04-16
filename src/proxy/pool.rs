@@ -51,7 +51,7 @@ static GLOBAL_CONN_COUNT: AtomicI32 = AtomicI32::new(0);
 //   by flow control throttling.
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
-    pool_notifier: Arc::<watch::Sender<bool>>, // This is already impl clone? rustc complains that it isn't, tho
+    pool_notifier: Arc<watch::Sender<bool>>, // This is already impl clone? rustc complains that it isn't, tho
     pool_watcher: watch::Receiver<bool>,
     max_streamcount: u16,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
@@ -159,8 +159,6 @@ impl WorkloadHBONEPool {
                 drop(map_write_lock); // strictly redundant
             }
 
-
-
             // If we get here, it means the following are true:
             // 1. We have a guaranteed sharded mutex in the outer map for our current key.
             // 2. We can now, under readlock(nonexclusive) in the outer map, attempt to
@@ -228,7 +226,8 @@ impl WorkloadHBONEPool {
                                 );
                                 // The sharded mutex for this connkey is already locked - someone else must be making a conn
                                 // if they are, try to wait for it, but bail if we find one and it's got a maxed streamcount.
-                                let existing_conn = self.connected_pool.get(&hash_key);                               match existing_conn {
+                                let existing_conn = self.connected_pool.get(&hash_key);
+                                match existing_conn {
                                     None => {
                                         debug!("got nothing");
                                         continue;
@@ -247,13 +246,12 @@ impl WorkloadHBONEPool {
                             }
                             Err(_) => {
                                 // END take outer readlock
-                                return Err(Error::WorkloadHBONEPoolDraining)
+                                return Err(Error::WorkloadHBONEPoolDraining);
                             }
                         }
                     }
                 }
             };
-
 
             // If we get here, it means the following are true:
             // 1. At one point, there was a preexisting conn in the pool for this key.
@@ -435,7 +433,9 @@ mod test {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
     use tokio::task::{self};
-    use tracing::{error, info, Instrument};
+
+    #[cfg(tokio_unstable)]
+    use tracing::Instrument;
 
     use ztunnel::test_helpers::*;
 
@@ -864,7 +864,7 @@ mod test {
                         wi.write_all(b"waypoint\n").await.unwrap();
                         tcp::handle_stream(tcp::Mode::ReadWrite, &mut ri, &mut wi).await;
                     }
-                    Err(e) => error!("No upgrade {e}"),
+                    Err(e) => panic!("No upgrade {e}"),
                 }
             });
             Ok::<_, Infallible>(Response::new(http_body_util::Empty::<Bytes>::new()))
