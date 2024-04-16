@@ -263,8 +263,6 @@ pub enum Error {
     #[error("pool draining")]
     WorkloadHBONEPoolDraining,
 
-    // #[error("pool: {0}")]
-    // WorkloadHBONEPool(#[from] custom_http2_pool::Error),
     #[error("{0}")]
     Generic(Box<dyn std::error::Error + Send + Sync>),
 
