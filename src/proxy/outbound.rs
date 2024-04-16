@@ -394,8 +394,8 @@ impl OutboundConnection {
         let upgraded = hyper::upgrade::on(response).await?;
 
         socket::copy_bidirectional(
-            &mut ::hyper_util::rt::TokioIo::new(upgraded),
             stream,
+            &mut ::hyper_util::rt::TokioIo::new(upgraded),
             connection_stats,
         )
         .instrument(trace_span!("hbone client"))
@@ -423,7 +423,7 @@ impl OutboundConnection {
         let mut outbound =
             super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref()).await?;
         // Proxying data between downstream and upstream
-        socket::copy_bidirectional(&mut outbound, stream, connection_stats).await
+        socket::copy_bidirectional(stream, &mut outbound, connection_stats).await
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {

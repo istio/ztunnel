@@ -219,7 +219,7 @@ impl InboundPassthrough {
                     .map_err(Error::ConnectionFailed)?;
 
             trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
-            socket::copy_bidirectional( &mut inbound_stream, &mut outbound, &result_tracker).await
+            socket::copy_bidirectional(&mut inbound_stream, &mut outbound, &result_tracker).await
         };
 
         let res = tokio::select! {

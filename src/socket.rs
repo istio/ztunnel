@@ -193,7 +193,7 @@ where
     let downstream_to_upstream = async {
         let mut rd = io::BufReader::with_capacity(BUFFER_SIZE, &mut rd);
         let res = copy_buf(&mut rd, &mut wu, stats, false).await;
-        trace!(?res, "downstream -> upstream");
+        trace!(?res, "send");
         sent = res?;
         wu.shutdown().await
     };
@@ -201,7 +201,7 @@ where
     let upstream_to_downstream = async {
         let mut ru = io::BufReader::with_capacity(BUFFER_SIZE, &mut ru);
         let res = copy_buf(&mut ru, &mut wd, stats, true).await;
-        trace!(?res, "tcp -> hbone");
+        trace!(?res, "recieve");
         received = res?;
         wd.shutdown().await
     };
@@ -217,25 +217,25 @@ struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     send: bool,
     reader: &'a mut R,
     writer: &'a mut W,
-    x: &'a ConnectionResult,
+    metrics: &'a ConnectionResult,
     amt: u64,
 }
 
 async fn copy_buf<'a, R, W>(
     reader: &'a mut R,
     writer: &'a mut W,
-    x: &ConnectionResult,
-    send: bool,
+    metrics: &ConnectionResult,
+    is_send: bool,
 ) -> std::io::Result<u64>
 where
     R: tokio::io::AsyncBufRead + Unpin + ?Sized,
     W: tokio::io::AsyncWrite + Unpin + ?Sized,
 {
     CopyBuf {
-        send,
+        send: is_send,
         reader,
         writer,
-        x,
+        metrics,
         amt: 0,
     }
     .await
@@ -262,9 +262,9 @@ where
                 return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
             }
             if me.send {
-                me.x.increment_send(i as u64);
+                me.metrics.increment_send(i as u64);
             } else {
-                me.x.increment_recv(i as u64);
+                me.metrics.increment_recv(i as u64);
             }
             self.amt += i as u64;
             Pin::new(&mut *self.reader).consume(i);
