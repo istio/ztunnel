@@ -12,13 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use realm_io::AsyncRawIO;
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::AddAssign;
+use std::os::fd::{AsRawFd, RawFd};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use tokio::io;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::net::TcpSocket;
+use tracing::trace;
 
+use crate::proxy::ConnectionResult;
 #[cfg(target_os = "linux")]
 use {
     realm_io,
@@ -166,14 +174,93 @@ mod linux {
     }
 }
 
+pub async fn relay<A, B>(
+    upgraded: &mut A,
+    stream: &mut B,
+    x: &ConnectionResult,
+) -> Result<(u64, u64), crate::proxy::Error>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let (mut ri, mut wi) = tokio::io::split(upgraded);
+    let (mut ro, mut wo) = tokio::io::split(stream);
+
+    let (mut sent, mut received): (u64, u64) = (0, 0);
+
+    let client_to_server = async {
+        let mut ri = tokio::io::BufReader::with_capacity(crate::proxy::HBONE_BUFFER_SIZE, &mut ri);
+        let res = crate::proxy::copy_buf(&mut ri, &mut wo, &x, false).await;
+        trace!(?res, "hbone -> tcp");
+        received = res?;
+        wo.shutdown().await
+    };
+
+    let server_to_client = async {
+        let mut ro = tokio::io::BufReader::with_capacity(crate::proxy::HBONE_BUFFER_SIZE, &mut ro);
+        let res = crate::proxy::copy_buf(&mut ro, &mut wi, x, true).await;
+        trace!(?res, "tcp -> hbone");
+        sent = res?;
+        wi.shutdown().await
+    };
+
+    tokio::try_join!(client_to_server, server_to_client)?;
+
+    trace!(sent, recv = received, "copy hbone complete");
+    Ok((sent, received))
+}
+
+struct StreamWrapper<'a> {
+    inner: realm_io::statistic::StatStream<&'a TcpStream, Wrapper<'a>>,
+}
+struct Wrapper<'a> {
+    data: &'a ConnectionResult,
+}
+
+impl<'a> AsRef<realm_io::statistic::StatStream<&'a TcpStream, Wrapper<'a>>> for StreamWrapper<'a, > {
+    fn as_ref(&self) -> &realm_io::statistic::StatStream<&'a TcpStream, Wrapper<'a>> {
+        &self.inner
+    }
+}
+
+impl<'a> AsyncRawIO for StreamWrapper<'a>
+where
+{
+    fn x_poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.inner.poll_read_ready(cx)
+    }
+
+    fn x_poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.inner.poll_write_ready(cx)
+    }
+
+    fn x_try_io<R>(
+        &self,
+        interest: Interest,
+        f: impl FnOnce() -> std::io::Result<R>,
+    ) -> std::io::Result<R> {
+        self.inner.try_io(interest, f)
+    }
+}
+impl<'a> AddAssign<usize> for Wrapper<'a> {
+    fn add_assign(&mut self, rhs: usize) {
+        self.data.increment_recv(rhs as u64)
+    }
+}
+
 #[cfg(target_os = "linux")]
-pub async fn relay(
+pub async fn relay_zero_copy(
     downstream: &mut tokio::net::TcpStream,
     upstream: &mut tokio::net::TcpStream,
+    x: &ConnectionResult,
 ) -> Result<(u64, u64), Error> {
     const EINVAL: i32 = 22;
 
-    match realm_io::bidi_zero_copy(downstream, upstream).await {
+    let wrapper = StreamWrapper {
+        inner: realm_io::statistic::StatStream::new(downstream, Wrapper { data: x }),
+    };
+    match realm_io::bidi_zero_copy(&mut wrapper, upstream).await {
         Ok(d) => Ok(d),
         Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
             tokio::io::copy_bidirectional(downstream, upstream).await

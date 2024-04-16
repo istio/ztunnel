@@ -290,7 +290,7 @@ pub enum Error {
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
-const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
+pub const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
 
 pub async fn copy_hbone(
     upgraded: &mut hyper::upgrade::Upgraded,
@@ -368,7 +368,7 @@ struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     amt: u64,
 }
 
-async fn copy_buf<'a, R, W>(reader: &'a mut R, writer: &'a mut W, x: &ConnectionResult, send: bool) -> io::Result<u64>
+pub async fn copy_buf<'a, R, W>(reader: &'a mut R, writer: &'a mut W, x: &ConnectionResult, send: bool) -> io::Result<u64>
 where
     R: tokio::io::AsyncBufRead + Unpin + ?Sized,
     W: tokio::io::AsyncWrite + Unpin + ?Sized,
