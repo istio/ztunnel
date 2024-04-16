@@ -110,6 +110,7 @@ pub(super) struct ProxyInputs {
     proxy_workload_info: Option<Arc<WorkloadInfo>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl ProxyInputs {
     pub fn new(
         cfg: config::Config,
