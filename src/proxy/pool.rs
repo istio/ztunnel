@@ -51,7 +51,7 @@ static GLOBAL_CONN_COUNT: AtomicI32 = AtomicI32::new(0);
 //   by flow control throttling.
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
-    pool_notifier: watch::Sender<bool>,
+    pool_notifier: Arc<watch::Sender<bool>>,
     pool_watcher: watch::Receiver<bool>,
     max_streamcount: u16,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
@@ -78,7 +78,7 @@ impl WorkloadHBONEPool {
             cfg.pool_max_streams_per_conn
         );
         Self {
-            pool_notifier: tx,
+            pool_notifier: Arc::new(tx),
             pool_watcher: rx,
             max_streamcount: cfg.pool_max_streams_per_conn,
             // the number here is simply the number of unique src/dest keys
