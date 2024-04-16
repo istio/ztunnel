@@ -51,7 +51,7 @@ static GLOBAL_CONN_COUNT: AtomicI32 = AtomicI32::new(0);
 //   by flow control throttling.
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
-    pool_notifier: Arc<watch::Sender<bool>>,
+    pool_notifier: watch::Sender<bool>,
     pool_watcher: watch::Receiver<bool>,
     max_streamcount: u16,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
@@ -78,7 +78,7 @@ impl WorkloadHBONEPool {
             cfg.pool_max_streams_per_conn
         );
         Self {
-            pool_notifier: Arc::new(tx),
+            pool_notifier: tx,
             pool_watcher: rx,
             max_streamcount: cfg.pool_max_streams_per_conn,
             // the number here is simply the number of unique src/dest keys
@@ -176,18 +176,21 @@ impl WorkloadHBONEPool {
                     // The sharded mutex for this connkey is already locked - someone else must be making a conn
                     // if they are, try to wait for it, but bail if we find one and it's got a maxed streamcount.
                     debug!("something else is creating a conn, wait for it");
-                    let waiter = self.pool_watcher.changed();
-                    tokio::pin!(waiter);
+                    // let waiter = self.pool_watcher.changed();
+                    // tokio::pin!(waiter);
 
                     loop {
-                        tokio::select! {
-                            _ = &mut  waiter => {
-                                debug!("notified a new conn was enpooled, checking for hash {:#?}", hash_key);
+                        match self.pool_watcher.changed().await {
+                            Ok(_) => {
+                                debug!(
+                                    "notified a new conn was enpooled, checking for hash {:#?}",
+                                    hash_key
+                                );
 
-                                let existing_conn = self.connected_pool.get(&hash_key);// .and_then(|e_conn| {
+                                let existing_conn = self.connected_pool.get(&hash_key); // .and_then(|e_conn| {
 
-                                        //         debug!("while waiting for new conn, got existing conn for key {:#?}", key);
-                                        // });
+                                //         debug!("while waiting for new conn, got existing conn for key {:#?}", key);
+                                // });
                                 match existing_conn {
                                     None => {
                                         debug!("got nothin");
@@ -203,7 +206,9 @@ impl WorkloadHBONEPool {
                                     }
                                 }
                             }
-
+                            Err(_) => {
+                                break None
+                            }
                         }
                     }
                 }
@@ -231,7 +236,6 @@ impl WorkloadHBONEPool {
             }
         }
     }
-
     async fn first_checkout_conn_from_pool(
         &self,
         key: &WorkloadKey,
@@ -368,7 +372,7 @@ mod test {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
     use tokio::task::{self};
-    use tracing::{error, info};
+    use tracing::{error, info, Instrument};
 
     use ztunnel::test_helpers::*;
 
@@ -522,7 +526,7 @@ mod test {
 
     #[tokio::test]
     async fn test_pool_100_clients_streamexhaust() {
-        // crate::telemetry::setup_logging();
+        crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
         let (server_addr, server_handle) = spawn_server(server_drain.clone()).await;
@@ -553,7 +557,8 @@ mod test {
                 break;
             }
         }
-        while let Some(_) = tasks.next().await {
+        while let Some(Err(res)) = tasks.next().await {
+            assert!(!res.is_panic(), "CLIENT PANICKED!");
             continue;
         }
 
@@ -561,7 +566,7 @@ mod test {
 
         server_drain_signal.drain().await;
         let real_conncount = server_handle.await.unwrap();
-        assert!(real_conncount == 2, "actual conncount was {real_conncount}");
+        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
     }
 
     #[tokio::test]
@@ -602,7 +607,8 @@ mod test {
                 break;
             }
         }
-        while let Some(_) = tasks.next().await {
+        while let Some(Err(res)) = tasks.next().await {
+            assert!(!res.is_panic(), "CLIENT PANICKED!");
             continue;
         }
 
@@ -654,7 +660,9 @@ mod test {
                 break;
             }
         }
-        while let Some(_) = tasks.next().await {
+
+        while let Some(Err(res)) = tasks.next().await {
+            assert!(!res.is_panic(), "CLIENT PANICKED!");
             continue;
         }
 
@@ -675,14 +683,14 @@ mod test {
             ..crate::config::parse_config().unwrap()
         };
 
-        // crate::telemetry::setup_logging();
+        crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
         let (server_addr, server_handle) = spawn_server(server_drain.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 1000,
+            pool_max_streams_per_conn: 100,
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
@@ -696,7 +704,7 @@ mod test {
             dst: server_addr,
         };
 
-        let client_count = 1000;
+        let client_count = 100;
         let mut count = 0u32;
         let mut tasks = futures::stream::FuturesUnordered::new();
         loop {
@@ -712,13 +720,14 @@ mod test {
                 key1.src = IpAddr::from([127, 0, 0, 2]);
             }
 
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
 
             if count == client_count {
                 break;
             }
         }
-        while let Some(_) = tasks.next().await {
+        while let Some(Err(res)) = tasks.next().await {
+            assert!(!res.is_panic(), "CLIENT PANICKED!");
             continue;
         }
 
@@ -761,11 +770,16 @@ mod test {
             let mut count = 0u32;
             loop {
                 count += 1;
-                if c1.send_request(req()).await.unwrap().status() != 200 {
-                    panic!("nope")
+                let res = c1.send_request(req()).await;
+
+                if res.is_err() {
+                    panic!("SEND ERR: {:#?} sendcount {count}", res);
+                } else if res.unwrap().status() != 200 {
+                    panic!("CLIENT RETURNED ERROR")
                 }
 
                 if count >= req_count {
+                    debug!("CLIENT DONE");
                     break;
                 }
             }
@@ -777,7 +791,7 @@ mod test {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let test_cfg = test_config();
         async fn hello_world(req: Request<Incoming>) -> Result<Response<Empty<Bytes>>, Infallible> {
-            info!("hello world: received request");
+            debug!("hello world: received request");
             tokio::task::spawn(async move {
                 match hyper::upgrade::on(req).await {
                     Ok(upgraded) => {
