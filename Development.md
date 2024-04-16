@@ -147,7 +147,8 @@ spec:
           path: istio-token
 EOF
 ```
-add `istiod.istio-system.svc` to `hosts` file, make [`verify_is_valid_for_subject_name`](https://crates.io/crates/rustls-webpki) works
+
+Add `istiod.istio-system.svc` to the system's `hosts` file so that [`verify_is_valid_for_subject_name`](https://crates.io/crates/rustls-webpki) passes:
 
 ```shell
 echo "127.0.0.1 istiod.istio-system.svc" >> /etc/hosts
