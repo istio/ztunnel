@@ -21,7 +21,7 @@ use prometheus_client::registry::{Registry, Unit};
 use std::time::Duration;
 
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Recorder};
-use crate::state::workload::address::Address;
+
 use crate::state::workload::Workload;
 
 pub struct Metrics {
@@ -77,31 +77,21 @@ impl DeferRecorder for Metrics {}
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct DnsLabels {
-    request_hostname: String,
     request_query_type: String,
     request_protocol: String,
 
     // Source workload.
     source_canonical_service: DefaultedUnknown<String>,
     source_canonical_revision: DefaultedUnknown<String>,
-
-    // Destination.
-    destination_service: DefaultedUnknown<String>,
-    destination_namespace: DefaultedUnknown<String>,
-    destination_hostname: DefaultedUnknown<String>,
 }
 
 impl DnsLabels {
     pub fn new(r: &Request) -> Self {
         Self {
-            request_hostname: r.query().name().to_string(),
             request_query_type: r.query().query_type().to_string().to_lowercase(),
             request_protocol: r.protocol().to_string().to_lowercase(),
             source_canonical_service: Default::default(),
             source_canonical_revision: Default::default(),
-            destination_service: Default::default(),
-            destination_namespace: Default::default(),
-            destination_hostname: Default::default(),
         }
     }
 
@@ -111,30 +101,12 @@ impl DnsLabels {
 
         self
     }
-
-    pub fn with_destination(mut self, addr: &Address) -> Self {
-        match addr {
-            Address::Workload(w) => {
-                self.destination_service = w.canonical_name.clone().into();
-                self.destination_namespace = w.namespace.clone().into();
-                self.destination_hostname = w.hostname.clone().into();
-            }
-            Address::Service(s) => {
-                self.destination_service = s.name.clone().into();
-                self.destination_namespace = s.namespace.clone().into();
-                self.destination_hostname = s.hostname.clone().into();
-            }
-        };
-
-        self
-    }
 }
 
 #[derive(Clone)]
 pub struct DnsRequest<'a> {
     pub request: &'a Request,
     pub source: Option<&'a Workload>,
-    pub destination: Option<&'a Address>,
 }
 
 impl Recorder<DnsRequest<'_>, u64> for Metrics {
@@ -150,9 +122,6 @@ impl From<&DnsRequest<'_>> for DnsLabels {
         let mut labels = Self::new(value.request);
         if let Some(source) = &value.source {
             labels = labels.with_source(source)
-        }
-        if let Some(dest) = &value.destination {
-            labels = labels.with_destination(dest);
         }
         labels
     }

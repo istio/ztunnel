@@ -438,7 +438,6 @@ impl Store {
         self.metrics.increment(&DnsRequest {
             request,
             source: client,
-            destination: None,
         });
 
         // Increment counter for forwarded requests.
@@ -485,7 +484,6 @@ impl Resolver for Store {
                 self.metrics.increment(&DnsRequest {
                     request,
                     source: None,
-                    destination: None,
                 });
 
                 return Err(LookupError::ResponseCode(ResponseCode::ServFail));
@@ -510,7 +508,6 @@ impl Resolver for Store {
         self.metrics.increment(&DnsRequest {
             request,
             source: Some(&client),
-            destination: Some(&service_match.server),
         });
 
         // Get the addresses for the service.
