@@ -108,7 +108,7 @@ impl WorkloadHBONEPool {
     // if none exist, or the existing conn is maxed out on streamcount, will spawn a new one,
     // even if it is to the same dest+port.
     //
-    // If many `connects` request a connection  to the same dest at once, all will wait until exactly
+    // If many `connects` request a connection to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
     pub async fn connect(&mut self, key: WorkloadKey) -> Result<Client, Error> {
         debug!("pool connect START");
