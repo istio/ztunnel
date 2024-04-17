@@ -104,7 +104,7 @@ impl WorkloadHBONEPool {
             max_streamcount: cfg.pool_max_streams_per_conn,
             // the number here is simply the number of unique src/dest keys
             // the pool is expected to track before the inner hashmap resizes.
-            connected_pool: Arc::new(pingora_pool::ConnectionPool::new(50000)),
+            connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
             cfg,
             socket_factory,
             cert_manager,
