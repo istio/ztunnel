@@ -672,17 +672,17 @@ mod tests {
                 hbone_port: 15008,
                 cfg: cfg.clone(),
                 metrics: test_proxy_metrics(),
-                pool: pool::WorkloadHBONEPool::new(
-                    cfg,
-                    sock_fact.clone(),
-                    cert_mgr.clone(),
-                    sub_drain,
-                ),
-                socket_factory: sock_fact,
+                socket_factory: sock_fact.clone(),
                 proxy_workload_info: None,
                 connection_manager: ConnectionManager::default(),
             },
             id: TraceParent::new(),
+            pool: pool::WorkloadHBONEPool::new(
+                cfg,
+                sock_fact,
+                cert_mgr.clone(),
+                sub_drain,
+            ),
         };
 
         let req = outbound

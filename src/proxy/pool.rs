@@ -29,6 +29,8 @@ use std::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::watch;
+use tokio::task;
+
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error};
 
@@ -53,6 +55,8 @@ static GLOBAL_CONN_COUNT: AtomicI32 = AtomicI32::new(0);
 pub struct WorkloadHBONEPool {
     pool_notifier: Arc<watch::Sender<bool>>, // This is already impl clone? rustc complains that it isn't, tho
     pool_watcher: watch::Receiver<bool>,
+    timeout_send: Arc<watch::Sender<bool>>, // This is already impl clone? rustc complains that it isn't, tho
+    timeout_recv: watch::Receiver<bool>,
     max_streamcount: u16,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
     // and has no actual hyper/http/connection logic.
@@ -63,6 +67,7 @@ pub struct WorkloadHBONEPool {
     drainer: Watch,
     // this must be a readlockable list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
     established_conn_writelock: Arc<RwLock<HashMap<u64, Option<Mutex<()>>>>>,
+    close_pollers: Arc<futures::stream::FuturesUnordered<task::JoinHandle<()>>>,
 }
 
 impl WorkloadHBONEPool {
@@ -76,6 +81,7 @@ impl WorkloadHBONEPool {
         drainer: Watch, //when signaled, will stop driving all conns in the pool, effectively draining the pool.
     ) -> WorkloadHBONEPool {
         let (tx, rx) = watch::channel(false);
+        let (timeout_send, timeout_recv) = watch::channel(false);
         debug!(
             "constructing pool with {:#?} streams per conn",
             cfg.pool_max_streams_per_conn
@@ -83,6 +89,8 @@ impl WorkloadHBONEPool {
         Self {
             pool_notifier: Arc::new(tx),
             pool_watcher: rx,
+            timeout_send: Arc::new(timeout_send),
+            timeout_recv,
             max_streamcount: cfg.pool_max_streams_per_conn,
             // the number here is simply the number of unique src/dest keys
             // the pool is expected to track before the inner hashmap resizes.
@@ -92,6 +100,7 @@ impl WorkloadHBONEPool {
             cert_manager,
             drainer,
             established_conn_writelock: Arc::new(RwLock::new(HashMap::new())),
+            close_pollers: Arc::new(futures::stream::FuturesUnordered::new()),
         }
     }
 
@@ -282,8 +291,7 @@ impl WorkloadHBONEPool {
                 // After waiting, we found an available conn we can use, so no need to start another.
                 // Clone the underlying client, return a copy, and put the other back in the pool.
                 Some(f_conn) => {
-                    self.connected_pool.put(&pool_key, f_conn.clone());
-                    let _ = self.pool_notifier.send(true);
+                    self.checkin_conn(f_conn.clone(), pool_key.clone());
                     Ok(f_conn)
                 }
 
@@ -298,8 +306,8 @@ impl WorkloadHBONEPool {
                         Arc::new(AtomicU16::new(0)),
                         self.max_streamcount,
                     );
-                    self.connected_pool.put(&pool_key, r_conn.clone());
-                    let _ = self.pool_notifier.send(true);
+
+                    self.checkin_conn(r_conn.clone(), pool_key.clone());
                     Ok(r_conn)
                 }
             }
@@ -326,14 +334,44 @@ impl WorkloadHBONEPool {
                         debug!("got conn for key {:#?}, but streamcount is maxed", key);
                         None
                     } else {
-                        self.connected_pool.put(pool_key, e_conn.clone());
-                        let _ = self.pool_notifier.send(true);
+                        self.checkin_conn(e_conn.clone(), pool_key.clone());
                         Some(e_conn)
                     }
                 })
             }
             None => None,
         }
+    }
+
+    // This simply puts the connection back into the inner pool,
+    // and sets up a timed popper, which will resolve
+    // - when this reference is popped back out of the inner pool (doing nothing)
+    // - when this reference is evicted from the inner pool (doing nothing)
+    // - when the timeout_idler is drained (will pop)
+    // - when the timeout is hit (will pop)
+    //
+    // Idle poppers are safe to invoke if the conn they are popping is already gone
+    // from the inner queue, so we will start one for every insert, let them run or terminate on their own,
+    // and poll them to completion on shutdown.
+    //
+    // Note that "idle" in the context of this pool means "no one has asked for it or dropped it in X time, so prune it".
+    //
+    // Pruning the idle connection from the pool does not close it - it simply ensures the pool stops holding a ref.
+    // hyper self-closes client conns when all refs are dropped and streamcount is 0, so pool consumers must
+    // drop their checked out conns and/or terminate their streams as well.
+    //
+    // Note that this simply removes the client ref from this pool - if other things hold client/streamrefs refs,
+    // they must also drop those before the underlying connection is fully closed.
+    fn checkin_conn(&self, conn: Client, pool_key: pingora_pool::ConnectionMeta) {
+        let (evict, pickup) = self.connected_pool.put(&pool_key, conn);
+        let rx = self.timeout_recv.clone();
+        let pool_ref = self.connected_pool.clone();
+        let pool_key_ref = pool_key.clone();
+        let release_timeout = self.cfg.pool_unused_release_timeout;
+        self.close_pollers.push(tokio::spawn(async move {
+            pool_ref.idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup).await;
+        }));
+        let _ = self.pool_notifier.send(true);
     }
 
     async fn spawn_new_pool_conn(
@@ -410,6 +448,12 @@ impl Client {
         // TODO should we enforce streamcount per-sent-request? This would be slow.
         self.1.fetch_add(1, Ordering::Relaxed);
         self.0.send_request(req)
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        println!("Dropping Client!");
     }
 }
 

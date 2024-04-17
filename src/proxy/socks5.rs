@@ -65,6 +65,8 @@ impl Socks5 {
                 let socket = self.listener.accept().await;
                 let inpod = self.pi.cfg.inpod_enabled;
                 let stream_drain = inner_drain.clone();
+                // TODO creating a new HBONE pool for SOCKS5 here may not be ideal,
+                // but ProxyInfo is overloaded and only `outbound` should ever use the pool.
                 let pool = crate::proxy::pool::WorkloadHBONEPool::new(
                             self.pi.cfg.clone(),
                             self.pi.socket_factory.clone(),
