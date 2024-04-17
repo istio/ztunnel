@@ -70,6 +70,16 @@ pub struct WorkloadHBONEPool {
     close_pollers: Arc<futures::stream::FuturesUnordered<task::JoinHandle<()>>>,
 }
 
+impl Drop for WorkloadHBONEPool {
+    fn drop(&mut self) {
+        println!("pool dropping, cancelling all outstanding pool eviction timeout spawns");
+        let _ = self.timeout_send.send(true);
+        // No need to wait for all `close_pollers` to resolve,
+        // since this is a drop - the recievers will either get the notification, or
+        // return an error if their sender drops first - either way they will resolve.
+    }
+}
+
 impl WorkloadHBONEPool {
     // Creates a new pool instance, which should be owned by a single proxied workload.
     // The pool will watch the provided drain signal and drain itself when notified.
