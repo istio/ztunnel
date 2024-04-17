@@ -12,16 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures_core::ready;
+use std::future::Future;
 use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use tokio::io;
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::net::TcpSocket;
+use tracing::trace;
 
+use crate::proxy::ConnectionResult;
 #[cfg(target_os = "linux")]
 use {
-    realm_io,
     socket2::{Domain, SockRef},
     std::io::ErrorKind,
     tracing::warn,
@@ -166,26 +172,102 @@ mod linux {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub async fn relay(
-    downstream: &mut tokio::net::TcpStream,
-    upstream: &mut tokio::net::TcpStream,
-) -> Result<(u64, u64), Error> {
-    const EINVAL: i32 = 22;
+// TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
+const BUFFER_SIZE: usize = 16_384 - 64;
 
-    match realm_io::bidi_zero_copy(downstream, upstream).await {
-        Ok(d) => Ok(d),
-        Err(ref e) if e.raw_os_error().map_or(false, |ec| ec == EINVAL) => {
-            tokio::io::copy_bidirectional(downstream, upstream).await
-        }
-        Err(e) => Err(e),
-    }
+pub async fn copy_bidirectional<A, B>(
+    downstream: &mut A,
+    upstream: &mut B,
+    stats: &ConnectionResult,
+) -> Result<(u64, u64), crate::proxy::Error>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let (mut rd, mut wd) = tokio::io::split(downstream);
+    let (mut ru, mut wu) = tokio::io::split(upstream);
+
+    let (mut sent, mut received): (u64, u64) = (0, 0);
+
+    let downstream_to_upstream = async {
+        let mut rd = io::BufReader::with_capacity(BUFFER_SIZE, &mut rd);
+        let res = copy_buf(&mut rd, &mut wu, stats, false).await;
+        trace!(?res, "send");
+        sent = res?;
+        wu.shutdown().await
+    };
+
+    let upstream_to_downstream = async {
+        let mut ru = io::BufReader::with_capacity(BUFFER_SIZE, &mut ru);
+        let res = copy_buf(&mut ru, &mut wd, stats, true).await;
+        trace!(?res, "recieve");
+        received = res?;
+        wd.shutdown().await
+    };
+
+    tokio::try_join!(downstream_to_upstream, upstream_to_downstream)?;
+
+    trace!(sent, received, "copy complete");
+    Ok((sent, received))
 }
 
-#[cfg(not(target_os = "linux"))]
-pub async fn relay(
-    downstream: &mut tokio::net::TcpStream,
-    upstream: &mut tokio::net::TcpStream,
-) -> Result<(u64, u64), Error> {
-    tokio::io::copy_bidirectional(downstream, upstream).await
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
+    send: bool,
+    reader: &'a mut R,
+    writer: &'a mut W,
+    metrics: &'a ConnectionResult,
+    amt: u64,
+}
+
+async fn copy_buf<'a, R, W>(
+    reader: &'a mut R,
+    writer: &'a mut W,
+    metrics: &ConnectionResult,
+    is_send: bool,
+) -> std::io::Result<u64>
+where
+    R: tokio::io::AsyncBufRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    CopyBuf {
+        send: is_send,
+        reader,
+        writer,
+        metrics,
+        amt: 0,
+    }
+    .await
+}
+
+impl<R, W> Future for CopyBuf<'_, R, W>
+where
+    R: AsyncBufRead + Unpin + ?Sized,
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    type Output = std::io::Result<u64>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            let me = &mut *self;
+            let buffer = ready!(Pin::new(&mut *me.reader).poll_fill_buf(cx))?;
+            if buffer.is_empty() {
+                ready!(Pin::new(&mut self.writer).poll_flush(cx))?;
+                return Poll::Ready(Ok(self.amt));
+            }
+
+            let i = ready!(Pin::new(&mut *me.writer).poll_write(cx, buffer))?;
+            if i == 0 {
+                return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+            }
+            if me.send {
+                me.metrics.increment_send(i as u64);
+            } else {
+                me.metrics.increment_recv(i as u64);
+            }
+            self.amt += i as u64;
+            Pin::new(&mut *self.reader).consume(i);
+        }
+    }
 }

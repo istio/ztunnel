@@ -45,7 +45,7 @@ use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
-use crate::{proxy, tls};
+use crate::{proxy, socket, tls};
 
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -212,28 +212,38 @@ impl Inbound {
                         return;
                     }
                 };
+                let result_tracker = Arc::new(result_tracker);
                 let send = async {
+                    let result_tracker = result_tracker.clone();
                     match request_type {
                         Hbone(req) => {
                             hyper::upgrade::on(req)
                                 .map_err(Error::NoUpgrade)
-                                .and_then(|mut upgraded| async move {
-                                    super::copy_hbone(&mut upgraded, &mut stream)
-                                        .instrument(trace_span!("hbone server"))
-                                        .await
+                                .and_then(|upgraded| async move {
+                                    socket::copy_bidirectional(
+                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
+                                        &mut stream,
+                                        &result_tracker,
+                                    )
+                                    .instrument(trace_span!("hbone server"))
+                                    .await
                                 })
                                 .await
                         }
                         Proxy(req, (src, dst), src_id) => {
                             hyper::upgrade::on(req)
                                 .map_err(Error::NoUpgrade)
-                                .and_then(|mut upgraded| async move {
+                                .and_then(|upgraded| async move {
                                     super::write_proxy_protocol(&mut stream, (src, dst), src_id)
                                         .instrument(trace_span!("proxy protocol"))
                                         .await?;
-                                    super::copy_hbone(&mut upgraded, &mut stream)
-                                        .instrument(trace_span!("hbone server"))
-                                        .await
+                                    socket::copy_bidirectional(
+                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
+                                        &mut stream,
+                                        &result_tracker,
+                                    )
+                                    .instrument(trace_span!("hbone server"))
+                                    .await
                                 })
                                 .await
                         }

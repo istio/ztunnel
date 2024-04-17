@@ -284,41 +284,6 @@ pub enum Error {
     IPMismatch(IpAddr, IpAddr),
 }
 
-// TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
-const HBONE_BUFFER_SIZE: usize = 16_384 - 64;
-
-pub async fn copy_hbone(
-    upgraded: &mut hyper::upgrade::Upgraded,
-    stream: &mut TcpStream,
-) -> Result<(u64, u64), Error> {
-    use tokio::io::AsyncWriteExt;
-    let (mut ri, mut wi) = tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
-    let (mut ro, mut wo) = stream.split();
-
-    let (mut sent, mut received): (u64, u64) = (0, 0);
-
-    let client_to_server = async {
-        let mut ri = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ri);
-        let res = tokio::io::copy_buf(&mut ri, &mut wo).await;
-        trace!(?res, "hbone -> tcp");
-        received = res?;
-        wo.shutdown().await
-    };
-
-    let server_to_client = async {
-        let mut ro = tokio::io::BufReader::with_capacity(HBONE_BUFFER_SIZE, &mut ro);
-        let res = tokio::io::copy_buf(&mut ro, &mut wi).await;
-        trace!(?res, "tcp -> hbone");
-        sent = res?;
-        wi.shutdown().await
-    };
-
-    tokio::try_join!(client_to_server, server_to_client)?;
-
-    trace!(sent, recv = received, "copy hbone complete");
-    Ok((sent, received))
-}
-
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
 
 pub async fn write_proxy_protocol<T>(
@@ -491,19 +456,6 @@ pub async fn freebind_connect(
     timeout(CONNECTION_TIMEOUT, connect(local, addr, socket_factory))
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
-}
-
-pub async fn relay(
-    downstream: &mut TcpStream,
-    upstream: &mut TcpStream,
-) -> Result<(u64, u64), Error> {
-    match socket::relay(downstream, upstream).await {
-        Ok(transferred) => {
-            trace!(sent = transferred.0, recv = transferred.1, "relay complete");
-            Ok(transferred)
-        }
-        Err(e) => Err(Error::Io(e)),
-    }
 }
 
 // guess_inbound_service selects an upstream service for inbound metrics.
