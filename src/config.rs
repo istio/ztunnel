@@ -50,6 +50,7 @@ const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
+const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
@@ -64,6 +65,7 @@ const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
+const DEFAULT_POOL_RELEASE: Duration = Duration::from_secs(60 * 5); // 5 minutes
 
 const DEFAULT_INPOD_MARK: u32 = 1337;
 
@@ -138,6 +140,8 @@ pub struct Config {
     // and queue 500 streams on it, you will still exceed this limit and are at the mercy of hyper's
     // default stream queuing.
     pub pool_max_streams_per_conn: u16,
+
+    pub pool_unused_release_timeout: Duration,
 
     pub socks5_addr: Option<SocketAddr>,
     pub admin_addr: SocketAddr,
@@ -336,6 +340,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .map_or(false, |value| value.to_lowercase() == "true"),
 
         pool_max_streams_per_conn: parse_default(POOL_MAX_STREAMS_PER_CONNECTION, 250)?,
+
+        pool_unused_release_timeout: match parse::<String>(POOL_UNUSED_RELEASE_TIMEOUT)? {
+            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_POOL_RELEASE),
+            None => DEFAULT_POOL_RELEASE,
+        },
 
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
