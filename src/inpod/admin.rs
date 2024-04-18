@@ -12,15 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper::body::Incoming;
-use hyper::{Request, Response};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::state::WorkloadInfo;
+use anyhow::anyhow;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -136,44 +133,22 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
-    fn to_bytes(&self) -> Vec<u8> {
-        let serialized_state = if let Ok(state) = self.state.read() {
-            serde_json::to_vec(&*state)
+    fn to_json(&self) -> anyhow::Result<serde_json::Value> {
+        if let Ok(state) = self.state.read() {
+            Ok(serde_json::to_value(&*state)?)
         } else {
-            error!("Failed to read state");
-            return vec![];
-        };
-        match serialized_state {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed serializing state {:?}", e);
-                vec![]
-            }
+            Err(anyhow!("Failed to read state"))
         }
     }
 }
 
-impl crate::admin::AdminHandler for WorkloadManagerAdminHandler {
-    fn path(&self) -> &'static str {
-        "/workloadmanager"
-    }
-    fn description(&self) -> &'static str {
-        "Workload Manager Admin Handler"
+impl crate::admin::AdminHandler2 for WorkloadManagerAdminHandler {
+    fn key(&self) -> &'static str {
+        "workload_state"
     }
 
-    fn handle(
-        &self,
-        _req: Request<Incoming>,
-    ) -> std::pin::Pin<Box<dyn futures_util::Future<Output = Response<Full<Bytes>>> + Sync + Send>>
-    {
-        let data = self.to_bytes();
-        let ready = std::future::ready(
-            Response::builder()
-                .status(hyper::StatusCode::OK)
-                .body(data.into())
-                .unwrap(),
-        );
-        Box::pin(ready)
+    fn handle(&self) -> anyhow::Result<serde_json::Value> {
+        self.to_json()
     }
 }
 
@@ -184,11 +159,11 @@ mod test {
     #[test]
     fn test_proxy_state() {
         let handler = WorkloadManagerAdminHandler::default();
-        let data = || String::from_utf8_lossy(&handler.to_bytes()).to_string();
+        let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
 
         let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
         handler.proxy_pending(&uid1, &None);
-        assert_eq!(data(), "{\"uid1\":{\"state\":\"Pending\"}}");
+        assert_eq!(data(), r#"{"uid1":{"state":"Pending"}}"#);
         handler.proxy_up(
             &uid1,
             &Some(crate::state::WorkloadInfo {
@@ -201,7 +176,7 @@ mod test {
         );
         assert_eq!(
             data(),
-            r#"{"uid1":{"state":"Up","info":{"name":"name","namespace":"ns","trustDomain":"td","serviceAccount":"sa"}}}"#
+            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa","trustDomain":"td"},"state":"Up"}}"#
         );
         handler.proxy_down(&uid1);
         assert_eq!(data(), "{}");

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+
 use http_body_util::BodyExt;
 use http_body_util::Empty;
 use hyper::body::Incoming;
@@ -105,6 +106,32 @@ impl TestApp {
         };
 
         match self.namespace {
+            Some(ref _ns) => {
+                // TODO: if this is needed, do something like admin_request_body.
+                // Its not safe to expose the Body outside of the network namespace call, as we cannot
+                // receive data once we leave the network namespace
+                panic!("cannot send admin_request in pod");
+            }
+            None => get_resp().await,
+        }
+    }
+    pub async fn admin_request_body(&self, path: &str) -> anyhow::Result<Bytes> {
+        let port = self.admin_address.port();
+        let path = path.to_string();
+
+        let get_resp = move || async move {
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri(format!("http://localhost:{}/{path}", port))
+                .header("content-type", "application/json")
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            let client = hyper_util::pooling_client();
+            let res = client.request(req).await?;
+            Ok::<_, anyhow::Error>(res.collect().await?.to_bytes())
+        };
+
+        match self.namespace {
             Some(ref ns) => ns.clone().run(get_resp)?.join().unwrap(),
             None => get_resp().await,
         }
@@ -129,9 +156,13 @@ impl TestApp {
 
     #[cfg(target_os = "linux")]
     pub async fn inpod_state(&self) -> anyhow::Result<HashMap<String, inpod::admin::ProxyState>> {
-        let body = self.admin_request("workloadmanager").await?;
-        let body = body.collect().await?.to_bytes();
-        let result: HashMap<String, inpod::admin::ProxyState> = serde_json::from_slice(&body)?;
+        let body = self.admin_request_body("config_dump").await?;
+        let serde_json::Value::Object(mut v) = serde_json::from_slice(&body)? else {
+            anyhow::bail!("not an object");
+        };
+
+        let result: HashMap<String, inpod::admin::ProxyState> =
+            serde_json::from_value(v.remove("workload_state").unwrap())?;
         Ok(result)
     }
 
