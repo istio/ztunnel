@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::proxy::error;
+use crate::proxy::{error, Error};
 use crate::rbac;
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
@@ -20,9 +20,11 @@ use drain;
 use serde::{Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::Formatter;
+use std::future::Future;
+
 use std::sync::Arc;
 use std::sync::RwLock;
-use tracing::info;
+use tracing::{debug, info};
 
 struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.
@@ -67,12 +69,63 @@ impl Default for ConnectionManager {
     }
 }
 
+pub struct ConnectionGuard {
+    cm: ConnectionManager,
+    ctx: ProxyRbacContext,
+    watch: Option<drain::Watch>,
+}
+
+impl ConnectionGuard {
+    pub async fn handle_connection(
+        mut self,
+        send: impl Future<Output = Result<(u64, u64), Error>> + Sized,
+    ) -> Result<(u64, u64), Error> {
+        let watch = self.watch.take().expect("watch cannot be taken twice");
+        tokio::select! {
+            res = send => {
+                self.cm.release(&self.ctx);
+                res
+            }
+            _signaled = watch.signaled() => Err(Error::AuthorizationPolicyLateRejection)
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if self.watch.is_some() {
+            debug!("rbac context {} auto-dropped", &self.ctx);
+            self.cm.release(&self.ctx)
+        }
+    }
+}
+
 impl ConnectionManager {
+    pub async fn assert_rbac(
+        &self,
+        state: &DemandProxyState,
+        ctx: &ProxyRbacContext,
+    ) -> Result<ConnectionGuard, Error> {
+        // Register before our initial assert. This prevents a race if policy changes between assert() and
+        // track()
+        self.register(ctx);
+        if !state.assert_rbac(ctx).await {
+            return Err(Error::AuthorizationPolicyRejection);
+        }
+        let Some(watch) = self.track(ctx) else {
+            return Err(Error::AuthorizationPolicyRejection);
+        };
+        Ok(ConnectionGuard {
+            cm: self.clone(),
+            ctx: ctx.clone(),
+            watch: Some(watch),
+        })
+    }
     // register a connection with the connection manager
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
     // even no tasks have a receiver channel yet
-    pub fn register(&self, c: &ProxyRbacContext) {
+    fn register(&self, c: &ProxyRbacContext) {
         self.drains
             .write()
             .expect("mutex")
@@ -83,7 +136,7 @@ impl ConnectionManager {
     // get a channel to receive close on for your connection
     // requires that the connection be registered first
     // if you receive None this connection is invalid and should close
-    pub fn track(&self, c: &ProxyRbacContext) -> Option<drain::Watch> {
+    fn track(&self, c: &ProxyRbacContext) -> Option<drain::Watch> {
         match self
             .drains
             .write()
@@ -101,7 +154,7 @@ impl ConnectionManager {
 
     // releases tracking on a connection
     // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
-    pub fn release(&self, c: &ProxyRbacContext) {
+    fn release(&self, c: &ProxyRbacContext) {
         let mut drains = self.drains.write().expect("mutex");
         if let Some((k, mut v)) = drains.remove_entry(c) {
             if v.count > 1 {

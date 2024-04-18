@@ -33,7 +33,7 @@ use tokio::time::timeout;
 
 use tracing::{debug, error, info, instrument, trace_span, Instrument};
 
-use super::connection_manager::ConnectionManager;
+use super::connection_manager::{ConnectionGuard, ConnectionManager};
 use super::{ConnectionResult, Error, SocketFactory};
 use crate::baggage::parse_baggage_header;
 use crate::identity::{Identity, SecretManager};
@@ -186,8 +186,7 @@ impl Inbound {
         addr: SocketAddr,
         result_tracker: ConnectionResult,
         socket_factory: &(dyn SocketFactory + Send + Sync),
-        connection_manager: ConnectionManager,
-        rbac_ctx: crate::state::ProxyRbacContext,
+        conn_guard: ConnectionGuard,
     ) -> Result<(), ()> {
         let stream = super::freebind_connect(orig_src, addr, socket_factory)
             .await
@@ -206,15 +205,6 @@ impl Inbound {
 
         tokio::task::spawn(
             (async move {
-                let close = match connection_manager.track(&rbac_ctx) {
-                    Some(c) => c,
-                    None => {
-                        // if track returns None it means the connection was closed due to policy change
-                        // between the intial assertion of policy and the spawinging of the task
-                        result_tracker.record(Err(Error::AuthorizationPolicyRejection));
-                        return;
-                    }
-                };
                 let result_tracker = Arc::new(result_tracker);
                 let send = async {
                     let result_tracker = result_tracker.clone();
@@ -252,13 +242,7 @@ impl Inbound {
                         }
                     }
                 };
-                let res = tokio::select! {
-                     res = send => {
-                        connection_manager.release(&rbac_ctx);
-                        res
-                    }
-                    _c = close.signaled() => Err(Error::AuthorizationPolicyLateRejection)
-                };
+                let res = conn_guard.handle_connection(send).await;
                 result_tracker.record(res);
             })
             .in_current_span(),
@@ -403,14 +387,13 @@ impl Inbound {
             pi.metrics,
         );
 
-        //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-        connection_manager.register(&rbac_ctx);
-        if !pi.state.assert_rbac(&rbac_ctx).await {
-            info!(%rbac_ctx.conn, "RBAC rejected");
-            connection_manager.release(&rbac_ctx);
-            result_tracker.record(Err(Error::AuthorizationPolicyRejection));
-            return StatusCode::UNAUTHORIZED;
-        }
+        let conn_guard = match connection_manager.assert_rbac(&pi.state, &rbac_ctx).await {
+            Ok(cg) => cg,
+            Err(e) => {
+                result_tracker.record(Err(e));
+                return StatusCode::UNAUTHORIZED;
+            }
+        };
 
         let request_type = match inbound_protocol {
             AppProtocol::PROXY => Proxy(
@@ -427,8 +410,7 @@ impl Inbound {
             upstream_addr,
             result_tracker,
             pi.socket_factory.as_ref(),
-            connection_manager,
-            rbac_ctx,
+            conn_guard,
         )
         .in_current_span()
         .await
