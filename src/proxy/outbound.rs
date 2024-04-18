@@ -82,8 +82,7 @@ impl Outbound {
         let pool = proxy::pool::WorkloadHBONEPool::new(
                     self.pi.cfg.clone(),
                     self.pi.socket_factory.clone(),
-                    self.pi.cert_manager.clone(),
-                    sub_drain.clone());
+                    self.pi.cert_manager.clone());
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -674,9 +673,7 @@ mod tests {
             pool: pool::WorkloadHBONEPool::new(
                 cfg,
                 sock_fact,
-                cert_mgr.clone(),
-                sub_drain,
-            ),
+                cert_mgr.clone()),
         };
 
         let req = outbound

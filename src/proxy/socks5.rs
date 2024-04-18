@@ -70,8 +70,7 @@ impl Socks5 {
                 let pool = crate::proxy::pool::WorkloadHBONEPool::new(
                             self.pi.cfg.clone(),
                             self.pi.socket_factory.clone(),
-                            self.pi.cert_manager.clone(),
-                            stream_drain.clone());
+                            self.pi.cert_manager.clone());
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
