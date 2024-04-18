@@ -254,171 +254,187 @@ impl WorkloadHBONEPool {
             .first_checkout_conn_from_pool(&workload_key, &pool_key)
             .await;
 
+        // Early return, no need to do anything else
         if existing_conn.is_some() {
             debug!("initial attempt - found existing conn, done");
-            Ok(existing_conn.unwrap())
-        } else {
-            // We couldn't get a conn. This means either nobody has tried to establish any conns for this key yet,
-            // or they have, but no conns are currently available
-            // (because someone else has checked all of them out and not put any back yet)
-            //
-            // So, we will take a nonexclusive readlock on the lockmap, to see if an inner lock
-            // exists for our key.
-            //
-            // If not, we insert one.
-            {
-                debug!("didn't find a connection for key {:#?}, making sure lockmap has entry", hash_key);
-                let guard = self.state.established_conn_writelock.guard();
-                match self.state.established_conn_writelock.try_insert(hash_key, Some(Arc::new(Mutex::new(()))), &guard) {
-                    Ok(_) => {
-                        debug!("inserting conn mutex for key {:#?} into lockmap", hash_key);
-                    }
-                    Err(_) => {
-                        debug!("already have conn for key {:#?} in lockmap", hash_key);
-                    }
-                }
-            }
+            return Ok(existing_conn.unwrap());
+        }
 
-            // If we get here, it means the following are true:
-            // 1. We have a guaranteed sharded mutex in the outer map for our current key.
-            // 2. We can now, under readlock(nonexclusive) in the outer map, attempt to
-            // take the inner writelock for our specific key (exclusive).
-            //
-            // This doesn't block other tasks spawning connections against other keys, but DOES block other
-            // tasks spawning connections against THIS key - which is what we want.
-
-            // NOTE: This inner, key-specific mutex is a tokio::async::Mutex, and not a stdlib sync mutex.
-            // these differ from the stdlib sync mutex in that they are (slightly) slower
-            // (they effectively sleep the current task) and they can be held over an await.
-            // The tokio docs (rightly) advise you to not use these,
-            // because holding a lock over an await is a great way to create deadlocks if the await you
-            // hold it over does not resolve.
-            //
-            // HOWEVER. Here we know this connection will either establish or timeout
-            // and we WANT other tasks to go back to sleep if a task is already trying to create a new connection for this key.
-            //
-            // So the downsides are actually useful (we WANT task contention -
-            // to block other parallel tasks from trying to spawn a connection for this key if we are already doing so)
-            let inner_conn_lock = {
-                trace!("fallback attempt - getting keyed lock out of lockmap");
-                let guard = self.state.established_conn_writelock.guard();
-
-                let exist_conn_lock = self.state.established_conn_writelock.get(&hash_key, &guard).unwrap();
-                trace!("fallback attempt - got keyed lock out of lockmap");
-                exist_conn_lock.as_ref().unwrap().clone()
-            };
-
-            debug!("appears we need a new conn, attempting to win connlock for wl key {:#?}", workload_key);
-            let got_conn = match inner_conn_lock.try_lock() {
-                Ok(_guard) => {
-                    // BEGIN take inner writelock
-                    // If we get here, it means the following are true:
-                    // 1. We did not get a connection for our key.
-                    // 2. We have the exclusive inner writelock to create a new connection for our key.
-                    //
-                    // So, carry on doing that.
-                    debug!("nothing else is creating a conn and we won the lock, make one");
-                    let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
-                    let client = ConnClient{
-                        sender: pool_conn?,
-                        stream_count: Arc::new(AtomicU16::new(0)),
-                        stream_count_max: self.max_streamcount,
-                        wl_key: workload_key.clone(),
-                    };
-
-                    debug!(
-                        "starting new conn for key {:#?} with pk {:#?}",
-                        workload_key, pool_key
-                    );
-                    Some(client)
-                    // END take inner writelock
+        // We couldn't get a conn. This means either nobody has tried to establish any conns for this key yet,
+        // or they have, but no conns are currently available
+        // (because someone else has checked all of them out and not put any back yet)
+        //
+        // So, we will take a nonexclusive readlock on the lockmap, to see if an inner lock
+        // exists for our key.
+        //
+        // If not, we insert one.
+        {
+            debug!(
+                "didn't find a connection for key {:#?}, making sure lockmap has entry",
+                hash_key
+            );
+            let guard = self.state.established_conn_writelock.guard();
+            match self.state.established_conn_writelock.try_insert(
+                hash_key,
+                Some(Arc::new(Mutex::new(()))),
+                &guard,
+            ) {
+                Ok(_) => {
+                    debug!("inserting conn mutex for key {:#?} into lockmap", hash_key);
                 }
                 Err(_) => {
-                    debug!("we didnt' win the lock, something else is creating a conn, wait for it");
-                    // If we get here, it means the following are true:
-                    // 1. At one point, there was a preexisting conn in the pool for this key.
-                    // 2. When we checked, we got nothing for that key.
-                    // 3. We could not get the exclusive inner writelock to add a new one for this key.
-                    // 4. Someone else got the exclusive inner writelock, and is adding a new one for this key.
-                    //
-                    // So, loop and wait for the pool_watcher to tell us a new conn was enpooled,
-                    // so we can pull it out and check it.
-                    loop {
-                        match self.pool_watcher.changed().await {
-                            Ok(_) => {
-                                trace!(
-                                    "notified a new conn was enpooled, checking for hash {:#?}",
-                                    hash_key
-                                );
-                                // The sharded mutex for this connkey is already locked - someone else must be making a conn
-                                // if they are, try to wait for it, but bail if we find one and it's got a maxed streamcount.
-                                let existing_conn = self.state.connected_pool.get(&hash_key);
-                                match existing_conn {
-                                    None => {
-                                        trace!("woke up on pool notification, but didn't find a conn for {:#?} yet", hash_key);
-                                        continue;
+                    debug!("already have conn for key {:#?} in lockmap", hash_key);
+                }
+            }
+        }
+
+        // If we get here, it means the following are true:
+        // 1. We have a guaranteed sharded mutex in the outer map for our current key.
+        // 2. We can now, under readlock(nonexclusive) in the outer map, attempt to
+        // take the inner writelock for our specific key (exclusive).
+        //
+        // This doesn't block other tasks spawning connections against other keys, but DOES block other
+        // tasks spawning connections against THIS key - which is what we want.
+
+        // NOTE: This inner, key-specific mutex is a tokio::async::Mutex, and not a stdlib sync mutex.
+        // these differ from the stdlib sync mutex in that they are (slightly) slower
+        // (they effectively sleep the current task) and they can be held over an await.
+        // The tokio docs (rightly) advise you to not use these,
+        // because holding a lock over an await is a great way to create deadlocks if the await you
+        // hold it over does not resolve.
+        //
+        // HOWEVER. Here we know this connection will either establish or timeout
+        // and we WANT other tasks to go back to sleep if a task is already trying to create a new connection for this key.
+        //
+        // So the downsides are actually useful (we WANT task contention -
+        // to block other parallel tasks from trying to spawn a connection for this key if we are already doing so)
+        let inner_conn_lock = {
+            trace!("fallback attempt - getting keyed lock out of lockmap");
+            let guard = self.state.established_conn_writelock.guard();
+
+            let exist_conn_lock = self
+                .state
+                .established_conn_writelock
+                .get(&hash_key, &guard)
+                .unwrap();
+            trace!("fallback attempt - got keyed lock out of lockmap");
+            exist_conn_lock.as_ref().unwrap().clone()
+        };
+
+        debug!(
+            "appears we need a new conn, attempting to win connlock for wl key {:#?}",
+            workload_key
+        );
+        let got_conn = match inner_conn_lock.try_lock() {
+            Ok(_guard) => {
+                // BEGIN take inner writelock
+                // If we get here, it means the following are true:
+                // 1. We did not get a connection for our key.
+                // 2. We have the exclusive inner writelock to create a new connection for our key.
+                //
+                // So, carry on doing that.
+                debug!("nothing else is creating a conn and we won the lock, make one");
+                let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
+                let client = ConnClient {
+                    sender: pool_conn?,
+                    stream_count: Arc::new(AtomicU16::new(0)),
+                    stream_count_max: self.max_streamcount,
+                    wl_key: workload_key.clone(),
+                };
+
+                debug!(
+                    "starting new conn for key {:#?} with pk {:#?}",
+                    workload_key, pool_key
+                );
+                Some(client)
+                // END take inner writelock
+            }
+            Err(_) => {
+                debug!("we didnt' win the lock, something else is creating a conn, wait for it");
+                // If we get here, it means the following are true:
+                // 1. At one point, there was a preexisting conn in the pool for this key.
+                // 2. When we checked, we got nothing for that key.
+                // 3. We could not get the exclusive inner writelock to add a new one for this key.
+                // 4. Someone else got the exclusive inner writelock, and is adding a new one for this key.
+                //
+                // So, loop and wait for the pool_watcher to tell us a new conn was enpooled,
+                // so we can pull it out and check it.
+                loop {
+                    match self.pool_watcher.changed().await {
+                        Ok(_) => {
+                            trace!(
+                                "notified a new conn was enpooled, checking for hash {:#?}",
+                                hash_key
+                            );
+                            // The sharded mutex for this connkey is already locked - someone else must be making a conn
+                            // if they are, try to wait for it, but bail if we find one and it's got a maxed streamcount.
+                            let existing_conn = self.state.connected_pool.get(&hash_key);
+                            match existing_conn {
+                                None => {
+                                    trace!("woke up on pool notification, but didn't find a conn for {:#?} yet", hash_key);
+                                    continue;
+                                }
+                                Some(e_conn) => {
+                                    debug!("found existing conn after waiting");
+                                    // We found a conn, but it's already maxed out.
+                                    // Return None and create another.
+                                    if e_conn.at_max_streamcount() {
+                                        debug!("found existing conn for key {:#?}, but streamcount is maxed", workload_key);
+                                        break None;
                                     }
-                                    Some(e_conn) => {
-                                        debug!("found existing conn after waiting");
-                                        // We found a conn, but it's already maxed out.
-                                        // Return None and create another.
-                                        if e_conn.at_max_streamcount() {
-                                            debug!("found existing conn for key {:#?}, but streamcount is maxed", workload_key);
-                                            break None;
-                                        }
-                                        break Some(e_conn);
-                                    }
+                                    break Some(e_conn);
                                 }
                             }
-                            Err(_) => {
-                                return Err(Error::WorkloadHBONEPoolDraining);
-                            }
+                        }
+                        Err(_) => {
+                            return Err(Error::WorkloadHBONEPoolDraining);
                         }
                     }
                 }
-            };
-
-            // If we get here, it means the following are true:
-            // 1. At one point, there was a preexisting conn in the pool for this key.
-            // 2. When we checked, we got nothing for that key.
-            // 3. We could not get the exclusive inner writelock to add a new one
-            // 4. Someone else got the exclusive inner writelock, and is adding a new one
-            // 5. We waited until we got that connection for our key, that someone else added.
-            //
-            // So now we are down to 2 options:
-            //
-            // 1. We got an existing connection, it's usable, we use it.
-            // 2. We got an existing connection, it's not usable, we start another.
-            //
-            // Note that for (2) we do not really need to take the inner writelock again for this key -
-            // if we checked out a conn inserted by someone else that we cannot use,
-            // everyone else will implicitly be waiting for us to check one back in,
-            // since they are in their own loops.
-            match got_conn {
-                // After waiting, we found an available conn we can use, so no need to start another.
-                // Clone the underlying client, return a copy, and put the other back in the pool.
-                Some(f_conn) => {
-                    self.state.checkin_conn(f_conn.clone(), pool_key.clone());
-                    Ok(f_conn)
-                }
-
-                // After waiting, we found an available conn, but for whatever reason couldn't use it.
-                // (streamcount maxed, etc)
-                // Start a new one, clone the underlying client, return a copy, and put the other back in the pool.
-                None => {
-                    debug!("spawning new conn for key {:#?} to replace", workload_key);
-                    let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
-                    let r_conn = ConnClient{
-                        sender: pool_conn?,
-                        stream_count: Arc::new(AtomicU16::new(0)),
-                        stream_count_max: self.max_streamcount,
-                        wl_key: workload_key.clone(),
-                    };
-                    self.state.checkin_conn(r_conn.clone(), pool_key.clone());
-                    Ok(r_conn)
-                }
             }
-        }.and_then(|conn| {
+        };
+
+        // If we get here, it means the following are true:
+        // 1. At one point, there was a preexisting conn in the pool for this key.
+        // 2. When we checked, we got nothing for that key.
+        // 3. We could not get the exclusive inner writelock to add a new one
+        // 4. Someone else got the exclusive inner writelock, and is adding a new one
+        // 5. We waited until we got that connection for our key, that someone else added.
+        //
+        // So now we are down to 2 options:
+        //
+        // 1. We got an existing connection, it's usable, we use it.
+        // 2. We got an existing connection, it's not usable, we start another.
+        //
+        // Note that for (2) we do not really need to take the inner writelock again for this key -
+        // if we checked out a conn inserted by someone else that we cannot use,
+        // everyone else will implicitly be waiting for us to check one back in,
+        // since they are in their own loops.
+        match got_conn {
+            // After waiting, we found an available conn we can use, so no need to start another.
+            // Clone the underlying client, return a copy, and put the other back in the pool.
+            Some(f_conn) => {
+                self.state.checkin_conn(f_conn.clone(), pool_key.clone());
+                Ok(f_conn)
+            }
+
+            // After waiting, we found an available conn, but for whatever reason couldn't use it.
+            // (streamcount maxed, etc)
+            // Start a new one, clone the underlying client, return a copy, and put the other back in the pool.
+            None => {
+                debug!("spawning new conn for key {:#?} to replace", workload_key);
+                let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
+                let r_conn = ConnClient {
+                    sender: pool_conn?,
+                    stream_count: Arc::new(AtomicU16::new(0)),
+                    stream_count_max: self.max_streamcount,
+                    wl_key: workload_key.clone(),
+                };
+                self.state.checkin_conn(r_conn.clone(), pool_key.clone());
+                Ok(r_conn)
+            }
+        }
+        .and_then(|conn| {
             // Finally, we either have a conn or an error.
             // Just for safety's sake, since we are using a hash thanks to pingora supporting arbitrary Eq, Hash
             // types, do a deep equality test before returning the conn, returning an error if the conn's key does
@@ -426,12 +442,8 @@ impl WorkloadHBONEPool {
             //
             // this is a final safety check for collisions, we will throw up our hands and refuse to return the conn
             match conn.is_for_workload(workload_key) {
-                Ok(()) => {
-                    Ok(conn)
-                }
-                Err(e) => {
-                    Err(e)
-                }
+                Ok(()) => Ok(conn),
+                Err(e) => Err(e),
             }
         })
     }
