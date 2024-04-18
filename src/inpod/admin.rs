@@ -144,7 +144,7 @@ impl WorkloadManagerAdminHandler {
 
 impl crate::admin::AdminHandler2 for WorkloadManagerAdminHandler {
     fn key(&self) -> &'static str {
-        "workload_state"
+        "workloadState"
     }
 
     fn handle(&self) -> anyhow::Result<serde_json::Value> {

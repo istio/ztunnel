@@ -13,15 +13,17 @@
 // limitations under the License.
 
 use crate::proxy::{error, Error};
-use crate::rbac;
+
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
 use drain;
 use serde::{Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Formatter;
 use std::future::Future;
+use std::net::SocketAddr;
 
+use crate::rbac::Connection;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, info};
@@ -53,6 +55,7 @@ impl ConnectionDrain {
 #[derive(Clone)]
 pub struct ConnectionManager {
     drains: Arc<RwLock<HashMap<ProxyRbacContext, ConnectionDrain>>>,
+    outbound_connections: Arc<RwLock<HashSet<OutboundConnection>>>,
 }
 
 impl std::fmt::Debug for ConnectionManager {
@@ -65,6 +68,7 @@ impl Default for ConnectionManager {
     fn default() -> Self {
         ConnectionManager {
             drains: Arc::new(RwLock::new(HashMap::new())),
+            outbound_connections: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 }
@@ -100,7 +104,49 @@ impl Drop for ConnectionGuard {
     }
 }
 
+pub struct OutboundConnectionGuard {
+    cm: ConnectionManager,
+    conn: OutboundConnection,
+}
+
+impl Drop for OutboundConnectionGuard {
+    fn drop(&mut self) {
+        self.cm.release_outbound(&self.conn)
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundConnection {
+    pub src: SocketAddr,
+    pub original_dst: SocketAddr,
+    pub actual_dst: SocketAddr,
+}
+
 impl ConnectionManager {
+    pub fn track_outbound(
+        &self,
+        src: SocketAddr,
+        original_dst: SocketAddr,
+        actual_dst: SocketAddr,
+    ) -> OutboundConnectionGuard {
+        let c = OutboundConnection {
+            src,
+            original_dst,
+            actual_dst,
+        };
+
+        self.outbound_connections
+            .write()
+            .expect("mutex")
+            .insert(c.clone());
+
+        OutboundConnectionGuard {
+            cm: self.clone(),
+            conn: c,
+        }
+    }
+
     pub async fn assert_rbac(
         &self,
         state: &DemandProxyState,
@@ -165,6 +211,10 @@ impl ConnectionManager {
         }
     }
 
+    fn release_outbound(&self, c: &OutboundConnection) {
+        self.outbound_connections.write().expect("mutex").remove(c);
+    }
+
     // signal all connections listening to this channel to take action (typically terminate traffic)
     async fn close(&self, c: &ProxyRbacContext) {
         let drain = { self.drains.write().expect("mutex").remove(c) };
@@ -181,19 +231,12 @@ impl ConnectionManager {
         // potentially large copy under read lock, could require optimization
         self.drains.read().expect("mutex").keys().cloned().collect()
     }
+}
 
-    // get a dump (for admin API) for connects.
-    // This just avoids the redundant dest_workload_info
-    pub fn connections_dump(&self) -> Vec<rbac::Connection> {
-        // potentially large copy under read lock, could require optimization
-        self.drains
-            .read()
-            .expect("mutex")
-            .keys()
-            .cloned()
-            .map(|c| c.conn)
-            .collect()
-    }
+#[derive(serde::Serialize)]
+struct ConnectionManagerDump {
+    inbound: Vec<Connection>,
+    outbound: Vec<OutboundConnection>,
 }
 
 impl Serialize for ConnectionManager {
@@ -201,8 +244,23 @@ impl Serialize for ConnectionManager {
     where
         S: Serializer,
     {
-        let conns = self.connections_dump();
-        conns.serialize(serializer)
+        let inbound: Vec<_> = self
+            .drains
+            .read()
+            .expect("mutex")
+            .keys()
+            .cloned()
+            .map(|c| c.conn)
+            .collect();
+        let outbound: Vec<_> = self
+            .outbound_connections
+            .read()
+            .expect("mutex")
+            .iter()
+            .cloned()
+            .collect();
+        let dump = ConnectionManagerDump { inbound, outbound };
+        dump.serialize(serializer)
     }
 }
 
