@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -62,12 +63,17 @@ impl InboundPassthrough {
         })
     }
 
-    pub(super) async fn run(self) {
+    pub(super) fn address(&self) -> SocketAddr {
+        self.listener.local_addr().expect("local_addr available")
+    }
+
+    pub(super) async fn run(self, illegal_ports: Arc<HashSet<u16>>) {
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 let pi = self.pi.clone();
+                let illegal_ports = illegal_ports.clone();
 
                 let connection_manager = self.pi.connection_manager.clone();
                 match socket {
@@ -78,6 +84,7 @@ impl InboundPassthrough {
                                     pi, // pi cloned above; OK to move
                                     socket::to_canonical(remote),
                                     stream,
+                                    illegal_ports,
                                     connection_manager,
                                 )
                                 .await
@@ -110,12 +117,21 @@ impl InboundPassthrough {
         pi: ProxyInputs,
         source_addr: SocketAddr,
         mut inbound_stream: TcpStream,
+        illegal_ports: Arc<HashSet<u16>>,
         connection_manager: ConnectionManager,
     ) {
         let start = Instant::now();
         let dest_addr = socket::orig_dst_addr_or_default(&inbound_stream);
-        // Check if it is a recursive call when proxy mode is Node.
-        if pi.cfg.proxy_mode == ProxyMode::Shared && Some(dest_addr.ip()) == pi.cfg.local_ip {
+        // Check if it is an illegal call to ourself, which could trampoline to illegal addresses or
+        // lead to infinite loops
+        let illegal_call = if pi.cfg.inpod_enabled {
+            // User sent a request to pod:15006. This would forward to pod:15006 infinitely
+            illegal_ports.contains(&dest_addr.port())
+        } else {
+            // User sent a request to the ztunnel directly. This isn't allowed
+            pi.cfg.proxy_mode == ProxyMode::Shared && Some(dest_addr.ip()) == pi.cfg.local_ip
+        };
+        if illegal_call {
             metrics::log_early_deny(
                 source_addr,
                 dest_addr,

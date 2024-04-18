@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
@@ -83,7 +84,7 @@ impl Inbound {
         self.listener.local_addr().expect("local_addr available")
     }
 
-    pub(super) async fn run(self) {
+    pub(super) async fn run(self, illegal_ports: Arc<HashSet<u16>>) {
         let acceptor = InboundCertProvider {
             state: self.pi.state.clone(),
             cert_manager: self.pi.cert_manager.clone(),
@@ -103,6 +104,7 @@ impl Inbound {
             let connection_manager = self.pi.connection_manager.clone();
             let drain = sub_drain.clone();
             let network = self.pi.cfg.network.clone();
+            let illegal_ports = illegal_ports.clone();
             let drain_deadline = self.pi.cfg.self_termination_deadline;
             tokio::task::spawn(async move {
                 let conn = Connection {
@@ -128,6 +130,7 @@ impl Inbound {
                                 conn.clone(),
                                 enable_original_source.unwrap_or_default(),
                                 req,
+                                illegal_ports.clone(),
                                 connection_manager.clone(),
                             )
                             .map(|status| {
@@ -285,6 +288,7 @@ impl Inbound {
         conn: Connection,
         enable_original_source: bool,
         req: Request<Incoming>,
+        illegal_ports: Arc<HashSet<u16>>,
         connection_manager: ConnectionManager,
     ) -> StatusCode {
         if req.method() != Method::CONNECT {
@@ -319,7 +323,21 @@ impl Inbound {
             );
             return StatusCode::BAD_REQUEST;
         };
-
+        let illegal_call = if pi.cfg.inpod_enabled {
+            // User sent a request to pod:15006. This would forward to pod:15006 infinitely
+            illegal_ports.contains(&upstream_addr.port())
+        } else {
+            false // TODO: do we need any check here?
+        };
+        if illegal_call {
+            metrics::log_early_deny(
+                conn.src,
+                upstream_addr,
+                Reporter::destination,
+                Error::SelfCall,
+            );
+            return StatusCode::BAD_REQUEST;
+        }
         // Connection has 15008, swap with the real port
         let conn = Connection {
             dst: upstream_addr,

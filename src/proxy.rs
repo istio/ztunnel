@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -93,6 +94,7 @@ pub struct Proxy {
     outbound: Outbound,
     socks5: Socks5,
     policy_watcher: PolicyWatcher,
+    illegal_ports: Arc<HashSet<u16>>,
 }
 
 #[derive(Clone)]
@@ -155,13 +157,19 @@ impl Proxy {
         Self::from_inputs(pi, drain).await
     }
     pub(super) async fn from_inputs(mut pi: ProxyInputs, drain: Watch) -> Result<Self, Error> {
+        // illegal_ports are internal ports that clients are not authorized to send to
+        let mut illegal_ports: HashSet<u16> = HashSet::new();
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
         pi.hbone_port = inbound.address().port();
+        illegal_ports.insert(inbound.address().port());
 
         let inbound_passthrough = InboundPassthrough::new(pi.clone(), drain.clone()).await?;
+        illegal_ports.insert(inbound_passthrough.address().port());
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
+        illegal_ports.insert(outbound.address().port());
         let socks5 = Socks5::new(pi.clone(), drain.clone()).await?;
+        illegal_ports.insert(socks5.address().port());
         let policy_watcher = PolicyWatcher::new(pi.state, drain, pi.connection_manager);
 
         Ok(Proxy {
@@ -170,13 +178,22 @@ impl Proxy {
             outbound,
             socks5,
             policy_watcher,
+            illegal_ports: Arc::new(illegal_ports),
         })
     }
 
     pub async fn run(self) {
         let tasks = vec![
-            tokio::spawn(self.inbound_passthrough.run().in_current_span()),
-            tokio::spawn(self.inbound.run().in_current_span()),
+            tokio::spawn(
+                self.inbound_passthrough
+                    .run(self.illegal_ports.clone())
+                    .in_current_span(),
+            ),
+            tokio::spawn(
+                self.inbound
+                    .run(self.illegal_ports.clone())
+                    .in_current_span(),
+            ),
             tokio::spawn(self.outbound.run().in_current_span()),
             tokio::spawn(self.socks5.run().in_current_span()),
             tokio::spawn(self.policy_watcher.run().in_current_span()),

@@ -194,8 +194,11 @@ impl OutboundConnection {
     ) {
         let start = Instant::now();
 
+        // Block calls to ztunnel directly, unless we are in "in-pod".
+        // For in-pod, this isn't an issue and is useful: this allows things like prometheus scraping ztunnel.
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(dest_addr.ip()) == self.pi.cfg.local_ip
+            && !self.pi.cfg.inpod_enabled
         {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
