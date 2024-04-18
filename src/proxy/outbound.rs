@@ -663,7 +663,6 @@ mod tests {
 
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let (_, sub_drain) = drain::channel();
         let outbound = OutboundConnection {
             pi: ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
