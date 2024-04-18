@@ -306,7 +306,6 @@ async fn handle_config_dump(
         anyhow::bail!("config dump is not a key-value pair")
     };
 
-    kv.insert("static".to_string(), serde_json::json!([handlers.len()]));
     for h in handlers {
         let x = h.handle()?;
         kv.insert(h.key().to_string(), x);
