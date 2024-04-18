@@ -162,7 +162,7 @@ impl TestApp {
         };
 
         let result: HashMap<String, inpod::admin::ProxyState> =
-            serde_json::from_value(v.remove("workload_state").unwrap())?;
+            serde_json::from_value(v.remove("workloadState").unwrap())?;
         Ok(result)
     }
 
