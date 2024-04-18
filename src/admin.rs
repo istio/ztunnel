@@ -35,6 +35,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{net::SocketAddr, time::Duration};
+
 use tokio::time;
 use tracing::{error, info, warn};
 
@@ -50,12 +51,20 @@ pub trait AdminHandler: Sync + Send {
     ) -> std::pin::Pin<Box<dyn futures_util::Future<Output = Response<Full<Bytes>>> + Sync + Send>>;
 }
 
+pub trait AdminHandler2: Sync + Send {
+    fn key(&self) -> &'static str;
+    // sadly can't use async trait because no Sync
+    // see: https://github.com/dtolnay/async-trait/issues/248, https://github.com/dtolnay/async-trait/issues/142
+    // we can't use FutureExt::shared because our result is not clonable
+    fn handle(&self) -> anyhow::Result<serde_json::Value>;
+}
+
 struct State {
     proxy_state: DemandProxyState,
     config: Config,
     shutdown_trigger: signal::ShutdownTrigger,
     cert_manager: Arc<SecretManager>,
-    handlers: Vec<Arc<dyn AdminHandler>>,
+    handlers: Vec<Arc<dyn AdminHandler2>>,
 }
 
 pub struct Service {
@@ -119,7 +128,7 @@ impl Service {
         self.s.address()
     }
 
-    pub fn add_handler(&mut self, handler: Arc<dyn AdminHandler>) {
+    pub fn add_handler(&mut self, handler: Arc<dyn AdminHandler2>) {
         self.s.state_mut().handlers.push(handler);
     }
 
@@ -135,39 +144,27 @@ impl Service {
                 )
                 .await),
                 "/config_dump" => {
-                    handle_config_dump(ConfigDump {
-                        proxy_state: state.proxy_state.clone(),
-                        static_config: Default::default(),
-                        version: BuildInfo::new(),
-                        config: state.config.clone(),
-                        certificates: dump_certs(state.cert_manager.borrow()).await,
-                    })
+                    handle_config_dump(
+                        &state.handlers,
+                        ConfigDump {
+                            proxy_state: state.proxy_state.clone(),
+                            static_config: Default::default(),
+                            version: BuildInfo::new(),
+                            config: state.config.clone(),
+                            certificates: dump_certs(state.cert_manager.borrow()).await,
+                        },
+                    )
                     .await
                 }
                 "/logging" => Ok(handle_logging(req).await),
-                "/" => Ok(handle_dashboard(req, &state.handlers).await),
-                _ => match Self::find_handler(state.as_ref(), req.uri().path()) {
-                    Some(handler) => Ok(handler.handle(req).await),
-                    None => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
-                },
+                "/" => Ok(handle_dashboard(req).await),
+                _ => Ok(empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
     }
-
-    fn find_handler(state: &State, path: &str) -> Option<Arc<dyn AdminHandler>> {
-        for handler in state.handlers.iter() {
-            if handler.path() == path {
-                return Some(handler.clone());
-            }
-        }
-        None
-    }
 }
 
-async fn handle_dashboard(
-    _req: Request<Incoming>,
-    handlers: &[Arc<dyn AdminHandler>],
-) -> Response<Full<Bytes>> {
+async fn handle_dashboard(_req: Request<Incoming>) -> Response<Full<Bytes>> {
     let apis = &[
         (
             "debug/pprof/profile",
@@ -181,11 +178,10 @@ async fn handle_dashboard(
         ("config_dump", "dump the current Ztunnel configuration"),
         ("logging", "query/changing logging levels"),
     ];
-    let handlers_api = handlers.iter().map(|h| (h.path(), h.description()));
 
     let mut api_rows = String::new();
 
-    for (index, (path, description)) in apis.iter().copied().chain(handlers_api).enumerate() {
+    for (index, (path, description)) in apis.iter().copied().enumerate() {
         api_rows.push_str(&format!(
             "<tr class=\"{row_class}\"><td class=\"home-data\"><a href=\"{path}\">{path}</a></td><td class=\"home-data\">{description}</td></tr>\n",
             row_class = if index % 2 == 1 { "gray" } else { "vert-space" },
@@ -286,7 +282,10 @@ async fn handle_server_shutdown(
     }
 }
 
-async fn handle_config_dump(mut dump: ConfigDump) -> anyhow::Result<Response<Full<Bytes>>> {
+async fn handle_config_dump(
+    handlers: &[Arc<dyn AdminHandler2>],
+    mut dump: ConfigDump,
+) -> anyhow::Result<Response<Full<Bytes>>> {
     if let Some(cfg) = dump.config.local_xds_config.clone() {
         match cfg.read_to_string().await {
             Ok(data) => match serde_yaml::from_str(&data) {
@@ -303,7 +302,16 @@ async fn handle_config_dump(mut dump: ConfigDump) -> anyhow::Result<Response<Ful
         }
     }
 
-    let body = serde_json::to_string_pretty(&dump)?;
+    let serde_json::Value::Object(mut kv) = serde_json::to_value(&dump)? else {
+        anyhow::bail!("config dump is not a key-value pair")
+    };
+
+    kv.insert("static".to_string(), serde_json::json!([handlers.len()]));
+    for h in handlers {
+        let x = h.handle()?;
+        kv.insert(h.key().to_string(), x);
+    }
+    let body = serde_json::to_string_pretty(&kv)?;
     Ok(Response::builder()
         .status(hyper::StatusCode::OK)
         .body(body.into())
@@ -722,7 +730,7 @@ mod tests {
         //
         // this could happen for a variety of reasons; for example some types
         // may need custom serialize/deserialize to be keys in a map, like NetworkAddress
-        let resp = handle_config_dump(dump).await.unwrap();
+        let resp = handle_config_dump(&[], dump).await.unwrap();
 
         let resp_bytes = resp
             .body()
