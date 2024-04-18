@@ -31,13 +31,13 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task;
 
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tracing::{debug, error};
 
 use crate::config;
 use crate::identity::{Identity, SecretManager};
 
-use std::collections::HashMap;
+use flurry::HashMap;
 
 use pingora_pool;
 
@@ -71,7 +71,7 @@ struct PoolState {
     // and has no actual hyper/http/connection logic.
     connected_pool: Arc<pingora_pool::ConnectionPool<ConnClient>>,
     // this must be a readlockable list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
-    established_conn_writelock: RwLock<HashMap<u64, Option<Mutex<()>>>>,
+    established_conn_writelock: HashMap<u64, Option<Arc<Mutex<()>>>>,
     close_pollers: futures::stream::FuturesUnordered<task::JoinHandle<()>>,
     pool_unused_release_timeout: Duration,
 }
@@ -119,12 +119,34 @@ impl PoolState {
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
     ) -> Option<ConnClient> {
-        debug!("first checkout READLOCK");
-        let map_read_lock = self.established_conn_writelock.read().await;
-        match map_read_lock.get(&pool_key.key) {
+        debug!("first checkout READGUARD");
+
+        let found_conn = {
+            // BEGIN take outer readlock
+            debug!("pool connect MAP OUTER READ/WRITE GUARD");
+            let guard = self.established_conn_writelock.guard();
+            debug!("pool connect MAP OUTER READ/WRITE START");
+
+            //OLD
+            // debug!("pool connect MAP OUTER READLOCK START");
+            // let map_read_lock = self.state.established_conn_writelock.read().await;
+            // debug!("pool connect MAP OUTER READLOCK END");
+            let exist_conn_lock = self.established_conn_writelock.get(&pool_key.key, &guard);
+            // BEGIN take inner writelock
+            debug!("pool connect MAP INNER WRITELOCK START");
+            match exist_conn_lock {
+                Some(e_conn_lock) => e_conn_lock.clone(),
+                None => None,
+            }
+            // exist_conn_lock.as_ref().unwrap().clone()
+        };
+        // let guard = self.established_conn_writelock.guard();
+        // debug!("pool connect MAP OUTER READGUARD GOT");
+        match found_conn {
+            // match map_read_lock.get(&pool_key.key) {
             Some(exist_conn_lock) => {
                 debug!("first checkout INNER WRITELOCK");
-                let _conn_lock = exist_conn_lock.as_ref().unwrap().lock().await;
+                let _conn_lock = exist_conn_lock.as_ref().lock().await;
 
                 debug!(
                     "getting conn for key {:#?} and hash {:#?}",
@@ -178,7 +200,7 @@ impl WorkloadHBONEPool {
                 // the number here is simply the number of unique src/dest keys
                 // the pool is expected to track before the inner hashmap resizes.
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
-                established_conn_writelock: RwLock::new(HashMap::new()),
+                established_conn_writelock: HashMap::new(),
                 close_pollers: futures::stream::FuturesUnordered::new(),
                 pool_unused_release_timeout: pool_duration,
             }),
@@ -245,19 +267,17 @@ impl WorkloadHBONEPool {
             // this is is the ONLY block where we should hold a writelock on the whole mutex map
             // for the rest, a readlock (nonexclusive) is sufficient.
             {
-                debug!("pool connect MAP OUTER WRITELOCK START");
-                let mut map_write_lock = self.state.established_conn_writelock.write().await;
-                debug!("pool connect MAP OUTER WRITELOCK END");
-                match map_write_lock.get(&hash_key) {
-                    Some(_) => {
+                debug!("pool connect MAP OUTER READ/WRITE GUARD");
+                let guard = self.state.established_conn_writelock.guard();
+                debug!("pool connect MAP OUTER READ/WRITE START");
+                match self.state.established_conn_writelock.try_insert(hash_key, Some(Arc::new(Mutex::new(()))), &guard) {
+                    Ok(_) => {
+                        debug!("inserting conn mutex for key {:#?}", hash_key);
+                    }
+                    Err(_) => {
                         debug!("already have conn for key {:#?}", hash_key);
                     }
-                    None => {
-                        debug!("inserting conn mutex for key {:#?}", hash_key);
-                        map_write_lock.insert(hash_key, Some(Mutex::new(())));
-                    }
-                };
-                drop(map_write_lock); // strictly redundant
+                }
             }
 
             // If we get here, it means the following are true:
@@ -280,14 +300,25 @@ impl WorkloadHBONEPool {
             // So the downsides are actually useful (we WANT task contention -
             // to block other parallel tasks from trying to spawn a connection if we are already doing so)
             //
-            // BEGIN take outer readlock
-            debug!("pool connect MAP OUTER READLOCK START");
-            let map_read_lock = self.state.established_conn_writelock.read().await;
-            debug!("pool connect MAP OUTER READLOCK END");
-            let exist_conn_lock = map_read_lock.get(&hash_key).unwrap();
-            // BEGIN take inner writelock
-            debug!("pool connect MAP INNER WRITELOCK START");
-            let found_conn = match exist_conn_lock.as_ref().unwrap().try_lock() {
+            let found_conn = {
+                // BEGIN take outer readlock
+                debug!("pool connect MAP OUTER READ/WRITE GUARD");
+                let guard = self.state.established_conn_writelock.guard();
+                debug!("pool connect MAP OUTER READ/WRITE START");
+
+
+                //OLD
+                // debug!("pool connect MAP OUTER READLOCK START");
+                // let map_read_lock = self.state.established_conn_writelock.read().await;
+                // debug!("pool connect MAP OUTER READLOCK END");
+                let exist_conn_lock = self.state.established_conn_writelock.get(&hash_key, &guard).unwrap();
+                // BEGIN take inner writelock
+                debug!("pool connect MAP INNER WRITELOCK START");
+                exist_conn_lock.as_ref().unwrap().clone()
+            };
+            // drop(guard);
+
+            let got_conn = match found_conn.try_lock() {
                 Ok(_guard) => {
                     // If we get here, it means the following are true:
                     // 1. We did not get a connection for our key.
@@ -375,7 +406,7 @@ impl WorkloadHBONEPool {
             // if we checked out a conn inserted by someone else that we cannot use,
             // everyone else will implicitly be waiting for us to check one back in,
             // since they are in their own loops.
-            match found_conn {
+            match got_conn {
                 // After waiting, we found an available conn we can use, so no need to start another.
                 // Clone the underlying client, return a copy, and put the other back in the pool.
                 Some(f_conn) => {
