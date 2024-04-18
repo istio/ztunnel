@@ -40,7 +40,7 @@ use crate::rbac::Connection;
 use crate::state::service::{endpoint_uid, Service, ServiceDescription};
 use crate::state::workload::address::Address;
 use crate::state::workload::{network_addr, GatewayAddress, Workload};
-use crate::state::{DemandProxyState, ProxyRbacContext, WorkloadInfo};
+use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
 pub mod connection_manager;

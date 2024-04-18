@@ -226,6 +226,11 @@ impl OutboundConnection {
             return;
         }
         let connection_metrics = Self::conn_metrics_from_request(&req);
+        // TODO: should we use the original address or the actual address? Both seems nice!
+        let _conn_guard =
+            self.pi
+                .connection_manager
+                .track_outbound(source_addr, dest_addr, req.gateway);
 
         let metrics = self.pi.metrics.clone();
         let hbone_target = if req.request_type == RequestType::ToServerWaypoint {
