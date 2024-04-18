@@ -14,7 +14,6 @@
 
 use super::{Error, SocketFactory};
 use bytes::Bytes;
-use drain::Watch;
 use std::time::Duration;
 use http_body_util::Empty;
 use hyper::body::Incoming;
@@ -110,18 +109,40 @@ impl PoolState {
         let _ = self.pool_notifier.send(true);
     }
 
+    async fn first_checkout_conn_from_pool(
+        &self,
+        workload_key: &WorkloadKey,
+        pool_key: &pingora_pool::ConnectionMeta,
+    ) -> Option<ConnClient> {
+        debug!("first checkout READLOCK");
+        let map_read_lock = self.established_conn_writelock.read().await;
+        match map_read_lock.get(&pool_key.key) {
+            Some(exist_conn_lock) => {
+                debug!("first checkout INNER WRITELOCK");
+                let _conn_lock = exist_conn_lock.as_ref().unwrap().lock().await;
+
+                debug!("getting conn for key {:#?} and hash {:#?}", workload_key, pool_key.key);
+                self.connected_pool.get(&pool_key.key).and_then(|e_conn| {
+                    debug!("got existing conn for key {:#?}", workload_key);
+                    if e_conn.at_max_streamcount() {
+                        debug!("got conn for key {:#?}, but streamcount is maxed", workload_key);
+                        None
+                    } else {
+                        self.checkin_conn(e_conn.clone(), pool_key.clone());
+                        Some(e_conn)
+                    }
+                })
+            }
+            None => None,
+        }
+    }
+
 }
+
 impl Drop for PoolState {
     fn drop(&mut self) {
-        // let sc = Arc::strong_count(&self.timeout_tx);
-        // debug!("pool dropping, strong count is {sc}");
-        // if sc == 1 {
-            debug!("poolstate dropping, cancelling all outstanding pool eviction timeout spawns");
-            let _ = self.timeout_tx.send(true);
-        // }
-        // No need to wait for all `close_pollers` to resolve,
-        // since this is a drop - the recievers will either get the notification, or
-        // return an error if their sender drops first - either way they will resolve.
+        debug!("poolstate dropping, cancelling all outstanding pool eviction timeout spawns");
+        let _ = self.timeout_tx.send(true);
     }
 }
 
@@ -133,11 +154,9 @@ impl WorkloadHBONEPool {
         cfg: crate::config::Config,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         cert_manager: Arc<SecretManager>,
-        // drainer: Watch, //when signaled, will stop driving all conns in the pool, effectively draining the pool.
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
         let (timeout_send, timeout_recv) = watch::channel(false);
-        let (server_drain_signal, server_drain) = drain::channel();
         let max_count = cfg.pool_max_streams_per_conn;
         let pool_duration = cfg.pool_unused_release_timeout;
         debug!(
@@ -161,7 +180,6 @@ impl WorkloadHBONEPool {
             cert_manager,
             pool_watcher: timeout_rx,
             max_streamcount: max_count,
-            // drainer,
         }
     }
 
@@ -193,9 +211,7 @@ impl WorkloadHBONEPool {
         //
         // This is so we can backpressure correctly if 1000 tasks all demand a new connection
         // to the same key at once, and not eagerly open 1000 tunnel connections.
-        let existing_conn = self
-            .first_checkout_conn_from_pool(&workload_key, &pool_key)
-            .await;
+        let existing_conn = self.state.first_checkout_conn_from_pool(&workload_key, &pool_key).await;
 
         debug!("pool connect GOT EXISTING");
         if existing_conn.is_some() {
@@ -383,41 +399,14 @@ impl WorkloadHBONEPool {
             // this is a final safety check for collisions, we will throw up our hands and refuse to return the conn
             match conn.is_for_workload(workload_key) {
                 Ok(()) => {
-                    return Ok(conn)
+                    Ok(conn)
                 }
                 Err(e) => {
-                    return Err(e)
+                    Err(e)
                 }
             }
         })
 
-    }
-    async fn first_checkout_conn_from_pool(
-        &self,
-        workload_key: &WorkloadKey,
-        pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Option<ConnClient> {
-        debug!("first checkout READLOCK");
-        let map_read_lock = self.state.established_conn_writelock.read().await;
-        match map_read_lock.get(&pool_key.key) {
-            Some(exist_conn_lock) => {
-                debug!("first checkout INNER WRITELOCK");
-                let _conn_lock = exist_conn_lock.as_ref().unwrap().lock().await;
-
-                debug!("getting conn for key {:#?} and hash {:#?}", workload_key, pool_key.key);
-                self.state.connected_pool.get(&pool_key.key).and_then(|e_conn| {
-                    debug!("got existing conn for key {:#?}", workload_key);
-                    if e_conn.at_max_streamcount() {
-                        debug!("got conn for key {:#?}, but streamcount is maxed", workload_key);
-                        None
-                    } else {
-                        self.state.checkin_conn(e_conn.clone(), pool_key.clone());
-                        Some(e_conn)
-                    }
-                })
-            }
-            None => None,
-        }
     }
 
     async fn spawn_new_pool_conn(
@@ -472,6 +461,7 @@ impl WorkloadHBONEPool {
 
         Ok(request_sender)
     }
+
 }
 
 #[derive(Debug, Clone)]
@@ -506,9 +496,9 @@ impl ConnClient {
 
     pub fn is_for_workload(&self, wl_key: WorkloadKey) -> Result<(), crate::proxy::Error> {
         if !(self.wl_key == wl_key) {
-            return Err(crate::proxy::Error::Generic("fetched connection does not match workload key!".into()))
+            Err(crate::proxy::Error::Generic("fetched connection does not match workload key!".into()))
         } else {
-            return Ok(())
+            Ok(())
         }
     }
 
@@ -555,7 +545,7 @@ mod test {
 
     #[tokio::test]
     async fn test_pool_reuses_conn_for_same_key() {
-        crate::telemetry::setup_logging();
+        // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
 
