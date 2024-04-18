@@ -68,9 +68,10 @@ impl Socks5 {
                 // TODO creating a new HBONE pool for SOCKS5 here may not be ideal,
                 // but ProxyInfo is overloaded and only `outbound` should ever use the pool.
                 let pool = crate::proxy::pool::WorkloadHBONEPool::new(
-                            self.pi.cfg.clone(),
-                            self.pi.socket_factory.clone(),
-                            self.pi.cert_manager.clone());
+                    self.pi.cfg.clone(),
+                    self.pi.socket_factory.clone(),
+                    self.pi.cert_manager.clone(),
+                );
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);

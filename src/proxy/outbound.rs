@@ -80,9 +80,10 @@ impl Outbound {
         let (sub_drain_signal, sub_drain) = drain::channel();
 
         let pool = proxy::pool::WorkloadHBONEPool::new(
-                    self.pi.cfg.clone(),
-                    self.pi.socket_factory.clone(),
-                    self.pi.cert_manager.clone());
+            self.pi.cfg.clone(),
+            self.pi.socket_factory.clone(),
+            self.pi.cert_manager.clone(),
+        );
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -147,13 +148,8 @@ impl OutboundConnection {
         let source_addr =
             socket::to_canonical(source_stream.peer_addr().expect("must receive peer addr"));
         let dst_addr = socket::orig_dst_addr_or_default(&source_stream);
-        self.proxy_to(
-            source_stream,
-            source_addr,
-            dst_addr,
-            false,
-        )
-        .await;
+        self.proxy_to(source_stream, source_addr, dst_addr, false)
+            .await;
     }
 
     // this is a cancellable outbound proxy. If `out_drain` is a Watch drain, will resolve
@@ -251,13 +247,8 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(
-                    &mut source_stream,
-                    source_addr,
-                    &req,
-                    &result_tracker,
-                )
-                .await
+                self.proxy_to_hbone(&mut source_stream, source_addr, &req, &result_tracker)
+                    .await
             }
             Protocol::TCP => {
                 self.proxy_to_tcp(&mut source_stream, &req, &result_tracker)
@@ -304,9 +295,11 @@ impl OutboundConnection {
         };
 
         debug!("outbound - connection get START");
-        let mut connection = self.pool.connect(pool_key.clone())
-                                         .instrument(trace_span!("get pool conn"))
-                                         .await?;
+        let mut connection = self
+            .pool
+            .connect(pool_key.clone())
+            .instrument(trace_span!("get pool conn"))
+            .await?;
         debug!("outbound - connection get END");
 
         let mut f = http_types::proxies::Forwarded::new();
@@ -329,9 +322,10 @@ impl OutboundConnection {
         // There are scenarios (upstream hangup, etc) where this "send" will simply get stuck.
         // As in, stream processing deadlocks, and `send_request` never resolves to anything.
         // Probably related to https://github.com/hyperium/hyper/issues/3623
-        let response = connection.send_request(request)
-                                 .instrument(trace_span!("send pool conn"))
-                                 .await?;
+        let response = connection
+            .send_request(request)
+            .instrument(trace_span!("send pool conn"))
+            .await?;
         debug!("outbound - connection send END");
 
         let code = response.status();
@@ -669,10 +663,7 @@ mod tests {
                 connection_manager: ConnectionManager::default(),
             },
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(
-                cfg,
-                sock_fact,
-                cert_mgr.clone()),
+            pool: pool::WorkloadHBONEPool::new(cfg, sock_fact, cert_mgr.clone()),
         };
 
         let req = outbound
