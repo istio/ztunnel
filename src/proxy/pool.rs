@@ -14,11 +14,11 @@
 
 use super::{Error, SocketFactory};
 use bytes::Bytes;
-use std::time::Duration;
 use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::client::conn::http2;
 use hyper::http::{Request, Response};
+use std::time::Duration;
 
 use std::collections::hash_map::DefaultHasher;
 use std::future::Future;
@@ -103,8 +103,13 @@ impl PoolState {
         let pool_key_ref = pool_key.clone();
         let release_timeout = self.pool_unused_release_timeout;
         self.close_pollers.push(tokio::spawn(async move {
-            pool_ref.idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup).await;
-            debug!("connection {:#?} was removed/checked out/timed out of the pool", pool_key_ref)
+            pool_ref
+                .idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup)
+                .await;
+            debug!(
+                "connection {:#?} was removed/checked out/timed out of the pool",
+                pool_key_ref
+            )
         }));
         let _ = self.pool_notifier.send(true);
     }
@@ -121,11 +126,17 @@ impl PoolState {
                 debug!("first checkout INNER WRITELOCK");
                 let _conn_lock = exist_conn_lock.as_ref().unwrap().lock().await;
 
-                debug!("getting conn for key {:#?} and hash {:#?}", workload_key, pool_key.key);
+                debug!(
+                    "getting conn for key {:#?} and hash {:#?}",
+                    workload_key, pool_key.key
+                );
                 self.connected_pool.get(&pool_key.key).and_then(|e_conn| {
                     debug!("got existing conn for key {:#?}", workload_key);
                     if e_conn.at_max_streamcount() {
-                        debug!("got conn for key {:#?}, but streamcount is maxed", workload_key);
+                        debug!(
+                            "got conn for key {:#?}, but streamcount is maxed",
+                            workload_key
+                        );
                         None
                     } else {
                         self.checkin_conn(e_conn.clone(), pool_key.clone());
@@ -136,7 +147,6 @@ impl PoolState {
             None => None,
         }
     }
-
 }
 
 impl Drop for PoolState {
@@ -159,12 +169,9 @@ impl WorkloadHBONEPool {
         let (timeout_send, timeout_recv) = watch::channel(false);
         let max_count = cfg.pool_max_streams_per_conn;
         let pool_duration = cfg.pool_unused_release_timeout;
-        debug!(
-            "constructing pool with {:#?} streams per conn",
-            max_count
-        );
+        debug!("constructing pool with {:#?} streams per conn", max_count);
         Self {
-            state: Arc::new(PoolState{
+            state: Arc::new(PoolState {
                 pool_notifier: timeout_tx,
                 timeout_tx: timeout_send,
                 timeout_rx: timeout_recv,
@@ -211,7 +218,10 @@ impl WorkloadHBONEPool {
         //
         // This is so we can backpressure correctly if 1000 tasks all demand a new connection
         // to the same key at once, and not eagerly open 1000 tunnel connections.
-        let existing_conn = self.state.first_checkout_conn_from_pool(&workload_key, &pool_key).await;
+        let existing_conn = self
+            .state
+            .first_checkout_conn_from_pool(&workload_key, &pool_key)
+            .await;
 
         debug!("pool connect GOT EXISTING");
         if existing_conn.is_some() {
@@ -406,7 +416,6 @@ impl WorkloadHBONEPool {
                 }
             }
         })
-
     }
 
     async fn spawn_new_pool_conn(
@@ -461,7 +470,6 @@ impl WorkloadHBONEPool {
 
         Ok(request_sender)
     }
-
 }
 
 #[derive(Debug, Clone)]
@@ -470,7 +478,7 @@ impl WorkloadHBONEPool {
 pub struct ConnClient {
     sender: http2::SendRequest<Empty<Bytes>>,
     stream_count: Arc<AtomicU16>, // the current streamcount for this client conn.
-    stream_count_max: u16, // the max streamcount associated with this client.
+    stream_count_max: u16,        // the max streamcount associated with this client.
     // A WL key may have many clients, but every client has no more than one WL key
     wl_key: WorkloadKey, // the WL key associated with this client.
 }
@@ -496,12 +504,13 @@ impl ConnClient {
 
     pub fn is_for_workload(&self, wl_key: WorkloadKey) -> Result<(), crate::proxy::Error> {
         if !(self.wl_key == wl_key) {
-            Err(crate::proxy::Error::Generic("fetched connection does not match workload key!".into()))
+            Err(crate::proxy::Error::Generic(
+                "fetched connection does not match workload key!".into(),
+            ))
         } else {
             Ok(())
         }
     }
-
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
