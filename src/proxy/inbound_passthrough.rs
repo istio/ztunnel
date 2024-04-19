@@ -184,7 +184,7 @@ impl InboundPassthrough {
             identity: rbac_ctx.conn.src_identity.clone(),
             ..Default::default()
         };
-        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, upstream_service, &upstream);
+        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, &None, upstream_service, &upstream);
         let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::destination,
             source: source_workload,
@@ -202,7 +202,10 @@ impl InboundPassthrough {
             pi.metrics,
         );
 
-        let conn_guard = match connection_manager.assert_rbac(&pi.state, &rbac_ctx).await {
+        let conn_guard = match connection_manager
+            .assert_rbac(&pi.state, &rbac_ctx, None)
+            .await
+        {
             Ok(cg) => cg,
             Err(e) => {
                 result_tracker.record(Err(e));
