@@ -14,11 +14,12 @@
 
 use std::fmt::Write;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{atomic, Arc};
 use std::time::Instant;
 
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
-use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::counter::{Atomic, Counter};
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
@@ -340,6 +341,15 @@ pub struct ConnectionResult {
     start: Instant,
     tl: CommonTrafficLabels,
     metrics: Arc<Metrics>,
+
+    // sent records the number of bytes sent on this connection
+    sent: AtomicU64,
+    // sent_metric records the number of bytes sent on this connection to the aggregated metric counter
+    sent_metric: Counter,
+    // recv records the number of bytes received on this connection
+    recv: AtomicU64,
+    // recv_metric records the number of bytes received on this connection to the aggregated metric counter
+    recv_metric: Counter,
 }
 
 // log_early_deny allows logging a connection is denied before we have enough information to emit proper
@@ -449,6 +459,15 @@ impl ConnectionResult {
 
             "connection opened"
         );
+        // Grab the metrics with our labels now, so we don't need to fetch them each time.
+        // The inner metric is an Arc so clone is fine/cheap.
+        // With the raw Counter, we increment is a simple atomic add operation (~1ns).
+        // Fetching the metric itself is ~300ns; fast, but we call it on each read/write so it would
+        // add up.
+        let sent_metric = metrics.sent_bytes.get_or_create(&tl).clone();
+        let recv_metric = metrics.received_bytes.get_or_create(&tl).clone();
+        let sent = atomic::AtomicU64::new(0);
+        let recv = atomic::AtomicU64::new(0);
         Self {
             src,
             dst,
@@ -456,20 +475,27 @@ impl ConnectionResult {
             start,
             tl,
             metrics,
+
+            sent,
+            sent_metric,
+            recv,
+            recv_metric,
         }
     }
 
     pub fn increment_send(&self, res: u64) {
-        let tl = &self.tl;
-        self.metrics.sent_bytes.get_or_create(tl).inc_by(res);
+        self.sent.inc_by(res);
+        self.sent_metric.inc_by(res);
     }
+
     pub fn increment_recv(&self, res: u64) {
-        let tl = &self.tl;
-        self.metrics.received_bytes.get_or_create(tl).inc_by(res);
+        self.recv.inc_by(res);
+        self.recv_metric.inc_by(res);
     }
+
     // Record our final result.
     // Ideally, we would save and report from the increment_ functions instead of requiring a report here.
-    pub fn record<E: std::error::Error>(&self, res: Result<(u64, u64), E>) {
+    pub fn record<E: std::error::Error>(&self, res: Result<(), E>) {
         let tl = &self.tl;
 
         // Unconditionally record the connection was closed
@@ -477,7 +503,10 @@ impl ConnectionResult {
 
         // Unconditionally write out an access log
         let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
-        let bytes = res.as_ref().ok();
+        let bytes = (
+            self.recv.load(Ordering::SeqCst),
+            self.sent.load(Ordering::SeqCst),
+        );
         let dur = format!("{}ms", self.start.elapsed().as_millis());
         // We use our own macro to allow setting the level dynamically
         access_log!(
@@ -503,8 +532,8 @@ impl ConnectionResult {
 
             // Istio flips the metric for source: https://github.com/istio/istio/issues/32399
             // Unflip for logs
-            bytes_sent = bytes.map(|r| if tl.reporter == Reporter::source {r.0} else {r.1}),
-            bytes_recv = bytes.map(|r| if tl.reporter == Reporter::source {r.1} else {r.0}),
+            bytes_sent = if tl.reporter == Reporter::source {bytes.0} else {bytes.1},
+            bytes_recv = if tl.reporter == Reporter::source {bytes.1} else {bytes.0},
             duration = dur,
         );
     }

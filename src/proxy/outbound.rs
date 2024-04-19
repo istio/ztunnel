@@ -263,7 +263,7 @@ impl OutboundConnection {
                     .await
             }
         };
-        result_tracker.record(res)
+        result_tracker.record(res.map(|_| ()))
     }
 
     async fn proxy_to_hbone(

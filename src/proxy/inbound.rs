@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -33,8 +33,8 @@ use tokio::time::timeout;
 
 use tracing::{debug, error, info, instrument, trace_span, Instrument};
 
-use super::connection_manager::{ConnectionGuard, ConnectionManager};
-use super::{ConnectionResult, Error, SocketFactory};
+use super::connection_manager::ConnectionManager;
+use super::Error;
 use crate::baggage::parse_baggage_header;
 use crate::identity::{Identity, SecretManager};
 
@@ -176,81 +176,6 @@ impl Inbound {
         drop(sub_drain); // sub_drain_signal.drain() will never resolve while sub_drain is valid, will deadlock if not dropped
         sub_drain_signal.drain().await;
         info!("all inbound connections drained");
-    }
-
-    /// handle_inbound serves an inbound connection with a target address `addr`.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn handle_inbound(
-        request_type: InboundConnect,
-        orig_src: Option<IpAddr>,
-        addr: SocketAddr,
-        result_tracker: ConnectionResult,
-        socket_factory: &(dyn SocketFactory + Send + Sync),
-        conn_guard: ConnectionGuard,
-    ) -> Result<(), ()> {
-        let stream = super::freebind_connect(orig_src, addr, socket_factory)
-            .await
-            .and_then(|s| {
-                s.set_nodelay(true)?;
-                Ok(s)
-            });
-        let mut stream = match stream {
-            Err(err) => {
-                result_tracker.record(Err(err));
-                return Err(());
-            }
-            Ok(stream) => stream,
-        };
-        debug!("connected to: {addr}");
-
-        tokio::task::spawn(
-            (async move {
-                let result_tracker = Arc::new(result_tracker);
-                let send = async {
-                    let result_tracker = result_tracker.clone();
-                    match request_type {
-                        Hbone(req) => {
-                            hyper::upgrade::on(req)
-                                .map_err(Error::NoUpgrade)
-                                .and_then(|upgraded| async move {
-                                    socket::copy_bidirectional(
-                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
-                                        &mut stream,
-                                        &result_tracker,
-                                    )
-                                    .instrument(trace_span!("hbone server"))
-                                    .await
-                                })
-                                .await
-                        }
-                        Proxy(req, (src, dst), src_id) => {
-                            hyper::upgrade::on(req)
-                                .map_err(Error::NoUpgrade)
-                                .and_then(|upgraded| async move {
-                                    super::write_proxy_protocol(&mut stream, (src, dst), src_id)
-                                        .instrument(trace_span!("proxy protocol"))
-                                        .await?;
-                                    socket::copy_bidirectional(
-                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
-                                        &mut stream,
-                                        &result_tracker,
-                                    )
-                                    .instrument(trace_span!("hbone server"))
-                                    .await
-                                })
-                                .await
-                        }
-                    }
-                };
-                let res = conn_guard.handle_connection(send).await;
-                result_tracker.record(res);
-            })
-            .in_current_span(),
-        );
-        // Send back our 200. We do this regardless of if our spawned task copies the data;
-        // we need to respond with headers immediately once connection is established for the
-        // stream of bytes to begin.
-        Ok(())
     }
 
     fn extract_traceparent(req: &Request<Incoming>) -> TraceParent {
@@ -404,20 +329,70 @@ impl Inbound {
             _ => Hbone(req),
         };
 
-        match Self::handle_inbound(
-            request_type,
-            enable_original_source.then_some(source_ip),
-            upstream_addr,
-            result_tracker,
-            pi.socket_factory.as_ref(),
-            conn_guard,
-        )
-        .in_current_span()
-        .await
-        {
-            Ok(_) => StatusCode::OK,
-            Err(_) => StatusCode::SERVICE_UNAVAILABLE,
-        }
+        let orig_src = enable_original_source.then_some(source_ip);
+        let stream = super::freebind_connect(orig_src, upstream_addr, pi.socket_factory.as_ref())
+            .await
+            .and_then(|s| {
+                s.set_nodelay(true)?;
+                Ok(s)
+            });
+        let mut stream = match stream {
+            Err(err) => {
+                result_tracker.record(Err(err));
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
+            Ok(stream) => stream,
+        };
+        debug!("connected to: {upstream_addr}");
+
+        tokio::task::spawn(
+            (async move {
+                let result_tracker = Arc::new(result_tracker);
+                let send = async {
+                    let result_tracker = result_tracker.clone();
+                    match request_type {
+                        Hbone(req) => {
+                            hyper::upgrade::on(req)
+                                .map_err(Error::NoUpgrade)
+                                .and_then(|upgraded| async move {
+                                    socket::copy_bidirectional(
+                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
+                                        &mut stream,
+                                        &result_tracker,
+                                    )
+                                    .instrument(trace_span!("hbone server"))
+                                    .await
+                                })
+                                .await
+                        }
+                        Proxy(req, (src, dst), src_id) => {
+                            hyper::upgrade::on(req)
+                                .map_err(Error::NoUpgrade)
+                                .and_then(|upgraded| async move {
+                                    super::write_proxy_protocol(&mut stream, (src, dst), src_id)
+                                        .instrument(trace_span!("proxy protocol"))
+                                        .await?;
+                                    socket::copy_bidirectional(
+                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
+                                        &mut stream,
+                                        &result_tracker,
+                                    )
+                                    .instrument(trace_span!("hbone server"))
+                                    .await
+                                })
+                                .await
+                        }
+                    }
+                };
+                let res = conn_guard.handle_connection(send).await;
+                result_tracker.record(res.map(|_| ()));
+            })
+            .in_current_span(),
+        );
+        // Send back our 200. We do this regardless of if our spawned task copies the data;
+        // we need to respond with headers immediately once connection is established for the
+        // stream of bytes to begin.
+        StatusCode::OK
     }
 
     async fn find_inbound_upstream(

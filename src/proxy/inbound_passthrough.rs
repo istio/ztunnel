@@ -231,6 +231,6 @@ impl InboundPassthrough {
         };
 
         let res = conn_guard.handle_connection(send).await;
-        result_tracker.record(res);
+        result_tracker.record(res.map(|_| ()));
     }
 }
