@@ -65,7 +65,8 @@ const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
-const DEFAULT_POOL_RELEASE: Duration = Duration::from_secs(60 * 5); // 5 minutes
+const DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
+const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 100; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
 
 const DEFAULT_INPOD_MARK: u32 = 1337;
 
@@ -134,8 +135,8 @@ pub struct Config {
     // This can be used to effect flow control for "connection storms" when workload clients
     // (such as loadgen clients) open many connections all at once.
     //
-    // Note that this will only be checked and inner conns rebalanced accordingly when a new connection
-    // is requested from the pool, and not on every stream queue on that connection.
+    // Note that this will only be checked when a *new* connection
+    // is requested from the pool, and not on every *stream* queued on that connection.
     // So if you request a single connection from a pool configured wiht a max streamcount of 200,
     // and queue 500 streams on it, you will still exceed this limit and are at the mercy of hyper's
     // default stream queuing.
@@ -339,11 +340,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .get(DNS_CAPTURE_METADATA)
             .map_or(false, |value| value.to_lowercase() == "true"),
 
-        pool_max_streams_per_conn: parse_default(POOL_MAX_STREAMS_PER_CONNECTION, 250)?,
+        pool_max_streams_per_conn: parse_default(
+            POOL_MAX_STREAMS_PER_CONNECTION,
+            DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION,
+        )?,
 
         pool_unused_release_timeout: match parse::<String>(POOL_UNUSED_RELEASE_TIMEOUT)? {
-            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_POOL_RELEASE),
-            None => DEFAULT_POOL_RELEASE,
+            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT),
+            None => DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
         },
 
         window_size: 4 * 1024 * 1024,
