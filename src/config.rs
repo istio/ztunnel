@@ -50,6 +50,8 @@ const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
+const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
+
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
@@ -117,7 +119,7 @@ pub struct Config {
     pub connection_window_size: u32,
     pub frame_size: u32,
 
-    pub socks5_addr: SocketAddr,
+    pub socks5_addr: Option<SocketAddr>,
     pub admin_addr: SocketAddr,
     pub stats_addr: SocketAddr,
     pub readiness_addr: SocketAddr,
@@ -300,6 +302,12 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         None => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
     };
 
+    let socks5_addr = if let Some(true) = parse(UNSTABLE_ENABLE_SOCKS5)? {
+        Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080))
+    } else {
+        None
+    };
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         dns_proxy: pc
@@ -328,7 +336,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
 
-        socks5_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080),
+        socks5_addr,
         inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
         outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),

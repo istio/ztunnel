@@ -75,11 +75,6 @@ async fn test_conflicting_bind_error_outbound() {
 }
 
 #[tokio::test]
-async fn test_conflicting_bind_error_socks5() {
-    test_bind_conflict(|c| &mut c.socks5_addr).await;
-}
-
-#[tokio::test]
 async fn test_conflicting_bind_error_admin() {
     test_bind_conflict(|c| &mut c.admin_addr).await;
 }
