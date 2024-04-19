@@ -8,9 +8,7 @@ features = ["tls-boring", "tls-ring"]
 
 [advisories]
 version = 2
-ignore = [
-    { id = "RUSTSEC-2021-0145", reason = "TODO(https://github.com/istio/ztunnel/issues/878)" },
-]
+
 
 [licenses]
 version = 2
@@ -40,10 +38,6 @@ allow = ["Apache-2.0",
     "Unicode-DFS-2016"]
 unused-allowed-license = "allow"
 
-# TOOD: https://github.com/istio/ztunnel/issues/877
-exceptions = [
-    { crate = "priority-queue", allow = ["MPL-2.0"] },
-]
 
 # Deny cannot detect ring properly. Directly assign
 [[licenses.clarify]]
@@ -73,7 +67,7 @@ skip = [
     { crate = "itertools" },
     { crate = "memoffset" },
     { crate = "nix" },
-    { crate = "atty" },
+    { crate = "heck" },
 ]
 
 [sources]
