@@ -594,6 +594,7 @@ mod test {
     use hyper::{Request, Response};
     use std::sync::atomic::AtomicU32;
     use std::time::Duration;
+    use tokio::time::sleep;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
     use tokio::task::{self};
@@ -611,7 +612,9 @@ mod test {
 
         let (server_drain_signal, server_drain) = drain::channel();
 
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
@@ -639,7 +642,8 @@ mod test {
 
         server_drain_signal.drain().await;
         drop(pool);
-        let real_conncount = server_handle.await.unwrap();
+        server_handle.await.unwrap();
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 1, "actual conncount was {real_conncount}");
 
         assert!(client1.is_ok());
@@ -650,7 +654,10 @@ mod test {
     #[tokio::test]
     async fn test_pool_does_not_reuse_conn_for_diff_key() {
         let (server_drain_signal, server_drain) = drain::channel();
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         // crate::telemetry::setup_logging();
 
@@ -681,7 +688,10 @@ mod test {
 
         server_drain_signal.drain().await;
         drop(pool);
-        let real_conncount = server_handle.await.unwrap();
+
+        server_handle.await.unwrap();
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
 
         assert!(client1.is_ok());
@@ -691,7 +701,10 @@ mod test {
     #[tokio::test]
     async fn test_pool_respects_per_conn_stream_limit() {
         let (server_drain_signal, server_drain) = drain::channel();
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
@@ -714,7 +727,9 @@ mod test {
         server_drain_signal.drain().await;
         drop(pool);
 
-        let real_conncount = server_handle.await.unwrap();
+        server_handle.await.unwrap();
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
 
         assert!(client1.is_ok());
@@ -724,7 +739,10 @@ mod test {
     #[tokio::test]
     async fn test_pool_handles_many_conns_per_key() {
         let (server_drain_signal, server_drain) = drain::channel();
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
@@ -748,7 +766,9 @@ mod test {
         drop(pool);
         server_drain_signal.drain().await;
 
-        let real_conncount = server_handle.await.unwrap();
+        server_handle.await.unwrap();
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
 
         assert!(client1.is_ok());
@@ -760,7 +780,10 @@ mod test {
         // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
@@ -795,7 +818,8 @@ mod test {
 
         drop(pool);
         server_drain_signal.drain().await;
-        let real_conncount = server_handle.await.unwrap();
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
     }
 
@@ -804,7 +828,10 @@ mod test {
         // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
@@ -840,7 +867,9 @@ mod test {
         drop(pool);
 
         server_drain_signal.drain().await;
-        let real_conncount = server_handle.await.unwrap();
+        server_handle.await.unwrap();
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 1, "actual conncount was {real_conncount}");
     }
 
@@ -849,7 +878,10 @@ mod test {
         // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
@@ -889,7 +921,9 @@ mod test {
         drop(pool);
 
         server_drain_signal.drain().await;
-        let real_conncount = server_handle.await.unwrap();
+        server_handle.await.unwrap();
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(
             real_conncount == 100,
             "actual conncount was {real_conncount}"
@@ -901,7 +935,10 @@ mod test {
         // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
-        let (server_addr, server_handle) = spawn_server(server_drain).await;
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
@@ -948,9 +985,147 @@ mod test {
 
         drop(pool);
 
-        server_drain_signal.drain().await;
-        let real_conncount = server_handle.await.unwrap();
+        server_handle.await.unwrap();
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+    }
+
+    #[tokio::test]
+    async fn test_pool_1000_clients_3_srcs_drops_after_timeout() {
+        // crate::telemetry::setup_logging();
+
+        let (server_drain_signal, server_drain) = drain::channel();
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
+
+        let cfg = crate::config::Config {
+            local_node: Some("local-node".to_string()),
+            pool_max_streams_per_conn: 1000,
+            pool_unused_release_timeout: Duration::from_secs(5),
+            ..crate::config::parse_config().unwrap()
+        };
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+
+        let mut key1 = WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, 1]),
+            dst: server_addr,
+        };
+
+        let client_count = 100;
+        let mut count = 0u32;
+        let mut tasks = futures::stream::FuturesUnordered::new();
+        loop {
+            count += 1;
+            if count % 2 == 0 {
+                debug!("using key 2");
+                key1.src = IpAddr::from([127, 0, 0, 4]);
+            } else if count % 3 == 0 {
+                debug!("using key 3");
+                key1.src = IpAddr::from([127, 0, 0, 6]);
+            } else {
+                debug!("using key 1");
+                key1.src = IpAddr::from([127, 0, 0, 2]);
+            }
+
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+
+            if count == client_count {
+                break;
+            }
+        }
+        while let Some(Err(res)) = tasks.next().await {
+            assert!(!res.is_panic(), "CLIENT PANICKED!");
+            continue;
+        }
+
+        let before_conncount = conn_counter.load(Ordering::Relaxed);
+        let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+        assert!(before_conncount == 3, "actual before conncount was {before_conncount}");
+        assert!(before_dropcount == 0, "actual before dropcount was {before_dropcount}");
+
+        drop(pool);
+        // Attempt to wait long enough for pool conns to timeout+drop
+        sleep(Duration::from_secs(6)).await;
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
+        let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+        assert!(real_dropcount == 3, "actual dropcount was {real_dropcount}");
+
+        server_drain_signal.drain().await;
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pool_1000_clients_3_srcs_does_not_drop_before_timeout() {
+        // crate::telemetry::setup_logging();
+
+        let (server_drain_signal, server_drain) = drain::channel();
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(server_drain, conn_counter.clone(), conn_drop_counter.clone()).await;
+
+        let cfg = crate::config::Config {
+            local_node: Some("local-node".to_string()),
+            pool_max_streams_per_conn: 1000,
+            pool_unused_release_timeout: Duration::from_secs(5),
+            ..crate::config::parse_config().unwrap()
+        };
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+
+        let mut key1 = WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, 1]),
+            dst: server_addr,
+        };
+
+        let client_count = 100;
+        let mut count = 0u32;
+        let mut tasks = futures::stream::FuturesUnordered::new();
+        loop {
+            count += 1;
+            if count % 2 == 0 {
+                debug!("using key 2");
+                key1.src = IpAddr::from([127, 0, 0, 4]);
+            } else if count % 3 == 0 {
+                debug!("using key 3");
+                key1.src = IpAddr::from([127, 0, 0, 6]);
+            } else {
+                debug!("using key 1");
+                key1.src = IpAddr::from([127, 0, 0, 2]);
+            }
+
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+
+            if count == client_count {
+                break;
+            }
+        }
+        while let Some(Err(res)) = tasks.next().await {
+            assert!(!res.is_panic(), "CLIENT PANICKED!");
+            continue;
+        }
+
+        drop(pool);
+        // Attempt to wait long enough for pool conns to timeout+drop
+        sleep(Duration::from_secs(6)).await;
+
+        server_drain_signal.drain().await;
+        server_handle.await.unwrap();
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
+        let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+        assert!(real_dropcount == 3, "actual dropcount was {real_dropcount}");
     }
 
     fn spawn_client(
@@ -1001,7 +1176,7 @@ mod test {
         })
     }
 
-    async fn spawn_server(stop: Watch) -> (SocketAddr, task::JoinHandle<u32>) {
+    async fn spawn_server(stop: Watch, conn_count: Arc<AtomicU32>, conn_drop_count: Arc<AtomicU32>) -> (SocketAddr, task::JoinHandle<()>) {
         // We'll bind to 127.0.0.1:3000
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let test_cfg = test_config();
@@ -1022,9 +1197,6 @@ mod test {
             Ok::<_, Infallible>(Response::new(http_body_util::Empty::<Bytes>::new()))
         }
 
-        let conn_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        // let _drop_conn_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-
         // We create a TcpListener and bind it to 127.0.0.1:3000
         let listener = TcpListener::bind(addr).await.unwrap();
         let bound_addr = listener.local_addr().unwrap();
@@ -1041,10 +1213,12 @@ mod test {
             // We start a loop to continuously accept incoming connections
             // and also count them
             let movable_count = conn_count.clone();
+            let movable_drop_count = conn_drop_count.clone();
             let accept = async move {
                 loop {
                     let stream = tls_stream.next().await.unwrap();
                     movable_count.fetch_add(1, Ordering::Relaxed);
+                    let dcount = movable_drop_count.clone();
                     debug!("bump serverconn");
 
                     // Spawn a tokio task to serve multiple connections concurrently
@@ -1065,6 +1239,7 @@ mod test {
                         {
                             println!("Error serving connection: {:?}", err);
                         }
+                        dcount.fetch_add(1, Ordering::Relaxed);
                     });
                 }
             };
@@ -1074,8 +1249,6 @@ mod test {
                     debug!("GOT STOP SERVER");
                 }
             };
-
-            conn_count.load(Ordering::Relaxed)
         });
 
         (bound_addr, srv_handle)
