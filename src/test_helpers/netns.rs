@@ -29,7 +29,6 @@ use tracing::{debug, error, warn, Instrument};
 use crate::test_helpers::helpers;
 
 pub struct NamespaceManager {
-    prefix: String,
     state: Arc<Mutex<State>>,
 }
 
@@ -174,24 +173,22 @@ fn id_to_ip(node_id: u8, pod_id: u8) -> IpAddr {
 // Clear out the namespace on Drop. This gives best effort assurance our test cleans up properly
 impl Drop for NamespaceManager {
     fn drop(&mut self) {
-        // Drop the root namespace
-        drop_namespace(&self.prefix);
         let Ok(state) = self.state.lock() else {
             // Panic in Drop is not good... so just skip
             error!("lock poisoned!");
             return;
         };
         for (name, ns) in state.pods.iter() {
-            drop_namespace(&format!("{}~{}~{name}", self.prefix, &ns.node));
+            drop_namespace(&format!("{}~{name}", &ns.node));
         }
         for (name, _) in state.nodes.iter() {
-            drop_namespace(&format!("{}~{name}", self.prefix));
+            drop_namespace(&name.to_string());
         }
     }
 }
 
 impl NamespaceManager {
-    pub fn new(prefix: &str) -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         if let Ok(h) = Handle::try_current() {
             assert_eq!(
                 h.runtime_flavor(),
@@ -199,20 +196,17 @@ impl NamespaceManager {
                 "Namespaces require single threaded"
             );
         }
-        let ns = NetNs::new(prefix)?;
         // Build Self early so we cleanup if later commands fail
         let res = Self {
-            prefix: prefix.to_string(),
             state: Default::default(),
         };
-        ns.enter()?;
-        helpers::run_command(&format!(
+        helpers::run_command(
             "
-ip -n {prefix} link add name br0 type bridge
-ip -n {prefix} link set dev br0 up
-ip -n {prefix} addr add 172.172.0.1/16 dev br0
-"
-        ))?;
+ip link add name br0 type bridge
+ip link set dev br0 up
+ip addr add 172.172.0.1/16 dev br0
+",
+        )?;
         Ok(res)
     }
 
@@ -251,8 +245,7 @@ ip -n {prefix} addr add 172.172.0.1/16 dev br0
         // 10.0.0.1 is the node namespace, so skip 0 and 1
         assert!(state.pods.len() < 254, "only 255 networks allowed");
         let id = state.pods.len() as u8 + 2;
-        let node_net = format!("{}~{node}", &self.prefix);
-        let prefix = &self.prefix;
+        let node_net = node.to_string();
         if state.pods.contains_key(name) {
             panic!("pod {name} already registered");
         }
@@ -272,10 +265,10 @@ ip -n {prefix} addr add 172.172.0.1/16 dev br0
             helpers::run_command(&format!(
                 "
 set -ex
-ip -n {prefix} link add {veth} type veth peer name eth0 netns {node_net}
-ip -n {prefix} link set dev {veth} up
-ip -n {prefix} link set dev {veth} master br0
-ip -n {prefix} route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev br0
+ip link add {veth} type veth peer name eth0 netns {node_net}
+ip link set dev {veth} up
+ip link set dev {veth} master br0
+ip route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev br0
 # Give our node an IP
 ip -n {node_net} link set dev eth0 up
 ip -n {node_net} addr add 172.172.0.{node_id}/16 dev eth0
@@ -290,7 +283,7 @@ ip -n {node_net} route add 172.172.0.0/17 dev eth0 scope link src 172.172.0.{nod
                     continue;
                 }
                 let other_id = s.id;
-                let other_net = format!("{}~{node}", &self.prefix);
+                let other_net = node.clone();
                 helpers::run_command(&format!(
                     "
 set -ex
@@ -304,7 +297,7 @@ ip -n {other_net} route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev eth0
         }
         let node_id = state.nodes.get(node).unwrap().id;
         let veth = format!("veth{id}");
-        let net = format!("{prefix}~{node}~{name}");
+        let net = format!("{node}~{name}");
         let netns = NetNs::new(&net)?;
         let ns = Namespace {
             id,

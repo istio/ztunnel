@@ -107,34 +107,14 @@ mod namespaced {
         .expect("xtables bindmount");
     }
 
-    macro_rules! function {
-        () => {{
-            fn f() {}
-            fn type_name_of<T>(_: T) -> &'static str {
-                std::any::type_name::<T>()
-            }
-            let name = type_name_of(f);
-            &name[..name.len() - 3]
-        }};
-    }
-
     /// setup_netns_test prepares a test using network namespaces. This checks we have root,
-    /// and automatically setups up a namespace based on the test name (to avoid conflicts).
-    macro_rules! setup_netns_test {
-        () => {{
-            if unsafe { libc::getuid() } != 0 {
-                panic!("CI tests should run as root; this is supposed to happen automatically?");
-            }
-            initialize_telemetry();
-            let f = function!()
-                .strip_prefix(module_path!())
-                .unwrap()
-                .strip_prefix("::")
-                .unwrap()
-                .strip_suffix("::{{closure}}")
-                .unwrap();
-            WorkloadManager::new(f)?
-        }};
+    /// and automatically setups up a namespace manager.
+    fn setup_netns_test() -> WorkloadManager {
+        if unsafe { libc::getuid() } != 0 {
+            panic!("CI tests should run as root; this is supposed to happen automatically?");
+        }
+        initialize_telemetry();
+        WorkloadManager::new().expect("create workload manager")
     }
 
     const TEST_VIP: &str = "10.10.0.1";
@@ -146,7 +126,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_vip_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         manager
             .service_builder("server1")
             .addresses(vec![NetworkAddress {
@@ -276,7 +256,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_tcp_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         run_tcp_server(manager.workload_builder("server", REMOTE_NODE).register()?)?;
         let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
         let client = manager
@@ -298,7 +278,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_tcp_request_inpod_mode() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         info!("running server for ztunnel");
 
         let randnum: usize = rand::random();
@@ -379,7 +359,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_tcp_local_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         run_tcp_server(
             manager
                 .workload_builder("server", DEFAULT_NODE)
@@ -412,7 +392,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_hbone_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
@@ -493,7 +473,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
         let ip = waypoint.ip();
         run_hbone_server(waypoint)?;
@@ -521,7 +501,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_svc_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         let waypoint_workload = manager
             .workload_builder("waypoint", DEFAULT_NODE)
             .hbone()
@@ -560,7 +540,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_waypoint_bypass() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
         // create a policy to ensure traffic is from the waypoint
         // TODO: this test is testing bypass from uncaptured workloads but other forms of bypass should be tested
@@ -636,7 +616,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         let _ = manager
             .workload_builder("server", DEFAULT_NODE)
             .register()?;
@@ -794,7 +774,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
             .register()?;
@@ -866,7 +846,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!();
+        let mut manager = setup_netns_test();
         let id = match identity::Identity::default() {
             identity::Identity::Spiffe { .. } => {
                 identity::Identity::Spiffe {
