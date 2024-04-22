@@ -93,13 +93,16 @@ pub enum RequestProtocol {
 #[derive(Default, Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ResponseFlags {
     #[default]
-    none,
+    None,
+    // connection denied due to policy
+    AuthorizationPolicyDenied,
 }
 
 impl EncodeLabelValue for ResponseFlags {
     fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
         match self {
-            ResponseFlags::none => writer.write_str("-"),
+            ResponseFlags::None => writer.write_str("-"),
+            ResponseFlags::AuthorizationPolicyDenied => writer.write_str("DENY"),
         }
     }
 }
@@ -189,7 +192,7 @@ impl From<&ConnectionOpen> for CommonTrafficLabels {
         CommonTrafficLabels {
             reporter: c.reporter,
             request_protocol: RequestProtocol::tcp,
-            response_flags: ResponseFlags::none,
+            response_flags: ResponseFlags::None,
             connection_security_policy: c.connection_security_policy,
             ..CommonTrafficLabels::new()
                 // Intentionally before with_source; source is more reliable
@@ -491,6 +494,15 @@ impl ConnectionResult {
     pub fn increment_recv(&self, res: u64) {
         self.recv.inc_by(res);
         self.recv_metric.inc_by(res);
+    }
+
+    pub fn record_with_flag<E: std::error::Error>(
+        mut self,
+        res: Result<(), E>,
+        flag: ResponseFlags,
+    ) {
+        self.tl.response_flags = flag;
+        self.record(res)
     }
 
     // Record our final result.

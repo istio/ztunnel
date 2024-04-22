@@ -208,7 +208,8 @@ impl InboundPassthrough {
         {
             Ok(cg) => cg,
             Err(e) => {
-                result_tracker.record(Err(e));
+                result_tracker
+                    .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
                 return;
             }
         };
