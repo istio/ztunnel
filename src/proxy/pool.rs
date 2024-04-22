@@ -59,7 +59,6 @@ pub struct WorkloadHBONEPool {
 struct PoolState {
     pool_notifier: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
     timeout_tx: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
-    timeout_rx: watch::Receiver<bool>,
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
     // and has no actual hyper/http/connection logic.
     connected_pool: Arc<pingora_pool::ConnectionPool<ConnClient>>,
@@ -70,70 +69,20 @@ struct PoolState {
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
-    // TODO move this stuff out
+    max_streamcount: u16,
+    spawner: ConnSpawner,
+}
+
+struct ConnSpawner {
     cfg: config::Config,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     cert_manager: Arc<SecretManager>,
-    max_streamcount: u16,
+    timeout_rx: watch::Receiver<bool>,
 }
 
-impl PoolState {
-    // This simply puts the connection back into the inner pool,
-    // and sets up a timed popper, which will resolve
-    // - when this reference is popped back out of the inner pool (doing nothing)
-    // - when this reference is evicted from the inner pool (doing nothing)
-    // - when the timeout_idler is drained (will pop)
-    // - when the timeout is hit (will pop)
-    //
-    // Idle poppers are safe to invoke if the conn they are popping is already gone
-    // from the inner queue, so we will start one for every insert, let them run or terminate on their own,
-    // and poll them to completion on shutdown - any duplicates from repeated checkouts/checkins of the same conn
-    // will simply resolve as a no-op in order.
-    //
-    // Note that "idle" in the context of this pool means "no one has asked for it or dropped it in X time, so prune it".
-    //
-    // Pruning the idle connection from the pool does not close it - it simply ensures the pool stops holding a ref.
-    // hyper self-closes client conns when all refs are dropped and streamcount is 0, so pool consumers must
-    // drop their checked out conns and/or terminate their streams as well.
-    //
-    // Note that this simply removes the client ref from this pool - if other things hold client/streamrefs refs,
-    // they must also drop those before the underlying connection is fully closed.
-    fn checkin_conn(&self, conn: ConnClient, pool_key: pingora_pool::ConnectionMeta) {
-        let (evict, pickup) = self.connected_pool.put(&pool_key, conn);
-        let rx = self.timeout_rx.clone();
-        let pool_ref = self.connected_pool.clone();
-        let pool_key_ref = pool_key.clone();
-        let release_timeout = self.pool_unused_release_timeout;
-        self.close_pollers.push(tokio::spawn(async move {
-            debug!("starting an idle timeout for connection {:#?}", pool_key_ref);
-            pool_ref
-                .idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup)
-                .await;
-            debug!(
-                "connection {:#?} was removed/checked out/timed out of the pool",
-                pool_key_ref
-            )
-        }));
-        let _ = self.pool_notifier.send(true);
-    }
-
-    // Since we are using a hash key to do lookup on the inner pingora pool, do a get guard
-    // to make sure what we pull out actually deep-equals the workload_key, to avoid *sigh* crossing the streams.
-    fn guarded_get(
-        &self,
-        hash_key: &u64,
-        workload_key: &WorkloadKey,
-    ) -> Result<Option<ConnClient>, Error> {
-        match self.connected_pool.get(hash_key) {
-            None => Ok(None),
-            Some(conn) => match Self::enforce_key_integrity(conn, workload_key) {
-                Err(e) => Err(e),
-                Ok(conn) => Ok(Some(conn)),
-            },
-        }
-    }
-
-    async fn spawn_new_pool_conn(
+// Does nothing but spawn new conns when asked
+impl ConnSpawner {
+    async fn new_pool_conn(
         &self,
         key: WorkloadKey,
     ) -> Result<http2::SendRequest<Empty<Bytes>>, Error> {
@@ -186,6 +135,66 @@ impl PoolState {
 
         Ok(request_sender)
     }
+}
+
+impl PoolState {
+    // This simply puts the connection back into the inner pool,
+    // and sets up a timed popper, which will resolve
+    // - when this reference is popped back out of the inner pool (doing nothing)
+    // - when this reference is evicted from the inner pool (doing nothing)
+    // - when the timeout_idler is drained (will pop)
+    // - when the timeout is hit (will pop)
+    //
+    // Idle poppers are safe to invoke if the conn they are popping is already gone
+    // from the inner queue, so we will start one for every insert, let them run or terminate on their own,
+    // and poll them to completion on shutdown - any duplicates from repeated checkouts/checkins of the same conn
+    // will simply resolve as a no-op in order.
+    //
+    // Note that "idle" in the context of this pool means "no one has asked for it or dropped it in X time, so prune it".
+    //
+    // Pruning the idle connection from the pool does not close it - it simply ensures the pool stops holding a ref.
+    // hyper self-closes client conns when all refs are dropped and streamcount is 0, so pool consumers must
+    // drop their checked out conns and/or terminate their streams as well.
+    //
+    // Note that this simply removes the client ref from this pool - if other things hold client/streamrefs refs,
+    // they must also drop those before the underlying connection is fully closed.
+    fn checkin_conn(&self, conn: ConnClient, pool_key: pingora_pool::ConnectionMeta) {
+        let (evict, pickup) = self.connected_pool.put(&pool_key, conn);
+        let rx = self.spawner.timeout_rx.clone();
+        let pool_ref = self.connected_pool.clone();
+        let pool_key_ref = pool_key.clone();
+        let release_timeout = self.pool_unused_release_timeout;
+        self.close_pollers.push(tokio::spawn(async move {
+            debug!(
+                "starting an idle timeout for connection {:#?}",
+                pool_key_ref
+            );
+            pool_ref
+                .idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup)
+                .await;
+            debug!(
+                "connection {:#?} was removed/checked out/timed out of the pool",
+                pool_key_ref
+            )
+        }));
+        let _ = self.pool_notifier.send(true);
+    }
+
+    // Since we are using a hash key to do lookup on the inner pingora pool, do a get guard
+    // to make sure what we pull out actually deep-equals the workload_key, to avoid *sigh* crossing the streams.
+    fn guarded_get(
+        &self,
+        hash_key: &u64,
+        workload_key: &WorkloadKey,
+    ) -> Result<Option<ConnClient>, Error> {
+        match self.connected_pool.get(hash_key) {
+            None => Ok(None),
+            Some(conn) => match Self::enforce_key_integrity(conn, workload_key) {
+                Err(e) => Err(e),
+                Ok(conn) => Ok(Some(conn)),
+            },
+        }
+    }
 
     // Just for safety's sake, since we are using a hash thanks to pingora supporting arbitrary Eq, Hash
     // types, do a deep equality test before returning the conn, returning an error if the conn's key does
@@ -202,6 +211,65 @@ impl PoolState {
         }
     }
 
+    async fn start_conn_if_win_writelock(
+        &self,
+        workload_key: &WorkloadKey,
+        pool_key: &pingora_pool::ConnectionMeta,
+    ) -> Option<ConnClient> {
+        let inner_conn_lock = {
+            trace!("getting keyed lock out of lockmap");
+            let guard = self.established_conn_writelock.guard();
+
+            let exist_conn_lock = self
+                .established_conn_writelock
+                .get(&pool_key.key, &guard)
+                .unwrap();
+            trace!("got keyed lock out of lockmap");
+            exist_conn_lock.as_ref().unwrap().clone()
+        };
+
+        debug!("attempting to win connlock for wl key {:#?}", workload_key);
+
+        let inner_lock = inner_conn_lock.try_lock();
+        match inner_lock {
+            Ok(_guard) => {
+                // BEGIN take inner writelock
+                debug!("nothing else is creating a conn and we won the lock, make one");
+                match self.spawner.new_pool_conn(workload_key.clone()).await {
+                    Ok(pool_conn) => {
+                        let client = ConnClient {
+                            sender: pool_conn,
+                            stream_count: Arc::new(AtomicU16::new(0)),
+                            stream_count_max: self.max_streamcount,
+                            wl_key: workload_key.clone(),
+                        };
+
+                        debug!(
+                            "starting new conn for key {:#?} with pk {:#?}",
+                            workload_key, pool_key
+                        );
+
+                        debug!("checking new conn for key {:#?} into pool", pool_key);
+                        self.checkin_conn(client.clone(), pool_key.clone());
+                        Some(client)
+                    }
+                    Err(e) => {
+                        error!("could not spawn new conn, got {e}");
+                        None
+                    }
+                }
+                // END take inner writelock
+            }
+            Err(_) => {
+                debug!(
+                    "did not win connlock for wl key {:#?}, something else has it",
+                    workload_key
+                );
+                None
+            }
+        }
+    }
+
     // Does an initial, naive check to see if a conn exists for this key.
     //
     // If it does, WRITELOCK the mutex for that key, clone (or create), check in the clone,
@@ -215,7 +283,7 @@ impl PoolState {
     //
     // This is so we can backpressure correctly if 1000 tasks all demand a new connection
     // to the same key at once, and not eagerly open 1000 tunnel connections.
-    async fn maybe_checkout_conn_from_pool_under_writelock(
+    async fn checkout_conn_under_writelock(
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
@@ -252,7 +320,7 @@ impl PoolState {
                             );
 
                             debug!("spawning new conn for wl key {:#?} to replace using pool key {:#?}", workload_key, pool_key);
-                            let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
+                            let pool_conn = self.spawner.new_pool_conn(workload_key.clone()).await;
                             let r_conn = ConnClient {
                                 sender: pool_conn?,
                                 stream_count: Arc::new(AtomicU16::new(0)),
@@ -300,6 +368,14 @@ impl WorkloadHBONEPool {
         let (timeout_send, timeout_recv) = watch::channel(false);
         let max_count = cfg.pool_max_streams_per_conn;
         let pool_duration = cfg.pool_unused_release_timeout;
+
+        let spawner = ConnSpawner {
+            cfg,
+            socket_factory,
+            cert_manager,
+            timeout_rx: timeout_recv.clone(),
+        };
+
         // This is merely a counter to track the overall number of conns this pool spawns
         // to ensure we get unique poolkeys-per-new-conn, it is not a limit
         debug!("constructing pool with {:#?} streams per conn", max_count);
@@ -308,7 +384,7 @@ impl WorkloadHBONEPool {
             state: Arc::new(PoolState {
                 pool_notifier: timeout_tx,
                 timeout_tx: timeout_send,
-                timeout_rx: timeout_recv,
+                // timeout_rx: timeout_recv,
                 // the number here is simply the number of unique src/dest keys
                 // the pool is expected to track before the inner hashmap resizes.
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
@@ -316,10 +392,8 @@ impl WorkloadHBONEPool {
                 close_pollers: futures::stream::FuturesUnordered::new(),
                 pool_unused_release_timeout: pool_duration,
                 pool_global_conn_count: AtomicI32::new(0),
-                cfg,
-                socket_factory,
-                cert_manager,
                 max_streamcount: max_count,
+                spawner,
             }),
             pool_watcher: timeout_rx,
         }
@@ -357,7 +431,7 @@ impl WorkloadHBONEPool {
         // to the same key at once, and not eagerly open 1000 tunnel connections.
         let existing_conn = self
             .state
-            .maybe_checkout_conn_from_pool_under_writelock(&workload_key, &pool_key)
+            .checkout_conn_under_writelock(&workload_key, &pool_key)
             .await?;
 
         // Early return, no need to do anything else
@@ -402,7 +476,7 @@ impl WorkloadHBONEPool {
         // This doesn't block other tasks spawning connections against other keys, but DOES block other
         // tasks spawning connections against THIS key - which is what we want.
 
-        // NOTE: This inner, key-specific mutex is a tokio::async::Mutex, and not a stdlib sync mutex.
+        // NOTE: The inner, key-specific mutex is a tokio::async::Mutex, and not a stdlib sync mutex.
         // these differ from the stdlib sync mutex in that they are (slightly) slower
         // (they effectively sleep the current task) and they can be held over an await.
         // The tokio docs (rightly) advise you to not use these,
@@ -414,51 +488,14 @@ impl WorkloadHBONEPool {
         //
         // So the downsides are actually useful (we WANT task contention -
         // to block other parallel tasks from trying to spawn a connection for this key if we are already doing so)
-        let inner_conn_lock = {
-            trace!("fallback attempt - getting keyed lock out of lockmap");
-            let guard = self.state.established_conn_writelock.guard();
-
-            let exist_conn_lock = self
-                .state
-                .established_conn_writelock
-                .get(&hash_key, &guard)
-                .unwrap();
-            trace!("fallback attempt - got keyed lock out of lockmap");
-            exist_conn_lock.as_ref().unwrap().clone()
-        };
-
-        debug!(
-            "appears we need a new conn for this key, attempting to win connlock for wl key {:#?}",
-            workload_key
-        );
-        let res = match inner_conn_lock.try_lock() {
-            Ok(_guard) => {
-                // BEGIN take inner writelock
-                // If we get here, it means the following are true:
-                // 1. We did not get a connection for our key.
-                // 2. We have the exclusive inner writelock to create a new connection for our key.
-                //
-                // So, carry on doing that.
-                debug!("nothing else is creating a conn and we won the lock, make one");
-                let pool_conn = self.state.spawn_new_pool_conn(workload_key.clone()).await;
-                let client = ConnClient {
-                    sender: pool_conn?,
-                    stream_count: Arc::new(AtomicU16::new(0)),
-                    stream_count_max: self.state.max_streamcount,
-                    wl_key: workload_key.clone(),
-                };
-
-                debug!(
-                    "starting new conn for key {:#?} with pk {:#?}",
-                    workload_key, pool_key
-                );
-
-                debug!("checking new conn for key {:#?} into pool", pool_key);
-                self.state.checkin_conn(client.clone(), pool_key.clone());
-                client
-                // END take inner writelock
-            }
-            Err(_) => {
+        trace!("fallback attempt - trying win win connlock");
+        let res = match self
+            .state
+            .start_conn_if_win_writelock(&workload_key, &pool_key)
+            .await
+        {
+            Some(client) => client,
+            None => {
                 debug!("we didn't win the lock, something else is creating a conn, wait for it");
                 // If we get here, it means the following are true:
                 // 1. At one point, there was a preexisting conn in the pool for this key.
@@ -478,7 +515,7 @@ impl WorkloadHBONEPool {
                             // Notifier fired, try and get a conn out for our key.
                             let existing_conn = self
                                 .state
-                                .maybe_checkout_conn_from_pool_under_writelock(&workload_key, &pool_key)
+                                .checkout_conn_under_writelock(&workload_key, &pool_key)
                                 .await?;
                             match existing_conn {
                                 None => {
@@ -498,7 +535,6 @@ impl WorkloadHBONEPool {
                 }
             }
         };
-
         Ok(res)
     }
 }
