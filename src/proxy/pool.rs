@@ -843,6 +843,7 @@ mod test {
 
         drop(pool);
         server_drain_signal.drain().await;
+        server_handle.await.unwrap();
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
@@ -1184,16 +1185,26 @@ mod test {
         let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
         // At this point, we should still have one conn that hasn't been dropped (even though the pool has)
-        // because we haven't ended the
+        // because we haven't ended the persistent client
         let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
         assert!(
             real_dropcount == 2,
             "actual dropcount was {real_dropcount}"
         );
-        server_drain_signal.drain().await;
         client_stop_signal.drain().await;
-
         assert!(!persist_res.await.is_err(), "PERSIST CLIENT ERROR");
+
+        sleep(Duration::from_secs(6)).await;
+
+        let after_conncount = conn_counter.load(Ordering::Relaxed);
+        assert!(after_conncount == 3, "after conncount was {after_conncount}");
+        let after_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+        assert!(
+            after_dropcount == 3,
+            "after dropcount was {after_dropcount}"
+        );
+        server_drain_signal.drain().await;
+        server_handle.await.unwrap();
 
         drop(pool);
 
