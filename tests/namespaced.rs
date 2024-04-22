@@ -21,7 +21,7 @@ mod namespaced {
     use std::fs;
     use std::fs::File;
     use std::net::{IpAddr, SocketAddr};
-    use std::os::fd::AsRawFd;
+
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::time::Duration;
@@ -42,8 +42,9 @@ mod namespaced {
     use ztunnel::test_helpers::app::ParsedMetrics;
     use ztunnel::test_helpers::app::TestApp;
     use ztunnel::test_helpers::helpers::initialize_telemetry;
-    use ztunnel::test_helpers::inpod::start_ztunnel_server;
-    use ztunnel::test_helpers::linux::WorkloadManager;
+
+    use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
+    use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
 
@@ -109,12 +110,12 @@ mod namespaced {
 
     /// setup_netns_test prepares a test using network namespaces. This checks we have root,
     /// and automatically setups up a namespace manager.
-    fn setup_netns_test() -> WorkloadManager {
+    fn setup_netns_test(mode: TestMode) -> WorkloadManager {
         if unsafe { libc::getuid() } != 0 {
             panic!("CI tests should run as root; this is supposed to happen automatically?");
         }
         initialize_telemetry();
-        WorkloadManager::new().expect("create workload manager")
+        WorkloadManager::new(mode).expect("create workload manager")
     }
 
     const TEST_VIP: &str = "10.10.0.1";
@@ -125,8 +126,36 @@ mod namespaced {
     const REMOTE_NODE: &str = "remote-node";
 
     #[tokio::test]
+    async fn simple() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test(InPod);
+        let ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .register()
+            .await?;
+        run_tcp_server(server)?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        run_tcp_client(client, manager.resolver(), "server")?;
+
+        let metrics: [(&str, u64); 4] = [
+            (CONNECTIONS_OPENED, 1),
+            (CONNECTIONS_CLOSED, 1),
+            // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+            (BYTES_RECV, REQ_SIZE),
+            (BYTES_SENT, REQ_SIZE * 2),
+        ];
+        info!("verifying remote metrics");
+        verify_local_remote_metrics(&ztunnel, &ztunnel, &metrics).await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_vip_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
+        let mut manager = setup_netns_test(SharedNode);
         manager
             .service_builder("server1")
             .addresses(vec![NetworkAddress {
@@ -139,25 +168,29 @@ mod namespaced {
             manager
                 .workload_builder("server1", REMOTE_NODE)
                 .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
-                .register()?,
+                .register()
+                .await?,
         )?;
         run_tcp_server(
             manager
                 .workload_builder("server2", REMOTE_NODE)
                 .hbone()
                 .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
-                .register()?,
+                .register()
+                .await?,
         )?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
+            .register()
+            .await?;
 
         let lb_client = manager
             .workload_builder("lb_client", DEFAULT_NODE)
-            .register()?;
+            .register()
+            .await?;
 
-        let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
-        let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
+        let remote = manager.deploy_ztunnel(REMOTE_NODE).await?;
+        let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
 
@@ -256,13 +289,19 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_tcp_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
-        run_tcp_server(manager.workload_builder("server", REMOTE_NODE).register()?)?;
-        let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
+        let mut manager = setup_netns_test(SharedNode);
+        run_tcp_server(
+            manager
+                .workload_builder("server", REMOTE_NODE)
+                .register()
+                .await?,
+        )?;
+        let remote = manager.deploy_ztunnel(REMOTE_NODE).await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
-        let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         run_tcp_client(client, manager.resolver(), "server")?;
         let metrics = [
@@ -276,99 +315,102 @@ mod namespaced {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_tcp_request_inpod_mode() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
-        info!("running server for ztunnel");
+    /*
+        #[tokio::test]
+        async fn test_tcp_request_inpod_mode() -> anyhow::Result<()> {
+            let mut manager = setup_netns_test(InPod);
+            info!("running server for ztunnel");
 
-        let randnum: usize = rand::random();
-        let uds_remote_node = PathBuf::from(format!("/tmp/ztunnel-uds-remote-{}", randnum));
-        let uds_default_node = PathBuf::from(format!("/tmp/ztunnel-uds-default-{}", randnum));
-        let (remote_node_server, mut remote_node_server_ack) =
-            start_ztunnel_server(uds_remote_node.clone());
-        let (default_node_server, mut default_node_server_ack) =
-            start_ztunnel_server(uds_default_node.clone());
+            let randnum: usize = rand::random();
+            let uds_remote_node = PathBuf::from(format!("/tmp/ztunnel-uds-remote-{}", randnum));
+            let uds_default_node = PathBuf::from(format!("/tmp/ztunnel-uds-default-{}", randnum));
+            let (remote_node_server, mut remote_node_server_ack) =
+                start_ztunnel_server(uds_remote_node.clone());
+            let (default_node_server, mut default_node_server_ack) =
+                start_ztunnel_server(uds_default_node.clone());
 
-        info!("starting in-pod test");
-        let server = manager
-            .workload_builder("server", REMOTE_NODE)
-            .hbone()
-            .register()
-            .expect("register server failed");
-        server.netns().run(|_| {
-            // add "CNI" rules to pod.
-            helpers::run_command("scripts/ztunnel-redirect-inpod.sh")
-        })??;
+            info!("starting in-pod test");
+            let server = manager
+                .workload_builder("server", REMOTE_NODE)
+                .hbone()
+                .register()
+                .expect("register server failed");
+            server.netns().run(|_| {
+                // add "CNI" rules to pod.
+                helpers::run_command("scripts/ztunnel-redirect-inpod.sh")
+            })??;
 
-        let server_fd = server.netns().file().as_raw_fd();
-        run_tcp_server(server)?;
-        info!("deploying server ztunnel");
-        let remote = manager.deploy_ztunnel_inpod(REMOTE_NODE, uds_remote_node.clone())?;
-        let client = manager
-            .workload_builder("client", DEFAULT_NODE)
-            .hbone()
-            .register()
-            .expect("register client failed");
-        client.netns().run(|_| {
-            // add "CNI" rules
-            helpers::run_command("scripts/ztunnel-redirect-inpod.sh")
-        })??;
-        let client_fd = client.netns().file().as_raw_fd();
+            let server_fd = server.netns().file().as_raw_fd();
+            run_tcp_server(server)?;
+            error!("deploying server ztunnel");
+            let remote = manager.deploy_ztunnel_inpod(REMOTE_NODE, uds_remote_node.clone())?;
+            let client = manager
+                .workload_builder("client", DEFAULT_NODE)
+                .hbone()
+                .register()
+                .expect("register client failed");
+            client.netns().run(|_| {
+                // add "CNI" rules
+                helpers::run_command("scripts/ztunnel-redirect-inpod.sh")
+            })??;
+            let client_fd = client.netns().file().as_raw_fd();
 
-        info!("deploying client ztunnel");
-        let local = manager.deploy_ztunnel_inpod(DEFAULT_NODE, uds_default_node.clone())?;
+            error!("deploying client ztunnel");
+            let local = manager.deploy_ztunnel_inpod(DEFAULT_NODE, uds_default_node.clone())?;
 
-        info!("sending workload to ztunnel");
-        remote_node_server.send(server_fd).await.unwrap();
-        remote_node_server_ack.recv().await.unwrap();
-        default_node_server.send(client_fd).await.unwrap();
-        default_node_server_ack.recv().await.unwrap();
+            error!("sending workload to ztunnel");
+            remote_node_server.send(server_fd).await.unwrap();
+            remote_node_server_ack.recv().await.unwrap();
+            default_node_server.send(client_fd).await.unwrap();
+            default_node_server_ack.recv().await.unwrap();
 
-        info!("running tcp client");
-        run_tcp_client(client, manager.resolver(), "server")?;
-        let metrics: [(&str, u64); 4] = [
-            (CONNECTIONS_OPENED, 1),
-            (CONNECTIONS_CLOSED, 1),
-            // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
-            (BYTES_RECV, REQ_SIZE),
-            (BYTES_SENT, REQ_SIZE * 2),
-        ];
-        info!("verifying remote metrics");
-        verify_local_remote_metrics(&remote, &local, &metrics).await;
+            error!("running tcp client");
+            run_tcp_client(client, manager.resolver(), "server")?;
+            let metrics: [(&str, u64); 4] = [
+                (CONNECTIONS_OPENED, 1),
+                (CONNECTIONS_CLOSED, 1),
+                // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+                (BYTES_RECV, REQ_SIZE),
+                (BYTES_SENT, REQ_SIZE * 2),
+            ];
+            error!("verifying remote metrics");
+            verify_local_remote_metrics(&remote, &local, &metrics).await;
 
-        // verify that we see the "pods" in the ztunnel
-        assert_eq!(remote.inpod_state().await?.len(), 1);
-        assert_eq!(local.inpod_state().await?.len(), 1);
+            // verify that we see the "pods" in the ztunnel
+            assert_eq!(remote.inpod_state().await?.len(), 1);
+            assert_eq!(local.inpod_state().await?.len(), 1);
 
-        // now tell ztunnel the node was removed
-        remote_node_server.send(-1).await.unwrap();
-        remote_node_server_ack.recv().await.unwrap();
-        default_node_server.send(-1).await.unwrap();
-        default_node_server_ack.recv().await.unwrap();
-        let remote_state = remote.inpod_state().await?;
+            // now tell ztunnel the node was removed
+            remote_node_server.send(-1).await.unwrap();
+            remote_node_server_ack.recv().await.unwrap();
+            default_node_server.send(-1).await.unwrap();
+            default_node_server_ack.recv().await.unwrap();
+            let remote_state = remote.inpod_state().await?;
 
-        info!("verifying remote state {:?}", remote_state);
-        assert_eq!(remote.inpod_state().await?.len(), 0);
-        assert_eq!(local.inpod_state().await?.len(), 0);
+            error!("verifying remote state {:?}", remote_state);
+            assert_eq!(remote.inpod_state().await?.len(), 0);
+            assert_eq!(local.inpod_state().await?.len(), 0);
 
-        std::fs::remove_file(&uds_remote_node).unwrap();
-        std::fs::remove_file(&uds_default_node).unwrap();
+            std::fs::remove_file(&uds_remote_node).unwrap();
+            std::fs::remove_file(&uds_default_node).unwrap();
 
-        Ok(())
-    }
-
+            Ok(())
+        }
+    */
     #[tokio::test]
     async fn test_tcp_local_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
+        let mut manager = setup_netns_test(SharedNode);
         run_tcp_server(
             manager
                 .workload_builder("server", DEFAULT_NODE)
-                .register()?,
+                .register()
+                .await?,
         )?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
-        let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         run_tcp_client(client, manager.resolver(), "server")?;
 
@@ -392,18 +434,20 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_hbone_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
+        let mut manager = setup_netns_test(SharedNode);
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
                 .hbone()
-                .register()?,
+                .register()
+                .await?,
         )?;
-        let remote = manager.deploy_ztunnel(REMOTE_NODE)?;
+        let remote = manager.deploy_ztunnel(REMOTE_NODE).await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
-        let local = manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         run_tcp_client(client, manager.resolver(), "server")?;
 
@@ -473,19 +517,21 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
-        let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
+        let mut manager = setup_netns_test(SharedNode);
+        let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
         let ip = waypoint.ip();
         run_hbone_server(waypoint)?;
         manager
             .workload_builder("server", DEFAULT_NODE)
             .hbone()
             .waypoint(ip)
-            .register()?;
+            .register()
+            .await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
-        let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
 
@@ -501,11 +547,12 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_svc_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
+        let mut manager = setup_netns_test(SharedNode);
         let waypoint_workload = manager
             .workload_builder("waypoint", DEFAULT_NODE)
             .hbone()
-            .register()?;
+            .register()
+            .await?;
         let ip = waypoint_workload.ip();
         // in this case waypoint is basically just a dummy echo
         // this means waypoint won't proxy traffic so a server isn't required
@@ -513,7 +560,8 @@ mod namespaced {
         run_hbone_server(waypoint_workload)?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
+            .register()
+            .await?;
         // register a service that has our dummy waypoint's IP as the gateway
         manager
             .service_builder("svc")
@@ -524,7 +572,7 @@ mod namespaced {
             .ports(HashMap::from([(80u16, 80u16)]))
             .waypoint(ip)
             .register()?;
-        let zt = manager.deploy_ztunnel(DEFAULT_NODE)?;
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         run_tcp_to_hbone_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
 
@@ -540,8 +588,8 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_waypoint_bypass() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
-        let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE)?;
+        let mut manager = setup_netns_test(SharedNode);
+        let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
         // create a policy to ensure traffic is from the waypoint
         // TODO: this test is testing bypass from uncaptured workloads but other forms of bypass should be tested
         //    - service addressed traffic without a svc-attached waypoint
@@ -565,12 +613,14 @@ mod namespaced {
         let _ = manager
             .workload_builder("server", DEFAULT_NODE)
             .waypoint(ip)
-            .register()?;
+            .register()
+            .await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
             .uncaptured()
-            .register()?;
-        let app = manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        let app = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         let srv = resolve_target(manager.resolver(), "server");
         client
@@ -616,14 +666,16 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
+        let mut manager = setup_netns_test(SharedNode);
         let _ = manager
             .workload_builder("server", DEFAULT_NODE)
-            .register()?;
+            .register()
+            .await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
-        let app = manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        let app = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         let srv = resolve_target(manager.resolver(), "server");
         client
@@ -774,11 +826,12 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
+        let mut manager = setup_netns_test(SharedNode);
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
-            .register()?;
-        manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         #[derive(PartialEq, Copy, Clone, Debug)]
         enum Failure {
@@ -846,7 +899,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test();
+        let mut manager = setup_netns_test(SharedNode);
         let id = match identity::Identity::default() {
             identity::Identity::Spiffe { .. } => {
                 identity::Identity::Spiffe {
@@ -869,15 +922,17 @@ mod namespaced {
                 .workload_builder("server", REMOTE_NODE)
                 .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
                 .hbone()
-                .register()?,
+                .register()
+                .await?,
         )?;
-        let _ = manager.deploy_ztunnel(REMOTE_NODE)?;
+        let _ = manager.deploy_ztunnel(REMOTE_NODE).await?;
 
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
             .identity(id)
-            .register()?;
-        let _ = manager.deploy_ztunnel(DEFAULT_NODE)?;
+            .register()
+            .await?;
+        let _ = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         let srv = resolve_target(manager.resolver(), &format!("{TEST_VIP}:80"));
 

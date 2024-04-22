@@ -15,17 +15,15 @@
 use crate::inpod::test_helpers::{
     read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del,
 };
+use std::os::fd::RawFd;
 
+use crate::test_helpers;
+use crate::test_helpers::MpscAckSender;
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
-    bind_path: P,
-) -> (
-    tokio::sync::mpsc::Sender<i32>,
-    tokio::sync::mpsc::Receiver<()>,
-) {
+pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(bind_path: P) -> MpscAckSender<(String, i32)> {
     info!("starting server {}", bind_path.as_ref().display());
 
     // remove file if exists
@@ -36,8 +34,9 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
         );
         std::fs::remove_file(&bind_path).expect("remove file failed");
     }
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<i32>(1);
-    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let (tx, mut rx) = test_helpers::mpsc_ack::<(String, i32)>(1);
+    // let (tx, mut rx) = tokio::sync::mpsc::channel::<i32>(1);
+    // let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     // these tests are structured in an unusual way - async operations are done in a different thread,
     // that is joined. This blocks asyncs done here. thus the need run the servers in a different thread
@@ -76,8 +75,8 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             let read_amount = ztun_sock.read(&mut buf).await.unwrap();
             info!("ack received, len {}", read_amount);
             // Now await for FDs
-            while let Some(fd) = rx.recv().await {
-                let uid = crate::inpod::WorkloadUid::new("uid-0".to_string());
+            while let Some((uid, fd)) = rx.recv().await {
+                let uid = crate::inpod::WorkloadUid::new(uid);
                 if fd >= 0 {
                     send_workload_added(&mut ztun_sock, uid, fd).await;
                 } else {
@@ -87,9 +86,25 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
                 // receive ack from ztunnel
                 let ack = read_msg(&mut ztun_sock).await;
                 info!("ack received, len {:?}", ack);
-                ack_tx.send(()).await.expect("send failed");
+                rx.ack().await.expect("ack failed");
             }
         });
     });
-    (tx, ack_rx)
+    tx
+}
+
+pub struct ZtunnelFDServer {
+    send: tokio::sync::mpsc::Sender<i32>,
+    ack: tokio::sync::mpsc::Receiver<()>,
+}
+
+impl ZtunnelFDServer {
+    pub async fn send(&mut self, fd: RawFd) -> anyhow::Result<()> {
+        self.send.send(fd).await?;
+        self.ack
+            .recv()
+            .await
+            .ok_or(anyhow::anyhow!("failed to get nack"))?;
+        Ok(())
+    }
 }

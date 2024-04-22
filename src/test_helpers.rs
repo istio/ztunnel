@@ -27,6 +27,7 @@ use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::istio::workload::Service as XdsService;
 use crate::xds::istio::workload::Workload as XdsWorkload;
 use crate::xds::{Handler, LocalConfig, LocalWorkload, ProxyStateUpdater, XdsResource, XdsUpdate};
+use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
@@ -41,7 +42,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Add;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
-use tracing::trace;
+use tokio::sync::mpsc::error::SendError;
+use tracing::{debug, trace};
 
 pub mod app;
 pub mod ca;
@@ -467,4 +469,59 @@ pub async fn get_response_str(resp: Response<Full<Bytes>>) -> String {
         .into_data()
         .unwrap();
     String::from(std::str::from_utf8(&resp_bytes).unwrap())
+}
+
+#[derive(Debug)]
+pub struct MpscAckSender<T> {
+    tx: tokio::sync::mpsc::Sender<T>,
+    ack_rx: tokio::sync::mpsc::Receiver<()>,
+}
+
+#[derive(Debug)]
+pub struct MpscAckReceiver<T> {
+    rx: tokio::sync::mpsc::Receiver<T>,
+    ack_tx: tokio::sync::mpsc::Sender<()>,
+}
+
+impl<T: Send + Sync + 'static> MpscAckSender<T> {
+    pub async fn send_and_wait(&mut self, t: T) -> anyhow::Result<()> {
+        debug!("send...");
+        self.tx.send(t).await?;
+        debug!("wait for ack");
+        self.ack_rx
+            .recv()
+            .await
+            .ok_or(anyhow!("failed to receive ack"))?;
+        Ok(())
+    }
+    pub async fn send(&mut self, t: T) -> anyhow::Result<()> {
+        debug!("send...");
+        self.tx.send(t).await?;
+        Ok(())
+    }
+    pub async fn wait(&mut self) -> anyhow::Result<()> {
+        debug!("wait for ack");
+        self.ack_rx
+            .recv()
+            .await
+            .ok_or(anyhow!("failed to receive ack"))?;
+        Ok(())
+    }
+}
+
+impl<T> MpscAckReceiver<T> {
+    pub async fn recv(&mut self) -> Option<T> {
+        debug!("Recv");
+        self.rx.recv().await
+    }
+    pub async fn ack(&mut self) -> Result<(), SendError<()>> {
+        debug!("ACK");
+        self.ack_tx.send(()).await
+    }
+}
+
+pub fn mpsc_ack<T>(buffer: usize) -> (MpscAckSender<T>, MpscAckReceiver<T>) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<T>(buffer);
+    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);
+    (MpscAckSender { tx, ack_rx }, MpscAckReceiver { rx, ack_tx })
 }
