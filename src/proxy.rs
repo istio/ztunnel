@@ -299,6 +299,9 @@ pub enum Error {
 
     #[error("ip mismatch: {0} != {1}")]
     IPMismatch(IpAddr, IpAddr),
+
+    #[error("bug: connection seen twice")]
+    DoubleConnection,
 }
 
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;

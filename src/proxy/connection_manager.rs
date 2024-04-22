@@ -12,17 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::proxy::error;
-use crate::rbac;
+use crate::proxy::{error, Error};
+
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
 use drain;
 use serde::{Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Formatter;
+use std::future::Future;
+use std::net::SocketAddr;
+
+use crate::rbac::Connection;
 use std::sync::Arc;
 use std::sync::RwLock;
-use tracing::info;
+use tracing::{debug, info};
 
 struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.
@@ -51,6 +55,7 @@ impl ConnectionDrain {
 #[derive(Clone)]
 pub struct ConnectionManager {
     drains: Arc<RwLock<HashMap<ProxyRbacContext, ConnectionDrain>>>,
+    outbound_connections: Arc<RwLock<HashSet<OutboundConnection>>>,
 }
 
 impl std::fmt::Debug for ConnectionManager {
@@ -63,16 +68,110 @@ impl Default for ConnectionManager {
     fn default() -> Self {
         ConnectionManager {
             drains: Arc::new(RwLock::new(HashMap::new())),
+            outbound_connections: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 }
 
+pub struct ConnectionGuard {
+    cm: ConnectionManager,
+    ctx: ProxyRbacContext,
+    watch: Option<drain::Watch>,
+}
+
+impl ConnectionGuard {
+    pub async fn handle_connection(
+        mut self,
+        send: impl Future<Output = Result<(u64, u64), Error>> + Sized,
+    ) -> Result<(u64, u64), Error> {
+        let watch = self.watch.take().expect("watch cannot be taken twice");
+        tokio::select! {
+            res = send => {
+                self.cm.release(&self.ctx);
+                res
+            }
+            _signaled = watch.signaled() => Err(Error::AuthorizationPolicyLateRejection)
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if self.watch.is_some() {
+            debug!("rbac context {} auto-dropped", &self.ctx);
+            self.cm.release(&self.ctx)
+        }
+    }
+}
+
+pub struct OutboundConnectionGuard {
+    cm: ConnectionManager,
+    conn: OutboundConnection,
+}
+
+impl Drop for OutboundConnectionGuard {
+    fn drop(&mut self) {
+        self.cm.release_outbound(&self.conn)
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundConnection {
+    pub src: SocketAddr,
+    pub original_dst: SocketAddr,
+    pub actual_dst: SocketAddr,
+}
+
 impl ConnectionManager {
+    pub fn track_outbound(
+        &self,
+        src: SocketAddr,
+        original_dst: SocketAddr,
+        actual_dst: SocketAddr,
+    ) -> OutboundConnectionGuard {
+        let c = OutboundConnection {
+            src,
+            original_dst,
+            actual_dst,
+        };
+
+        self.outbound_connections
+            .write()
+            .expect("mutex")
+            .insert(c.clone());
+
+        OutboundConnectionGuard {
+            cm: self.clone(),
+            conn: c,
+        }
+    }
+
+    pub async fn assert_rbac(
+        &self,
+        state: &DemandProxyState,
+        ctx: &ProxyRbacContext,
+    ) -> Result<ConnectionGuard, Error> {
+        // Register before our initial assert. This prevents a race if policy changes between assert() and
+        // track()
+        self.register(ctx);
+        if !state.assert_rbac(ctx).await {
+            return Err(Error::AuthorizationPolicyRejection);
+        }
+        let Some(watch) = self.track(ctx) else {
+            return Err(Error::AuthorizationPolicyRejection);
+        };
+        Ok(ConnectionGuard {
+            cm: self.clone(),
+            ctx: ctx.clone(),
+            watch: Some(watch),
+        })
+    }
     // register a connection with the connection manager
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
     // even no tasks have a receiver channel yet
-    pub fn register(&self, c: &ProxyRbacContext) {
+    fn register(&self, c: &ProxyRbacContext) {
         self.drains
             .write()
             .expect("mutex")
@@ -83,7 +182,7 @@ impl ConnectionManager {
     // get a channel to receive close on for your connection
     // requires that the connection be registered first
     // if you receive None this connection is invalid and should close
-    pub fn track(&self, c: &ProxyRbacContext) -> Option<drain::Watch> {
+    fn track(&self, c: &ProxyRbacContext) -> Option<drain::Watch> {
         match self
             .drains
             .write()
@@ -101,7 +200,7 @@ impl ConnectionManager {
 
     // releases tracking on a connection
     // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
-    pub fn release(&self, c: &ProxyRbacContext) {
+    fn release(&self, c: &ProxyRbacContext) {
         let mut drains = self.drains.write().expect("mutex");
         if let Some((k, mut v)) = drains.remove_entry(c) {
             if v.count > 1 {
@@ -110,6 +209,10 @@ impl ConnectionManager {
                 drains.insert(k, v);
             }
         }
+    }
+
+    fn release_outbound(&self, c: &OutboundConnection) {
+        self.outbound_connections.write().expect("mutex").remove(c);
     }
 
     // signal all connections listening to this channel to take action (typically terminate traffic)
@@ -128,19 +231,12 @@ impl ConnectionManager {
         // potentially large copy under read lock, could require optimization
         self.drains.read().expect("mutex").keys().cloned().collect()
     }
+}
 
-    // get a dump (for admin API) for connects.
-    // This just avoids the redundant dest_workload_info
-    pub fn connections_dump(&self) -> Vec<rbac::Connection> {
-        // potentially large copy under read lock, could require optimization
-        self.drains
-            .read()
-            .expect("mutex")
-            .keys()
-            .cloned()
-            .map(|c| c.conn)
-            .collect()
-    }
+#[derive(serde::Serialize)]
+struct ConnectionManagerDump {
+    inbound: Vec<Connection>,
+    outbound: Vec<OutboundConnection>,
 }
 
 impl Serialize for ConnectionManager {
@@ -148,8 +244,23 @@ impl Serialize for ConnectionManager {
     where
         S: Serializer,
     {
-        let conns = self.connections_dump();
-        conns.serialize(serializer)
+        let inbound: Vec<_> = self
+            .drains
+            .read()
+            .expect("mutex")
+            .keys()
+            .cloned()
+            .map(|c| c.conn)
+            .collect();
+        let outbound: Vec<_> = self
+            .outbound_connections
+            .read()
+            .expect("mutex")
+            .iter()
+            .cloned()
+            .collect();
+        let dump = ConnectionManagerDump { inbound, outbound };
+        dump.serialize(serializer)
     }
 }
 
