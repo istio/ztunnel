@@ -436,7 +436,7 @@ impl ConnectionResult {
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             dst.addr = %dst.0,
-            dst.hbone_addr = hbone_target.map(|r| tracing::field::display(r)),
+            dst.hbone_addr = hbone_target.map(tracing::field::display),
             dst.workload = dst.1,
             dst.namespace = tl.destination_canonical_service.as_ref(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
@@ -489,7 +489,7 @@ impl ConnectionResult {
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             dst.addr = %self.dst.0,
-            dst.hbone_addr = self.hbone_target.map(|r| tracing::field::display(r)),
+            dst.hbone_addr = self.hbone_target.map(tracing::field::display),
             dst.service = tl.destination_service.as_ref(),
             dst.workload = self.dst.1,
             dst.namespace = tl.destination_canonical_service.as_ref(),
