@@ -307,6 +307,7 @@ ip -n {other_net} route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev eth0
             name: name.to_string(),
         };
         let ip = ns.ip();
+        debug!("assigned {} to {}", name, ip);
         state.pods.insert(
             name.to_string(),
             Network {

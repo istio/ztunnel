@@ -25,8 +25,12 @@ use bytes::Bytes;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
+use tokio::sync::Mutex;
 
 use crate::identity;
+#[cfg(any(test, feature = "testing"))]
+use crate::test_helpers::MpscAckReceiver;
+use crate::xds::LocalConfig;
 
 const ENABLE_PROXY: &str = "ENABLE_PROXY";
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
@@ -85,10 +89,12 @@ pub enum RootCert {
     Default,
 }
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum ConfigSource {
     File(PathBuf),
     Static(Bytes),
+    #[cfg(any(test, feature = "testing"))]
+    Dynamic(Arc<Mutex<MpscAckReceiver<LocalConfig>>>),
 }
 
 impl ConfigSource {
@@ -96,6 +102,8 @@ impl ConfigSource {
         Ok(match self {
             ConfigSource::File(path) => tokio::fs::read_to_string(path).await?,
             ConfigSource::Static(data) => std::str::from_utf8(data).map(|s| s.to_string())?,
+            #[cfg(any(test, feature = "testing"))]
+            _ => "{}".to_string(),
         })
     }
 }
