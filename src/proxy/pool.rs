@@ -228,7 +228,7 @@ impl PoolState {
             exist_conn_lock.as_ref().unwrap().clone()
         };
 
-        debug!("attempting to win connlock for wl key {:#?}", workload_key);
+        trace!("attempting to win connlock for wl key {:#?}", workload_key);
 
         let inner_lock = inner_conn_lock.try_lock();
         match inner_lock {
@@ -245,11 +245,9 @@ impl PoolState {
                         };
 
                         debug!(
-                            "starting new conn for key {:#?} with pk {:#?}",
+                            "checking in new conn for key {:#?} with pk {:#?}",
                             workload_key, pool_key
                         );
-
-                        debug!("checking new conn for key {:#?} into pool", pool_key);
                         self.checkin_conn(client.clone(), pool_key.clone());
                         Some(client)
                     }
@@ -288,8 +286,6 @@ impl PoolState {
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
     ) -> Result<Option<ConnClient>, Error> {
-        debug!("first checkout READGUARD");
-
         let found_conn = {
             trace!("pool connect outer map - take guard");
             let guard = self.established_conn_writelock.guard();
@@ -300,26 +296,19 @@ impl PoolState {
         };
         match found_conn {
             Some(exist_conn_lock) => {
-                debug!("first checkout - found mutex for key, waiting for writelock");
+                debug!("checkout - found mutex for key, waiting for writelock");
                 let _conn_lock = exist_conn_lock.as_ref().lock().await;
 
-                debug!(
-                    "first checkout - got writelock for conn with key {:#?} and hash {:#?}",
-                    workload_key, pool_key.key
+                trace!(
+                    "checkout - got writelock for conn with key {:#?} and hash {:#?}",
+                    workload_key,
+                    pool_key.key
                 );
                 let result = match self.guarded_get(&pool_key.key, workload_key)? {
                     Some(e_conn) => {
-                        trace!(
-                            "first checkout - inner pool - got existing conn for key {:#?}",
-                            workload_key
-                        );
+                        trace!("checkout - got existing conn for key {:#?}", workload_key);
                         if e_conn.at_max_streamcount() {
-                            debug!(
-                                "got conn for key {:#?}, but streamcount is maxed",
-                                workload_key
-                            );
-
-                            debug!("spawning new conn for wl key {:#?} to replace using pool key {:#?}", workload_key, pool_key);
+                            debug!("got conn for wl key {:#?}, but streamcount is maxed, spawning new conn to replace using pool key {:#?}", workload_key, pool_key);
                             let pool_conn = self.spawner.new_pool_conn(workload_key.clone()).await;
                             let r_conn = ConnClient {
                                 sender: pool_conn?,
@@ -328,7 +317,6 @@ impl PoolState {
                                 wl_key: workload_key.clone(),
                             };
                             self.checkin_conn(r_conn.clone(), pool_key.clone());
-                            // None
                             Some(r_conn)
                         } else {
                             debug!("checking existing conn for key {:#?} back in", pool_key);
@@ -406,7 +394,7 @@ impl WorkloadHBONEPool {
     // If many `connects` request a connection to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
     pub async fn connect(&mut self, workload_key: WorkloadKey) -> Result<ConnClient, Error> {
-        debug!("pool connect START");
+        trace!("pool connect START");
         // TODO BML this may not be collision resistant/slow. It should be resistant enough for workloads tho.
         // We are doing a deep-equals check at the end to mitigate any collisions, will see about bumping Pingora
         let mut s = DefaultHasher::new();
@@ -418,7 +406,6 @@ impl WorkloadHBONEPool {
                 .pool_global_conn_count
                 .fetch_add(1, Ordering::SeqCst),
         );
-        debug!("initial attempt - try to get existing conn from pool");
         // First, see if we can naively just check out a connection.
         // This should be the common case, except for the first establishment of a new connection/key.
         // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
@@ -553,7 +540,7 @@ pub struct ConnClient {
 impl ConnClient {
     pub fn at_max_streamcount(&self) -> bool {
         let curr_count = self.stream_count.load(Ordering::Relaxed);
-        debug!("checking streamcount: {curr_count}");
+        trace!("checking streamcount: {curr_count}");
         if curr_count >= self.stream_count_max {
             return true;
         }
@@ -583,9 +570,11 @@ impl ConnClient {
 // This is currently only for debugging
 impl Drop for ConnClient {
     fn drop(&mut self) {
-        debug!(
+        trace!(
             "dropping ConnClient for key {:#?} with streamcount: {:?} / {:?}",
-            self.wl_key, self.stream_count, self.stream_count_max
+            self.wl_key,
+            self.stream_count,
+            self.stream_count_max
         )
     }
 }
