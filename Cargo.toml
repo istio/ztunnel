@@ -10,6 +10,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"]
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen"]
 testing = ["dep:rcgen", "rcgen/x509-parser"] # Enables utilities supporting tests.
+taskdump = []
 
 [lib]
 path = "src/lib.rs"
