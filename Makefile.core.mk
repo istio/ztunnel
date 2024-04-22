@@ -4,9 +4,6 @@ FEATURES ?=
 ifeq ($(TLS_MODE), boring)
 	FEATURES:=--no-default-features -F tls-boring
 endif
-ifeq ($(TEST_MODE), root)
-	export CARGO_TARGET_$(shell rustc -vV | sed -n 's|host: ||p' | tr [:lower:] [:upper:]| tr - _)_RUNNER=sudo -E
-endif
 
 test:
 	RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
