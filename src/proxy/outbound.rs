@@ -171,7 +171,7 @@ impl OutboundConnection {
             Some(drain) => {
                 tokio::select! {
                         _ = drain.signaled() => {
-                            info!("socks drain signaled");
+                            info!("drain signaled");
                         }
                         res = self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough) => res
                 }

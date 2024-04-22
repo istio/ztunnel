@@ -37,7 +37,7 @@ use tracing::{debug, error, trace};
 use crate::config;
 use crate::identity::{Identity, SecretManager};
 
-use flurry::HashMap;
+use flurry;
 
 use pingora_pool;
 
@@ -51,12 +51,8 @@ use pingora_pool;
 //   by flow control throttling.
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
-    cfg: config::Config,
-    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    cert_manager: Arc<SecretManager>,
     state: Arc<PoolState>,
     pool_watcher: watch::Receiver<bool>,
-    max_streamcount: u16,
 }
 
 // PoolState is effectively the gnarly inner state stuff that needs thread/task sync, and should be wrapped in a Mutex.
@@ -68,12 +64,17 @@ struct PoolState {
     // and has no actual hyper/http/connection logic.
     connected_pool: Arc<pingora_pool::ConnectionPool<ConnClient>>,
     // this must be an atomic/concurrent-safe list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
-    established_conn_writelock: HashMap<u64, Option<Arc<Mutex<()>>>>,
+    established_conn_writelock: flurry::HashMap<u64, Option<Arc<Mutex<()>>>>,
     close_pollers: futures::stream::FuturesUnordered<task::JoinHandle<()>>,
     pool_unused_release_timeout: Duration,
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
+    // TODO move this stuff out
+    cfg: config::Config,
+    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    cert_manager: Arc<SecretManager>,
+    max_streamcount: u16,
 }
 
 impl PoolState {
@@ -104,6 +105,7 @@ impl PoolState {
         let pool_key_ref = pool_key.clone();
         let release_timeout = self.pool_unused_release_timeout;
         self.close_pollers.push(tokio::spawn(async move {
+            debug!("starting an idle timeout for connection {:#?}", pool_key_ref);
             pool_ref
                 .idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup)
                 .await;
@@ -129,6 +131,60 @@ impl PoolState {
                 Ok(conn) => Ok(Some(conn)),
             },
         }
+    }
+
+    async fn spawn_new_pool_conn(
+        &self,
+        key: WorkloadKey,
+    ) -> Result<http2::SendRequest<Empty<Bytes>>, Error> {
+        debug!("spawning new pool conn for key {:#?}", key);
+        let clone_key = key.clone();
+        let mut c_builder = http2::Builder::new(crate::hyper_util::TokioExecutor);
+        let builder = c_builder
+            .initial_stream_window_size(self.cfg.window_size)
+            .max_frame_size(self.cfg.frame_size)
+            .initial_connection_window_size(self.cfg.connection_window_size);
+
+        let local = self
+            .cfg
+            .enable_original_source
+            .unwrap_or_default()
+            .then_some(key.src);
+        let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
+        let connector = cert.outbound_connector(key.dst_id)?;
+        let tcp_stream =
+            super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
+        tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
+        let tls_stream = connector.connect(tcp_stream).await?;
+        let (request_sender, connection) = builder
+            .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
+            .await
+            .map_err(Error::HttpHandshake)?;
+
+        // spawn a task to poll the connection and drive the HTTP state
+        // if we got a drain for that connection, respect it in a race
+        // it is important to have a drain here, or this connection will never terminate
+        let mut driver_drain = self.timeout_rx.clone();
+        tokio::spawn(async move {
+            debug!("starting a connection driver for {:?}", clone_key);
+            tokio::select! {
+                    _ = driver_drain.changed() => {
+                        debug!("draining outer HBONE connection {:?}", clone_key);
+                    }
+                    res = connection=> {
+                        match res {
+                            Err(e) => {
+                                error!("Error in HBONE connection handshake: {:?}", e);
+                            }
+                            Ok(_) => {
+                                debug!("done with HBONE connection handshake: {:?}", res);
+                            }
+                        }
+                    }
+            }
+        });
+
+        Ok(request_sender)
     }
 
     // Just for safety's sake, since we are using a hash thanks to pingora supporting arbitrary Eq, Hash
@@ -159,7 +215,7 @@ impl PoolState {
     //
     // This is so we can backpressure correctly if 1000 tasks all demand a new connection
     // to the same key at once, and not eagerly open 1000 tunnel connections.
-    async fn first_checkout_conn_from_pool(
+    async fn maybe_checkout_conn_from_pool_under_writelock(
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
@@ -183,23 +239,39 @@ impl PoolState {
                     "first checkout - got writelock for conn with key {:#?} and hash {:#?}",
                     workload_key, pool_key.key
                 );
-                let got = self.guarded_get(&pool_key.key, workload_key)?;
-                Ok(got.and_then(|e_conn| {
-                    trace!(
-                        "first checkout - inner pool - got existing conn for key {:#?}",
-                        workload_key
-                    );
-                    if e_conn.at_max_streamcount() {
-                        debug!(
-                            "got conn for key {:#?}, but streamcount is maxed",
+                let result = match self.guarded_get(&pool_key.key, workload_key)? {
+                    Some(e_conn) => {
+                        trace!(
+                            "first checkout - inner pool - got existing conn for key {:#?}",
                             workload_key
                         );
-                        None
-                    } else {
-                        self.checkin_conn(e_conn.clone(), pool_key.clone());
-                        Some(e_conn)
+                        if e_conn.at_max_streamcount() {
+                            debug!(
+                                "got conn for key {:#?}, but streamcount is maxed",
+                                workload_key
+                            );
+
+                            debug!("spawning new conn for wl key {:#?} to replace using pool key {:#?}", workload_key, pool_key);
+                            let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
+                            let r_conn = ConnClient {
+                                sender: pool_conn?,
+                                stream_count: Arc::new(AtomicU16::new(0)),
+                                stream_count_max: self.max_streamcount,
+                                wl_key: workload_key.clone(),
+                            };
+                            self.checkin_conn(r_conn.clone(), pool_key.clone());
+                            // None
+                            Some(r_conn)
+                        } else {
+                            debug!("checking existing conn for key {:#?} back in", pool_key);
+                            self.checkin_conn(e_conn.clone(), pool_key.clone());
+                            Some(e_conn)
+                        }
                     }
-                }))
+                    None => None,
+                };
+
+                Ok(result)
             }
             None => Ok(None),
         }
@@ -240,16 +312,16 @@ impl WorkloadHBONEPool {
                 // the number here is simply the number of unique src/dest keys
                 // the pool is expected to track before the inner hashmap resizes.
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
-                established_conn_writelock: HashMap::new(),
+                established_conn_writelock: flurry::HashMap::new(),
                 close_pollers: futures::stream::FuturesUnordered::new(),
                 pool_unused_release_timeout: pool_duration,
                 pool_global_conn_count: AtomicI32::new(0),
+                cfg,
+                socket_factory,
+                cert_manager,
+                max_streamcount: max_count,
             }),
-            cfg,
-            socket_factory,
-            cert_manager,
             pool_watcher: timeout_rx,
-            max_streamcount: max_count,
         }
     }
 
@@ -270,7 +342,7 @@ impl WorkloadHBONEPool {
             hash_key,
             self.state
                 .pool_global_conn_count
-                .fetch_add(1, Ordering::Relaxed),
+                .fetch_add(1, Ordering::SeqCst),
         );
         debug!("initial attempt - try to get existing conn from pool");
         // First, see if we can naively just check out a connection.
@@ -285,7 +357,7 @@ impl WorkloadHBONEPool {
         // to the same key at once, and not eagerly open 1000 tunnel connections.
         let existing_conn = self
             .state
-            .first_checkout_conn_from_pool(&workload_key, &pool_key)
+            .maybe_checkout_conn_from_pool_under_writelock(&workload_key, &pool_key)
             .await?;
 
         // Early return, no need to do anything else
@@ -356,10 +428,10 @@ impl WorkloadHBONEPool {
         };
 
         debug!(
-            "appears we need a new conn, attempting to win connlock for wl key {:#?}",
+            "appears we need a new conn for this key, attempting to win connlock for wl key {:#?}",
             workload_key
         );
-        let got_conn = match inner_conn_lock.try_lock() {
+        let res = match inner_conn_lock.try_lock() {
             Ok(_guard) => {
                 // BEGIN take inner writelock
                 // If we get here, it means the following are true:
@@ -368,11 +440,11 @@ impl WorkloadHBONEPool {
                 //
                 // So, carry on doing that.
                 debug!("nothing else is creating a conn and we won the lock, make one");
-                let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
+                let pool_conn = self.state.spawn_new_pool_conn(workload_key.clone()).await;
                 let client = ConnClient {
                     sender: pool_conn?,
                     stream_count: Arc::new(AtomicU16::new(0)),
-                    stream_count_max: self.max_streamcount,
+                    stream_count_max: self.state.max_streamcount,
                     wl_key: workload_key.clone(),
                 };
 
@@ -380,7 +452,10 @@ impl WorkloadHBONEPool {
                     "starting new conn for key {:#?} with pk {:#?}",
                     workload_key, pool_key
                 );
-                Some(client)
+
+                debug!("checking new conn for key {:#?} into pool", pool_key);
+                self.state.checkin_conn(client.clone(), pool_key.clone());
+                client
                 // END take inner writelock
             }
             Err(_) => {
@@ -400,10 +475,11 @@ impl WorkloadHBONEPool {
                                 "notified a new conn was enpooled, checking for hash {:#?}",
                                 hash_key
                             );
-
                             // Notifier fired, try and get a conn out for our key.
-                            // If we do, make sure it's not maxed out on streams.
-                            let existing_conn = self.state.guarded_get(&hash_key, &workload_key)?;
+                            let existing_conn = self
+                                .state
+                                .maybe_checkout_conn_from_pool_under_writelock(&workload_key, &pool_key)
+                                .await?;
                             match existing_conn {
                                 None => {
                                     trace!("woke up on pool notification, but didn't find a conn for {:#?} yet", hash_key);
@@ -411,13 +487,7 @@ impl WorkloadHBONEPool {
                                 }
                                 Some(e_conn) => {
                                     debug!("found existing conn after waiting");
-                                    // We found a conn, but it's already maxed out.
-                                    // Return None and create another.
-                                    if e_conn.at_max_streamcount() {
-                                        debug!("found existing conn for key {:#?}, but streamcount is maxed", workload_key);
-                                        break None;
-                                    }
-                                    break Some(e_conn);
+                                    break e_conn;
                                 }
                             }
                         }
@@ -429,99 +499,7 @@ impl WorkloadHBONEPool {
             }
         };
 
-        // If we get here, it means the following are true:
-        // 1. At one point, there was a preexisting conn in the pool for this key.
-        // 2. When we checked, we got nothing for that key.
-        // 3. We could not get the exclusive inner writelock to add a new one
-        // 4. Someone else got the exclusive inner writelock, and is adding a new one
-        // 5. We waited until we got that connection for our key, that someone else added.
-        //
-        // So now we are down to 2 options:
-        //
-        // 1. We got an existing connection, it's usable, we use it.
-        // 2. We got an existing connection, it's not usable, we start another.
-        //
-        // Note that for (2) we do not really need to take the inner writelock again for this key -
-        // if we checked out a conn inserted by someone else that we cannot use,
-        // everyone else will implicitly be waiting for us to check one back in,
-        // since they are in their own loops.
-        match got_conn {
-            // After waiting, we found an available conn we can use, so no need to start another.
-            // Clone the underlying client, return a copy, and put the other back in the pool.
-            Some(f_conn) => {
-                self.state.checkin_conn(f_conn.clone(), pool_key.clone());
-                Ok(f_conn)
-            }
-
-            // After waiting, we found an available conn, but for whatever reason couldn't use it.
-            // (streamcount maxed, etc)
-            // Start a new one, clone the underlying client, return a copy, and put the other back in the pool.
-            None => {
-                debug!("spawning new conn for key {:#?} to replace", workload_key);
-                let pool_conn = self.spawn_new_pool_conn(workload_key.clone()).await;
-                let r_conn = ConnClient {
-                    sender: pool_conn?,
-                    stream_count: Arc::new(AtomicU16::new(0)),
-                    stream_count_max: self.max_streamcount,
-                    wl_key: workload_key.clone(),
-                };
-                self.state.checkin_conn(r_conn.clone(), pool_key.clone());
-                Ok(r_conn)
-            }
-        }
-    }
-
-    async fn spawn_new_pool_conn(
-        &self,
-        key: WorkloadKey,
-    ) -> Result<http2::SendRequest<Empty<Bytes>>, Error> {
-        let clone_key = key.clone();
-        let mut c_builder = http2::Builder::new(crate::hyper_util::TokioExecutor);
-        let builder = c_builder
-            .initial_stream_window_size(self.cfg.window_size)
-            .max_frame_size(self.cfg.frame_size)
-            .initial_connection_window_size(self.cfg.connection_window_size);
-
-        let local = self
-            .cfg
-            .enable_original_source
-            .unwrap_or_default()
-            .then_some(key.src);
-        let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
-        let connector = cert.outbound_connector(key.dst_id)?;
-        let tcp_stream =
-            super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
-        tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
-        let tls_stream = connector.connect(tcp_stream).await?;
-        let (request_sender, connection) = builder
-            .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
-            .await
-            .map_err(Error::HttpHandshake)?;
-
-        // spawn a task to poll the connection and drive the HTTP state
-        // if we got a drain for that connection, respect it in a race
-        // it is important to have a drain here, or this connection will never terminate
-        let mut driver_drain = self.state.timeout_rx.clone();
-        tokio::spawn(async move {
-            debug!("starting a connection driver for {:?}", clone_key);
-            tokio::select! {
-                    _ = driver_drain.changed() => {
-                        debug!("draining outer HBONE connection {:?}", clone_key);
-                    }
-                    res = connection=> {
-                        match res {
-                            Err(e) => {
-                                error!("Error in HBONE connection handshake: {:?}", e);
-                            }
-                            Ok(_) => {
-                                debug!("done with HBONE connection handshake: {:?}", res);
-                            }
-                        }
-                    }
-            }
-        });
-
-        Ok(request_sender)
+        Ok(res)
     }
 }
 
@@ -563,6 +541,16 @@ impl ConnClient {
         } else {
             Ok(())
         }
+    }
+}
+
+// This is currently only for debugging
+impl Drop for ConnClient {
+    fn drop(&mut self) {
+        debug!(
+            "dropping ConnClient for key {:#?} with streamcount: {:?} / {:?}",
+            self.wl_key, self.stream_count, self.stream_count_max
+        )
     }
 }
 
@@ -846,7 +834,7 @@ mod test {
         server_handle.await.unwrap();
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+        assert!(real_conncount == 4, "actual conncount was {real_conncount}");
     }
 
     #[tokio::test]
@@ -1103,7 +1091,7 @@ mod test {
             "actual before dropcount was {before_dropcount}"
         );
 
-        // Attempt to wait long enough for pool conns to timeout+drop
+        // Attempt to wait long enough for pool conns to timeout+evict
         sleep(Duration::from_secs(2)).await;
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
@@ -1160,7 +1148,8 @@ mod test {
         }
 
         let (client_stop_signal, client_stop) = drain::channel();
-        let persist_res = spawn_persistent_client(pool.clone(), key1.clone(), server_addr, client_stop);
+        let persist_res =
+            spawn_persistent_client(pool.clone(), key1.clone(), server_addr, client_stop);
 
         //loop thru the nonpersistent clients and wait for them to finish
         while let Some(Err(res)) = tasks.next().await {
@@ -1171,7 +1160,7 @@ mod test {
         let before_conncount = conn_counter.load(Ordering::Relaxed);
         let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
         assert!(
-            before_conncount == 3,
+            before_conncount == 4,
             "actual before conncount was {before_conncount}"
         );
         assert!(
@@ -1179,36 +1168,34 @@ mod test {
             "actual before dropcount was {before_dropcount}"
         );
 
-
         // Attempt to wait long enough for pool conns to timeout+evict
         sleep(Duration::from_secs(2)).await;
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+        assert!(real_conncount == 4, "actual conncount was {real_conncount}");
         // At this point, we should still have one conn that hasn't been dropped
         // because we haven't ended the persistent client
         let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
-        assert!(
-            real_dropcount == 2,
-            "actual dropcount was {real_dropcount}"
-        );
+        assert!(real_dropcount == 3, "actual dropcount was {real_dropcount}");
         client_stop_signal.drain().await;
-        assert!(!persist_res.await.is_err(), "PERSIST CLIENT ERROR");
+        assert!(persist_res.await.is_ok(), "PERSIST CLIENT ERROR");
 
         sleep(Duration::from_secs(2)).await;
 
         let after_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(after_conncount == 3, "after conncount was {after_conncount}");
+        assert!(
+            after_conncount == 4,
+            "after conncount was {after_conncount}"
+        );
         let after_dropcount = conn_drop_counter.load(Ordering::Relaxed);
         assert!(
-            after_dropcount == 3,
+            after_dropcount == 4,
             "after dropcount was {after_dropcount}"
         );
         server_drain_signal.drain().await;
         server_handle.await.unwrap();
 
         drop(pool);
-
     }
 
     fn spawn_client(
@@ -1299,7 +1286,6 @@ mod test {
                     } else if res.unwrap().status() != 200 {
                         panic!("CLIENT RETURNED ERROR")
                     }
-
                 }
             };
 
