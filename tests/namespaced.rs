@@ -67,7 +67,7 @@ mod namespaced {
 
         // Map our current user to root in the new network namespace
         data_file
-            .write(format!("{} {} 1", 0, original_uid).as_bytes())
+            .write_all(format!("{} {} 1", 0, original_uid).as_bytes())
             .expect("write failed");
 
         // Setup a new network namespace
@@ -80,6 +80,10 @@ mod namespaced {
         let tp = std::env::temp_dir().join("ztunnel_namespaced.XXXXXX");
         let tmp = mkdtemp(&tp).expect("tmp dir");
 
+        // Create /var/run/netns and if it doesn't exist. Technically this requires root, but any system should have this
+        fs::create_dir_all("/var/run/netns")
+            .expect("host netns dir doesn't exist and we are not root");
+        let _ = File::create_new("/run/xtables.lock");
         // Bind mount /var/run/netns so we can make our own independent network namespaces
         fs::create_dir(tmp.join("netns")).expect("netns dir");
         mount(
