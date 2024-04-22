@@ -407,7 +407,7 @@ impl DemandProxyState {
                 // Policy not found. This is probably transition state where the policy hasn't been sent
                 // by the control plane, or it was just removed.
                 if pol.is_none() {
-                    debug!("skipping unknown policy {k}");
+                    warn!("skipping unknown policy {k}");
                 }
                 pol
             })
