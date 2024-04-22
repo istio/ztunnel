@@ -1976,16 +1976,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "realm_io"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "419b106090b985e393ac20b68845ca77d5a7fc9af6126ae97fbd8825bbdbaf69"
-dependencies = [
- "libc",
- "tokio",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3208,7 +3198,6 @@ dependencies = [
  "prost-types",
  "rand 0.8.5",
  "rcgen",
- "realm_io",
  "ring",
  "rustc_version",
  "rustls",

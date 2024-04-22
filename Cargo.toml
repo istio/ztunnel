@@ -75,7 +75,6 @@ prost = "0.12"
 prost-types = "0.12"
 rand = "0.8"
 rcgen = { version = "0.13", optional = true, features = ["pem"] }
-realm_io = "0.4"
 rustls = { version = "0.23", default-features = false }
 rustls-native-certs = "0.7.0"
 rustls-pemfile = "2.1"
