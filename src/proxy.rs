@@ -92,7 +92,7 @@ pub struct Proxy {
     inbound: Inbound,
     inbound_passthrough: InboundPassthrough,
     outbound: Outbound,
-    socks5: Socks5,
+    socks5: Option<Socks5>,
     policy_watcher: PolicyWatcher,
     illegal_ports: Arc<HashSet<u16>>,
 }
@@ -168,8 +168,13 @@ impl Proxy {
         illegal_ports.insert(inbound_passthrough.address().port());
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
         illegal_ports.insert(outbound.address().port());
-        let socks5 = Socks5::new(pi.clone(), drain.clone()).await?;
-        illegal_ports.insert(socks5.address().port());
+        let socks5 = if pi.cfg.socks5_addr.is_some() {
+            let socks5 = Socks5::new(pi.clone(), drain.clone()).await?;
+            illegal_ports.insert(socks5.address().port());
+            Some(socks5)
+        } else {
+            None
+        };
         let policy_watcher = PolicyWatcher::new(pi.state, drain, pi.connection_manager);
 
         Ok(Proxy {
@@ -183,7 +188,7 @@ impl Proxy {
     }
 
     pub async fn run(self) {
-        let tasks = vec![
+        let mut tasks = vec![
             tokio::spawn(
                 self.inbound_passthrough
                     .run(self.illegal_ports.clone())
@@ -195,9 +200,11 @@ impl Proxy {
                     .in_current_span(),
             ),
             tokio::spawn(self.outbound.run().in_current_span()),
-            tokio::spawn(self.socks5.run().in_current_span()),
             tokio::spawn(self.policy_watcher.run().in_current_span()),
         ];
+        if let Some(socks5) = self.socks5 {
+            tasks.push(tokio::spawn(socks5.run().in_current_span()));
+        }
 
         futures::future::join_all(tasks).await;
     }
@@ -206,7 +213,7 @@ impl Proxy {
         Addresses {
             outbound: self.outbound.address(),
             inbound: self.inbound.address(),
-            socks5: self.socks5.address(),
+            socks5: self.socks5.as_ref().map(|s| s.address()),
         }
     }
 }
@@ -215,7 +222,7 @@ impl Proxy {
 pub struct Addresses {
     pub outbound: SocketAddr,
     pub inbound: SocketAddr,
-    pub socks5: SocketAddr,
+    pub socks5: Option<SocketAddr>,
 }
 
 #[derive(thiserror::Error, Debug)]

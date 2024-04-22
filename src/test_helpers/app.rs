@@ -205,7 +205,7 @@ impl TestApp {
         // Always use IPv4 address. In theory, we can resolve `localhost` to pick to support any machine
         // However, we need to make sure the WorkloadStore knows about both families then.
         let socks_addr = with_ip(
-            self.proxy_addresses.socks5,
+            self.proxy_addresses.socks5.unwrap(),
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         );
         // Set source IP to TEST_WORKLOAD_SOURCE

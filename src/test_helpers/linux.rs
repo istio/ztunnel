@@ -119,7 +119,7 @@ impl WorkloadManager {
             let proxy_addresses = app.proxy_addresses.unwrap_or(proxy::Addresses {
                 inbound: "0.0.0.0:0".parse()?,
                 outbound: "0.0.0.0:0".parse()?,
-                socks5: "0.0.0.0:0".parse()?,
+                socks5: Some("0.0.0.0:0".parse()?),
             });
 
             let ta = TestApp {
@@ -130,7 +130,7 @@ impl WorkloadManager {
                 proxy_addresses: proxy::Addresses {
                     outbound: helpers::with_ip(proxy_addresses.outbound, ip),
                     inbound: helpers::with_ip(proxy_addresses.inbound, ip),
-                    socks5: helpers::with_ip(proxy_addresses.socks5, ip),
+                    socks5: proxy_addresses.socks5.map(|i| helpers::with_ip(i, ip)),
                 },
                 tcp_dns_proxy_address: Some(helpers::with_ip(
                     app.tcp_dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
