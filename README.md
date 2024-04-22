@@ -149,7 +149,7 @@ An example access log looks like (with newlines for readability; the real logs a
 ```text
 2024-04-11T15:38:42.182974Z  INFO access: connection complete
     src.addr=10.244.0.24:46238 src.workload="shell-6d8bcd654d-t88gp" src.namespace="default" src.identity="spiffe://cluster.local/ns/default/sa/default"
-    dst.addr=10.244.0.42:15008 dst.hbone_addr="10.96.108.116:80" dst.service="echo.default.svc.cluster.local"
+    dst.addr=10.244.0.42:15008 dst.hbone_addr=10.96.108.116:80 dst.service="echo.default.svc.cluster.local"
     direction="outbound" bytes_sent=67 bytes_recv=490 duration="13ms"
 ```
 
