@@ -46,10 +46,10 @@ pub struct WorkloadManager {
 }
 
 impl WorkloadManager {
-    /// new instantiates a manager with the given name. Using a unique name between tests is critical.
-    pub fn new(name: &str) -> anyhow::Result<Self> {
+    /// new instantiates a manager.
+    pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
-            namespaces: netns::NamespaceManager::new(name)?,
+            namespaces: netns::NamespaceManager::new()?,
             workloads: vec![],
             services: HashMap::new(),
             policies: vec![],
