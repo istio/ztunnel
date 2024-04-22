@@ -24,9 +24,10 @@ use drain::Watch;
 use futures::stream::StreamExt;
 use futures_util::{FutureExt, TryFutureExt};
 use http_body_util::Empty;
+
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{header, Method, Request, Response, StatusCode};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -345,6 +346,7 @@ impl Inbound {
 
         let source_ip = rbac_ctx.conn.src.ip();
 
+        let for_host = parse_forwarded_host(&req);
         let baggage =
             parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
 
@@ -369,7 +371,8 @@ impl Inbound {
             revision: baggage.revision,
             ..Default::default()
         };
-        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, upstream_service, &upstream);
+        let ds =
+            proxy::guess_inbound_service(&rbac_ctx.conn, &for_host, upstream_service, &upstream);
         let connection_metrics = ConnectionOpen {
             reporter: Reporter::destination,
             source,
@@ -387,7 +390,10 @@ impl Inbound {
             pi.metrics,
         );
 
-        let conn_guard = match connection_manager.assert_rbac(&pi.state, &rbac_ctx).await {
+        let conn_guard = match connection_manager
+            .assert_rbac(&pi.state, &rbac_ctx, for_host)
+            .await
+        {
             Ok(cg) => cg,
             Err(e) => {
                 result_tracker.record(Err(e));
@@ -594,6 +600,14 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
         let cert = self.cert_manager.fetch_certificate(&identity).await?;
         Ok(Arc::new(cert.server_config()?))
     }
+}
+
+pub fn parse_forwarded_host<T>(req: &Request<T>) -> Option<String> {
+    req.headers()
+        .get(header::FORWARDED)
+        .and_then(|rh| rh.to_str().ok())
+        .and_then(|rh| http_types::proxies::Forwarded::parse(rh).ok())
+        .and_then(|ph| ph.host().map(|s| s.to_string()))
 }
 
 #[cfg(test)]

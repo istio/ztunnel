@@ -490,9 +490,19 @@ pub async fn freebind_connect(
 // as a best guess.
 pub fn guess_inbound_service(
     conn: &Connection,
+    for_host_header: &Option<String>,
     upstream_service: Vec<Service>,
     dest: &Workload,
 ) -> Option<ServiceDescription> {
+    // First, if the client told us what Service they were reaching, look for that
+    // Note: the set of Services we look for is bounded, so we won't blindly trust bogus info.
+    if let Some(found) = upstream_service
+        .iter()
+        .find(|s| for_host_header.as_ref() == Some(&s.hostname))
+        .map(ServiceDescription::from)
+    {
+        return Some(found);
+    }
     let dport = conn.dst.port();
     let netaddr = network_addr(&dest.network, conn.dst.ip());
     let euid = endpoint_uid(&dest.uid, Some(&netaddr));
