@@ -31,7 +31,7 @@ workloads:
 policies:
   - action: Allow
     rules:
-    - - - not_destination_ports:
+    - - - notDestinationPorts:
           - 9999
     name: deny-9999
     namespace: default
