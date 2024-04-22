@@ -1102,7 +1102,6 @@ mod test {
             "actual before dropcount was {before_dropcount}"
         );
 
-        drop(pool);
         // Attempt to wait long enough for pool conns to timeout+drop
         sleep(Duration::from_secs(6)).await;
 
@@ -1113,6 +1112,91 @@ mod test {
 
         server_drain_signal.drain().await;
         server_handle.await.unwrap();
+        drop(pool);
+    }
+
+    #[tokio::test]
+    async fn test_pool_100_clients_evicts_but_does_not_close_active_conn() {
+        // crate::telemetry::setup_logging();
+
+        let (server_drain_signal, server_drain) = drain::channel();
+
+        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let (server_addr, server_handle) = spawn_server(
+            server_drain,
+            conn_counter.clone(),
+            conn_drop_counter.clone(),
+        )
+        .await;
+
+        let cfg = crate::config::Config {
+            local_node: Some("local-node".to_string()),
+            pool_max_streams_per_conn: 50,
+            ..crate::config::parse_config().unwrap()
+        };
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+
+        let key1 = WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, 2]),
+            dst: server_addr,
+        };
+        let client_count = 100;
+        let mut count = 0u32;
+        let mut tasks = futures::stream::FuturesUnordered::new();
+        loop {
+            count += 1;
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+
+            if count == client_count {
+                break;
+            }
+        }
+
+        let (client_stop_signal, client_stop) = drain::channel();
+        let persist_res = spawn_persistent_client(pool.clone(), key1.clone(), server_addr, client_stop);
+
+        //loop thru the nonpersistent results
+        while let Some(Err(res)) = tasks.next().await {
+            assert!(!res.is_panic(), "CLIENT PANICKED!");
+            continue;
+        }
+
+        let before_conncount = conn_counter.load(Ordering::Relaxed);
+        let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+        assert!(
+            before_conncount == 3,
+            "actual before conncount was {before_conncount}"
+        );
+        assert!(
+            before_dropcount == 0,
+            "actual before dropcount was {before_dropcount}"
+        );
+
+
+        // Attempt to wait long enough for pool conns to timeout+drop
+        sleep(Duration::from_secs(6)).await;
+
+        let real_conncount = conn_counter.load(Ordering::Relaxed);
+        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+        // At this point, we should still have one conn that hasn't been dropped (even though the pool has)
+        // because we haven't ended the
+        let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+        assert!(
+            real_dropcount == 2,
+            "actual dropcount was {real_dropcount}"
+        );
+        server_drain_signal.drain().await;
+        client_stop_signal.drain().await;
+
+        assert!(!persist_res.await.is_err(), "PERSIST CLIENT ERROR");
+
+        drop(pool);
+
     }
 
     fn spawn_client(
