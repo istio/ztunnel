@@ -1051,7 +1051,7 @@ mod test {
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
             pool_max_streams_per_conn: 1000,
-            pool_unused_release_timeout: Duration::from_secs(5),
+            pool_unused_release_timeout: Duration::from_secs(2),
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
@@ -1104,7 +1104,7 @@ mod test {
         );
 
         // Attempt to wait long enough for pool conns to timeout+drop
-        sleep(Duration::from_secs(6)).await;
+        sleep(Duration::from_secs(2)).await;
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
         let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
@@ -1134,6 +1134,7 @@ mod test {
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
             pool_max_streams_per_conn: 50,
+            pool_unused_release_timeout: Duration::from_secs(2),
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
@@ -1161,7 +1162,7 @@ mod test {
         let (client_stop_signal, client_stop) = drain::channel();
         let persist_res = spawn_persistent_client(pool.clone(), key1.clone(), server_addr, client_stop);
 
-        //loop thru the nonpersistent results
+        //loop thru the nonpersistent clients and wait for them to finish
         while let Some(Err(res)) = tasks.next().await {
             assert!(!res.is_panic(), "CLIENT PANICKED!");
             continue;
@@ -1179,12 +1180,12 @@ mod test {
         );
 
 
-        // Attempt to wait long enough for pool conns to timeout+drop
-        sleep(Duration::from_secs(6)).await;
+        // Attempt to wait long enough for pool conns to timeout+evict
+        sleep(Duration::from_secs(2)).await;
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
-        // At this point, we should still have one conn that hasn't been dropped (even though the pool has)
+        // At this point, we should still have one conn that hasn't been dropped
         // because we haven't ended the persistent client
         let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
         assert!(
@@ -1194,7 +1195,7 @@ mod test {
         client_stop_signal.drain().await;
         assert!(!persist_res.await.is_err(), "PERSIST CLIENT ERROR");
 
-        sleep(Duration::from_secs(6)).await;
+        sleep(Duration::from_secs(2)).await;
 
         let after_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(after_conncount == 3, "after conncount was {after_conncount}");
@@ -1293,12 +1294,12 @@ mod test {
                 loop {
                     count += 1;
                     let res = c1.send_request(req()).await;
-
                     if res.is_err() {
                         panic!("SEND ERR: {:#?} sendcount {count}", res);
                     } else if res.unwrap().status() != 200 {
                         panic!("CLIENT RETURNED ERROR")
                     }
+
                 }
             };
 
