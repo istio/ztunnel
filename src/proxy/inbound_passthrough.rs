@@ -202,18 +202,10 @@ impl InboundPassthrough {
             pi.metrics,
         );
 
-        //register before assert_rbac to ensure the connection is tracked during it's entire valid span
-        connection_manager.register(&rbac_ctx);
-        if !pi.state.assert_rbac(&rbac_ctx).await {
-            connection_manager.release(&rbac_ctx);
-            result_tracker.record(Err(Error::AuthorizationPolicyRejection));
-            return;
-        }
-        let close = match connection_manager.track(&rbac_ctx) {
-            Some(c) => c,
-            None => {
-                // this seems unlikely but could occur if policy changes while track awaits lock
-                result_tracker.record(Err(Error::AuthorizationPolicyRejection));
+        let conn_guard = match connection_manager.assert_rbac(&pi.state, &rbac_ctx).await {
+            Ok(cg) => cg,
+            Err(e) => {
+                result_tracker.record(Err(e));
                 return;
             }
         };
@@ -238,13 +230,7 @@ impl InboundPassthrough {
             socket::copy_bidirectional(&mut inbound_stream, &mut outbound, &result_tracker).await
         };
 
-        let res = tokio::select! {
-            res = send => {
-                connection_manager.release(&rbac_ctx);
-                res
-            }
-            _signaled = close.signaled() => Err(Error::AuthorizationPolicyLateRejection)
-        };
+        let res = conn_guard.handle_connection(send).await;
         result_tracker.record(res);
     }
 }
