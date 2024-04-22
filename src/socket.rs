@@ -179,7 +179,7 @@ pub async fn copy_bidirectional<A, B>(
     downstream: &mut A,
     upstream: &mut B,
     stats: &ConnectionResult,
-) -> Result<(u64, u64), crate::proxy::Error>
+) -> Result<(), crate::proxy::Error>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -209,7 +209,7 @@ where
     tokio::try_join!(downstream_to_upstream, upstream_to_downstream)?;
 
     trace!(sent, received, "copy complete");
-    Ok((sent, received))
+    Ok(())
 }
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
