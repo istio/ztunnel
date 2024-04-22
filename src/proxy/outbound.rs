@@ -368,6 +368,9 @@ impl OutboundConnection {
 
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
+        if let Some(svc) = &req.destination_service {
+            f.set_host(&svc.hostname);
+        }
 
         let request = hyper::Request::builder()
             .uri(&req.destination.to_string())
