@@ -82,8 +82,8 @@ pub struct ConnectionGuard {
 impl ConnectionGuard {
     pub async fn handle_connection(
         mut self,
-        send: impl Future<Output = Result<(u64, u64), Error>> + Sized,
-    ) -> Result<(u64, u64), Error> {
+        send: impl Future<Output = Result<(), Error>> + Sized,
+    ) -> Result<(), Error> {
         let watch = self.watch.take().expect("watch cannot be taken twice");
         tokio::select! {
             res = send => {

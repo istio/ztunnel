@@ -263,7 +263,7 @@ impl OutboundConnection {
                     .await
             }
         };
-        result_tracker.record(res.map(|_| ()))
+        result_tracker.record(res)
     }
 
     async fn proxy_to_hbone(
@@ -273,7 +273,7 @@ impl OutboundConnection {
         outer_conn_drain: Option<Watch>,
         req: &Request,
         connection_stats: &ConnectionResult,
-    ) -> Result<(u64, u64), Error> {
+    ) -> Result<(), Error> {
         debug!(
             "proxy to {} using HBONE via {} type {:#?}",
             req.destination, req.gateway, req.request_type
@@ -406,7 +406,7 @@ impl OutboundConnection {
         stream: &mut TcpStream,
         req: &Request,
         connection_stats: &ConnectionResult,
-    ) -> Result<(u64, u64), Error> {
+    ) -> Result<(), Error> {
         info!(
             "Proxying to {} using TCP via {} type {:?}",
             req.destination, req.gateway, req.request_type

@@ -385,7 +385,7 @@ impl Inbound {
                     }
                 };
                 let res = conn_guard.handle_connection(send).await;
-                result_tracker.record(res.map(|_| ()));
+                result_tracker.record(res);
             })
             .in_current_span(),
         );
