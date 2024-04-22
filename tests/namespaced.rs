@@ -18,6 +18,8 @@ mod namespaced {
     use futures::future::poll_fn;
     use http_body_util::Empty;
     use std::collections::HashMap;
+    use std::fs;
+    use std::fs::File;
     use std::net::{IpAddr, SocketAddr};
     use std::os::fd::AsRawFd;
     use std::path::PathBuf;
@@ -27,6 +29,8 @@ mod namespaced {
 
     use hyper::Method;
     use hyper_util::rt::TokioIo;
+
+    use nix::unistd::mkdtemp;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpStream;
@@ -42,6 +46,62 @@ mod namespaced {
     use ztunnel::test_helpers::linux::WorkloadManager;
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
+
+    /// initialize_namespace_tests sets up the namespace tests.
+    /// These utilize the `unshare` syscall to setup an environment where we:
+    /// * Are "root"
+    /// * Have our own network namespace to mess with (and create other network namespaces within)
+    /// * Have a few shared files re-mounted to not impact the host
+    /// The special ctor macro ensures this is run *before* any code. In particular, before tokio runtime.
+    #[ctor::ctor]
+    fn initialize_namespace_tests() {
+        use libc::getuid;
+        use nix::mount::{mount, MsFlags};
+        use nix::sched::{unshare, CloneFlags};
+        use std::io::Write;
+
+        // First, drop into a new user namespace.
+        let original_uid = unsafe { getuid() };
+        unshare(CloneFlags::CLONE_NEWUSER).unwrap();
+        let mut data_file = File::create("/proc/self/uid_map").expect("creation failed");
+
+        // Map our current user to root in the new network namespace
+        data_file
+            .write(format!("{} {} 1", 0, original_uid).as_bytes())
+            .expect("write failed");
+
+        // Setup a new network namespace
+        unshare(CloneFlags::CLONE_NEWNET).unwrap();
+
+        // Setup a new mount namespace
+        unshare(CloneFlags::CLONE_NEWNS).unwrap();
+
+        // Temporary directory will hold all our mounts
+        let tp = std::env::temp_dir().join("ztunnel_namespaced.XXXXXX");
+        let tmp = mkdtemp(&tp).expect("tmp dir");
+
+        // Bind mount /var/run/netns so we can make our own independent network namespaces
+        fs::create_dir(tmp.join("netns")).expect("netns dir");
+        mount(
+            Some(&tmp.join("netns")),
+            "/var/run/netns",
+            None::<&PathBuf>,
+            MsFlags::MS_BIND,
+            None::<&PathBuf>,
+        )
+        .expect("network namespace bindmount");
+
+        // Bind xtables lock so we can access it (otherwise, permission denied)
+        File::create(tmp.join("xtables.lock")).expect("xtables file");
+        mount(
+            Some(&tmp.join("xtables.lock")),
+            "/run/xtables.lock",
+            None::<&PathBuf>,
+            MsFlags::MS_BIND,
+            None::<&PathBuf>,
+        )
+        .expect("xtables bindmount");
+    }
 
     macro_rules! function {
         () => {{
@@ -59,11 +119,7 @@ mod namespaced {
     macro_rules! setup_netns_test {
         () => {{
             if unsafe { libc::getuid() } != 0 {
-                if std::env::var("CI").is_ok() {
-                    panic!("CI tests should run as root to have full coverage");
-                }
-                eprintln!("This test requires root; skipping");
-                return Ok(());
+                panic!("CI tests should run as root; this is supposed to happen automatically?");
             }
             initialize_telemetry();
             let f = function!()
