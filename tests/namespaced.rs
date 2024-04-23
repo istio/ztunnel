@@ -37,11 +37,11 @@ mod namespaced {
     use tokio::time::timeout;
     use tracing::{error, info};
 
-    use ztunnel::identity;
     use ztunnel::state::workload::NetworkAddress;
     use ztunnel::test_helpers::app::ParsedMetrics;
     use ztunnel::test_helpers::app::TestApp;
     use ztunnel::test_helpers::helpers::initialize_telemetry;
+    use ztunnel::{identity, telemetry};
 
     use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
     use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
@@ -148,8 +148,25 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        info!("verifying remote metrics");
         verify_local_remote_metrics(&ztunnel, &ztunnel, &metrics).await;
+        telemetry::testing::assert_contains(HashMap::from([
+            ("target", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "server"),
+            ("bytes_sent", "22"),
+            ("bytes_recv", "11"),
+            ("direction", "inbound"),
+            ("message", "connection complete"),
+        ]));
+        telemetry::testing::assert_contains(HashMap::from([
+            ("target", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "server"),
+            ("bytes_sent", "11"),
+            ("bytes_recv", "22"),
+            ("direction", "outbound"),
+            ("message", "connection complete"),
+        ]));
         Ok(())
     }
 
