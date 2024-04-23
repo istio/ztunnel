@@ -190,8 +190,8 @@ impl WorkloadManager {
         Ok(rx.recv()?)
     }
 
-    async fn refresh_config(&mut self, ) -> anyhow::Result<()> {
-        for (_,mut node) in &mut self.ztunnels {
+    async fn refresh_config(&mut self) -> anyhow::Result<()> {
+        for (_, mut node) in &mut self.ztunnels {
             let new_config = LocalConfig {
                 workloads: self.workloads.clone(),
                 policies: self.policies.clone(),
@@ -204,7 +204,13 @@ impl WorkloadManager {
 
     /// workload_builder allows creating a new workload. It will run in its own network namespace.
     pub fn workload_builder(&mut self, name: &str, node: &str) -> TestWorkloadBuilder {
-        TestWorkloadBuilder::new(name, self).on_node(node)
+        TestWorkloadBuilder::new(name, self)
+            .on_node(node)
+            .identity(identity::Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "default".to_string(),
+                service_account: name.to_string(),
+            })
     }
 
     /// service_builder allows creating a new service
@@ -217,12 +223,12 @@ impl WorkloadManager {
     pub async fn register_waypoint(&mut self, name: &str, node: &str) -> anyhow::Result<Namespace> {
         let ns = TestWorkloadBuilder::new(name, self)
             .on_node(node)
-            // TODO: way to add certs for other identities to the cert manager
-            // .identity(identity::Identity::Spiffe {
-            //     trust_domain: "cluster.local".to_string(),
-            //     namespace: "default".to_string(),
-            //     service_account: name.to_string(),
-            // })
+            .uncaptured() // Waypoints are not captured.
+            .identity(identity::Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "default".to_string(),
+                service_account: name.to_string(),
+            })
             .register()
             .await?;
         self.waypoints.push(ns.ip());
@@ -381,6 +387,7 @@ impl<'a> TestWorkloadBuilder<'a> {
     /// Opt out of redirection
     pub fn uncaptured(mut self) -> Self {
         self.captured = false;
+        self.w.workload.protocol = TCP;
         self
     }
 
