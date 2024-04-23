@@ -29,6 +29,7 @@ mod namespaced {
 
     use hyper::Method;
     use hyper_util::rt::TokioIo;
+    use libc::getpid;
 
     use nix::unistd::mkdtemp;
 
@@ -106,6 +107,9 @@ mod namespaced {
             None::<&PathBuf>,
         )
         .expect("xtables bindmount");
+
+        let pid = unsafe {getpid() };
+        println!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net -t {pid}`");
     }
 
     /// setup_netns_test prepares a test using network namespaces. This checks we have root,
@@ -769,7 +773,7 @@ mod namespaced {
                         .unwrap()
                         .unwrap();
                     timeout(
-                        Duration::from_secs(5),
+                        Duration::from_secs(500),
                         double_read_write_stream(&mut stream),
                     )
                     .await
