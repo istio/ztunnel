@@ -15,10 +15,11 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::sleep;
 use tracing::{error, info, trace, Instrument};
 
 use crate::config::ProxyMode;
@@ -56,6 +57,12 @@ impl InboundPassthrough {
             transparent,
             "listener established",
         );
+        tokio::spawn(async {
+            loop {
+                sleep(Duration::from_secs(1)).await;
+                info!("inbound plaintext tick..");
+            }
+        });
         Ok(InboundPassthrough {
             listener,
             pi,
@@ -111,6 +118,7 @@ impl InboundPassthrough {
                 info!("inbound passthrough drained");
             }
         }
+        error!("INBOUND PLAINTEXT DONE!!!!")
     }
 
     async fn proxy_inbound_plaintext(

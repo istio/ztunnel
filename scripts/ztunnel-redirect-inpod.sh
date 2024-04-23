@@ -19,22 +19,29 @@ iptables-restore --wait 10 <<EOF
 :FORWARD ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
-
--A PREROUTING -m mark --mark 1337/0xfff -j CONNMARK --set-xmark 0x111/0xfff
--A PREROUTING -p tcp -m tcp --dport $POD_INBOUND -m mark ! --mark 1337/0xfff -j TPROXY --on-port $POD_INBOUND --on-ip 127.0.0.1 --tproxy-mark 0x111/0xfff
--A PREROUTING -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A PREROUTING ! -d 127.0.0.1/32 -p tcp -m mark ! --mark 1337/0xfff -j TPROXY --on-port $POD_INBOUND_PLAINTEXT --on-ip 127.0.0.1 --tproxy-mark 0x111/0xfff
--A OUTPUT -m connmark --mark 0x111/0xfff -j CONNMARK --restore-mark --nfmask 0xffffffff --ctmask 0xffffffff
+:ISTIO_OUTPUT - [0:0]
+:ISTIO_PRERT - [0:0]
+-A PREROUTING -j ISTIO_PRERT
+-A OUTPUT -j ISTIO_OUTPUT
+-A ISTIO_OUTPUT -m connmark --mark 0x111/0xfff -j CONNMARK --restore-mark --nfmask 0xffffffff --ctmask 0xffffffff
+-A ISTIO_PRERT -m mark --mark 0x539/0xfff -j CONNMARK --set-xmark 0x111/0xfff
+-A ISTIO_PRERT -s 169.254.7.127/32 -p tcp -m tcp -j ACCEPT
+-A ISTIO_PRERT ! -d 127.0.0.1/32 -i lo -p tcp -j ACCEPT
+-A ISTIO_PRERT -p tcp -m tcp --dport 15008 -m mark ! --mark 0x539/0xfff -j TPROXY --on-port 15008 --on-ip 0.0.0.0 --tproxy-mark 0x111/0xfff
+-A ISTIO_PRERT -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ISTIO_PRERT ! -d 127.0.0.1/32 -p tcp -m mark ! --mark 0x539/0xfff -j TPROXY --on-port 15006 --on-ip 0.0.0.0 --tproxy-mark 0x111/0xfff
 COMMIT
 *nat
 :PREROUTING ACCEPT [0:0]
 :INPUT ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
-:ISTIO_REDIRECT - [0:0]
--A OUTPUT -p tcp -j ISTIO_REDIRECT
--A ISTIO_REDIRECT -p tcp -m mark --mark 0x111/0xfff -j ACCEPT
--A ISTIO_REDIRECT -p tcp -m mark ! --mark 1337/0xfff -j REDIRECT --to-ports $POD_OUTBOUND
+:ISTIO_OUTPUT - [0:0]
+-A OUTPUT -j ISTIO_OUTPUT
+-A ISTIO_OUTPUT -d 169.254.7.127/32 -p tcp -m tcp -j ACCEPT
+-A ISTIO_OUTPUT -p tcp -m mark --mark 0x111/0xfff -j ACCEPT
+-A ISTIO_OUTPUT ! -d 127.0.0.1/32 -o lo -j ACCEPT
+-A ISTIO_OUTPUT ! -d 127.0.0.1/32 -p tcp -m mark ! --mark 0x539/0xfff -j REDIRECT --to-ports 15001
 COMMIT
 EOF
 

@@ -133,11 +133,13 @@ impl Namespace {
                         .enable_all()
                         .build()
                         .unwrap();
-                    rt.block_on(f(Ready(tx)).instrument(tracing::info_span!(
+                    let res=rt.block_on(f(Ready(tx)).instrument(tracing::info_span!(
                         "run",
                         name = self.name,
                         node = self.node_name
-                    )))
+                    )));
+                    error!("RUN done");
+                    res
                 })
                 .unwrap()
         });

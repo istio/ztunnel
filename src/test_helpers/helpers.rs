@@ -25,7 +25,8 @@ use crate::metrics::sub_registry;
 use crate::{proxy, telemetry};
 
 // Ensure that the `tracing` stack is only initialised once using `once_cell`
-static TRACING: Lazy<()> = Lazy::new(telemetry::testing::setup_test_logging);
+// static TRACING: Lazy<()> = Lazy::new(telemetry::testing::setup_test_logging);
+static TRACING: Lazy<()> = Lazy::new(telemetry::setup_logging);
 
 pub fn initialize_telemetry() {
     Lazy::force(&TRACING);
