@@ -152,25 +152,25 @@ mod namespaced {
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        // verify_local_remote_metrics(&ztunnel, &ztunnel, &metrics).await;
-        // telemetry::testing::assert_contains(HashMap::from([
-        //     ("target", "access"),
-        //     ("src.workload", "client"),
-        //     ("dst.workload", "server"),
-        //     ("bytes_sent", "22"),
-        //     ("bytes_recv", "11"),
-        //     ("direction", "inbound"),
-        //     ("message", "connection complete"),
-        // ]));
-        // telemetry::testing::assert_contains(HashMap::from([
-        //     ("target", "access"),
-        //     ("src.workload", "client"),
-        //     ("dst.workload", "server"),
-        //     ("bytes_sent", "11"),
-        //     ("bytes_recv", "22"),
-        //     ("direction", "outbound"),
-        //     ("message", "connection complete"),
-        // ]));
+        verify_local_remote_metrics(&ztunnel, &ztunnel, &metrics).await;
+        telemetry::testing::assert_contains(HashMap::from([
+            ("target", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "server"),
+            ("bytes_sent", "22"),
+            ("bytes_recv", "11"),
+            ("direction", "inbound"),
+            ("message", "connection complete"),
+        ]));
+        telemetry::testing::assert_contains(HashMap::from([
+            ("target", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "server"),
+            ("bytes_sent", "11"),
+            ("bytes_recv", "22"),
+            ("direction", "outbound"),
+            ("message", "connection complete"),
+        ]));
         Ok(())
     }
 
