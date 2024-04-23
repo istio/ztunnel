@@ -71,6 +71,7 @@ pub enum TestMode {
     InPod,
     SharedNode,
 }
+
 impl WorkloadManager {
     /// new instantiates a manager.
     pub fn new(mode: TestMode) -> anyhow::Result<Self> {
@@ -189,14 +190,14 @@ impl WorkloadManager {
         Ok(rx.recv()?)
     }
 
-    async fn refresh_config(&mut self, node: &str) -> anyhow::Result<()> {
-        let new_config = LocalConfig {
-            workloads: self.workloads.clone(),
-            policies: self.policies.clone(),
-            services: self.services.values().cloned().collect_vec(),
-        };
-        if let Some(ref mut zt) = self.ztunnels.get_mut(node) {
-            zt.config_sender.send_and_wait(new_config).await?;
+    async fn refresh_config(&mut self, ) -> anyhow::Result<()> {
+        for (_,mut node) in &mut self.ztunnels {
+            let new_config = LocalConfig {
+                workloads: self.workloads.clone(),
+                policies: self.policies.clone(),
+                services: self.services.values().cloned().collect_vec(),
+            };
+            node.config_sender.send_and_wait(new_config).await;
         }
         Ok(())
     }
@@ -446,7 +447,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                 })?;
             }
         }
-        self.manager.refresh_config(&node).await?;
+        self.manager.refresh_config().await?;
         Ok(network_namespace)
     }
 }
