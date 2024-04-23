@@ -430,7 +430,10 @@ impl LocalClient {
     }
 
     fn load_config(&self, r: LocalConfig) -> anyhow::Result<()> {
-        debug!("load local config: {}", serde_yaml::to_string(&r).unwrap_or_default());
+        debug!(
+            "load local config: {}",
+            serde_yaml::to_string(&r).unwrap_or_default()
+        );
         let mut state = self.state.write().unwrap();
         // Start the state as empty
         *state = Default::default();

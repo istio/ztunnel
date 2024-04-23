@@ -23,7 +23,9 @@ use std::path::Path;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(bind_path: P) -> MpscAckSender<(String, i32)> {
+pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
+    bind_path: P,
+) -> MpscAckSender<(String, i32)> {
     info!("starting server {}", bind_path.as_ref().display());
 
     // remove file if exists
