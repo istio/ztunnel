@@ -435,8 +435,11 @@ impl LocalClient {
             serde_yaml::to_string(&r).unwrap_or_default()
         );
         let mut state = self.state.write().unwrap();
-        // Start the state as empty
-        *state = Default::default();
+        // Clear the state
+        state.workloads = Default::default();
+        state.services = Default::default();
+        // Policies have some channels, so we don't want to reset it entirely
+        state.policies.clear_all_policies();
         let num_workloads = r.workloads.len();
         let num_policies = r.policies.len();
         for wl in r.workloads {
