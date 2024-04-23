@@ -35,7 +35,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{net::SocketAddr, time::Duration};
-use tokio::runtime::Handle;
 
 use tokio::time;
 use tracing::{error, info, warn};
@@ -66,7 +65,6 @@ struct State {
     shutdown_trigger: signal::ShutdownTrigger,
     cert_manager: Arc<SecretManager>,
     handlers: Vec<Arc<dyn AdminHandler2>>,
-    dataplane_handle: Handle,
 }
 
 pub struct Service {
@@ -109,7 +107,6 @@ impl Service {
         shutdown_trigger: signal::ShutdownTrigger,
         drain_rx: Watch,
         cert_manager: Arc<SecretManager>,
-        dataplane_handle: Handle,
     ) -> anyhow::Result<Self> {
         Server::<State>::bind(
             "admin",
@@ -121,7 +118,6 @@ impl Service {
                 shutdown_trigger,
                 cert_manager,
                 handlers: vec![],
-                dataplane_handle,
             },
         )
         .await
@@ -141,7 +137,6 @@ impl Service {
             match req.uri().path() {
                 "/debug/pprof/profile" => handle_pprof(req).await,
                 "/debug/pprof/heap" => handle_jemalloc_pprof_heapgen(req).await,
-                "/debug/tasks" => handle_tokio_tasks(req, &state.dataplane_handle).await,
                 "/quitquitquit" => Ok(handle_server_shutdown(
                     state.shutdown_trigger.clone(),
                     req,
@@ -421,35 +416,6 @@ async fn handle_jemalloc_pprof_heapgen(
     Ok(Response::builder()
         .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
         .body("jemalloc not enabled".into())
-        .expect("builder with known status code should not fail"))
-}
-
-async fn handle_tokio_tasks(
-    _req: Request<Incoming>,
-    dataplane_handle: &Handle,
-) -> anyhow::Result<Response<Full<Bytes>>> {
-    let handle = tokio::runtime::Handle::current();
-    if let Ok(dump) = tokio::time::timeout(Duration::from_secs(5), handle.dump()).await {
-        for (i, task) in dump.tasks().iter().enumerate() {
-            let trace = task.trace();
-            println!("Admin Task {i}:");
-            println!("{trace}\n");
-        }
-    } else {
-        println!("failed to admin workload tasks");
-    }
-    if let Ok(dump) = tokio::time::timeout(Duration::from_secs(10), dataplane_handle.dump()).await {
-        for (i, task) in dump.tasks().iter().enumerate() {
-            let trace = task.trace();
-            println!("Workload Task {i}:");
-            println!("{trace}\n");
-        }
-    } else {
-        println!("failed to dump workload tasks");
-    }
-    Ok(Response::builder()
-        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-        .body("check stdout".into())
         .expect("builder with known status code should not fail"))
 }
 
