@@ -35,8 +35,9 @@ mod namespaced {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpStream;
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
     use tracing::{error, info};
+    use WorkloadMode::Uncaptured;
 
     use ztunnel::state::workload::NetworkAddress;
     use ztunnel::test_helpers::app::ParsedMetrics;
@@ -48,6 +49,7 @@ mod namespaced {
     use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
+    use crate::namespaced::WorkloadMode::Captured;
 
     /// initialize_namespace_tests sets up the namespace tests.
     /// These utilize the `unshare` syscall to setup an environment where we:
@@ -95,7 +97,7 @@ mod namespaced {
             MsFlags::MS_BIND,
             None::<&PathBuf>,
         )
-        .expect("network namespace bindmount");
+            .expect("network namespace bindmount");
 
         // Bind xtables lock so we can access it (otherwise, permission denied)
         File::create(tmp.join("xtables.lock")).expect("xtables file");
@@ -106,10 +108,10 @@ mod namespaced {
             MsFlags::MS_BIND,
             None::<&PathBuf>,
         )
-        .expect("xtables bindmount");
+            .expect("xtables bindmount");
 
-        let pid = unsafe {getpid() };
-        println!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net -t {pid}`");
+        let pid = unsafe { getpid() };
+        eprintln!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net -t {pid}`");
     }
 
     /// setup_netns_test prepares a test using network namespaces. This checks we have root,
@@ -128,50 +130,92 @@ mod namespaced {
 
     const DEFAULT_NODE: &str = "node";
     const REMOTE_NODE: &str = "remote-node";
+    const UNCAPTURED_NODE: &str = "remote-node";
 
-    #[tokio::test]
-    async fn simple() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(InPod);
-        let ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+    #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+    pub enum WorkloadMode {
+        Captured(&'static str),
+        Uncaptured,
+    }
+
+    impl WorkloadMode {
+        fn node(&self) -> &'static str {
+            match self {
+                WorkloadMode::Captured(n) => n,
+                Uncaptured => UNCAPTURED_NODE
+            }
+        }
+    }
+
+    async fn simple_client_server_test(mode: TestMode, client_node: WorkloadMode, server_node: WorkloadMode) -> anyhow::Result<()> {
+        let mut manager = setup_netns_test(mode);
+        // Simple test of client -> server, with the configured mode and nodes
+        let client_ztunnel = match client_node {
+            Captured(node) => Some(manager.deploy_ztunnel(node).await?),
+            Uncaptured => None
+        };
+        let server_ztunnel = match server_node {
+            Captured(node) => if node == client_node.node() {
+                client_ztunnel.clone()
+            } else {
+                Some(manager.deploy_ztunnel(node).await?)
+            },
+            Uncaptured => None
+        };
         let server = manager
-            .workload_builder("server", DEFAULT_NODE)
+            .workload_builder("server", server_node.node())
             .register()
             .await?;
         run_tcp_server(server)?;
 
         let client = manager
-            .workload_builder("client", DEFAULT_NODE)
+            .workload_builder("client", client_node.node())
             .register()
             .await?;
         run_tcp_client(client, manager.resolver(), "server")?;
 
-        let metrics: [(&str, u64); 4] = [
+        let metrics = [
             (CONNECTIONS_OPENED, 1),
             (CONNECTIONS_CLOSED, 1),
             // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
             (BYTES_RECV, REQ_SIZE),
             (BYTES_SENT, REQ_SIZE * 2),
         ];
-        verify_local_remote_metrics(&ztunnel, &ztunnel, &metrics).await;
-        telemetry::testing::assert_contains(HashMap::from([
-            ("target", "access"),
-            ("src.workload", "client"),
-            ("dst.workload", "server"),
-            ("bytes_sent", "22"),
-            ("bytes_recv", "11"),
-            ("direction", "inbound"),
-            ("message", "connection complete"),
-        ]));
-        telemetry::testing::assert_contains(HashMap::from([
-            ("target", "access"),
-            ("src.workload", "client"),
-            ("dst.workload", "server"),
-            ("bytes_sent", "11"),
-            ("bytes_recv", "22"),
-            ("direction", "outbound"),
-            ("message", "connection complete"),
-        ]));
+        if let Some(zt) = server_ztunnel {
+            let remote_metrics = verify_metrics(&zt, &metrics, &destination_labels()).await;
+            telemetry::testing::assert_contains(HashMap::from([
+                ("target", "access"),
+                ("src.workload", "client"),
+                ("dst.workload", "server"),
+                ("bytes_sent", "22"),
+                ("bytes_recv", "11"),
+                ("direction", "inbound"),
+                ("message", "connection complete"),
+            ]));
+        }
+        if let Some(zt) = client_ztunnel {
+            let remote_metrics = verify_metrics(&zt, &metrics, &source_labels()).await;
+            telemetry::testing::assert_contains(HashMap::from([
+                ("target", "access"),
+                ("src.workload", "client"),
+                ("dst.workload", "server"),
+                ("bytes_sent", "11"),
+                ("bytes_recv", "22"),
+                ("direction", "outbound"),
+                ("message", "connection complete"),
+            ]));
+        }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_node_hbone() -> anyhow::Result<()> {
+        simple_client_server_test(InPod, Captured(DEFAULT_NODE), Captured(DEFAULT_NODE)).await
+    }
+
+    #[tokio::test]
+    async fn remote_node_hbone() -> anyhow::Result<()> {
+        simple_client_server_test(InPod, Captured(DEFAULT_NODE), Captured(REMOTE_NODE)).await
     }
 
     #[tokio::test]
@@ -265,7 +309,7 @@ mod namespaced {
                 ),
             ]),
         )
-        .await;
+            .await;
 
         verify_metrics(
             &local,
@@ -286,7 +330,7 @@ mod namespaced {
                 ),
             ]),
         )
-        .await;
+            .await;
 
         // response needed is opposite of what we got before
         let needed_response = match lb_to_nodelocal {
@@ -773,11 +817,11 @@ mod namespaced {
                         .unwrap()
                         .unwrap();
                     timeout(
-                        Duration::from_secs(500),
+                        Duration::from_secs(5),
                         double_read_write_stream(&mut stream),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 }
                 Ok(())
             })?

@@ -286,7 +286,9 @@ impl Inbound {
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
-                pi.state.fetch_workload(&src_network_addr).await
+                let r = pi.state.fetch_workload(&src_network_addr).await;
+                error!("howardjohn lookup {src_network_addr} got {r:?}");
+                r
             }
         };
 
