@@ -17,7 +17,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use drain::Watch;
