@@ -24,7 +24,6 @@ use std::thread;
 
 use anyhow::Context;
 use prometheus_client::registry::Registry;
-use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tracing::{warn, Instrument};
 
@@ -38,7 +37,7 @@ pub async fn build_with_cert(
     cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
     // Start the data plane worker pool.
-    let (data_plane_pool, data_plane_handle)  = new_data_plane_pool(config.num_worker_threads);
+    let data_plane_pool = new_data_plane_pool(config.num_worker_threads);
 
     let shutdown = signal::Shutdown::new();
     // Setup a drain channel. drain_tx is used to trigger a drain, which will complete
@@ -113,7 +112,6 @@ pub async fn build_with_cert(
         shutdown.trigger(),
         drain_rx.clone(),
         cert_manager.clone(),
-        data_plane_handle
     )
     .await
     .context("admin server starts")?;
@@ -232,24 +230,22 @@ struct DataPlaneTask {
     fut: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>,
 }
 
-fn new_data_plane_pool(num_worker_threads: usize) -> (mpsc::Sender<DataPlaneTask>, Handle) {
+fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask> {
     let (tx, rx) = mpsc::channel();
 
     let span = tracing::span::Span::current();
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_worker_threads)
-        .thread_name_fn(|| {
-            static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-            let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-            format!("ztunnel-proxy-{id}")
-        })
-        .enable_all()
-        .build()
-        .unwrap();
-    let handle = runtime.handle().clone();
     thread::spawn(move || {
         let _span = span.enter();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(num_worker_threads)
+            .thread_name_fn(|| {
+                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                format!("ztunnel-proxy-{id}")
+            })
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(
             async move {
                 let mut join_set = JoinSet::new();
@@ -281,7 +277,7 @@ fn new_data_plane_pool(num_worker_threads: usize) -> (mpsc::Sender<DataPlaneTask
         );
     });
 
-    (tx, handle)
+    tx
 }
 
 pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
