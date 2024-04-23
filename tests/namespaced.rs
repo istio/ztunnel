@@ -401,85 +401,84 @@ mod namespaced {
             Ok(())
         }
 
-        #[tokio::test]
-        async fn test_waypoint_bypass() -> anyhow::Result<()> {
-            let mut manager = setup_netns_test!(SharedNode);
-            let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
-            // create a policy to ensure traffic is from the waypoint
-            // TODO: this test is testing bypass from uncaptured workloads but other forms of bypass should be tested
-            //    - service addressed traffic without a svc-attached waypoint
-            //    - workload addressed traffic without a wl-attached waypoint
-            manager.add_policy(Authorization {
+
+    */
+    #[tokio::test]
+    async fn test_policy() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        // create a policy to ensure traffic is from the waypoint
+        // TODO: this test is testing bypass from uncaptured workloads but other forms of bypass should be tested
+        //    - service addressed traffic without a svc-attached waypoint
+        //    - workload addressed traffic without a wl-attached waypoint
+        manager
+            .add_policy(Authorization {
                 name: "deny_bypass".to_string(),
                 namespace: "default".to_string(),
                 scope: ztunnel::rbac::RbacScope::Namespace,
                 action: ztunnel::rbac::RbacAction::Allow,
                 rules: vec![vec![vec![RbacMatch {
                     principals: vec![StringMatch::Exact(
-                        identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/waypoint")
-                            .unwrap()
-                            .to_string(),
+                        "spiffe://cluster.local/ns/default/sa/waypoint".to_string(),
                     )],
                     ..Default::default()
                 }]]],
-            });
-            let ip = waypoint.ip();
-            run_hbone_server(waypoint)?;
-            let _ = manager
-                .workload_builder("server", DEFAULT_NODE)
-                .waypoint(ip)
-                .register()
-                .await?;
-            let client = manager
-                .workload_builder("client", DEFAULT_NODE)
-                .uncaptured()
-                .register()
-                .await?;
-            let app = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+            })
+            .await?;
+        let _ = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .register()
+            .await?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .uncaptured()
+            .register()
+            .await?;
 
-            let srv = resolve_target(manager.resolver(), "server");
-            client
-                .run(move || async move {
-                    let builder =
-                        hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
+        let srv = resolve_target(manager.resolver(), "server");
+        client
+            .run(move || async move {
+                let builder =
+                    hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
 
-                    let request = hyper::Request::builder()
-                        .uri(&srv.to_string())
-                        .method(Method::CONNECT)
-                        .version(hyper::Version::HTTP_2)
-                        .body(Empty::<Bytes>::new())
+                let request = hyper::Request::builder()
+                    .uri(&srv.to_string())
+                    .method(Method::CONNECT)
+                    .version(hyper::Version::HTTP_2)
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+
+                let id = &identity::Identity::default();
+                let dst_id =
+                    identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
+                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let hbone = SocketAddr::new(srv.ip(), 15008);
+                let tcp_stream = TcpStream::connect(hbone).await.unwrap();
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
+                // spawn a task to poll the connection and drive the HTTP state
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        error!("Error in HBONE connection handshake: {:?}", e);
+                    }
+                });
 
-                    let id = &identity::Identity::default();
-                    let dst_id =
-                        identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
-                            .unwrap();
-                    let cert = app.cert_manager.fetch_certificate(id).await?;
-                    let connector = cert.outbound_connector(vec![dst_id]).unwrap();
-                    // connector.set_verify_hostname(false);
-                    // connector.set_use_server_name_indication(false);
-                    let hbone = SocketAddr::new(srv.ip(), 15008);
-                    let tcp_stream = TcpStream::connect(hbone).await.unwrap();
-                    let tls_stream = connector.connect(tcp_stream).await.unwrap();
-                    let (mut request_sender, connection) =
-                        builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
-                    // spawn a task to poll the connection and drive the HTTP state
-                    tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            error!("Error in HBONE connection handshake: {:?}", e);
-                        }
-                    });
+                let response = request_sender.send_request(request).await.unwrap();
+                assert_eq!(response.status(), hyper::StatusCode::UNAUTHORIZED);
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
+        telemetry::testing::assert_contains(HashMap::from([
+            ("target", "access"),
+            ("error", "connection closed due to policy rejection"),
+        ]));
+        Ok(())
+    }
 
-                    let response = request_sender.send_request(request).await.unwrap();
-                    assert_eq!(response.status(), hyper::StatusCode::UNAUTHORIZED);
-                    Ok(())
-                })?
-                .join()
-                .unwrap()?;
-            Ok(())
-        }
-
-    */
     #[tokio::test]
     async fn hbone_ip_mismatch() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(InPod);
@@ -562,10 +561,10 @@ mod namespaced {
                 (zt, 15006, Request), // Inbound: should be blocked due to recursive call
                 (zt, 15008, Request), // HBONE: expected TLS, reject
                 // Localhost still get connection established, as ztunnel accepts anything. But they are dropped immediately.
-                (zt, 15080, Request), // socks5: localhost
-                (zt, 15000, Request), // admin: localhost
-                (zt, 15020, Http),    // Stats: accept connection and returns a HTTP error
-                (zt, 15021, Http),    // Readiness: accept connection and returns a HTTP error
+                (zt, 15080, Request),      // socks5: localhost
+                (zt, 15000, Request),      // admin: localhost
+                (zt, 15020, Http),         // Stats: accept connection and returns a HTTP error
+                (zt, 15021, Http),         // Readiness: accept connection and returns a HTTP error
                 (ourself, 15001, Request), // Outbound: should be blocked due to recursive call
                 (ourself, 15006, Request), // Inbound: should be blocked due to recursive call
                 (ourself, 15008, Request), // HBONE: expected TLS, reject

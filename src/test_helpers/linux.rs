@@ -235,8 +235,10 @@ impl WorkloadManager {
         Ok(ns)
     }
 
-    pub fn add_policy(&mut self, p: Authorization) {
+    pub async fn add_policy(&mut self, p: Authorization) -> anyhow::Result<()> {
         self.policies.push(p);
+        self.refresh_config().await?;
+        Ok(())
     }
 
     pub fn resolver(&self) -> Resolver {
