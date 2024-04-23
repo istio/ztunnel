@@ -194,7 +194,6 @@ async fn run_requests_test(
         local_node: (!node.is_empty()).then(|| node.to_string()),
         ..test_config_with_port(echo_addr.port())
     };
-    error!("nip");
     tokio::spawn(echo.run());
     testapp::with_app(cfg, |app| async move {
         let dst = SocketAddr::from_str(target)

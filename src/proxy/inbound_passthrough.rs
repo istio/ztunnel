@@ -57,12 +57,6 @@ impl InboundPassthrough {
             transparent,
             "listener established",
         );
-        tokio::spawn(async {
-            loop {
-                sleep(Duration::from_secs(1)).await;
-                info!("inbound plaintext tick..");
-            }
-        });
         Ok(InboundPassthrough {
             listener,
             pi,
@@ -118,7 +112,6 @@ impl InboundPassthrough {
                 info!("inbound passthrough drained");
             }
         }
-        error!("INBOUND PLAINTEXT DONE!!!!")
     }
 
     async fn proxy_inbound_plaintext(
