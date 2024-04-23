@@ -235,7 +235,9 @@ impl Inbound {
         };
         let illegal_call = if pi.cfg.inpod_enabled {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
-            illegal_ports.contains(&upstream_addr.port())
+            // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
+            // sends to 15008.
+            illegal_ports.contains(&hbone_addr.port())
         } else {
             false // TODO: do we need any check here?
         };
