@@ -222,17 +222,14 @@ impl Inbound {
         };
 
         // Determine the next hop.
-        let Ok((upstream_addr, inbound_protocol, upstream, upstream_service)) =
-            Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await
-        else {
-            metrics::log_early_deny(
-                conn.src,
-                conn.dst,
-                Reporter::destination,
-                Error::UnknownDestination(hbone_addr.ip()),
-            );
-            return StatusCode::BAD_REQUEST;
-        };
+        let (upstream_addr, inbound_protocol, upstream, upstream_service) =
+            match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
+                Ok(res) => res,
+                Err(e) => {
+                    metrics::log_early_deny(conn.src, conn.dst, Reporter::destination, e);
+                    return StatusCode::BAD_REQUEST;
+                }
+            };
         let illegal_call = if pi.cfg.inpod_enabled {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
             // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
