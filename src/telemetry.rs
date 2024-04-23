@@ -245,7 +245,7 @@ pub mod testing {
     use std::collections::HashMap;
     use std::io;
     use std::sync::{Mutex, MutexGuard, OnceLock};
-    use tracing::error;
+
     use tracing_subscriber::fmt;
     use tracing_subscriber::fmt::format;
     use tracing_subscriber::layer::SubscriberExt;

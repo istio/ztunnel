@@ -25,15 +25,14 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
-use tracing::error;
 
 use ztunnel::config;
 use ztunnel::identity::mock::new_secret_manager;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
 use ztunnel::test_helpers::assert_eventually;
-use ztunnel::test_helpers::*;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
+use ztunnel::test_helpers::*;
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {

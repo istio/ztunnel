@@ -181,7 +181,11 @@ impl HboneTestServer {
     pub async fn new(mode: Mode, name: &str) -> Self {
         let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
         let listener = TcpListener::bind(addr).await.unwrap();
-        Self { listener, mode, name: name.to_string()}
+        Self {
+            listener,
+            mode,
+            name: name.to_string(),
+        }
     }
 
     pub fn address(&self) -> SocketAddr {

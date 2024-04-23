@@ -151,13 +151,14 @@ mod namespaced {
         let mut manager = setup_netns_test!(InPod);
 
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
-        let ip = waypoint.ip();
+        let waypoint_ip = waypoint.ip();
         run_hbone_server(waypoint, "waypoint")?;
 
         manager
             .workload_builder("server", DEFAULT_NODE)
-            .waypoint(ip)
+            .waypoint(waypoint_ip)
             .register()
             .await?;
         let client = manager
@@ -165,6 +166,7 @@ mod namespaced {
             .register()
             .await?;
 
+        let server_ip = manager.resolver().resolve("server")?;
         run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
 
         let metrics = [
@@ -176,10 +178,77 @@ mod namespaced {
         verify_metrics(&zt, &metrics, &source_labels()).await;
         let sent = format!("{REQ_SIZE}");
         let recv = format!("{HBONE_REQ_SIZE}");
+        let hbone_addr = format!("{server_ip}:8080");
+        let dst_addr = format!("{waypoint_ip}:15008");
         let want = HashMap::from([
             ("target", "access"),
             ("src.workload", "client"),
             ("dst.workload", "waypoint"),
+            ("dst.hbone_addr", &hbone_addr),
+            ("dst.addr", &dst_addr),
+            ("bytes_sent", &sent),
+            ("bytes_recv", &recv),
+            ("direction", "outbound"),
+            ("message", "connection complete"),
+            (
+                "src.identity",
+                "spiffe://cluster.local/ns/default/sa/client",
+            ),
+            (
+                "dst.identity",
+                "spiffe://cluster.local/ns/default/sa/waypoint",
+            ),
+        ]);
+        telemetry::testing::assert_contains(want);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_waypoint() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
+        let waypoint_ip = waypoint.ip();
+        run_hbone_server(waypoint, "waypoint")?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+
+        manager
+            .service_builder("service")
+            .addresses(vec![NetworkAddress {
+                network: "".to_string(),
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, 80u16)]))
+            .waypoint(waypoint_ip)
+            .register()
+            .await?;
+
+        run_tcp_to_hbone_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
+
+        let metrics = [
+            (CONNECTIONS_OPENED, 1),
+            (CONNECTIONS_CLOSED, 1),
+            (BYTES_RECV, REQ_SIZE),
+            (BYTES_SENT, HBONE_REQ_SIZE),
+        ];
+        verify_metrics(&zt, &metrics, &source_labels()).await;
+
+        let sent = format!("{REQ_SIZE}");
+        let recv = format!("{HBONE_REQ_SIZE}");
+        let hbone_addr = format!("{TEST_VIP}:80");
+        let dst_addr = format!("{waypoint_ip}:15008");
+        let want = HashMap::from([
+            ("target", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "waypoint"),
+            ("dst.hbone_addr", &hbone_addr),
+            ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),
             ("bytes_recv", &recv),
             ("direction", "outbound"),
@@ -333,77 +402,6 @@ mod namespaced {
         }
 
         #[tokio::test]
-        async fn test_waypoint() -> anyhow::Result<()> {
-            let mut manager = setup_netns_test!(SharedNode);
-            let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
-            let ip = waypoint.ip();
-            run_hbone_server(waypoint)?;
-            manager
-                .workload_builder("server", DEFAULT_NODE)
-                .hbone()
-                .waypoint(ip)
-                .register()
-                .await?;
-            let client = manager
-                .workload_builder("client", DEFAULT_NODE)
-                .register()
-                .await?;
-            let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-
-            run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
-
-            let metrics = [
-                (CONNECTIONS_OPENED, 1),
-                (CONNECTIONS_CLOSED, 1),
-                (BYTES_RECV, REQ_SIZE),
-                (BYTES_SENT, HBONE_REQ_SIZE),
-            ];
-            verify_metrics(&zt, &metrics, &source_labels()).await;
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn test_svc_waypoint() -> anyhow::Result<()> {
-            let mut manager = setup_netns_test!(SharedNode);
-            let waypoint_workload = manager
-                .workload_builder("waypoint", DEFAULT_NODE)
-                .hbone()
-                .register()
-                .await?;
-            let ip = waypoint_workload.ip();
-            // in this case waypoint is basically just a dummy echo
-            // this means waypoint won't proxy traffic so a server isn't required
-            // we will test that traffic reaches the echo "waypoint"
-            run_hbone_server(waypoint_workload)?;
-            let client = manager
-                .workload_builder("client", DEFAULT_NODE)
-                .register()
-                .await?;
-            // register a service that has our dummy waypoint's IP as the gateway
-            manager
-                .service_builder("svc")
-                .addresses(vec![NetworkAddress {
-                    network: "".to_string(),
-                    address: TEST_VIP.parse::<IpAddr>()?,
-                }])
-                .ports(HashMap::from([(80u16, 80u16)]))
-                .waypoint(ip)
-                .register()?;
-            let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-
-            run_tcp_to_hbone_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
-
-            let metrics = [
-                (CONNECTIONS_OPENED, 1),
-                (CONNECTIONS_CLOSED, 1),
-                (BYTES_RECV, REQ_SIZE),
-                (BYTES_SENT, HBONE_REQ_SIZE),
-            ];
-            verify_metrics(&zt, &metrics, &source_labels()).await;
-            Ok(())
-        }
-
-        #[tokio::test]
         async fn test_waypoint_bypass() -> anyhow::Result<()> {
             let mut manager = setup_netns_test!(SharedNode);
             let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
@@ -537,140 +535,145 @@ mod namespaced {
                 .unwrap()?;
             Ok(())
         }
-
-        #[tokio::test]
-        async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
-            let mut manager = setup_netns_test!(SharedNode);
-            let client = manager
-                .workload_builder("client", DEFAULT_NODE)
-                .register()
-                .await?;
-            manager.deploy_ztunnel(DEFAULT_NODE).await?;
-
-            #[derive(PartialEq, Copy, Clone, Debug)]
-            enum Failure {
-                /// Cannot even connect
-                Connection,
-                /// Can connect, but cannot send bytes
-                Request,
-                /// Can connect, but get a HTTP error
-                Http,
-            }
-            use Failure::*;
-            async fn send_traffic(stream: &mut TcpStream) -> anyhow::Result<()> {
-                const BODY: &[u8] = b"hello world\r\n\r\n";
-                stream.write_all(BODY).await?;
-                let mut buf: [u8; BODY.len()] = [0; BODY.len()];
-                stream.read_exact(&mut buf).await?;
-                if &buf[..12] != b"HTTP/1.1 400" {
-                    anyhow::bail!(
-                        "expected http error, got {}",
-                        std::str::from_utf8(&buf).unwrap()
-                    );
-                }
-                Ok(())
-            }
-            // Test calling sensitive ports on ztunnel, to ensure we are robust against (usually malicious) calls
-            // directly to ztunnel.
-            client
-                .run(move || async move {
-                    let tests = [
-                        (15001, Request),    // Outbound: should be blocked due to recursive call
-                        (15006, Request),    // Inbound: should be blocked due to recursive call
-                        (15008, Request),    // HBONE: expected TLS, reject
-                        (15080, Connection), // Socks5: only localhost
-                        (15000, Connection), // Admin: only localhost
-                        (15020, Http),       // Stats: accept connection and returns a HTTP error
-                        (15021, Http),       // Readiness: accept connection and returns a HTTP error
-                    ];
-                    for (port, failure) in tests {
-                        info!("send to {port}, want {failure:?} error");
-                        let tgt = SocketAddr::from((manager.resolve("ztunnel-node").unwrap(), port));
-                        let stream = timeout(Duration::from_secs(1), TcpStream::connect(tgt))
-                            .await
-                            .unwrap();
-                        if failure == Connection {
-                            assert!(stream.is_err());
-                            continue;
-                        }
-                        let mut stream = stream.unwrap();
-
-                        let res = timeout(Duration::from_secs(1), send_traffic(&mut stream))
-                            .await
-                            .unwrap();
-                        if failure == Request {
-                            assert!(res.is_err());
-                            continue;
-                        }
-                        res.unwrap();
-                    }
-                    Ok(())
-                })?
-                .join()
-                .unwrap()?;
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
-            let mut manager = setup_netns_test!(SharedNode);
-            let id = match identity::Identity::default() {
-                identity::Identity::Spiffe { .. } => {
-                    identity::Identity::Spiffe {
-                        trust_domain: "clusterset.local".to_string(), // change to mismatched trustdomain
-                        service_account: "my-app".to_string(),
-                        namespace: "default".to_string(),
-                    }
-                }
-            };
-            manager
-                .service_builder("server1")
-                .addresses(vec![NetworkAddress {
-                    network: "".to_string(),
-                    address: TEST_VIP.parse::<IpAddr>()?,
-                }])
-                .ports(HashMap::from([(80u16, 80u16)]))
-                .register()?;
-            run_tcp_server(
-                manager
-                    .workload_builder("server", REMOTE_NODE)
-                    .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
-                    .hbone()
-                    .register()
-                    .await?,
-            )?;
-            let _ = manager.deploy_ztunnel(REMOTE_NODE).await?;
-
-            let client = manager
-                .workload_builder("client", DEFAULT_NODE)
-                .identity(id)
-                .register()
-                .await?;
-            let _ = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-
-            let srv = resolve_target(manager.resolver(), &format!("{TEST_VIP}:80"));
-
-            client
-                .run(move || async move {
-                    let mut tcp_stream = TcpStream::connect(&srv.to_string()).await?;
-                    tcp_stream.write_all(b"hello world!").await?;
-                    let mut buf = [0; 10];
-                    let mut buf = ReadBuf::new(&mut buf);
-
-                    let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
-                    assert!(result.is_err()); // expect a connection reset due to TLS SAN mismatch
-                    assert_eq!(
-                        result.err().unwrap().kind(),
-                        std::io::ErrorKind::ConnectionReset
-                    );
-
-                    Ok(())
-                })?
-                .join()
-                .unwrap()?;
-            Ok(())
-        }
     */
+
+    #[tokio::test]
+    async fn malicious_calls_inpod() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+        let ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let uncaptured = manager
+            .workload_builder("uncaptured", DEFAULT_NODE)
+            .uncaptured()
+            .register()
+            .await?;
+
+        let zt = manager.resolve("ztunnel-node")?;
+        let ourself = manager.resolve("client")?;
+        malicious_calls_test(
+            client,
+            vec![
+                (zt, 15001, Request), // Outbound: should be blocked due to recursive call
+                (zt, 15006, Request), // Inbound: should be blocked due to recursive call
+                (zt, 15008, Request), // HBONE: expected TLS, reject
+                // Localhost still get connection established, as ztunnel accepts anything. But they are dropped immediately.
+                (zt, 15080, Request), // socks5: localhost
+                (zt, 15000, Request), // admin: localhost
+                (zt, 15020, Http),    // Stats: accept connection and returns a HTTP error
+                (zt, 15021, Http),    // Readiness: accept connection and returns a HTTP error
+
+
+                (ourself, 15001, Request), // Outbound: should be blocked due to recursive call
+                (ourself, 15006, Request), // Inbound: should be blocked due to recursive call
+                (ourself, 15008, Request), // HBONE: expected TLS, reject
+                // Localhost still get connection established, as ztunnel accepts anything. But they are dropped immediately.
+                (ourself, 15080, Connection), // socks5: current disabled, so we just cannot connect
+                (ourself, 15000, Connection), // admin: doesn't exist on this network
+                (ourself, 15020, Connection),    // Stats: doesn't exist on this network
+                (ourself, 15021, Connection),    // Readiness: doesn't exist on this network
+            ],
+        )
+        .await?;
+
+        malicious_calls_test(
+            uncaptured,
+            vec![
+                // Ztunnel doesn't listen on these ports...
+                (zt, 15001, Connection), // Outbound: should be blocked due to recursive call
+                (zt, 15006, Connection), // Inbound: should be blocked due to recursive call
+                (zt, 15008, Connection), // HBONE: expected TLS, reject
+                // Localhost is not accessible
+                (zt, 15080, Connection), // socks5: localhost
+                (zt, 15000, Connection), // admin: localhost
+                (zt, 15020, Http),    // Stats: accept connection and returns a HTTP error
+                (zt, 15021, Http),    // Readiness: accept connection and returns a HTTP error
+
+                // All are accepted as "inbound plaintext" but then immediately closed
+                (ourself, 15001, Request),
+                (ourself, 15006, Request),
+                (ourself, 15008, Request),
+                (ourself, 15080, Request),
+                (ourself, 15000, Request),
+                (ourself, 15020, Request),
+                (ourself, 15021, Request),
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn malicious_calls_sharednode() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(SharedNode);
+        let ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+
+        let zt = manager.resolve("ztunnel-node")?;
+        malicious_calls_test(
+            client,
+            vec![
+                (zt, 15001, Request),    // Outbound: should be blocked due to recursive call
+                (zt, 15006, Request),    // Inbound: should be blocked due to recursive call
+                (zt, 15008, Request),    // HBONE: expected TLS, reject
+                (zt, 15080, Connection), // Socks5: only localhost
+                (zt, 15000, Connection), // Admin: only localhost
+                (zt, 15020, Http),       // Stats: accept connection and returns a HTTP error
+                (zt, 15021, Http),       // Readiness: accept connection and returns a HTTP error
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn trust_domain_mismatch_rejected() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+        let id = identity::Identity::Spiffe {
+            trust_domain: "clusterset.local".to_string(), // change to mismatched trustdomain
+            service_account: "my-app".to_string(),
+            namespace: "default".to_string(),
+        };
+
+        let _ = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        run_tcp_server(
+            manager
+                .workload_builder("server", DEFAULT_NODE)
+                .register()
+                .await?,
+        )?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .identity(id)
+            .register()
+            .await?;
+
+        let srv = resolve_target(manager.resolver(), "server");
+
+        client
+            .run(move || async move {
+                let mut tcp_stream = TcpStream::connect(&srv.to_string()).await?;
+                tcp_stream.write_all(b"hello world!").await?;
+                let mut buf = [0; 10];
+                let mut buf = ReadBuf::new(&mut buf);
+
+                let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
+                assert!(result.is_err()); // expect a connection reset due to TLS SAN mismatch
+                assert_eq!(
+                    result.err().unwrap().kind(),
+                    std::io::ErrorKind::ConnectionReset
+                );
+
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
+        Ok(())
+    }
 
     /// initialize_namespace_tests sets up the namespace tests.
     /// These utilize the `unshare` syscall to setup an environment where we:
@@ -1008,5 +1011,61 @@ mod namespaced {
         let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
+    }
+
+    #[derive(PartialEq, Copy, Clone, Debug)]
+    enum Failure {
+        /// Cannot even connect
+        Connection,
+        /// Can connect, but cannot send bytes
+        Request,
+        /// Can connect, but get a HTTP error
+        Http,
+    }
+    use Failure::*;
+    async fn malicious_calls_test(
+        client: Namespace,
+        cases: Vec<(IpAddr, u16, Failure)>,
+    ) -> anyhow::Result<()> {
+        async fn send_traffic(stream: &mut TcpStream) -> anyhow::Result<()> {
+            const BODY: &[u8] = b"hello world\r\n\r\n";
+            stream.write_all(BODY).await?;
+            let mut buf: [u8; BODY.len()] = [0; BODY.len()];
+            stream.read_exact(&mut buf).await?;
+            if &buf[..12] != b"HTTP/1.1 400" {
+                anyhow::bail!(
+                    "expected http error, got {}",
+                    std::str::from_utf8(&buf).unwrap()
+                );
+            }
+            Ok(())
+        }
+        client
+            .run(move || async move {
+                for (target, port, failure) in cases {
+                    let tgt = SocketAddr::from((target, port));
+                    info!("send to {tgt}, want {failure:?} error");
+                    let stream = timeout(Duration::from_secs(1), TcpStream::connect(tgt))
+                        .await?;
+                    error!("stream {stream:?}");
+                    if failure == Connection {
+                        assert!(stream.is_err());
+                        continue;
+                    }
+                    let mut stream = stream.unwrap();
+
+                    let res = timeout(Duration::from_secs(1), send_traffic(&mut stream))
+                        .await?;
+                    if failure == Request {
+                        assert!(res.is_err());
+                        continue;
+                    }
+                    res.unwrap();
+                }
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
+        Ok(())
     }
 }

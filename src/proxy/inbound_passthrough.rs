@@ -15,11 +15,11 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use drain::Watch;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::sleep;
+
 use tracing::{error, info, trace, Instrument};
 
 use crate::config::ProxyMode;
