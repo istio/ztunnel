@@ -268,14 +268,6 @@ pub mod testing {
             .collect();
         let matched = logs.iter().find(|log| {
             for (k, v) in &want {
-                error!(
-                    "{:?} {}, {}, {:?} {:?}",
-                    log,
-                    k,
-                    v,
-                    log.get(k),
-                    log.get(k).map(|l| l.to_string())
-                );
                 let Some(have) = log.get(k) else {
                     // Required key not found, continue
                     return false;

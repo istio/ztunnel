@@ -524,6 +524,9 @@ impl<T> MpscAckReceiver<T> {
     }
 }
 
+/// mpsc_ack is a small helper around mpsc that requires ACKing a message.
+/// This allows sending a message and waiting until it was full processed, not just read.
+/// Users MUST wait for each ACK after reading.
 pub fn mpsc_ack<T>(buffer: usize) -> (MpscAckSender<T>, MpscAckReceiver<T>) {
     let (tx, rx) = tokio::sync::mpsc::channel::<T>(buffer);
     let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);

@@ -37,8 +37,6 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
         std::fs::remove_file(&bind_path).expect("remove file failed");
     }
     let (tx, mut rx) = test_helpers::mpsc_ack::<(String, i32)>(1);
-    // let (tx, mut rx) = tokio::sync::mpsc::channel::<i32>(1);
-    // let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     // these tests are structured in an unusual way - async operations are done in a different thread,
     // that is joined. This blocks asyncs done here. thus the need run the servers in a different thread
@@ -93,20 +91,4 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
         });
     });
     tx
-}
-
-pub struct ZtunnelFDServer {
-    send: tokio::sync::mpsc::Sender<i32>,
-    ack: tokio::sync::mpsc::Receiver<()>,
-}
-
-impl ZtunnelFDServer {
-    pub async fn send(&mut self, fd: RawFd) -> anyhow::Result<()> {
-        self.send.send(fd).await?;
-        self.ack
-            .recv()
-            .await
-            .ok_or(anyhow::anyhow!("failed to get nack"))?;
-        Ok(())
-    }
 }
