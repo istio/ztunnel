@@ -32,7 +32,7 @@ use std::time::Duration;
 use crate::test_helpers::inpod::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::InPod;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{error, info};
 
 /// WorkloadManager provides an interface to deploy "workloads" as part of a test. Each workload
 /// runs in its own isolated network namespace, simulating a real environment. Redirection in the "host network"

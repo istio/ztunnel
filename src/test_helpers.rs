@@ -485,37 +485,39 @@ pub struct MpscAckReceiver<T> {
 
 impl<T: Send + Sync + 'static> MpscAckSender<T> {
     pub async fn send_and_wait(&mut self, t: T) -> anyhow::Result<()> {
-        debug!("send...");
+        debug!("send message");
         self.tx.send(t).await?;
-        debug!("wait for ack");
+        debug!("wait for ack...");
         self.ack_rx
             .recv()
             .await
             .ok_or(anyhow!("failed to receive ack"))?;
+        debug!("got ack");
         Ok(())
     }
     pub async fn send(&mut self, t: T) -> anyhow::Result<()> {
-        debug!("send...");
+        debug!("send message");
         self.tx.send(t).await?;
         Ok(())
     }
     pub async fn wait(&mut self) -> anyhow::Result<()> {
-        debug!("wait for ack");
+        debug!("wait for ack...");
         self.ack_rx
             .recv()
             .await
             .ok_or(anyhow!("failed to receive ack"))?;
+        debug!("got ack");
         Ok(())
     }
 }
 
 impl<T> MpscAckReceiver<T> {
     pub async fn recv(&mut self) -> Option<T> {
-        debug!("Recv");
+        debug!("recv message");
         self.rx.recv().await
     }
     pub async fn ack(&mut self) -> Result<(), SendError<()>> {
-        debug!("ACK");
+        debug!("sending ack");
         self.ack_tx.send(()).await
     }
 }
