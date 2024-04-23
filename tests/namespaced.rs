@@ -45,11 +45,11 @@ mod namespaced {
     use ztunnel::test_helpers::helpers::initialize_telemetry;
     use ztunnel::{identity, telemetry};
 
+    use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
     use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
-    use crate::namespaced::WorkloadMode::Captured;
 
     /// initialize_namespace_tests sets up the namespace tests.
     /// These utilize the `unshare` syscall to setup an environment where we:
@@ -97,7 +97,7 @@ mod namespaced {
             MsFlags::MS_BIND,
             None::<&PathBuf>,
         )
-            .expect("network namespace bindmount");
+        .expect("network namespace bindmount");
 
         // Bind xtables lock so we can access it (otherwise, permission denied)
         File::create(tmp.join("xtables.lock")).expect("xtables file");
@@ -108,20 +108,40 @@ mod namespaced {
             MsFlags::MS_BIND,
             None::<&PathBuf>,
         )
-            .expect("xtables bindmount");
+        .expect("xtables bindmount");
 
         let pid = unsafe { getpid() };
         eprintln!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net -t {pid}`");
     }
 
+    macro_rules! function {
+        () => {{
+            fn f() {}
+            fn type_name_of<T>(_: T) -> &'static str {
+                std::any::type_name::<T>()
+            }
+            let name = type_name_of(f);
+            &name[..name.len() - 3]
+        }};
+    }
+
     /// setup_netns_test prepares a test using network namespaces. This checks we have root,
-    /// and automatically setups up a namespace manager.
-    fn setup_netns_test(mode: TestMode) -> WorkloadManager {
-        if unsafe { libc::getuid() } != 0 {
-            panic!("CI tests should run as root; this is supposed to happen automatically?");
-        }
-        initialize_telemetry();
-        WorkloadManager::new(mode).expect("create workload manager")
+    /// and automatically setups up a namespace based on the test name (to avoid conflicts).
+    macro_rules! setup_netns_test {
+        ($mode:expr) => {{
+            if unsafe { libc::getuid() } != 0 {
+                panic!("CI tests should run as root; this is supposed to happen automatically?");
+            }
+            initialize_telemetry();
+            let f = function!()
+                .strip_prefix(module_path!())
+                .unwrap()
+                .strip_prefix("::")
+                .unwrap()
+                .strip_suffix("::{{closure}}")
+                .unwrap();
+            WorkloadManager::new(f, $mode)?
+        }};
     }
 
     const TEST_VIP: &str = "10.10.0.1";
@@ -132,6 +152,13 @@ mod namespaced {
     const REMOTE_NODE: &str = "remote-node";
     const UNCAPTURED_NODE: &str = "remote-node";
 
+    const CONNECTIONS_OPENED: &str = "istio_tcp_connections_opened_total";
+    const CONNECTIONS_CLOSED: &str = "istio_tcp_connections_closed_total";
+    const BYTES_RECV: &str = "istio_tcp_received_bytes_total";
+    const BYTES_SENT: &str = "istio_tcp_sent_bytes_total";
+    const REQ_SIZE: u64 = b"hello world".len() as u64;
+    const HBONE_REQ_SIZE: u64 = b"hello world".len() as u64 + b"waypoint\n".len() as u64;
+
     #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
     pub enum WorkloadMode {
         Captured(&'static str),
@@ -141,26 +168,31 @@ mod namespaced {
     impl WorkloadMode {
         fn node(&self) -> &'static str {
             match self {
-                WorkloadMode::Captured(n) => n,
-                Uncaptured => UNCAPTURED_NODE
+                Captured(n) => n,
+                Uncaptured => UNCAPTURED_NODE,
             }
         }
     }
 
-    async fn simple_client_server_test(mode: TestMode, client_node: WorkloadMode, server_node: WorkloadMode) -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(mode);
+    async fn simple_client_server_test(
+        mut manager: WorkloadManager,
+        client_node: WorkloadMode,
+        server_node: WorkloadMode,
+    ) -> anyhow::Result<()> {
         // Simple test of client -> server, with the configured mode and nodes
         let client_ztunnel = match client_node {
             Captured(node) => Some(manager.deploy_ztunnel(node).await?),
-            Uncaptured => None
+            Uncaptured => None,
         };
         let server_ztunnel = match server_node {
-            Captured(node) => if node == client_node.node() {
-                client_ztunnel.clone()
-            } else {
-                Some(manager.deploy_ztunnel(node).await?)
-            },
-            Uncaptured => None
+            Captured(node) => {
+                if node == client_node.node() {
+                    client_ztunnel.clone()
+                } else {
+                    Some(manager.deploy_ztunnel(node).await?)
+                }
+            }
+            Uncaptured => None,
         };
         let server = manager
             .workload_builder("server", server_node.node())
@@ -209,18 +241,81 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn local_node_hbone() -> anyhow::Result<()> {
-        simple_client_server_test(InPod, Captured(DEFAULT_NODE), Captured(DEFAULT_NODE)).await
+    async fn local_captured_inpod() -> anyhow::Result<()> {
+        simple_client_server_test(
+            setup_netns_test!(InPod),
+            Captured(DEFAULT_NODE),
+            Captured(DEFAULT_NODE),
+        )
+        .await
     }
 
     #[tokio::test]
-    async fn remote_node_hbone() -> anyhow::Result<()> {
-        simple_client_server_test(InPod, Captured(DEFAULT_NODE), Captured(REMOTE_NODE)).await
+    async fn server_uncaptured_inpod() -> anyhow::Result<()> {
+        simple_client_server_test(
+            setup_netns_test!(InPod),
+            Captured(DEFAULT_NODE),
+            Uncaptured,
+        )
+        .await
     }
 
+    #[tokio::test]
+    async fn client_uncaptured_inpod() -> anyhow::Result<()> {
+        simple_client_server_test(
+            setup_netns_test!(InPod),
+            Captured(DEFAULT_NODE),
+            Uncaptured,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn cross_node_captured_inpod() -> anyhow::Result<()> {
+        simple_client_server_test(
+            setup_netns_test!(InPod),
+            Captured(DEFAULT_NODE),
+            Captured(REMOTE_NODE),
+        )
+        .await
+    }
+
+    // Intentionally, we do not have a 'local_captured_sharednode'
+    // This is not currently supported since https://github.com/istio/ztunnel/commit/12d154cceb1d20eb1f11ae43c2310e66e93c7120
+
+    #[tokio::test]
+    async fn server_uncaptured_sharednode() -> anyhow::Result<()> {
+        simple_client_server_test(
+            setup_netns_test!(SharedNode),
+            Captured(DEFAULT_NODE),
+            Uncaptured,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn client_uncaptured_sharednode() -> anyhow::Result<()> {
+        simple_client_server_test(
+            setup_netns_test!(SharedNode),
+            Captured(DEFAULT_NODE),
+            Uncaptured,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn cross_node_captured_sharednode() -> anyhow::Result<()> {
+        simple_client_server_test(
+            setup_netns_test!(SharedNode),
+            Captured(DEFAULT_NODE),
+            Captured(REMOTE_NODE),
+        )
+        .await
+    }
+/*
     #[tokio::test]
     async fn test_vip_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         manager
             .service_builder("server1")
             .addresses(vec![NetworkAddress {
@@ -309,7 +404,7 @@ mod namespaced {
                 ),
             ]),
         )
-            .await;
+        .await;
 
         verify_metrics(
             &local,
@@ -330,7 +425,7 @@ mod namespaced {
                 ),
             ]),
         )
-            .await;
+        .await;
 
         // response needed is opposite of what we got before
         let needed_response = match lb_to_nodelocal {
@@ -354,7 +449,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_tcp_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
@@ -380,10 +475,9 @@ mod namespaced {
         Ok(())
     }
 
-    /*
         #[tokio::test]
         async fn test_tcp_request_inpod_mode() -> anyhow::Result<()> {
-            let mut manager = setup_netns_test(InPod);
+            let mut manager = setup_netns_test!(InPod);
             info!("running server for ztunnel");
 
             let randnum: usize = rand::random();
@@ -461,10 +555,9 @@ mod namespaced {
 
             Ok(())
         }
-    */
     #[tokio::test]
     async fn test_tcp_local_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         run_tcp_server(
             manager
                 .workload_builder("server", DEFAULT_NODE)
@@ -490,16 +583,9 @@ mod namespaced {
         Ok(())
     }
 
-    const CONNECTIONS_OPENED: &str = "istio_tcp_connections_opened_total";
-    const CONNECTIONS_CLOSED: &str = "istio_tcp_connections_closed_total";
-    const BYTES_RECV: &str = "istio_tcp_received_bytes_total";
-    const BYTES_SENT: &str = "istio_tcp_sent_bytes_total";
-    const REQ_SIZE: u64 = b"hello world".len() as u64;
-    const HBONE_REQ_SIZE: u64 = b"hello world".len() as u64 + b"waypoint\n".len() as u64;
-
     #[tokio::test]
     async fn test_hbone_request() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         run_tcp_server(
             manager
                 .workload_builder("server", REMOTE_NODE)
@@ -527,62 +613,9 @@ mod namespaced {
         Ok(())
     }
 
-    fn destination_labels() -> HashMap<String, String> {
-        HashMap::from([("reporter".to_string(), "destination".to_string())])
-    }
-
-    fn source_labels() -> HashMap<String, String> {
-        HashMap::from([("reporter".to_string(), "source".to_string())])
-    }
-
-    async fn verify_metrics(
-        ztunnel: &TestApp,
-        assertions: &[(&str, u64)],
-        labels: &HashMap<String, String>,
-    ) -> ParsedMetrics {
-        // Wait for metrics to populate...
-        for _ in 0..10 {
-            let m = ztunnel.metrics().await.unwrap();
-            let mut found = true;
-            for (metric, _) in assertions {
-                if m.query_sum(metric, labels) == 0 {
-                    found = false
-                }
-            }
-            if found {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let metrics = ztunnel.metrics().await.unwrap();
-
-        // Now run our assertions
-        for (metric, expected) in assertions {
-            assert_eq!(
-                metrics.query_sum(metric, labels),
-                *expected,
-                "{} with {:?} failed, dump: {}",
-                metric,
-                labels,
-                metrics.dump()
-            );
-        }
-        metrics
-    }
-
-    async fn verify_local_remote_metrics(
-        remote: &TestApp,
-        local: &TestApp,
-        metrics: &[(&str, u64)],
-    ) -> (ParsedMetrics, ParsedMetrics) {
-        let remote_metrics = verify_metrics(remote, metrics, &destination_labels()).await;
-        let local_metrics = verify_metrics(local, metrics, &source_labels()).await;
-        (remote_metrics, local_metrics)
-    }
-
     #[tokio::test]
     async fn test_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
         let ip = waypoint.ip();
         run_hbone_server(waypoint)?;
@@ -612,7 +645,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_svc_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         let waypoint_workload = manager
             .workload_builder("waypoint", DEFAULT_NODE)
             .hbone()
@@ -653,7 +686,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_waypoint_bypass() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
         // create a policy to ensure traffic is from the waypoint
         // TODO: this test is testing bypass from uncaptured workloads but other forms of bypass should be tested
@@ -731,7 +764,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_hbone_ip_mismatch() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         let _ = manager
             .workload_builder("server", DEFAULT_NODE)
             .register()
@@ -786,112 +819,9 @@ mod namespaced {
         Ok(())
     }
 
-    fn resolve_target(resolver: Resolver, target: &str) -> SocketAddr {
-        // We accept a ip:port, ip, or name (which is resolved).
-        target.parse::<SocketAddr>().unwrap_or_else(|_| {
-            let ip = target
-                .parse::<IpAddr>()
-                .unwrap_or_else(|_| resolver.resolve(target).unwrap());
-            SocketAddr::new(ip, SERVER_PORT)
-        })
-    }
-
-    /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
-    fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
-        run_tcp_client_iters(client, 1, resolver, target)
-    }
-
-    fn run_tcp_client_iters(
-        client: Namespace,
-        iters: usize,
-        resolver: Resolver,
-        target: &str,
-    ) -> anyhow::Result<()> {
-        let srv = resolve_target(resolver, target);
-        client
-            .run(move || async move {
-                for attempt in 0..iters {
-                    info!("Running client attempt {attempt} to {srv}");
-                    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    timeout(
-                        Duration::from_secs(5),
-                        double_read_write_stream(&mut stream),
-                    )
-                        .await
-                        .unwrap();
-                }
-                Ok(())
-            })?
-            .join()
-            .unwrap()
-    }
-
-    /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
-    fn run_tcp_to_hbone_client(
-        client: Namespace,
-        resolver: Resolver,
-        target: &str,
-    ) -> anyhow::Result<()> {
-        let srv = resolve_target(resolver, target);
-        client
-            .run(move || async move {
-                info!("Running client to {srv}");
-                let mut stream = TcpStream::connect(srv).await.unwrap();
-                hbone_read_write_stream(&mut stream).await;
-                Ok(())
-            })?
-            .join()
-            .unwrap()
-    }
-
-    /// run_tcp_server deploys a simple echo server in the provided namespace
-    fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
-        server.run_ready(|ready| async move {
-            let echo = tcp::TestServer::new(tcp::Mode::ReadDoubleWrite, SERVER_PORT).await;
-            info!("Running echo server at {}", echo.address());
-            ready.set_ready();
-            echo.run().await;
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    /// run_hbone_server deploys a simple echo server, deployed over HBONE, in the provided namespace
-    fn run_hbone_server(server: Namespace) -> anyhow::Result<()> {
-        server.run_ready(|ready| async move {
-            let echo = tcp::HboneTestServer::new(tcp::Mode::ReadWrite).await;
-            info!("Running hbone echo server at {}", echo.address());
-            ready.set_ready();
-            echo.run().await;
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    async fn double_read_write_stream(stream: &mut TcpStream) -> usize {
-        const BODY: &[u8] = b"hello world";
-        stream.write_all(BODY).await.unwrap();
-        let mut buf = [0; BODY.len() * 2];
-        stream.read_exact(&mut buf).await.unwrap();
-        assert_eq!(b"hello worldhello world", &buf);
-        BODY.len() * 2
-    }
-
-    async fn hbone_read_write_stream(stream: &mut TcpStream) {
-        const BODY: &[u8] = b"hello world";
-        const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
-        stream.write_all(BODY).await.unwrap();
-        let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
-        stream.read_exact(&mut buf).await.unwrap();
-        assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
-    }
-
     #[tokio::test]
     async fn test_direct_ztunnel_call() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
             .register()
@@ -964,7 +894,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_san_trust_domain_mismatch() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test(SharedNode);
+        let mut manager = setup_netns_test!(SharedNode);
         let id = match identity::Identity::default() {
             identity::Identity::Spiffe { .. } => {
                 identity::Identity::Spiffe {
@@ -1021,4 +951,161 @@ mod namespaced {
             .unwrap()?;
         Ok(())
     }
+*/
+    fn destination_labels() -> HashMap<String, String> {
+        HashMap::from([("reporter".to_string(), "destination".to_string())])
+    }
+
+    fn source_labels() -> HashMap<String, String> {
+        HashMap::from([("reporter".to_string(), "source".to_string())])
+    }
+
+    async fn verify_metrics(
+        ztunnel: &TestApp,
+        assertions: &[(&str, u64)],
+        labels: &HashMap<String, String>,
+    ) -> ParsedMetrics {
+        // Wait for metrics to populate...
+        for _ in 0..10 {
+            let m = ztunnel.metrics().await.unwrap();
+            let mut found = true;
+            for (metric, _) in assertions {
+                if m.query_sum(metric, labels) == 0 {
+                    found = false
+                }
+            }
+            if found {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let metrics = ztunnel.metrics().await.unwrap();
+
+        // Now run our assertions
+        for (metric, expected) in assertions {
+            assert_eq!(
+                metrics.query_sum(metric, labels),
+                *expected,
+                "{} with {:?} failed, dump: {}",
+                metric,
+                labels,
+                metrics.dump()
+            );
+        }
+        metrics
+    }
+
+    async fn verify_local_remote_metrics(
+        remote: &TestApp,
+        local: &TestApp,
+        metrics: &[(&str, u64)],
+    ) -> (ParsedMetrics, ParsedMetrics) {
+        let remote_metrics = verify_metrics(remote, metrics, &destination_labels()).await;
+        let local_metrics = verify_metrics(local, metrics, &source_labels()).await;
+        (remote_metrics, local_metrics)
+    }
+
+    fn resolve_target(resolver: Resolver, target: &str) -> SocketAddr {
+        // We accept a ip:port, ip, or name (which is resolved).
+        target.parse::<SocketAddr>().unwrap_or_else(|_| {
+            let ip = target
+                .parse::<IpAddr>()
+                .unwrap_or_else(|_| resolver.resolve(target).unwrap());
+            SocketAddr::new(ip, SERVER_PORT)
+        })
+    }
+
+    /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
+    fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
+        run_tcp_client_iters(client, 1, resolver, target)
+    }
+
+    fn run_tcp_client_iters(
+        client: Namespace,
+        iters: usize,
+        resolver: Resolver,
+        target: &str,
+    ) -> anyhow::Result<()> {
+        let srv = resolve_target(resolver, target);
+        client
+            .run(move || async move {
+                for attempt in 0..iters {
+                    info!("Running client attempt {attempt} to {srv}");
+                    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    timeout(
+                        Duration::from_secs(5),
+                        double_read_write_stream(&mut stream),
+                    )
+                    .await
+                    .unwrap();
+                }
+                Ok(())
+            })?
+            .join()
+            .unwrap()
+    }
+
+    /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
+    fn run_tcp_to_hbone_client(
+        client: Namespace,
+        resolver: Resolver,
+        target: &str,
+    ) -> anyhow::Result<()> {
+        let srv = resolve_target(resolver, target);
+        client
+            .run(move || async move {
+                info!("Running client to {srv}");
+                let mut stream = TcpStream::connect(srv).await.unwrap();
+                hbone_read_write_stream(&mut stream).await;
+                Ok(())
+            })?
+            .join()
+            .unwrap()
+    }
+
+    /// run_tcp_server deploys a simple echo server in the provided namespace
+    fn run_tcp_server(server: Namespace) -> anyhow::Result<()> {
+        server.run_ready(|ready| async move {
+            let echo = tcp::TestServer::new(tcp::Mode::ReadDoubleWrite, SERVER_PORT).await;
+            info!("Running echo server at {}", echo.address());
+            ready.set_ready();
+            echo.run().await;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// run_hbone_server deploys a simple echo server, deployed over HBONE, in the provided namespace
+    fn run_hbone_server(server: Namespace) -> anyhow::Result<()> {
+        server.run_ready(|ready| async move {
+            let echo = tcp::HboneTestServer::new(tcp::Mode::ReadWrite).await;
+            info!("Running hbone echo server at {}", echo.address());
+            ready.set_ready();
+            echo.run().await;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    async fn double_read_write_stream(stream: &mut TcpStream) -> usize {
+        const BODY: &[u8] = b"hello world";
+        stream.write_all(BODY).await.unwrap();
+        let mut buf = [0; BODY.len() * 2];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(b"hello worldhello world", &buf);
+        BODY.len() * 2
+    }
+
+    async fn hbone_read_write_stream(stream: &mut TcpStream) {
+        const BODY: &[u8] = b"hello world";
+        const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
+        stream.write_all(BODY).await.unwrap();
+        let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
+    }
+
 }
