@@ -73,8 +73,8 @@ pub enum TestMode {
 }
 
 impl WorkloadManager {
-    /// new instantiates a manager.
-    pub fn new(mode: TestMode) -> anyhow::Result<Self> {
+    /// new instantiates a manager with the given name. Using a unique name between tests is critical.
+    pub fn new(name: &str, mode: TestMode) -> anyhow::Result<Self> {
         // Temporary directory will hold all our mounts
         let tp = std::env::temp_dir().join("ztunnel_namespaced.XXXXXX");
         let tmp_dir = mkdtemp(&tp).expect("tmp dir");
@@ -82,7 +82,7 @@ impl WorkloadManager {
             mode,
             tmp_dir,
             ztunnels: Default::default(),
-            namespaces: netns::NamespaceManager::new()?,
+            namespaces: netns::NamespaceManager::new(name)?,
             workloads: vec![],
             services: HashMap::new(),
             policies: vec![],
@@ -197,7 +197,7 @@ impl WorkloadManager {
                 policies: self.policies.clone(),
                 services: self.services.values().cloned().collect_vec(),
             };
-            node.config_sender.send_and_wait(new_config).await;
+            node.config_sender.send_and_wait(new_config).await?;
         }
         Ok(())
     }
