@@ -166,7 +166,6 @@ POD_NAMESPACE=istio-system
 POD_NAME=ztunnel-worker1
 CA_ROOT_CA=/tmp/istio-root.pem
 XDS_ROOT_CA=/tmp/istio-root.pem
-CARGO_TARGET_$(rustc -vV | sed -n 's|host: ||p' | tr '[:lower:]' '[:upper:]'| tr - _)_RUNNER="sudo -E"
 cargo run proxy ztunnel
 EOF
 ```
