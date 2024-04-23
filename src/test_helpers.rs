@@ -43,6 +43,7 @@ use std::ops::Add;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::error::SendError;
+use tokio::time::timeout;
 use tracing::{debug, trace};
 
 pub mod app;
@@ -488,9 +489,9 @@ impl<T: Send + Sync + 'static> MpscAckSender<T> {
         debug!("send message");
         self.tx.send(t).await?;
         debug!("wait for ack...");
-        self.ack_rx
-            .recv()
-            .await
+        timeout(Duration::from_secs(2), self.ack_rx
+            .recv())
+            .await?
             .ok_or(anyhow!("failed to receive ack"))?;
         debug!("got ack");
         Ok(())
@@ -502,9 +503,10 @@ impl<T: Send + Sync + 'static> MpscAckSender<T> {
     }
     pub async fn wait(&mut self) -> anyhow::Result<()> {
         debug!("wait for ack...");
-        self.ack_rx
-            .recv()
-            .await
+
+        timeout(Duration::from_secs(2), self.ack_rx
+            .recv())
+            .await?
             .ok_or(anyhow!("failed to receive ack"))?;
         debug!("got ack");
         Ok(())

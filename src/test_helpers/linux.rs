@@ -132,7 +132,7 @@ impl WorkloadManager {
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
-        ns.run_ready(move |ready| async move {
+        let t = ns.run_ready(move |ready| async move {
             if !inpod_enabled {
                 // not needed in inpod mode. In in pod mode we run `ztunnel-redirect-inpod.sh`
                 // inside the pod's netns
@@ -177,6 +177,10 @@ impl WorkloadManager {
 
             app.wait_termination().await
         })?;
+        tokio::task::spawn_blocking(move || {
+            t.join().unwrap().unwrap();
+            error!("ZTUNNEL DONE")
+        });
         // Make sure our initial config is ACKed
         tx_cfg.wait().await?;
         let zt_info = LocalZtunnel {
