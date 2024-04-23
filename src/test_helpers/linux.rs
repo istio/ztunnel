@@ -32,7 +32,7 @@ use std::time::Duration;
 use crate::test_helpers::inpod::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::InPod;
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::info;
 
 /// WorkloadManager provides an interface to deploy "workloads" as part of a test. Each workload
 /// runs in its own isolated network namespace, simulating a real environment. Redirection in the "host network"
@@ -191,7 +191,7 @@ impl WorkloadManager {
     }
 
     async fn refresh_config(&mut self) -> anyhow::Result<()> {
-        for (_, mut node) in &mut self.ztunnels {
+        for (_, node) in &mut self.ztunnels {
             let new_config = LocalConfig {
                 workloads: self.workloads.clone(),
                 policies: self.policies.clone(),
@@ -298,10 +298,11 @@ impl<'a> TestServiceBuilder<'a> {
     }
 
     /// Finish building the service.
-    pub fn register(self) -> anyhow::Result<()> {
+    pub async fn register(self) -> anyhow::Result<()> {
         self.manager
             .services
             .insert(self.s.namespaced_hostname(), self.s);
+        self.manager.refresh_config().await?;
         Ok(())
     }
 }

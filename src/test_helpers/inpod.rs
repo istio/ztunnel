@@ -15,7 +15,6 @@
 use crate::inpod::test_helpers::{
     read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del,
 };
-use std::os::fd::RawFd;
 
 use crate::test_helpers;
 use crate::test_helpers::MpscAckSender;
