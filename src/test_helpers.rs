@@ -30,8 +30,7 @@ use crate::xds::{Handler, LocalConfig, LocalWorkload, ProxyStateUpdater, XdsReso
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
-use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::TokioAsyncResolver;
+
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
 use std::collections::HashMap;
@@ -111,29 +110,6 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         dns_proxy_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         ..config::parse_config().unwrap()
     }
-}
-
-pub async fn add_nip_io_nameserver(mut cfg: config::Config) -> config::Config {
-    // add nip.io as a nameserver so our test hostnames can resolve to reliable IPs
-    let r = TokioAsyncResolver::new(
-        ResolverConfig::default(),
-        ResolverOpts::default(),
-        TokioConnectionProvider::default(),
-    );
-    let resp = r.lookup_ip("nip.io").await.unwrap();
-    let ips = resp.iter().collect::<Vec<_>>();
-    assert!(!ips.is_empty());
-    for ip in ips {
-        let name_server = NameServerConfig {
-            socket_addr: SocketAddr::new(ip, 53),
-            protocol: hickory_resolver::config::Protocol::Udp,
-            tls_dns_name: None,
-            bind_addr: None,
-            trust_negative_responses: false,
-        };
-        cfg.dns_resolver_cfg.add_name_server(name_server);
-    }
-    cfg
 }
 
 pub fn test_config_with_port(port: u16) -> config::Config {
