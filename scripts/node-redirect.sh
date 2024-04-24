@@ -8,8 +8,7 @@ ZTUNNEL_IP="${1:?ztunnel IP}"
 ZTUNNEL_INTERFACE="${2:?ztunnel interface}"
 shift; shift;
 set +e
-ipset -L ztunnel-pods-ips >/dev/null 2>&1
-if [ $? -eq 0 ]; then
+if ipset -L ztunnel-pods-ips >/dev/null 2>&1; then
   # ipset already exists, we must be a later iteration..
   for ip in "$@"; do
     ipset add ztunnel-pods-ips "${ip}"

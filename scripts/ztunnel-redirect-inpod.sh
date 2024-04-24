@@ -4,11 +4,6 @@
 
 set -ex
 
-# Below is from config.sh but used in redirect-worker.sh as well
-POD_OUTBOUND=15001
-POD_INBOUND=15008
-POD_INBOUND_PLAINTEXT=15006
-
 # CONNMARK is needed to make original src work. we set conn mark on prerouting. this is will not effect connections
 # from ztunnel to outside the pod, which will go on OUTPUT chain.
 # as we are in the pod ns, we can use whatever iptables is default.
