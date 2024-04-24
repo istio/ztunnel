@@ -35,7 +35,7 @@ mod namespaced {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpStream;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::timeout;
     use tracing::{error, info};
     use WorkloadMode::Uncaptured;
 
@@ -47,7 +47,7 @@ mod namespaced {
 
     use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
-    use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
+    use ztunnel::test_helpers::linux::WorkloadManager;
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
 
@@ -266,151 +266,154 @@ mod namespaced {
         Ok(())
     }
 
-    /*
-        #[tokio::test]
-        async fn test_vip_request() -> anyhow::Result<()> {
-            let mut manager = setup_netns_test!(SharedNode);
+    #[tokio::test]
+    async fn service_loadbalancing() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+        let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let remote = manager.deploy_ztunnel(REMOTE_NODE).await?;
+        manager
+            .service_builder("service")
+            .addresses(vec![NetworkAddress {
+                network: "".to_string(),
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, 80u16)]))
+            .register()
+            .await?;
+        run_tcp_server(
             manager
-                .service_builder("server1")
-                .addresses(vec![NetworkAddress {
-                    network: "".to_string(),
-                    address: TEST_VIP.parse::<IpAddr>()?,
-                }])
-                .ports(HashMap::from([(80u16, 80u16)]))
-                .register()?;
-            run_tcp_server(
-                manager
-                    .workload_builder("server1", REMOTE_NODE)
-                    .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
-                    .register()
-                    .await?,
-            )?;
-            run_tcp_server(
-                manager
-                    .workload_builder("server2", REMOTE_NODE)
-                    .hbone()
-                    .service("default/server1.default.svc.cluster.local", 80, SERVER_PORT)
-                    .register()
-                    .await?,
-            )?;
-            let client = manager
-                .workload_builder("client", DEFAULT_NODE)
+                .workload_builder("server1", DEFAULT_NODE)
+                .service("default/service.default.svc.cluster.local", 80, SERVER_PORT)
                 .register()
-                .await?;
-
-            let lb_client = manager
-                .workload_builder("lb_client", DEFAULT_NODE)
+                .await?,
+        )?;
+        run_tcp_server(
+            manager
+                .workload_builder("server2", REMOTE_NODE)
+                .hbone()
+                .service("default/service.default.svc.cluster.local", 80, SERVER_PORT)
                 .register()
-                .await?;
+                .await?,
+        )?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
 
-            let remote = manager.deploy_ztunnel(REMOTE_NODE).await?;
-            let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        // first just send a single request
+        run_tcp_client_iters(&client, 1, manager.resolver(), &format!("{TEST_VIP}:80"))?;
 
-            run_tcp_client(client, manager.resolver(), &format!("{TEST_VIP}:80"))?;
+        let metrics = [
+            (CONNECTIONS_OPENED, 1),
+            (CONNECTIONS_CLOSED, 1),
+            // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
+            (BYTES_RECV, REQ_SIZE),
+            (BYTES_SENT, REQ_SIZE * 2),
+        ];
 
-            let metrics = [
-                (CONNECTIONS_OPENED, 1),
-                (CONNECTIONS_CLOSED, 1),
-                // Traffic is 11 bytes sent, 22 received by the client. But Istio reports them backwards (https://github.com/istio/istio/issues/32399) .
-                (BYTES_RECV, REQ_SIZE),
-                (BYTES_SENT, REQ_SIZE * 2),
-            ];
-
-            // stronger assertion to ensure we load balance to the two endpoints
-            // switches between 10.0.2.2 (TCP) and 10.0.2.3 (HBONE):
-            // Proxying to 10.0.2.3:8080 using HBONE via 10.0.2.3:15008 type Direct
-            // Proxying to 10.0.2.2:8080 using TCP via 10.0.2.2:8080 type Direct
-            let (_remote_metrics, local_metrics) =
-                verify_local_remote_metrics(&remote, &local, &metrics).await;
-
-            // ensure the service is load-balancing across endpoints
-            let lb_to_nodelocal = local_metrics.query_sum(
-                CONNECTIONS_OPENED,
-                &HashMap::from([("connection_security_policy".into(), "unknown".into())]),
-            ) > 0;
-            let lb_to_remote = local_metrics.query_sum(
-                CONNECTIONS_OPENED,
-                &HashMap::from([("connection_security_policy".into(), "mutual_tls".into())]),
-            ) > 0;
-            // ensure we hit one endpoint or the other, not both somehow
-            assert!(lb_to_nodelocal || lb_to_remote);
-            if lb_to_nodelocal {
-                assert!(!lb_to_remote);
-            }
-
-            // Currently we do not do destination-reported service. Maybe we should
-            verify_metrics(
-                &remote,
-                &metrics,
-                &HashMap::from([
-                    ("reporter".to_string(), "destination".to_string()),
-                    (
-                        "destination_service".to_string(),
-                        "server1.default.svc.cluster.local".to_string(),
-                    ),
-                    (
-                        "destination_service_name".to_string(),
-                        "server1".to_string(),
-                    ),
-                    (
-                        "destination_service_namespace".to_string(),
-                        "default".to_string(),
-                    ),
-                ]),
-            )
-            .await;
-
-            verify_metrics(
-                &local,
-                &metrics,
-                &HashMap::from([
-                    ("reporter".to_string(), "source".to_string()),
-                    (
-                        "destination_service".to_string(),
-                        "server1.default.svc.cluster.local".to_string(),
-                    ),
-                    (
-                        "destination_service_name".to_string(),
-                        "server1".to_string(),
-                    ),
-                    (
-                        "destination_service_namespace".to_string(),
-                        "default".to_string(),
-                    ),
-                ]),
-            )
-            .await;
-
-            // response needed is opposite of what we got before
-            let needed_response = match lb_to_nodelocal {
-                true => "mutual_tls".to_string(), // we got node local so need remote
-                false => "unknown".to_string(),   // we got remote so need node local
-            };
-
-            // run 15 requests so chance of flake here is 1/2^15 = ~0.003%
-            run_tcp_client_iters(lb_client, 15, manager.resolver(), &format!("{TEST_VIP}:80"))?;
-
-            let updated_local_metrics = local.metrics().await.unwrap();
-            assert!(
-                updated_local_metrics.query_sum(
-                    CONNECTIONS_OPENED,
-                    &HashMap::from([("connection_security_policy".into(), needed_response)])
-                ) > 0
-            );
-
-            Ok(())
+        // Ensure we picked exactly one destination
+        let local_metrics = verify_metrics(&local, &metrics, &source_labels()).await;
+        let lb_to_nodelocal = local_metrics.query_sum(
+            CONNECTIONS_OPENED,
+            &HashMap::from([(
+                "destination_principal".into(),
+                "spiffe://cluster.local/ns/default/sa/server1".into(),
+            )]),
+        ) > 0;
+        let lb_to_remote = local_metrics.query_sum(
+            CONNECTIONS_OPENED,
+            &HashMap::from([(
+                "destination_principal".into(),
+                "spiffe://cluster.local/ns/default/sa/server2".into(),
+            )]),
+        ) > 0;
+        assert!(lb_to_nodelocal || lb_to_remote);
+        if lb_to_nodelocal {
+            assert!(!lb_to_remote);
         }
+        // Verify we report the service information in metrics as well
+        verify_metrics(
+            &local,
+            &metrics,
+            &HashMap::from([
+                ("reporter".to_string(), "source".to_string()),
+                (
+                    "destination_service".to_string(),
+                    "service.default.svc.cluster.local".to_string(),
+                ),
+                (
+                    "destination_service_name".to_string(),
+                    "service".to_string(),
+                ),
+                (
+                    "destination_service_namespace".to_string(),
+                    "default".to_string(),
+                ),
+            ]),
+        )
+        .await;
 
+        // response needed is opposite of what we got before
+        let _needed_response = match lb_to_nodelocal {
+            true => "mutual_tls".to_string(), // we got node local so need remote
+            false => "unknown".to_string(),   // we got remote so need node local
+        };
 
-    */
+        // run 50 requests so chance of flake here is small
+        run_tcp_client_iters(&client, 50, manager.resolver(), &format!("{TEST_VIP}:80"))?;
+
+        // now we should have hit both backends
+        verify_metric_exists(
+            &local,
+            CONNECTIONS_OPENED,
+            &HashMap::from([(
+                "destination_principal".into(),
+                "spiffe://cluster.local/ns/default/sa/server1".into(),
+            )]),
+        )
+        .await;
+        verify_metric_exists(
+            &local,
+            CONNECTIONS_OPENED,
+            &HashMap::from([(
+                "destination_principal".into(),
+                "spiffe://cluster.local/ns/default/sa/server2".into(),
+            )]),
+        )
+        .await;
+
+        // Now we should have hit the remote
+        verify_metric_exists(
+            &remote,
+            CONNECTIONS_OPENED,
+            &HashMap::from([
+                ("reporter".to_string(), "destination".to_string()),
+                (
+                    "destination_service".to_string(),
+                    "service.default.svc.cluster.local".to_string(),
+                ),
+                (
+                    "destination_service_name".to_string(),
+                    "service".to_string(),
+                ),
+                (
+                    "destination_service_namespace".to_string(),
+                    "default".to_string(),
+                ),
+                (
+                    "destination_principal".into(),
+                    "spiffe://cluster.local/ns/default/sa/server2".into(),
+                ),
+            ]),
+        )
+        .await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_policy() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(InPod);
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-        // create a policy to ensure traffic is from the waypoint
-        // TODO: this test is testing bypass from uncaptured workloads but other forms of bypass should be tested
-        //    - service addressed traffic without a svc-attached waypoint
-        //    - workload addressed traffic without a wl-attached waypoint
         manager
             .add_policy(Authorization {
                 name: "deny_bypass".to_string(),
@@ -483,7 +486,7 @@ mod namespaced {
     async fn hbone_ip_mismatch() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(InPod);
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-        let server = manager
+        let _server = manager
             .workload_builder("server", DEFAULT_NODE)
             .register()
             .await?;
@@ -541,7 +544,7 @@ mod namespaced {
     #[tokio::test]
     async fn malicious_calls_inpod() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(InPod);
-        let ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let _ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
             .register()
@@ -605,7 +608,7 @@ mod namespaced {
     #[tokio::test]
     async fn malicious_calls_sharednode() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(SharedNode);
-        let ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let _ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
             .register()
@@ -806,7 +809,7 @@ mod namespaced {
             (BYTES_SENT, REQ_SIZE * 2),
         ];
         if let Some(ref zt) = server_ztunnel {
-            let remote_metrics = verify_metrics(&zt, &metrics, &destination_labels()).await;
+            let _remote_metrics = verify_metrics(zt, &metrics, &destination_labels()).await;
             let mut want = HashMap::from([
                 ("target", "access"),
                 ("src.workload", "client"),
@@ -829,7 +832,7 @@ mod namespaced {
             telemetry::testing::assert_contains(want);
         }
         if let Some(zt) = client_ztunnel {
-            let remote_metrics = verify_metrics(&zt, &metrics, &source_labels()).await;
+            let _remote_metrics = verify_metrics(&zt, &metrics, &source_labels()).await;
             let mut want = HashMap::from([
                 ("target", "access"),
                 ("src.workload", "client"),
@@ -868,7 +871,7 @@ mod namespaced {
         labels: &HashMap<String, String>,
     ) -> ParsedMetrics {
         // Wait for metrics to populate...
-        for _ in 0..10 {
+        for i in 0..10 {
             let m = ztunnel.metrics().await.unwrap();
             let mut found = true;
             for (metric, _) in assertions {
@@ -879,7 +882,7 @@ mod namespaced {
             if found {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(i * 10)).await;
         }
         let metrics = ztunnel.metrics().await.unwrap();
 
@@ -897,14 +900,26 @@ mod namespaced {
         metrics
     }
 
-    async fn verify_local_remote_metrics(
-        remote: &TestApp,
-        local: &TestApp,
-        metrics: &[(&str, u64)],
-    ) -> (ParsedMetrics, ParsedMetrics) {
-        let remote_metrics = verify_metrics(remote, metrics, &destination_labels()).await;
-        let local_metrics = verify_metrics(local, metrics, &source_labels()).await;
-        (remote_metrics, local_metrics)
+    async fn verify_metric_exists(
+        ztunnel: &TestApp,
+        want_metric: &str,
+        labels: &HashMap<String, String>,
+    ) -> ParsedMetrics {
+        // Wait for metrics to populate...
+        for i in 0..10 {
+            let m = ztunnel.metrics().await.unwrap();
+            if m.query_sum(want_metric, labels) > 0 {
+                return m;
+            }
+            tokio::time::sleep(Duration::from_millis(i * 10)).await;
+        }
+        let got = ztunnel.metrics().await.unwrap();
+        panic!(
+            "{} with {:?} failed, dump: {}",
+            want_metric,
+            labels,
+            got.dump()
+        );
     }
 
     fn resolve_target(resolver: Resolver, target: &str) -> SocketAddr {
@@ -919,11 +934,11 @@ mod namespaced {
 
     /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
     fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
-        run_tcp_client_iters(client, 1, resolver, target)
+        run_tcp_client_iters(&client, 1, resolver, target)
     }
 
     fn run_tcp_client_iters(
-        client: Namespace,
+        client: &Namespace,
         iters: usize,
         resolver: Resolver,
         target: &str,
