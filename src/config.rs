@@ -25,12 +25,10 @@ use bytes::Bytes;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
-use tokio::sync::Mutex;
 
 use crate::identity;
 #[cfg(any(test, feature = "testing"))]
-use crate::test_helpers::MpscAckReceiver;
-use crate::xds::LocalConfig;
+use {crate::test_helpers::MpscAckReceiver, crate::xds::LocalConfig, tokio::sync::Mutex};
 
 const ENABLE_PROXY: &str = "ENABLE_PROXY";
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
