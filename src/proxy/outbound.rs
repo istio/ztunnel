@@ -551,6 +551,9 @@ impl OutboundConnection {
         let from_waypoint = proxy::check_from_waypoint(
             self.pi.state.clone(),
             &us.workload,
+            // if we're outbound from a Service zTunnel we must have picked a workload
+            // so we only check for Workload waypoint here.
+            &[],
             Some(&source_workload.identity()),
             &downstream_network_addr.address,
         )

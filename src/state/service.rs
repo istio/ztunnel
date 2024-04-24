@@ -21,6 +21,7 @@ use tracing::trace;
 
 use xds::istio::workload::Service as XdsService;
 
+use crate::identity::Identity;
 use crate::state::workload::is_default;
 use crate::state::workload::{
     byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
@@ -147,6 +148,8 @@ pub struct Endpoint {
 
     /// The port mapping.
     pub port: HashMap<u16, u16>,
+
+    pub identity: Identity,
 }
 
 pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> String {

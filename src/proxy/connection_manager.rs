@@ -14,6 +14,8 @@
 
 use crate::proxy::{error, Error};
 
+use crate::state::service::Service;
+use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
 use drain;
@@ -26,6 +28,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, info};
+
+use super::check_from_waypoint;
 
 struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.
@@ -167,6 +171,7 @@ impl ConnectionManager {
         state: &DemandProxyState,
         ctx: &ProxyRbacContext,
         dest_service: Option<String>,
+        waypointed_target: Option<(&Workload, &Vec<Service>)>,
     ) -> Result<ConnectionGuard, Error> {
         // Register before our initial assert. This prevents a race if policy changes between assert() and
         // track()
@@ -175,9 +180,35 @@ impl ConnectionManager {
             dest_service,
         };
         self.register(&conn);
-        if !state.assert_rbac(ctx).await {
+
+        // when coming from the waypoint, we assume it handles all authz
+        // if no waypointed_target is passed don't check for bypass or
+        let from_waypoint = if let Some((dst_workload, dst_workload_svcs)) = waypointed_target {
+            let from_waypoint = check_from_waypoint(
+                state.clone(),
+                dst_workload,
+                dst_workload_svcs,
+                ctx.conn.src_identity.as_ref(),
+                &ctx.conn.src.ip(),
+            )
+            .await;
+
+            let has_waypoint = dst_workload.waypoint.is_some()
+                || dst_workload_svcs.iter().any(|svc| svc.waypoint.is_some());
+            if has_waypoint && !from_waypoint {
+                return Err(Error::WaypointBypass);
+            }
+
+            from_waypoint
+        } else {
+            // caller chose not to validate waypoint traversal
+            false
+        };
+
+        if !from_waypoint && !state.assert_rbac(ctx).await {
             return Err(Error::AuthorizationPolicyRejection);
         }
+
         let Some(watch) = self.track(&conn) else {
             return Err(Error::AuthorizationPolicyRejection);
         };

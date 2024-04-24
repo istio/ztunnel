@@ -24,6 +24,8 @@ use crate::config::ProxyMode;
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
+use serde::de::Visitor;
+use serde::Deserializer;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
@@ -75,6 +77,33 @@ impl serde::Serialize for Identity {
         S: serde::Serializer,
     {
         self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Identity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IdentityVisitor;
+
+        impl<'de> Visitor<'de> for IdentityVisitor {
+            type Value = Identity;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("string with format spiffe://<trust-domain>[/ns/namespace][/sa/service-account]")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Identity, E>
+            where
+                E: serde::de::Error,
+            {
+                Identity::from_str(value).map_err(|_| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Str(value), &self)
+                })
+            }
+        }
+        deserializer.deserialize_str(IdentityVisitor)
     }
 }
 

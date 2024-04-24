@@ -424,6 +424,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                     service: service_name.clone(),
                     address: Some(ep_network_addr.clone()),
                     port: ports.to_owned(),
+                    identity: self.w.workload.identity(),
                 };
                 let mut svc = self.manager.services.get(&service_name).unwrap().clone();
                 let ep_uid = endpoint_uid(&self.w.workload.uid, Some(&ep_network_addr));

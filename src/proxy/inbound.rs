@@ -222,7 +222,7 @@ impl Inbound {
         };
 
         // Determine the next hop.
-        let (upstream_addr, inbound_protocol, upstream, upstream_service) =
+        let (upstream_addr, inbound_protocol, upstream, upstream_services) =
             match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
                 Ok(res) => res,
                 Err(e) => {
@@ -230,6 +230,7 @@ impl Inbound {
                     return StatusCode::BAD_REQUEST;
                 }
             };
+
         let illegal_call = if pi.cfg.inpod_enabled {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
             // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
@@ -296,12 +297,12 @@ impl Inbound {
             ..Default::default()
         };
         let ds =
-            proxy::guess_inbound_service(&rbac_ctx.conn, &for_host, upstream_service, &upstream);
+            proxy::guess_inbound_service(&rbac_ctx.conn, &for_host, &upstream_services, &upstream);
         let connection_metrics = ConnectionOpen {
             reporter: Reporter::destination,
             source,
             derived_source: Some(derived_source),
-            destination: Some(upstream),
+            destination: Some(upstream.clone()),
             connection_security_policy: metrics::SecurityPolicy::mutual_tls,
             destination_service: ds,
         };
@@ -315,7 +316,12 @@ impl Inbound {
         );
 
         let conn_guard = match connection_manager
-            .assert_rbac(&pi.state, &rbac_ctx, for_host)
+            .assert_rbac(
+                &pi.state,
+                &rbac_ctx,
+                for_host,
+                Some((&upstream, &upstream_services)),
+            )
             .await
         {
             Ok(cg) => cg,
@@ -591,10 +597,12 @@ mod tests {
 
     use std::{
         net::SocketAddr,
+        str::FromStr,
         sync::{Arc, RwLock},
     };
 
     use crate::{
+        identity::Identity,
         rbac::Connection,
         state::{
             self,
@@ -714,6 +722,10 @@ mod tests {
                         },
                         address: ep_addr,
                         port: std::collections::HashMap::new(),
+                        identity: Identity::from_str(&format!(
+                            "spiffe://cluster.local/ns/default/sa/service-account-{name}"
+                        ))
+                        .unwrap(),
                     },
                 )]
                 .into_iter()

@@ -317,6 +317,7 @@ fn service_endpoints(
                 service: namespaced_host.clone(),
                 address: Some(network_addr(&workload.network, *wip)),
                 port: ports.into(),
+                identity: workload.identity(),
             })
         }
         if workload.workload_ips.is_empty() {
@@ -325,6 +326,7 @@ fn service_endpoints(
                 service: namespaced_host.clone(),
                 address: None,
                 port: ports.into(),
+                identity: workload.identity(),
             })
         }
     }

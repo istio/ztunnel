@@ -21,6 +21,7 @@ use std::{fmt, io};
 
 use drain::Watch;
 
+use futures::StreamExt;
 use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -39,7 +40,8 @@ use crate::proxy::socks5::Socks5;
 use crate::rbac::Connection;
 use crate::state::service::{endpoint_uid, Service, ServiceDescription};
 use crate::state::workload::address::Address;
-use crate::state::workload::{network_addr, GatewayAddress, Workload};
+use crate::state::workload::gatewayaddress::Destination;
+use crate::state::workload::{network_addr, Workload};
 use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
@@ -243,6 +245,9 @@ pub enum Error {
 
     #[error("connection closed due to policy rejection")]
     AuthorizationPolicyRejection,
+
+    #[error("connection closed due to waypoint bypass")]
+    WaypointBypass,
 
     #[error("pool is already connecting")]
     PoolAlreadyConnecting,
@@ -493,7 +498,7 @@ pub async fn freebind_connect(
 pub fn guess_inbound_service(
     conn: &Connection,
     for_host_header: &Option<String>,
-    upstream_service: Vec<Service>,
+    upstream_service: &[Service],
     dest: &Workload,
 ) -> Option<ServiceDescription> {
     // First, if the client told us what Service they were reaching, look for that
@@ -529,17 +534,31 @@ pub fn guess_inbound_service(
         .map(ServiceDescription::from)
 }
 
-// Checks that the source identiy and address match the upstream's waypoint
+// Checks that the source identity matches any waypoint's
 async fn check_from_waypoint(
     state: DemandProxyState,
     upstream: &Workload,
+    services: &[Service],
     src_identity: Option<&Identity>,
     src_ip: &IpAddr,
 ) -> bool {
-    let is_waypoint = |wl: &Workload| {
-        Some(wl.identity()).as_ref() == src_identity && wl.workload_ips.contains(src_ip)
+    let Some(src_identity) = src_identity else {
+        return false;
     };
-    check_gateway_address(state, upstream.waypoint.as_ref(), is_waypoint).await
+
+    // waypoints for both the workload and all it's services
+    // TODO itertools::unique causes "FnOnce is not generic enough" so we use HashSet
+    let wp_addrs: HashSet<_> = services
+        .iter()
+        .filter_map(|svc| svc.waypoint.clone())
+        .chain(upstream.waypoint.clone().into_iter())
+        .map(|gw_addr| gw_addr.destination)
+        .collect();
+
+    let is_waypoint =
+        move |ips: &Vec<IpAddr>, id: &Identity| id == src_identity && ips.contains(src_ip);
+
+    check_gateway_address(state, wp_addrs.iter(), is_waypoint).await
 }
 
 // Checks if the connection's source identity is the identity for the upstream's network
@@ -549,38 +568,53 @@ async fn check_from_network_gateway(
     upstream: &Workload,
     src_identity: Option<&Identity>,
 ) -> bool {
-    let is_gateway = |wl: &Workload| Some(wl.identity()).as_ref() == src_identity;
-    check_gateway_address(state, upstream.network_gateway.as_ref(), is_gateway).await
-}
-
-// Check if the source's identity matches any workloads that make up the given gateway
-// TODO: This can be made more accurate by also checking addresses.
-async fn check_gateway_address<F>(
-    state: DemandProxyState,
-    gateway_address: Option<&GatewayAddress>,
-    predicate: F,
-) -> bool
-where
-    F: Fn(&Workload) -> bool,
-{
-    let Some(gateway_address) = gateway_address else {
+    let Some(src_identity) = src_identity else {
+        return false;
+    };
+    let Some(gw_address) = &upstream.network_gateway else {
         return false;
     };
 
-    match state.fetch_destination(&gateway_address.destination).await {
-        Some(Address::Workload(wl)) => return predicate(&wl),
-        Some(Address::Service(svc)) => {
-            for (_ep_uid, ep) in svc.endpoints.iter() {
-                // fetch workloads by workload UID since we may not have an IP for an endpoint (e.g., endpoint is just a hostname)
-                let wl = state.fetch_workload_by_uid(&ep.workload_uid).await;
-                if wl.as_ref().is_some_and(&predicate) {
-                    return true;
-                }
-            }
-        }
-        None => {}
-    };
+    let is_gateway = |_: &Vec<IpAddr>, id: &Identity| id == src_identity;
+    check_gateway_address(state, [gw_address.destination.clone()].iter(), is_gateway).await
+}
 
+// Check if the source's identity matches any workloads that make up the given gateway
+async fn check_gateway_address<'a, F, I>(
+    state: DemandProxyState,
+    gateway_addresses: I,
+    predicate: F,
+) -> bool
+where
+    F: Fn(&Vec<IpAddr>, &Identity) -> bool,
+    I: Iterator<Item = &'a Destination> + Clone + 'a,
+{
+    let addresses = state
+        .fetch_destinations(gateway_addresses.into_iter())
+        .await;
+    for address in addresses {
+        let matched = match address {
+            Address::Workload(wl) => predicate(&wl.workload_ips, &wl.identity()),
+            Address::Service(svc) => {
+                futures::stream::iter(svc.endpoints.values())
+                    .any(|ep| async {
+                        match &ep.address {
+                            // avoid an extra fetch by using info directly on Endpoint
+                            Some(addr) => predicate(&vec![addr.address], &ep.identity),
+                            // endpoint is just a hostname, fetch the workload to get IPs
+                            None => state
+                                .fetch_workload_by_uid(&ep.workload_uid)
+                                .await
+                                .is_some_and(|wl| predicate(&wl.workload_ips, &wl.identity())),
+                        }
+                    })
+                    .await
+            }
+        };
+        if matched {
+            return true;
+        }
+    }
     false
 }
 
@@ -591,7 +625,7 @@ mod tests {
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
     use crate::state::service::endpoint_uid;
-    use crate::state::workload::{NamespacedHostname, NetworkAddress};
+    use crate::state::workload::{GatewayAddress, NamespacedHostname, NetworkAddress};
     use crate::{
         identity::Identity,
         state::{
@@ -600,6 +634,7 @@ mod tests {
             workload::gatewayaddress::Destination,
         },
     };
+    use std::str::FromStr;
     use std::{collections::HashMap, net::Ipv4Addr, sync::RwLock};
 
     #[tokio::test]
@@ -741,6 +776,8 @@ mod tests {
                 },
                 address: addr,
                 port: ports.clone(),
+                identity: Identity::from_str("spiffe://cluster.local/ns/gatewayns/sa/default")
+                    .unwrap(),
             },
         );
         Service {

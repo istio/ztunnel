@@ -14,6 +14,7 @@
 
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
+use crate::identity::Identity;
 use crate::state::service::{Endpoint, Service};
 use crate::state::workload::Protocol;
 use crate::state::workload::Protocol::{HBONE, TCP};
@@ -39,6 +40,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Add;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::error::SendError;
@@ -268,6 +270,8 @@ fn test_custom_svc(
                 },
                 address: addr,
                 port: HashMap::from([(80u16, echo_port)]),
+                identity: Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                    .unwrap(),
             },
         )]),
         subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".to_string()],

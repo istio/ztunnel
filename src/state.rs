@@ -32,6 +32,7 @@ use crate::{cert_fetcher, config, rbac, xds};
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioAsyncResolver;
+use itertools::{Either, Itertools};
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
 use serde::Serializer;
@@ -41,6 +42,7 @@ use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+use tokio::task::JoinSet;
 use tracing::{debug, error, trace, warn};
 
 pub mod policy;
@@ -709,6 +711,49 @@ impl DemandProxyState {
         }
     }
 
+    /// Looks for either a workload or service by the destination. Those that are not found locally
+    /// are fetched on-demand. If still not found, the result list will be shorter than the input.
+    pub async fn fetch_destinations<'a, I>(&self, destinations: I) -> Vec<Address>
+    where
+        I: Iterator<Item = &'a Destination> + Clone + 'a,
+    {
+        let lookup = || -> (Vec<Address>, Vec<Destination>) {
+            let read = self.state.read().unwrap();
+            destinations
+                .clone()
+                .map(|d| (d.clone(), read.find_destination(d)))
+                .partition_map(|(d, r)| match r {
+                    Some(addr) => Either::Left(addr),
+                    None => Either::Right(d.clone()),
+                })
+        };
+
+        let (found, need_fetch) = lookup();
+        if need_fetch.is_empty() {
+            return found;
+        }
+
+        // Some items not in cache yet, fetch_on_demand
+        let mut set = JoinSet::new();
+        for dest in &need_fetch {
+            let key = match dest {
+                Destination::Address(a) => a.to_string(),
+                Destination::Hostname(h) => h.to_string(),
+            };
+            let state = self.clone();
+            set.spawn(async move {
+                state.fetch_on_demand(key).await;
+            });
+        }
+        while (set.join_next().await).is_some() {}
+
+        let (found, still_not_found) = lookup();
+        if !still_not_found.is_empty() {
+            debug!("fetch_all_workloads did not find: {:?}", still_not_found);
+        }
+        found
+    }
+
     /// Looks for the given address to find either a workload or service by IP. If not found
     /// locally, attempts to fetch on-demand.
     pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
@@ -834,8 +879,10 @@ impl ProxyStateManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::identity::Identity;
     use crate::state::service::LoadBalancer;
     use crate::state::workload::Locality;
+    use std::str::FromStr;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use super::*;
@@ -1067,6 +1114,8 @@ mod tests {
                         network: "".to_string(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
+                    identity: Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                        .unwrap(),
                 },
             ),
             (
@@ -1082,6 +1131,8 @@ mod tests {
                         network: "".to_string(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
+                    identity: Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                        .unwrap(),
                 },
             ),
             (
@@ -1097,6 +1148,8 @@ mod tests {
                         network: "".to_string(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
+                    identity: Identity::from_str("spiffe://cluster.local/ns/default/sa/default")
+                        .unwrap(),
                 },
             ),
         ]);

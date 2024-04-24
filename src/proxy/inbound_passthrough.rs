@@ -145,7 +145,7 @@ impl InboundPassthrough {
             network: pi.cfg.network.clone(), // inbound request must be on our network
             address: dest_addr.ip(),
         };
-        let Some((upstream, upstream_service)) =
+        let Some((upstream, upstream_services)) =
             pi.state.fetch_workload_services(&network_addr).await
         else {
             metrics::log_early_deny(
@@ -185,12 +185,12 @@ impl InboundPassthrough {
             identity: rbac_ctx.conn.src_identity.clone(),
             ..Default::default()
         };
-        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, &None, upstream_service, &upstream);
+        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, &None, &upstream_services, &upstream);
         let connection_metrics = metrics::ConnectionOpen {
             reporter: Reporter::destination,
             source: source_workload,
             derived_source: Some(derived_source),
-            destination: Some(upstream),
+            destination: Some(upstream.clone()),
             connection_security_policy: metrics::SecurityPolicy::unknown,
             destination_service: ds,
         };
@@ -204,7 +204,7 @@ impl InboundPassthrough {
         );
 
         let conn_guard = match connection_manager
-            .assert_rbac(&pi.state, &rbac_ctx, None)
+            .assert_rbac(&pi.state, &rbac_ctx, None, None)
             .await
         {
             Ok(cg) => cg,
