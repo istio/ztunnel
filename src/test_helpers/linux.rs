@@ -191,7 +191,7 @@ impl WorkloadManager {
     }
 
     async fn refresh_config(&mut self) -> anyhow::Result<()> {
-        for (_, node) in &mut self.ztunnels {
+        for node in self.ztunnels.values_mut() {
             let new_config = LocalConfig {
                 workloads: self.workloads.clone(),
                 policies: self.policies.clone(),
