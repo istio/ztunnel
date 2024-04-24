@@ -526,7 +526,7 @@ impl WorkloadHBONEPool {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 // A sort of faux-client, that represents a single checked-out 'request sender' which might
 // send requests over some underlying stream using some underlying http/2 client
 pub struct ConnClient {
@@ -576,6 +576,24 @@ impl Drop for ConnClient {
             self.stream_count,
             self.stream_count_max
         )
+    }
+}
+
+// This is currently only for debugging
+impl Clone for ConnClient {
+    fn clone(&self) -> Self {
+        trace!(
+            "cloning ConnClient for key {:#?} with streamcount: {:?} / {:?}",
+            self.wl_key,
+            self.stream_count,
+            self.stream_count_max
+        );
+        ConnClient {
+            sender: self.sender.clone(),
+            stream_count: self.stream_count.clone(),
+            stream_count_max: self.stream_count_max,
+            wl_key: self.wl_key.clone(),
+        }
     }
 }
 
