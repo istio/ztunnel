@@ -211,6 +211,7 @@ impl PoolState {
         }
     }
 
+
     async fn start_conn_if_win_writelock(
         &self,
         workload_key: &WorkloadKey,
@@ -324,7 +325,18 @@ impl PoolState {
                             Some(e_conn)
                         }
                     }
-                    None => None,
+                    None => {
+                        trace!("checkout - no existing conn for key {:#?}, adding one", workload_key);
+                        let pool_conn = self.spawner.new_pool_conn(workload_key.clone()).await;
+                        let r_conn = ConnClient {
+                            sender: pool_conn?,
+                            stream_count: Arc::new(AtomicU16::new(0)),
+                            stream_count_max: self.max_streamcount,
+                            wl_key: workload_key.clone(),
+                        };
+                        self.checkin_conn(r_conn.clone(), pool_key.clone());
+                        Some(r_conn)
+                    },
                 };
 
                 Ok(result)
@@ -427,9 +439,7 @@ impl WorkloadHBONEPool {
             return Ok(existing_conn.unwrap());
         }
 
-        // We couldn't get a conn. This means either nobody has tried to establish any conns for this key yet,
-        // or they have, but no conns are currently available
-        // (because someone else has checked all of them out and not put any back yet)
+        // We couldn't get a conn. This means nobody has tried to establish any conns for this key yet,
         //
         // So, we will take a nonexclusive readlock on the lockmap, to see if an inner lock
         // exists for our key.
@@ -828,7 +838,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_100_clients_streamexhaust() {
-        crate::telemetry::setup_logging();
+        // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
 
