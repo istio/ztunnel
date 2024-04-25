@@ -162,6 +162,8 @@ impl Proxy {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
         pi.hbone_port = inbound.address().port();
+        //  HBONE doesn't have redirection, so we cannot have loops, but this would allow multiple layers of HBONE.
+        // This might be desirable in the future, but for now just ban it.
         illegal_ports.insert(inbound.address().port());
 
         let inbound_passthrough = InboundPassthrough::new(pi.clone(), drain.clone()).await?;

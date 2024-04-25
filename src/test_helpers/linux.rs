@@ -48,7 +48,6 @@ pub struct WorkloadManager {
     services: HashMap<NamespacedHostname, Service>,
     /// Configured policies
     policies: Vec<Authorization>,
-    waypoints: Vec<IpAddr>,
     mode: TestMode,
     tmp_dir: PathBuf,
 }
@@ -86,7 +85,6 @@ impl WorkloadManager {
             workloads: vec![],
             services: HashMap::new(),
             policies: vec![],
-            waypoints: vec![],
         })
     }
 
@@ -129,7 +127,6 @@ impl WorkloadManager {
             inpod_enabled,
             ..config::parse_config().unwrap()
         };
-        let waypoints = self.waypoints.iter().map(|i| i.to_string()).join(" ");
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
@@ -137,7 +134,7 @@ impl WorkloadManager {
             if !inpod_enabled {
                 // not needed in inpod mode. In in pod mode we run `ztunnel-redirect-inpod.sh`
                 // inside the pod's netns
-                helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip} {waypoints}"))?;
+                helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
             }
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(cfg, cert_manager.clone()).await?;
@@ -221,7 +218,7 @@ impl WorkloadManager {
     /// register_waypoint builds a new waypoint. This must be used for waypoints, rather than workload_builder,
     /// or the redirection will not work properly
     pub async fn register_waypoint(&mut self, name: &str, node: &str) -> anyhow::Result<Namespace> {
-        let ns = TestWorkloadBuilder::new(name, self)
+        TestWorkloadBuilder::new(name, self)
             .on_node(node)
             .uncaptured() // Waypoints are not captured.
             .identity(identity::Identity::Spiffe {
@@ -230,9 +227,7 @@ impl WorkloadManager {
                 service_account: name.to_string(),
             })
             .register()
-            .await?;
-        self.waypoints.push(ns.ip());
-        Ok(ns)
+            .await
     }
 
     pub async fn add_policy(&mut self, p: Authorization) -> anyhow::Result<()> {
@@ -364,6 +359,12 @@ impl<'a> TestWorkloadBuilder<'a> {
             hbone_mtls_port: 15008,
             hbone_single_tls_port: Some(15003),
         });
+        self
+    }
+
+    /// Set a waypoint to the workload
+    pub fn mutate_workload(mut self, f: impl FnOnce(&mut Workload)) -> Self {
+        f(&mut self.w.workload);
         self
     }
 
