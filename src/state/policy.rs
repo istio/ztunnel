@@ -97,4 +97,8 @@ impl PolicyStore {
     pub fn send(&mut self) {
         self.notifier.sender.send_replace(());
     }
+    pub fn clear_all_policies(&mut self) {
+        self.by_namespace.clear();
+        self.by_key.clear();
+    }
 }

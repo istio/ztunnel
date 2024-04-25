@@ -203,7 +203,7 @@ mod tests {
     use crate::dns::handler::Handler;
     use crate::dns::resolver::{Answer, Resolver};
     use crate::test_helpers::dns::{a, a_request, n, socket_addr};
-    use crate::test_helpers::helpers::subscribe;
+    use crate::test_helpers::helpers::initialize_telemetry;
     use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
     use hickory_proto::rr::{Name, Record, RecordType};
     use hickory_proto::serialize::binary::BinEncoder;
@@ -219,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_found() {
-        let _guard = subscribe();
+        initialize_telemetry();
 
         let p = Handler::new(Arc::new(FakeResolver {}));
 

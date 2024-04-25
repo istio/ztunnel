@@ -50,7 +50,7 @@ impl Resolver for Forwarder {
 mod tests {
     use crate::dns::resolver::Resolver;
     use crate::test_helpers::dns::{a_request, n, socket_addr, system_forwarder};
-    use crate::test_helpers::helpers::subscribe;
+    use crate::test_helpers::helpers::initialize_telemetry;
     use hickory_proto::op::ResponseCode;
     use hickory_proto::rr::RecordType;
     use hickory_resolver::error::ResolveErrorKind;
@@ -58,7 +58,7 @@ mod tests {
 
     #[tokio::test]
     async fn found() {
-        let _guard = subscribe();
+        initialize_telemetry();
 
         let f = system_forwarder();
 
@@ -78,7 +78,7 @@ mod tests {
 
     #[tokio::test]
     async fn not_found() {
-        let _guard = subscribe();
+        initialize_telemetry();
 
         let f = system_forwarder();
 
