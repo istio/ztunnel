@@ -101,15 +101,19 @@ impl ConnSpawner {
             .then_some(key.src);
         let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
         let connector = cert.outbound_connector(key.dst_id)?;
+        debug!("got connector for key");
         let tcp_stream =
             super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
+        debug!("got stream for key");
         tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
         let tls_stream = connector.connect(tcp_stream).await?;
+        debug!("connector connected, handshaking");
         let (request_sender, connection) = builder
             .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
             .await
             .map_err(Error::HttpHandshake)?;
 
+        debug!("got TLS stream for key");
         // spawn a task to poll the connection and drive the HTTP state
         // if we got a drain for that connection, respect it in a race
         // it is important to have a drain here, or this connection will never terminate
@@ -216,7 +220,7 @@ impl PoolState {
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Option<ConnClient> {
+    ) -> Result<Option<ConnClient>, Error> {
         let inner_conn_lock = {
             trace!("getting keyed lock out of lockmap");
             let guard = self.established_conn_writelock.guard();
@@ -250,11 +254,11 @@ impl PoolState {
                             workload_key, pool_key
                         );
                         self.checkin_conn(client.clone(), pool_key.clone());
-                        Some(client)
+                        Ok(Some(client))
                     }
                     Err(e) => {
                         error!("could not spawn new conn, got {e}");
-                        None
+                        return Err(e)
                     }
                 }
                 // END take inner writelock
@@ -264,7 +268,7 @@ impl PoolState {
                     "did not win connlock for wl key {:#?}, something else has it",
                     workload_key
                 );
-                None
+                Ok(None)
             }
         }
     }
@@ -489,7 +493,7 @@ impl WorkloadHBONEPool {
         let res = match self
             .state
             .start_conn_if_win_writelock(&workload_key, &pool_key)
-            .await
+            .await?
         {
             Some(client) => client,
             None => {
@@ -639,6 +643,7 @@ mod test {
     use tokio::net::TcpListener;
     use tokio::task::{self};
     use tokio::time::sleep;
+    use http_body_util::BodyExt;
 
     #[cfg(tokio_unstable)]
     use tracing::Instrument;
@@ -886,8 +891,8 @@ mod test {
         server_handle.await.unwrap();
         drop(pool);
 
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 4, "actual conncount was {real_conncount}");
+        let real_conncount = conn_counter.load(Ordering::SeqCst);
+        assert!(real_conncount == 2, "actual conncount was {real_conncount}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1274,7 +1279,7 @@ mod test {
                 // needs tokio_unstable, but useful
                 // .instrument(tracing::debug_span!("client_tid", tid=%tokio::task::id()))
                 .await
-                .unwrap();
+                .expect("connect should succeed");
             debug!(
                 "client spent {}ms waiting for conn",
                 start.elapsed().as_millis()
@@ -1287,10 +1292,18 @@ mod test {
 
                 if res.is_err() {
                     panic!("SEND ERR: {:#?} sendcount {count}", res);
-                } else if res.unwrap().status() != 200 {
+                } else if !res.is_ok() {
                     panic!("CLIENT RETURNED ERROR")
                 }
 
+                let mut okres = res.unwrap();
+                const HBONE_MESSAGE: &[u8] = b"hbone\n";
+                while let Some(next) = okres.frame().await {
+                    let frame = next.expect("better have a resp body");
+                    if let Some(chunk) = frame.data_ref() {
+                        assert_eq!(HBONE_MESSAGE, chunk);
+                    }
+                }
                 if count >= req_count {
                     debug!("CLIENT DONE");
                     break;
@@ -1366,6 +1379,7 @@ mod test {
                     Ok(upgraded) => {
                         let (mut ri, mut wi) =
                             tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
+                        // wi.write_all(b"hbone\n").await.unwrap();
                         wi.write_all(b"hbone\n").await.unwrap();
                         tcp::handle_stream(tcp::Mode::ReadWrite, &mut ri, &mut wi).await;
                     }
