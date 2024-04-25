@@ -402,7 +402,15 @@ impl DemandProxyState {
             .iter()
             .chain(global.iter())
             .chain(workload)
-            .filter_map(|k| state.policies.get(k))
+            .filter_map(|k| {
+                let pol = state.policies.get(k);
+                // Policy not found. This is probably transition state where the policy hasn't been sent
+                // by the control plane, or it was just removed.
+                if pol.is_none() {
+                    warn!("skipping unknown policy {k}");
+                }
+                pol
+            })
             .partition(|p| p.action == rbac::RbacAction::Allow);
 
         trace!(
