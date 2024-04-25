@@ -20,7 +20,7 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::mpsc;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 pub use client::*;
 pub use metrics::*;
@@ -393,11 +393,53 @@ pub struct LocalConfig {
 impl LocalClient {
     #[instrument(skip_all, name = "local_client")]
     pub async fn run(self) -> Result<(), anyhow::Error> {
-        // Currently, we just load the file once. In the future, we could dynamically reload.
-        let data = self.cfg.read_to_string().await?;
-        debug!("local config: {data}");
-        let r: LocalConfig = serde_yaml::from_str(&data)?;
+        // Load initial state
+        match &self.cfg {
+            #[cfg(any(test, feature = "testing"))]
+            ConfigSource::Dynamic(rx) => {
+                let mut rx = rx.lock().await;
+                let r = rx
+                    .recv()
+                    .await
+                    .ok_or(anyhow::anyhow!("did not get initial config"))?;
+                self.load_config(r)?;
+                rx.ack().await?;
+            }
+            f => {
+                let r: LocalConfig = serde_yaml::from_str(&f.read_to_string().await?)?;
+                self.load_config(r)?;
+            }
+        };
+        #[cfg(any(test, feature = "testing"))]
+        if let ConfigSource::Dynamic(ref rx) = self.cfg {
+            let rx = rx.clone();
+            tokio::spawn(async move {
+                // Mutex is just for borrow checker; we know we are the only user and can hold the lock forever.
+                let mut rx = rx.lock().await;
+                while let Some(req) = rx.recv().await {
+                    if let Err(e) = self.load_config(req) {
+                        error!("failed to load dynamic config update: {e:?}");
+                    }
+                    if let Err(e) = rx.ack().await {
+                        error!("failed to ack: {}", e);
+                    }
+                }
+            });
+        };
+        Ok(())
+    }
+
+    fn load_config(&self, r: LocalConfig) -> anyhow::Result<()> {
+        debug!(
+            "load local config: {}",
+            serde_yaml::to_string(&r).unwrap_or_default()
+        );
         let mut state = self.state.write().unwrap();
+        // Clear the state
+        state.workloads = Default::default();
+        state.services = Default::default();
+        // Policies have some channels, so we don't want to reset it entirely
+        state.policies.clear_all_policies();
         let num_workloads = r.workloads.len();
         let num_policies = r.policies.len();
         for wl in r.workloads {

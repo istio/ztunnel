@@ -31,6 +31,7 @@ use ztunnel::identity::mock::new_secret_manager;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
 use ztunnel::test_helpers::assert_eventually;
+use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::*;
 
 #[tokio::test]
@@ -184,14 +185,14 @@ async fn run_requests_test(
     num_queries: u8,
     metrics_assertions: Option<fn(metrics: ParsedMetrics)>,
 ) {
+    initialize_telemetry();
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
-    let cfg = add_nip_io_nameserver(config::Config {
+    let cfg = config::Config {
         local_node: (!node.is_empty()).then(|| node.to_string()),
         ..test_config_with_port(echo_addr.port())
-    })
-    .await;
+    };
     tokio::spawn(echo.run());
     testapp::with_app(cfg, |app| async move {
         let dst = SocketAddr::from_str(target)

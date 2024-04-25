@@ -744,7 +744,7 @@ mod tests {
         a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client,
         send_request, server_request,
     };
-    use crate::test_helpers::helpers::subscribe;
+    use crate::test_helpers::helpers::initialize_telemetry;
     use crate::test_helpers::{new_proxy_state, test_default_workload};
     use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::Port as XdsPort;
@@ -891,7 +891,7 @@ mod tests {
     // TODO(nmittler): Test truncation once fixed (https://github.com/bluejekyll/trust-dns/issues/1973).
     #[tokio::test]
     async fn lookup() {
-        let _guard = subscribe();
+        initialize_telemetry();
 
         struct Case {
             name: &'static str,
@@ -1178,7 +1178,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_client_should_fail() {
-        let _guard = subscribe();
+        initialize_telemetry();
 
         // Create the DNS store.
         let state = state();
@@ -1208,7 +1208,7 @@ mod tests {
 
     #[tokio::test]
     async fn system_forwarder() {
-        let _guard = subscribe();
+        initialize_telemetry();
 
         struct Case {
             name: &'static str,
@@ -1272,7 +1272,7 @@ mod tests {
     // and https://github.com/istio/ztunnel/issues/582
     #[tokio::test]
     async fn ipv4_in_6_should_unwrap() {
-        let _guard = subscribe();
+        initialize_telemetry();
         let fake_ips = vec![ip("2.2.2.2")];
         let fake_wls = vec![xds_workload("client-fake", NS1, "", NW1, &[], &fake_ips)];
 

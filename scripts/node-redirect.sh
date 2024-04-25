@@ -7,7 +7,16 @@ HOST_IP="$(ip -j addr | jq '.[] | select(.ifname == "eth0").addr_info[0].local' 
 ZTUNNEL_IP="${1:?ztunnel IP}"
 ZTUNNEL_INTERFACE="${2:?ztunnel interface}"
 shift; shift;
-ipset create ztunnel-pods-ips hash:ip
+set +e
+if ipset -L ztunnel-pods-ips >/dev/null 2>&1; then
+  # ipset already exists, we must be a later iteration..
+  for ip in "$@"; do
+    ipset add ztunnel-pods-ips "${ip}"
+  done
+  exit 0
+fi
+set -e
+ipset create ztunnel-pods-ips hash:ip || :
 for ip in "$@"; do
   ipset add ztunnel-pods-ips "${ip}"
 done

@@ -21,11 +21,17 @@ use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
 use crate::xds::{LocalConfig, LocalWorkload};
 use crate::{config, identity, proxy};
-use bytes::BufMut;
+
 use itertools::Itertools;
+use nix::unistd::mkdtemp;
 use std::net::IpAddr;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::test_helpers::inpod::start_ztunnel_server;
+use crate::test_helpers::linux::TestMode::InPod;
+use tokio::sync::Mutex;
 use tracing::info;
 
 /// WorkloadManager provides an interface to deploy "workloads" as part of a test. Each workload
@@ -34,26 +40,52 @@ use tracing::info;
 /// Note: at this time, only a single "node" (and therefor, ztunnel), is supported.
 pub struct WorkloadManager {
     namespaces: netns::NamespaceManager,
+    /// set of nodes that have ztunnel deployed on them
+    ztunnels: HashMap<String, LocalZtunnel>,
     /// workloads that we have constructed
     workloads: Vec<LocalWorkload>,
     /// services that we have constructed. VIP -> SVC
     services: HashMap<NamespacedHostname, Service>,
     /// Configured policies
     policies: Vec<Authorization>,
-    /// Node to IPs on the node that are captured
-    captured_workloads: HashMap<String, Vec<IpAddr>>,
     waypoints: Vec<IpAddr>,
+    mode: TestMode,
+    tmp_dir: PathBuf,
+}
+
+pub struct LocalZtunnel {
+    fd_sender: Option<MpscAckSender<(String, i32)>>,
+    config_sender: MpscAckSender<LocalConfig>,
+    ip: IpAddr,
+    veth: String,
+}
+
+impl Drop for WorkloadManager {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.tmp_dir).unwrap()
+    }
+}
+
+#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+pub enum TestMode {
+    InPod,
+    SharedNode,
 }
 
 impl WorkloadManager {
     /// new instantiates a manager with the given name. Using a unique name between tests is critical.
-    pub fn new(name: &str) -> anyhow::Result<Self> {
+    pub fn new(name: &str, mode: TestMode) -> anyhow::Result<Self> {
+        // Temporary directory will hold all our mounts
+        let tp = std::env::temp_dir().join("ztunnel_namespaced.XXXXXX");
+        let tmp_dir = mkdtemp(&tp).expect("tmp dir");
         Ok(Self {
+            mode,
+            tmp_dir,
+            ztunnels: Default::default(),
             namespaces: netns::NamespaceManager::new(name)?,
             workloads: vec![],
             services: HashMap::new(),
             policies: vec![],
-            captured_workloads: Default::default(),
             waypoints: vec![],
         })
     }
@@ -62,43 +94,38 @@ impl WorkloadManager {
     ///
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
-    pub fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
-        self.deploy_ztunnel_maybe_inpod(node, None)
-    }
-    pub fn deploy_ztunnel_inpod(
-        &mut self,
-        node: &str,
-        inpod_uds: PathBuf,
-    ) -> anyhow::Result<TestApp> {
-        self.deploy_ztunnel_maybe_inpod(node, Some(inpod_uds))
-    }
-    pub fn deploy_ztunnel_maybe_inpod(
-        &mut self,
-        node: &str,
-        inpod_uds: Option<PathBuf>,
-    ) -> anyhow::Result<TestApp> {
+    pub async fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
+        let mut inpod_uds: PathBuf = "/dev/null".into();
+        let ztunnel_server = if self.mode == InPod {
+            inpod_uds = self.tmp_dir.join(node);
+            Some(start_ztunnel_server(inpod_uds.clone()))
+        } else {
+            None
+        };
         let ns = TestWorkloadBuilder::new(&format!("ztunnel-{node}"), self)
             .on_node(node)
             .uncaptured()
-            .register()?;
+            .register()
+            .await?;
         let ip = ns.ip();
         let veth = ns.interface();
-        let lc = LocalConfig {
+        let initial_config = LocalConfig {
             workloads: self.workloads.clone(),
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
-        let mut b = bytes::BytesMut::new().writer();
-        serde_yaml::to_writer(&mut b, &lc)?;
-        let inpod_enabled = inpod_uds.is_some();
+        let inpod_enabled = ztunnel_server.is_some();
+        let (mut tx_cfg, rx_cfg) = mpsc_ack(1);
+        tx_cfg.send(initial_config).await?;
+        let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
         let cfg = config::Config {
             xds_address: None,
             dns_proxy: true,
             fake_ca: true,
-            local_xds_config: Some(ConfigSource::Static(b.into_inner().freeze())),
+            local_xds_config,
             local_node: Some(node.to_string()),
             local_ip: Some(ns.ip()),
-            inpod_uds: inpod_uds.unwrap_or("/dev/null".into()),
+            inpod_uds,
             inpod_enabled,
             ..config::parse_config().unwrap()
         };
@@ -151,26 +178,39 @@ impl WorkloadManager {
 
             app.wait_termination().await
         })?;
-        if !inpod_enabled {
-            // Setup the node...
-            // not needed in inpod mode.
-            let captured = self
-                .captured_workloads
-                .get(node)
-                .unwrap_or(&vec![])
-                .iter()
-                .map(|i| i.to_string())
-                .join(" ");
-            self.namespaces.run_in_node(node, || {
-                helpers::run_command(&format!("scripts/node-redirect.sh {ip} {veth} {captured}"))
-            })?;
-        }
+        // Make sure our initial config is ACKed
+        tx_cfg.wait().await?;
+        let zt_info = LocalZtunnel {
+            fd_sender: ztunnel_server,
+            config_sender: tx_cfg,
+            ip,
+            veth: veth.clone(),
+        };
+        self.ztunnels.insert(node.to_string(), zt_info);
         Ok(rx.recv()?)
+    }
+
+    async fn refresh_config(&mut self) -> anyhow::Result<()> {
+        for node in self.ztunnels.values_mut() {
+            let new_config = LocalConfig {
+                workloads: self.workloads.clone(),
+                policies: self.policies.clone(),
+                services: self.services.values().cloned().collect_vec(),
+            };
+            node.config_sender.send_and_wait(new_config).await?;
+        }
+        Ok(())
     }
 
     /// workload_builder allows creating a new workload. It will run in its own network namespace.
     pub fn workload_builder(&mut self, name: &str, node: &str) -> TestWorkloadBuilder {
-        TestWorkloadBuilder::new(name, self).on_node(node)
+        TestWorkloadBuilder::new(name, self)
+            .on_node(node)
+            .identity(identity::Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "default".to_string(),
+                service_account: name.to_string(),
+            })
     }
 
     /// service_builder allows creating a new service
@@ -180,23 +220,25 @@ impl WorkloadManager {
 
     /// register_waypoint builds a new waypoint. This must be used for waypoints, rather than workload_builder,
     /// or the redirection will not work properly
-    pub fn register_waypoint(&mut self, name: &str, node: &str) -> anyhow::Result<Namespace> {
+    pub async fn register_waypoint(&mut self, name: &str, node: &str) -> anyhow::Result<Namespace> {
         let ns = TestWorkloadBuilder::new(name, self)
-            .hbone()
             .on_node(node)
-            // TODO: way to add certs for other identities to the cert manager
-            // .identity(identity::Identity::Spiffe {
-            //     trust_domain: "cluster.local".to_string(),
-            //     namespace: "default".to_string(),
-            //     service_account: name.to_string(),
-            // })
-            .register()?;
+            .uncaptured() // Waypoints are not captured.
+            .identity(identity::Identity::Spiffe {
+                trust_domain: "cluster.local".to_string(),
+                namespace: "default".to_string(),
+                service_account: name.to_string(),
+            })
+            .register()
+            .await?;
         self.waypoints.push(ns.ip());
         Ok(ns)
     }
 
-    pub fn add_policy(&mut self, p: Authorization) {
+    pub async fn add_policy(&mut self, p: Authorization) -> anyhow::Result<()> {
         self.policies.push(p);
+        self.refresh_config().await?;
+        Ok(())
     }
 
     pub fn resolver(&self) -> Resolver {
@@ -258,10 +300,11 @@ impl<'a> TestServiceBuilder<'a> {
     }
 
     /// Finish building the service.
-    pub fn register(self) -> anyhow::Result<()> {
+    pub async fn register(self) -> anyhow::Result<()> {
         self.manager
             .services
             .insert(self.s.namespaced_hostname(), self.s);
+        self.manager.refresh_config().await?;
         Ok(())
     }
 }
@@ -275,13 +318,13 @@ pub struct TestWorkloadBuilder<'a> {
 impl<'a> TestWorkloadBuilder<'a> {
     pub fn new(name: &str, manager: &'a mut WorkloadManager) -> TestWorkloadBuilder<'a> {
         TestWorkloadBuilder {
-            captured: true, // workload has redirection enabled
+            captured: false,
             w: LocalWorkload {
                 workload: Workload {
                     name: name.to_string(),
                     namespace: "default".to_string(),
                     service_account: "default".to_string(),
-                    node: "not-local".to_string(),
+                    node: "".to_string(),
                     ..test_default_workload()
                 },
                 services: Default::default(),
@@ -337,17 +380,22 @@ impl<'a> TestWorkloadBuilder<'a> {
     /// Configure the workload to run a given node
     pub fn on_node(mut self, node: &str) -> Self {
         self.w.workload.node = node.to_string();
+        if self.manager.ztunnels.contains_key(node) {
+            self.captured = true;
+            self.w.workload.protocol = HBONE;
+        }
         self
     }
 
     /// Opt out of redirection
     pub fn uncaptured(mut self) -> Self {
         self.captured = false;
+        self.w.workload.protocol = TCP;
         self
     }
 
     /// Finish building the workload.
-    pub fn register(mut self) -> anyhow::Result<Namespace> {
+    pub async fn register(mut self) -> anyhow::Result<Namespace> {
         let node = self.w.workload.node.clone();
         let network_namespace = self
             .manager
@@ -358,6 +406,7 @@ impl<'a> TestWorkloadBuilder<'a> {
             "cluster1//v1/Pod/{}/{}",
             self.w.workload.namespace, self.w.workload.name,
         );
+        let uid = self.w.workload.uid.clone();
 
         // update the endpoints for the service.
         for (service, ports) in &self.w.services {
@@ -384,12 +433,31 @@ impl<'a> TestWorkloadBuilder<'a> {
         info!("registered {}", self.w.workload.uid);
         self.manager.workloads.push(self.w);
         if self.captured {
-            self.manager
-                .captured_workloads
-                .entry(node)
-                .or_default()
-                .push(network_namespace.ip());
+            // Setup redirection
+            let zt_info = self.manager.ztunnels.get_mut(&node).unwrap();
+            if self.manager.mode == InPod {
+                // In the new pod network
+                network_namespace
+                    .netns()
+                    .run(|_| helpers::run_command("scripts/ztunnel-redirect-inpod.sh"))??;
+                let fd = network_namespace.netns().file().as_raw_fd();
+                zt_info
+                    .fd_sender
+                    .as_mut()
+                    .unwrap()
+                    .send_and_wait((uid, fd))
+                    .await?;
+            } else {
+                let our_ip = network_namespace.ip();
+                // Setup in the ztunnel network namespace
+                let ip = zt_info.ip;
+                let veth = &zt_info.veth;
+                self.manager.namespaces.run_in_node(&node, || {
+                    helpers::run_command(&format!("scripts/node-redirect.sh {ip} {veth} {our_ip}"))
+                })?;
+            }
         }
+        self.manager.refresh_config().await?;
         Ok(network_namespace)
     }
 }

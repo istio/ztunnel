@@ -1,8 +1,3 @@
-use std::env;
-use std::fmt::Debug;
-
-use std::time::Instant;
-
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +11,10 @@ use std::time::Instant;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use std::env;
+use std::fmt::Debug;
+use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
@@ -232,5 +231,120 @@ where
         ctx.format_fields(writer.by_ref(), event)?;
 
         writeln!(writer)
+    }
+}
+
+/// Mod testing gives access to a test logger, which stores logs in memory for querying.
+/// Inspired by https://github.com/dbrgn/tracing-test
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use crate::telemetry::{fmt_layer, APPLICATION_START_TIME};
+    use itertools::Itertools;
+    use once_cell::sync::Lazy;
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::io;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::fmt::format;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    /// assert_contains asserts the logs contain a line with the matching keys.
+    /// Common keys to match one are "target" and "message"; most of the rest are custom.
+    pub fn assert_contains(want: HashMap<&str, &str>) {
+        let logs = {
+            let buf = global_buf().lock().unwrap();
+            std::str::from_utf8(&buf)
+                .expect("Logs contain invalid UTF8")
+                .to_string()
+        };
+        let logs: Vec<serde_json::Value> = logs
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("log must be valid json")
+            })
+            .collect();
+        let matched = logs.iter().find(|log| {
+            for (k, v) in &want {
+                let Some(have) = log.get(k) else {
+                    // Required key not found, continue
+                    return false;
+                };
+                let have = match have {
+                    Value::Number(n) => format!("{n}"),
+                    Value::String(v) => v.clone(),
+                    _ => panic!("assert_contains currently only supports string/number values"),
+                };
+                // TODO fuzzy match
+                if *v != have {
+                    // no match
+                    return false;
+                }
+            }
+            true
+        });
+        assert!(
+            matched.is_some(),
+            "wanted a log line matching {want:?}, got {}",
+            logs.iter().map(|x| x.to_string()).join("\n")
+        );
+    }
+
+    /// MockWriter will store written logs
+    #[derive(Debug)]
+    pub struct MockWriter<'a> {
+        buf: &'a Mutex<Vec<u8>>,
+    }
+
+    impl<'a> MockWriter<'a> {
+        pub fn new(buf: &'a Mutex<Vec<u8>>) -> Self {
+            Self { buf }
+        }
+
+        fn buf(&self) -> io::Result<MutexGuard<'a, Vec<u8>>> {
+            self.buf
+                .lock()
+                .map_err(|_| io::Error::from(io::ErrorKind::Other))
+        }
+    }
+
+    impl<'a> io::Write for MockWriter<'a> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut target = self.buf()?;
+            target.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.buf()?.flush()
+        }
+    }
+
+    impl<'a> fmt::MakeWriter<'_> for MockWriter<'a> {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            MockWriter::new(self.buf)
+        }
+    }
+
+    // Global buffer to store logs in
+    fn global_buf() -> &'static Mutex<Vec<u8>> {
+        static GLOBAL_BUF: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+        GLOBAL_BUF.get_or_init(|| Mutex::new(vec![]))
+    }
+
+    pub fn setup_test_logging() {
+        Lazy::force(&APPLICATION_START_TIME);
+        let mock_writer = MockWriter::new(global_buf());
+        let layer: fmt::Layer<_, _, _, _> = fmt::layer()
+            .event_format(tracing_subscriber::fmt::format().json().flatten_event(true))
+            .fmt_fields(format::JsonFields::default())
+            .with_writer(mock_writer);
+        tracing_subscriber::registry()
+            .with(fmt_layer())
+            .with(layer)
+            .init();
     }
 }

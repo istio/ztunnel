@@ -174,13 +174,18 @@ where
 pub struct HboneTestServer {
     listener: TcpListener,
     mode: Mode,
+    name: String,
 }
 
 impl HboneTestServer {
-    pub async fn new(mode: Mode) -> Self {
+    pub async fn new(mode: Mode, name: &str) -> Self {
         let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
         let listener = TcpListener::bind(addr).await.unwrap();
-        Self { listener, mode }
+        Self {
+            listener,
+            mode,
+            name: name.to_string(),
+        }
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -192,7 +197,7 @@ impl HboneTestServer {
             &identity::Identity::Spiffe {
                 trust_domain: "cluster.local".to_string(),
                 namespace: "default".to_string(),
-                service_account: "default".to_string(),
+                service_account: self.name,
             }
             .into(),
             Duration::from_secs(0),

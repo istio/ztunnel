@@ -211,8 +211,8 @@ impl OutboundConnection {
             }
         };
         debug!(
-            "request from {} to {} via {} type {:#?} dir {:#?}",
-            req.source.name, dest_addr, req.gateway, req.request_type, req.direction
+            "request from {} to {} via {} type {:#?}",
+            req.source.name, dest_addr, req.gateway, req.request_type
         );
         if block_passthrough && req.destination_workload.is_none() {
             // This is mostly used by socks5. For typical outbound calls, we need to allow calls to arbitrary
@@ -501,7 +501,6 @@ impl OutboundConnection {
                 let id = waypoint_workload.identity();
                 return Ok(Request {
                     protocol: Protocol::HBONE,
-                    direction: Direction::Outbound,
                     source: source_workload,
                     destination: target,
                     destination_workload: Some(waypoint_workload),
@@ -537,7 +536,6 @@ impl OutboundConnection {
                     destination_service: None,
                     expected_identity: None,
                     gateway: target,
-                    direction: Direction::Outbound,
                     request_type: RequestType::Passthrough,
                     upstream_sans: vec![],
                 });
@@ -580,19 +578,18 @@ impl OutboundConnection {
                             self.pi.metrics.clone(),
                         )
                         .await?;
-                    let wp_socket_addr = SocketAddr::new(waypoint_ip, waypoint_us.port);
+                    let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
+                    let id = waypoint_workload.identity();
                     return Ok(Request {
                         // Always use HBONE here
                         protocol: Protocol::HBONE,
                         source: source_workload,
                         // Use the original VIP, not translated
                         destination: target,
-                        destination_workload: Some(us.workload),
+                        destination_workload: Some(waypoint_workload),
                         destination_service: us.destination_service.clone(),
-                        expected_identity: Some(waypoint_workload.identity()),
-                        gateway: wp_socket_addr,
-                        // Let the client remote know we are on the inbound path.
-                        direction: Direction::Inbound,
+                        expected_identity: Some(id),
+                        gateway: waypoint_socket_address,
                         request_type: RequestType::ToServerWaypoint,
                         upstream_sans: us.sans,
                     });
@@ -617,7 +614,6 @@ impl OutboundConnection {
             destination_service: us.destination_service.clone(),
             expected_identity: Some(us.workload.identity()),
             gateway: gw_addr,
-            direction: Direction::Outbound,
             request_type: RequestType::Direct,
             upstream_sans: us.sans,
         })
@@ -637,7 +633,6 @@ fn baggage(r: &Request, cluster: String) -> String {
 #[derive(Debug)]
 struct Request {
     protocol: Protocol,
-    direction: Direction,
     source: Workload,
     destination: SocketAddr,
     // The intended destination workload. This is always the original intended target, even in the case
@@ -651,12 +646,6 @@ struct Request {
     request_type: RequestType,
 
     upstream_sans: Vec<String>,
-}
-
-#[derive(Debug)]
-enum Direction {
-    Inbound,
-    Outbound,
 }
 
 #[derive(PartialEq, Debug)]

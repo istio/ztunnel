@@ -100,7 +100,7 @@ impl Namespace {
     }
 
     // A small helper around run_ready that marks as "ready" immediately.
-    pub fn run<F, Fut, R>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<R>>>
+    pub fn run<F, Fut, R>(&self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<R>>>
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<R>>,
@@ -117,7 +117,7 @@ impl Namespace {
     /// Because network namespaces are bound to a thread, this function spins up a new thread for the closure and
     /// spawns a single-threaded tokio runtime.
     /// To await the closure, be sure to call join().
-    pub fn run_ready<F, Fut, R>(self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<R>>>
+    pub fn run_ready<F, Fut, R>(&self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<R>>>
     where
         F: FnOnce(Ready) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<R>>,
@@ -126,9 +126,10 @@ impl Namespace {
         let name = self.name.clone();
         let node_name = self.node_name.clone();
         let (tx, rx) = sync::mpsc::sync_channel::<()>(0);
+        let netns = self.netns.clone();
         // Change network namespaces changes the entire thread, so we want to run each network in its own thread
         let j = thread::spawn(move || {
-            self.netns
+            netns
                 .run(|_n| {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -136,20 +137,20 @@ impl Namespace {
                         .unwrap();
                     rt.block_on(f(Ready(tx)).instrument(tracing::info_span!(
                         "run",
-                        name = self.name,
-                        node = self.node_name
+                        name = name,
+                        node = node_name
                     )))
                 })
                 .unwrap()
         });
-        debug!(%name, %node_name, "awaiting ready");
+        debug!(name=%self.name, node_name=%self.node_name, "awaiting ready");
         // Await readiness
         if rx.recv().is_err() {
-            debug!(%name, %node_name, "failed ready");
+            debug!(name=%self.name, node_name=%self.node_name, "failed ready");
             j.join().unwrap()?;
             anyhow::bail!("readiness dropped; used ready.set_ready() instead");
         }
-        debug!(%name, %node_name, "ready");
+        debug!(name=%self.name, node_name=%self.node_name, "ready");
         Ok(j)
     }
 }
@@ -314,6 +315,7 @@ ip -n {other_net} route add 10.0.{node_id}.0/24 via 172.172.0.{node_id} dev eth0
             name: name.to_string(),
         };
         let ip = ns.ip();
+        debug!("assigned {} to {}", name, ip);
         state.pods.insert(
             name.to_string(),
             Network {
