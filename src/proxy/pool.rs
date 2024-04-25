@@ -215,7 +215,6 @@ impl PoolState {
         }
     }
 
-
     async fn start_conn_if_win_writelock(
         &self,
         workload_key: &WorkloadKey,
@@ -240,27 +239,20 @@ impl PoolState {
             Ok(_guard) => {
                 // BEGIN take inner writelock
                 debug!("nothing else is creating a conn and we won the lock, make one");
-                match self.spawner.new_pool_conn(workload_key.clone()).await {
-                    Ok(pool_conn) => {
-                        let client = ConnClient {
-                            sender: pool_conn,
-                            stream_count: Arc::new(AtomicU16::new(0)),
-                            stream_count_max: self.max_streamcount,
-                            wl_key: workload_key.clone(),
-                        };
+                let pool_conn = self.spawner.new_pool_conn(workload_key.clone()).await?;
+                let client = ConnClient {
+                    sender: pool_conn,
+                    stream_count: Arc::new(AtomicU16::new(0)),
+                    stream_count_max: self.max_streamcount,
+                    wl_key: workload_key.clone(),
+                };
 
-                        debug!(
-                            "checking in new conn for key {:#?} with pk {:#?}",
-                            workload_key, pool_key
-                        );
-                        self.checkin_conn(client.clone(), pool_key.clone());
-                        Ok(Some(client))
-                    }
-                    Err(e) => {
-                        error!("could not spawn new conn, got {e}");
-                        return Err(e)
-                    }
-                }
+                debug!(
+                    "checking in new conn for key {:#?} with pk {:#?}",
+                    workload_key, pool_key
+                );
+                self.checkin_conn(client.clone(), pool_key.clone());
+                Ok(Some(client))
                 // END take inner writelock
             }
             Err(_) => {
@@ -314,9 +306,10 @@ impl PoolState {
                         trace!("checkout - got existing conn for key {:#?}", workload_key);
                         if e_conn.at_max_streamcount() {
                             debug!("got conn for wl key {:#?}, but streamcount is maxed, spawning new conn to replace using pool key {:#?}", workload_key, pool_key);
-                            let pool_conn = self.spawner.new_pool_conn(workload_key.clone()).await;
+                            let pool_conn =
+                                self.spawner.new_pool_conn(workload_key.clone()).await?;
                             let r_conn = ConnClient {
-                                sender: pool_conn?,
+                                sender: pool_conn,
                                 stream_count: Arc::new(AtomicU16::new(0)),
                                 stream_count_max: self.max_streamcount,
                                 wl_key: workload_key.clone(),
@@ -330,17 +323,20 @@ impl PoolState {
                         }
                     }
                     None => {
-                        trace!("checkout - no existing conn for key {:#?}, adding one", workload_key);
-                        let pool_conn = self.spawner.new_pool_conn(workload_key.clone()).await;
+                        trace!(
+                            "checkout - no existing conn for key {:#?}, adding one",
+                            workload_key
+                        );
+                        let pool_conn = self.spawner.new_pool_conn(workload_key.clone()).await?;
                         let r_conn = ConnClient {
-                            sender: pool_conn?,
+                            sender: pool_conn,
                             stream_count: Arc::new(AtomicU16::new(0)),
                             stream_count_max: self.max_streamcount,
                             wl_key: workload_key.clone(),
                         };
                         self.checkin_conn(r_conn.clone(), pool_key.clone());
                         Some(r_conn)
-                    },
+                    }
                 };
 
                 Ok(result)
@@ -635,6 +631,7 @@ mod test {
     use futures_util::StreamExt;
     use hyper::body::Incoming;
 
+    use http_body_util::BodyExt;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use std::sync::atomic::AtomicU32;
@@ -643,7 +640,6 @@ mod test {
     use tokio::net::TcpListener;
     use tokio::task::{self};
     use tokio::time::sleep;
-    use http_body_util::BodyExt;
 
     #[cfg(tokio_unstable)]
     use tracing::Instrument;
@@ -843,7 +839,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_100_clients_streamexhaust() {
-        // crate::telemetry::setup_logging();
+        crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
 
@@ -876,7 +872,7 @@ mod test {
         let mut tasks = futures::stream::FuturesUnordered::new();
         loop {
             count += 1;
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
 
             if count == client_count {
                 break;
@@ -1380,7 +1376,7 @@ mod test {
                         let (mut ri, mut wi) =
                             tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
                         // wi.write_all(b"hbone\n").await.unwrap();
-                        wi.write_all(b"hbone\n").await.unwrap();
+                        wi.write_all(b"hbone\n").await;
                         tcp::handle_stream(tcp::Mode::ReadWrite, &mut ri, &mut wi).await;
                     }
                     Err(e) => panic!("No upgrade {e}"),
