@@ -159,6 +159,7 @@ fn initialize_environment(
             Mode::ReadDoubleWrite => Mode::ReadDoubleWrite,
             Mode::Write => Mode::Read,
             Mode::Read => Mode::Write,
+            Mode::Forward(_) => todo!("not implemented for benchmark"),
         };
         // warmup: send 1 byte so we ensure we have the full connection setup.
         tcp::run_client(&mut hbone, 1, client_mode).await.unwrap();

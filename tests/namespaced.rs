@@ -39,7 +39,7 @@ mod namespaced {
     use tracing::{error, info};
     use WorkloadMode::Uncaptured;
 
-    use ztunnel::state::workload::NetworkAddress;
+    use ztunnel::state::workload::{ApplicationTunnel, NetworkAddress};
     use ztunnel::test_helpers::app::ParsedMetrics;
     use ztunnel::test_helpers::app::TestApp;
     use ztunnel::test_helpers::helpers::initialize_telemetry;
@@ -263,6 +263,42 @@ mod namespaced {
             ),
         ]);
         telemetry::testing::assert_contains(want);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sandwich_waypoint_plain() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+
+        let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        let waypoint = manager
+            .workload_builder("waypoint", DEFAULT_NODE)
+            .mutate_workload(|w| {
+                w.application_tunnel = Some(ApplicationTunnel {
+                    protocol: Protocol::NONE,
+                    port: None,
+                });
+            })
+            .register()
+            .await?;
+        let waypoint_ip = waypoint.ip();
+
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .waypoint(waypoint_ip)
+            .register()
+            .await?;
+        run_tcp_proxy_server(waypoint, SocketAddr::new(server.ip(), SERVER_PORT))?;
+        run_tcp_server(server)?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+
+        let _server_ip = manager.resolver().resolve("server")?;
+        run_tcp_client(client, manager.resolver(), "server")?;
         Ok(())
     }
 
@@ -995,6 +1031,18 @@ mod namespaced {
         Ok(())
     }
 
+    /// run_tcp_proxy_server deploys a simple tcp proxying in the provided namespace
+    fn run_tcp_proxy_server(server: Namespace, target: SocketAddr) -> anyhow::Result<()> {
+        server.run_ready(move |ready| async move {
+            let echo = tcp::TestServer::new(tcp::Mode::Forward(target), SERVER_PORT).await;
+            info!("Running echo server at {}", echo.address());
+            ready.set_ready();
+            echo.run().await;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// run_hbone_server deploys a simple echo server, deployed over HBONE, in the provided namespace
     fn run_hbone_server(server: Namespace, name: &str) -> anyhow::Result<()> {
         let name = name.to_string();
@@ -1035,7 +1083,9 @@ mod namespaced {
         /// Can connect, but get a HTTP error
         Http,
     }
+    use ztunnel::state::workload::application_tunnel::Protocol;
     use Failure::*;
+
     async fn malicious_calls_test(
         client: Namespace,
         cases: Vec<(IpAddr, u16, Failure)>,
