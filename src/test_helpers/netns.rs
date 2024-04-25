@@ -26,6 +26,7 @@ use netns_rs::NetNs;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::{debug, error, warn, Instrument};
 
+use crate::identity::Identity;
 use crate::test_helpers::helpers;
 
 pub struct NamespaceManager {
@@ -89,6 +90,14 @@ impl Ready {
 impl Namespace {
     pub fn ip(&self) -> IpAddr {
         id_to_ip(self.node_id, self.id)
+    }
+
+    pub fn identity(&self) -> Identity {
+        Identity::Spiffe {
+            trust_domain: "cluster.local".to_string(),
+            namespace: "default".to_string(),
+            service_account: self.name.clone(),
+        }
     }
 
     pub fn netns(&self) -> Arc<NetNs> {

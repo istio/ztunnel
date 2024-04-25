@@ -17,13 +17,17 @@ mod namespaced {
     use bytes::Bytes;
     use futures::future::poll_fn;
     use http_body_util::Empty;
+    use hyper::body::Incoming;
+    use hyper::Response;
     use std::collections::HashMap;
     use std::fs;
     use std::fs::File;
     use std::net::{IpAddr, SocketAddr};
+    use ztunnel::identity::SecretManager;
 
     use std::path::PathBuf;
     use std::str::FromStr;
+    use std::sync::Arc;
     use std::time::Duration;
     use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 
@@ -452,13 +456,13 @@ mod namespaced {
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         manager
             .add_policy(Authorization {
-                name: "deny_bypass".to_string(),
+                name: "allow_specific_principal".to_string(),
                 namespace: "default".to_string(),
                 scope: ztunnel::rbac::RbacScope::Namespace,
                 action: ztunnel::rbac::RbacAction::Allow,
                 rules: vec![vec![vec![RbacMatch {
                     principals: vec![StringMatch::Exact(
-                        "spiffe://cluster.local/ns/default/sa/waypoint".to_string(),
+                        "spiffe://cluster.local/ns/default/sa/only-allow-this-client".to_string(),
                     )],
                     ..Default::default()
                 }]]],
@@ -473,48 +477,85 @@ mod namespaced {
             .uncaptured()
             .register()
             .await?;
-
-        let srv = resolve_target(manager.resolver(), "server");
-        client
-            .run(move || async move {
-                let builder =
-                    hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
-
-                let request = hyper::Request::builder()
-                    .uri(&srv.to_string())
-                    .method(Method::CONNECT)
-                    .version(hyper::Version::HTTP_2)
-                    .body(Empty::<Bytes>::new())
-                    .unwrap();
-
-                let id = &identity::Identity::default();
-                let dst_id =
-                    identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
-                        .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
-                let hbone = SocketAddr::new(srv.ip(), 15008);
-                let tcp_stream = TcpStream::connect(hbone).await.unwrap();
-                let tls_stream = connector.connect(tcp_stream).await.unwrap();
-                let (mut request_sender, connection) =
-                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
-                // spawn a task to poll the connection and drive the HTTP state
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        error!("Error in HBONE connection handshake: {:?}", e);
-                    }
-                });
-
-                let response = request_sender.send_request(request).await.unwrap();
-                assert_eq!(response.status(), hyper::StatusCode::UNAUTHORIZED);
-                Ok(())
-            })?
-            .join()
-            .unwrap()?;
+        let server_addr = resolve_target(manager.resolver(), "server");
+        let response = run_hbone_with_identities(
+            client,
+            server_addr.to_string(),
+            server_addr,
+            zt.cert_manager.clone(),
+            "spiffe://cluster.local/ns/default/sa/client",
+            "spiffe://cluster.local/ns/default/sa/server",
+        )?;
+        assert_eq!(response.status(), hyper::StatusCode::UNAUTHORIZED);
         telemetry::testing::assert_contains(HashMap::from([
             ("target", "access"),
             ("error", "connection closed due to policy rejection"),
         ]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waypoint_skip_rbac() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+        manager
+            .add_policy(Authorization {
+                name: "allow_specific_principal".to_string(),
+                namespace: "default".to_string(),
+                scope: ztunnel::rbac::RbacScope::Namespace,
+                action: ztunnel::rbac::RbacAction::Allow,
+                rules: vec![vec![vec![RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "spiffe://cluster.local/ns/default/sa/only-allow-this-client".to_string(),
+                    )],
+                    ..Default::default()
+                }]]],
+            })
+            .await?;
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        // waypoint is attached to a service
+        let svc_waypoint = manager
+            .register_waypoint("svc-waypoint", DEFAULT_NODE)
+            .await?;
+        manager
+            .service_builder("service")
+            .addresses(vec![NetworkAddress {
+                network: "".to_string(),
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, 80u16)]))
+            .waypoint(svc_waypoint.ip())
+            .register()
+            .await?;
+
+        // server also has a workload waypoint
+        let wl_waypoint = manager
+            .register_waypoint("wl-waypoint", DEFAULT_NODE)
+            .await?;
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .waypoint(wl_waypoint.ip())
+            .service("default/service.default.svc.cluster.local", 80, SERVER_PORT)
+            .register()
+            .await?;
+        run_tcp_server(server)?;
+
+        // make a request directly from each waypoint to the server via ztunnel
+        for wp in [svc_waypoint, wl_waypoint] {
+            let srv = resolve_target(manager.resolver(), "server");
+            let src_id = wp.identity().to_string();
+            let response = run_hbone_with_identities(
+                wp,
+                // HBONE host header is client IP/port
+                srv.to_string(),
+                // but we're actually connecting to the server-ip:15008
+                srv,
+                zt.cert_manager.clone(),
+                &src_id,
+                "spiffe://cluster.local/ns/default/sa/server",
+            )?;
+            assert_eq!(response.status(), hyper::StatusCode::OK);
+        }
         Ok(())
     }
 
@@ -534,44 +575,17 @@ mod namespaced {
 
         let srv = resolve_target(manager.resolver(), "server");
         let clt = resolve_target(manager.resolver(), "client");
-        client
-            .run(move || async move {
-                let builder =
-                    hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
-
-                let request = hyper::Request::builder()
-                    .uri(&clt.to_string())
-                    .method(Method::CONNECT)
-                    .version(hyper::Version::HTTP_2)
-                    .body(Empty::<Bytes>::new())
-                    .unwrap();
-
-                let id = &identity::Identity::default();
-                let dst_id =
-                    identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
-                        .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
-                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
-                let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
-                    .await
-                    .unwrap();
-                let tls_stream = connector.connect(tcp_stream).await.unwrap();
-                let (mut request_sender, connection) =
-                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
-                // spawn a task to poll the connection and drive the HTTP state
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        error!("Error in HBONE connection handshake: {:?}", e);
-                    }
-                });
-
-                let response = request_sender.send_request(request).await.unwrap();
-                // We sent to server IP directly but requested client IP. Should be rejected
-                assert_eq!(response.status(), hyper::StatusCode::BAD_REQUEST);
-                Ok(())
-            })?
-            .join()
-            .unwrap()?;
+        let response = run_hbone_with_identities(
+            client,
+            // HBONE host header is client IP/port
+            clt.to_string(),
+            // but we're actually connecting to the server-ip:15008
+            srv,
+            zt.cert_manager.clone(),
+            "spiffe://cluster.local/ns/default/sa/client",
+            "spiffe://cluster.local/ns/default/sa/server",
+        )?;
+        assert_eq!(response.status(), hyper::StatusCode::BAD_REQUEST);
         let e = format!("ip mismatch: {} != {}", srv.ip(), clt.ip());
         telemetry::testing::assert_contains(HashMap::from([("target", "access"), ("error", &e)]));
         Ok(())
@@ -968,6 +982,51 @@ mod namespaced {
         })
     }
 
+    // make an HBONE request directly authorized with a given source identity and validating a
+    // given destination identity
+    fn run_hbone_with_identities(
+        client: Namespace,
+        hbone_target: String,
+        conn_target: SocketAddr,
+        cert_manager: Arc<SecretManager>,
+        client_id: &str,
+        server_id: &str,
+    ) -> anyhow::Result<Response<Incoming>> {
+        let hbone_conn_addr = SocketAddr::new(conn_target.ip(), 15008);
+        let src_id = identity::Identity::from_str(client_id).unwrap();
+        let dst_id = identity::Identity::from_str(server_id).unwrap();
+        client
+            .run(move || async move {
+                let builder =
+                    hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
+
+                let request = hyper::Request::builder()
+                    .uri(hbone_target)
+                    .method(Method::CONNECT)
+                    .version(hyper::Version::HTTP_2)
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+
+                let cert = cert_manager.fetch_certificate(&src_id).await?;
+                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let tcp_stream = TcpStream::connect(hbone_conn_addr).await.unwrap();
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
+                // spawn a task to poll the connection and drive the HTTP state
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        error!("Error in HBONE connection handshake: {:?}", e);
+                    }
+                });
+
+                let response = request_sender.send_request(request).await.unwrap();
+                Ok(response)
+            })?
+            .join()
+            .unwrap()
+    }
+
     /// run_tcp_client runs a simple client that reads and writes some data, asserting it flows end to end
     fn run_tcp_client(client: Namespace, resolver: Resolver, target: &str) -> anyhow::Result<()> {
         run_tcp_client_iters(&client, 1, resolver, target)
@@ -1127,6 +1186,7 @@ mod namespaced {
             })?
             .join()
             .unwrap()?;
+        println!("got here!!");
         Ok(())
     }
 }
