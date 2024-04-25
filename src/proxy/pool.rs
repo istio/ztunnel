@@ -637,7 +637,7 @@ mod test {
 
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_reuses_conn_for_same_key() {
         // crate::telemetry::setup_logging();
 
@@ -687,7 +687,7 @@ mod test {
         assert!(client3.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_does_not_reuse_conn_for_diff_key() {
         let (server_drain_signal, server_drain) = drain::channel();
 
@@ -739,7 +739,7 @@ mod test {
         assert!(client2.is_ok()); // expect this to panic - we used a new key
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_respects_per_conn_stream_limit() {
         let (server_drain_signal, server_drain) = drain::channel();
 
@@ -782,7 +782,7 @@ mod test {
         assert!(client2.is_ok()); // expect this to panic - same key, but stream limit of 3
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_handles_many_conns_per_key() {
         let (server_drain_signal, server_drain) = drain::channel();
 
@@ -826,9 +826,9 @@ mod test {
         assert!(client2.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_100_clients_streamexhaust() {
-        // crate::telemetry::setup_logging();
+        crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
 
@@ -872,15 +872,15 @@ mod test {
             continue;
         }
 
-        drop(pool);
         server_drain_signal.drain().await;
         server_handle.await.unwrap();
+        drop(pool);
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(real_conncount == 4, "actual conncount was {real_conncount}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_100_clients_singleconn() {
         // crate::telemetry::setup_logging();
 
@@ -935,7 +935,7 @@ mod test {
         assert!(real_conncount == 1, "actual conncount was {real_conncount}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_100_clients_100_srcs() {
         // crate::telemetry::setup_logging();
 
@@ -997,7 +997,7 @@ mod test {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_1000_clients_3_srcs() {
         // crate::telemetry::setup_logging();
 
@@ -1356,8 +1356,7 @@ mod test {
                     Ok(upgraded) => {
                         let (mut ri, mut wi) =
                             tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
-                        // Signal we are the waypoint so tests can validate this
-                        wi.write_all(b"waypoint\n").await.unwrap();
+                        wi.write_all(b"hbone\n").await.unwrap();
                         tcp::handle_stream(tcp::Mode::ReadWrite, &mut ri, &mut wi).await;
                     }
                     Err(e) => panic!("No upgrade {e}"),
