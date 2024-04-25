@@ -14,6 +14,7 @@ build:
 # Test that all important features build
 check-features:
 	cargo check --no-default-features -F tls-boring
+	cargo check -F jemalloc
 	(cd fuzz; cargo check)
 
 # target in common/Makefile.common.mk doesn't handle our third party vendored files; only check golang and rust codes
