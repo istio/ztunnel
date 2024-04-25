@@ -454,6 +454,12 @@ impl OutboundConnection {
             Some(wl) => wl,
             None => return Err(Error::UnknownSource(downstream)),
         };
+        if let Some(ref wl_info) = self.pi.proxy_workload_info {
+            // make sure that the workload we fetched matches the workload info we got over ZDS.
+            if !wl_info.matches(&source_workload) {
+                return Err(Error::MismatchedSource(downstream, wl_info.clone()));
+            }
+        }
 
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether or not this is svc addressed
