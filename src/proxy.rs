@@ -49,7 +49,7 @@ mod inbound_passthrough;
 #[allow(non_camel_case_types)]
 pub mod metrics;
 mod outbound;
-mod pool;
+pub mod pool;
 mod socks5;
 mod util;
 
@@ -105,11 +105,11 @@ pub(super) struct ProxyInputs {
     hbone_port: u16,
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
-    pool: pool::Pool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     proxy_workload_info: Option<Arc<WorkloadInfo>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl ProxyInputs {
     pub fn new(
         cfg: config::Config,
@@ -126,7 +126,6 @@ impl ProxyInputs {
             cert_manager,
             metrics,
             connection_manager,
-            pool: pool::Pool::new(),
             hbone_port: 0,
             socket_factory,
             proxy_workload_info: proxy_workload_info.map(Arc::new),
@@ -143,15 +142,16 @@ impl Proxy {
         drain: Watch,
     ) -> Result<Proxy, Error> {
         let metrics = Arc::new(metrics);
+        let socket_factory = Arc::new(DefaultSocketFactory);
+
         let pi = ProxyInputs {
             cfg,
             state,
             cert_manager,
             connection_manager: ConnectionManager::default(),
             metrics,
-            pool: pool::Pool::new(),
             hbone_port: 0,
-            socket_factory: Arc::new(DefaultSocketFactory),
+            socket_factory,
             proxy_workload_info: None,
         };
         Self::from_inputs(pi, drain).await
@@ -245,10 +245,13 @@ pub enum Error {
     AuthorizationPolicyRejection,
 
     #[error("pool is already connecting")]
-    PoolAlreadyConnecting,
+    WorkloadHBONEPoolAlreadyConnecting,
 
-    #[error("pool: {0}")]
-    Pool(#[from] hyper_util::client::legacy::pool::Error),
+    #[error("connection streams maxed out")]
+    WorkloadHBONEPoolConnStreamsMaxed,
+
+    #[error("pool draining")]
+    WorkloadHBONEPoolDraining,
 
     #[error("{0}")]
     Generic(Box<dyn std::error::Error + Send + Sync>),

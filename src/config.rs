@@ -49,6 +49,8 @@ const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
+const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
@@ -63,6 +65,8 @@ const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
+const DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
+const DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION: u16 = 100; //Go: 100, Hyper: 200, Envoy: 2147483647 (lol), Spec recommended minimum 100
 
 const DEFAULT_INPOD_MARK: u32 = 1337;
 
@@ -124,6 +128,21 @@ pub struct Config {
     pub window_size: u32,
     pub connection_window_size: u32,
     pub frame_size: u32,
+
+    // The limit of how many streams a single HBONE pool connection will be limited to, before
+    // spawning a new conn rather than reusing an existing one, even to a dest that already has an open connection.
+    //
+    // This can be used to effect flow control for "connection storms" when workload clients
+    // (such as loadgen clients) open many connections all at once.
+    //
+    // Note that this will only be checked when a *new* connection
+    // is requested from the pool, and not on every *stream* queued on that connection.
+    // So if you request a single connection from a pool configured wiht a max streamcount of 200,
+    // and queue 500 streams on it, you will still exceed this limit and are at the mercy of hyper's
+    // default stream queuing.
+    pub pool_max_streams_per_conn: u16,
+
+    pub pool_unused_release_timeout: Duration,
 
     pub socks5_addr: Option<SocketAddr>,
     pub admin_addr: SocketAddr,
@@ -320,6 +339,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .proxy_metadata
             .get(DNS_CAPTURE_METADATA)
             .map_or(false, |value| value.to_lowercase() == "true"),
+
+        pool_max_streams_per_conn: parse_default(
+            POOL_MAX_STREAMS_PER_CONNECTION,
+            DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION,
+        )?,
+
+        pool_unused_release_timeout: match parse::<String>(POOL_UNUSED_RELEASE_TIMEOUT)? {
+            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT),
+            None => DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
+        },
 
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
