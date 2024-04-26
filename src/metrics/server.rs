@@ -31,7 +31,11 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn new(config: Config, drain_rx: Watch, registry: Registry) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: Arc<Config>,
+        drain_rx: Watch,
+        registry: Registry,
+    ) -> anyhow::Result<Self> {
         hyper_util::Server::<Mutex<Registry>>::bind(
             "stats",
             config.stats_addr,

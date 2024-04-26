@@ -47,7 +47,7 @@ use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
-use crate::{proxy, socket, tls};
+use crate::{assertions, proxy, socket, tls};
 
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -67,7 +67,11 @@ impl Inbound {
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        pi.cfg.enable_original_source = Some(transparent);
+        if pi.cfg.enable_original_source.is_none() {
+            let mut cfg = (*pi.cfg).clone();
+            cfg.enable_original_source = Some(transparent);
+            pi.cfg = Arc::new(cfg);
+        }
         info!(
             address=%listener.local_addr().expect("local_addr available"),
             component="inbound",
@@ -102,12 +106,12 @@ impl Inbound {
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
             let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
             let pi = self.pi.clone();
-            let connection_manager = self.pi.connection_manager.clone();
+            let connection_manager = pi.connection_manager.clone();
             let drain = sub_drain.clone();
-            let network = self.pi.cfg.network.clone();
+            let network = pi.cfg.network.clone();
             let illegal_ports = illegal_ports.clone();
-            let drain_deadline = self.pi.cfg.self_termination_deadline;
-            tokio::task::spawn(async move {
+            let drain_deadline = pi.cfg.self_termination_deadline;
+            let serve_client = async move {
                 let conn = Connection {
                     src_identity,
                     src,
@@ -115,16 +119,16 @@ impl Inbound {
                     dst,
                 };
                 debug!(%conn, "accepted connection");
-                let enable_original_source = self.pi.cfg.enable_original_source;
+                let enable_original_source = pi.cfg.enable_original_source;
                 let serve = crate::hyper_util::http2_server()
-                    .initial_stream_window_size(self.pi.cfg.window_size)
-                    .initial_connection_window_size(self.pi.cfg.connection_window_size)
+                    .initial_stream_window_size(pi.cfg.window_size)
+                    .initial_connection_window_size(pi.cfg.connection_window_size)
                     // well behaved clients should close connections.
                     // not all clients are well-behaved. This will prune
                     // connections when the client is not responding, to keep
                     // us from holding many stale conns from deceased clients
                     .keep_alive_interval(Some(Duration::from_secs(10)))
-                    .max_frame_size(self.pi.cfg.frame_size)
+                    .max_frame_size(pi.cfg.frame_size)
                     // 64KB max; default is 16MB driven from Golang's defaults
                     // Since we know we are going to recieve a bounded set of headers, more is overkill.
                     .max_header_list_size(65536)
@@ -176,7 +180,10 @@ impl Inbound {
                         server
                     }
                 }
-            });
+            };
+            // This is pretty obscene right now. Fortunately with pooling this is less problematic than outbound.
+            assertions::size_between_ref(10_000, 12_000, &serve_client);
+            tokio::task::spawn(serve_client);
         }
         info!("draining connections");
         drop(sub_drain); // sub_drain_signal.drain() will never resolve while sub_drain is valid, will deadlock if not dropped
@@ -302,22 +309,21 @@ impl Inbound {
         };
         let ds =
             proxy::guess_inbound_service(&rbac_ctx.conn, &for_host, upstream_service, &upstream);
-        let connection_metrics = ConnectionOpen {
-            reporter: Reporter::destination,
-            source,
-            derived_source: Some(derived_source),
-            destination: Some(upstream),
-            connection_security_policy: metrics::SecurityPolicy::mutual_tls,
-            destination_service: ds,
-        };
-        let result_tracker = metrics::ConnectionResult::new(
+        let result_tracker = Arc::new(metrics::ConnectionResult::new(
             rbac_ctx.conn.src,
             rbac_ctx.conn.dst,
             Some(hbone_addr),
             start,
-            &connection_metrics,
+            ConnectionOpen {
+                reporter: Reporter::destination,
+                source,
+                derived_source: Some(derived_source),
+                destination: Some(upstream),
+                connection_security_policy: metrics::SecurityPolicy::mutual_tls,
+                destination_service: ds,
+            },
             pi.metrics,
-        );
+        ));
 
         let conn_guard = match connection_manager
             .assert_rbac(&pi.state, &rbac_ctx, for_host)
@@ -325,7 +331,8 @@ impl Inbound {
         {
             Ok(cg) => cg,
             Err(e) => {
-                result_tracker
+                Arc::into_inner(result_tracker)
+                    .expect("arc is not shared yet")
                     .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
                 return StatusCode::UNAUTHORIZED;
             }
@@ -358,7 +365,6 @@ impl Inbound {
 
         tokio::task::spawn(
             (async move {
-                let result_tracker = Arc::new(result_tracker);
                 let send = async {
                     let result_tracker = result_tracker.clone();
                     match request_type {
@@ -377,9 +383,8 @@ impl Inbound {
                                 .await
                         }
                         Proxy(req, (src, dst), src_id) => {
-                            hyper::upgrade::on(req)
-                                .map_err(Error::NoUpgrade)
-                                .and_then(|upgraded| async move {
+                            Box::pin(hyper::upgrade::on(req).map_err(Error::NoUpgrade).and_then(
+                                |upgraded| async move {
                                     super::write_proxy_protocol(&mut stream, (src, dst), src_id)
                                         .instrument(trace_span!("proxy protocol"))
                                         .await?;
@@ -390,8 +395,9 @@ impl Inbound {
                                     )
                                     .instrument(trace_span!("hbone server"))
                                     .await
-                                })
-                                .await
+                                },
+                            ))
+                            .await
                         }
                     }
                 };

@@ -14,6 +14,7 @@
 
 pub mod admin;
 pub mod app;
+pub mod assertions;
 pub mod baggage;
 pub mod cert_fetcher;
 pub mod config;
