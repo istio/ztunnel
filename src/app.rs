@@ -36,6 +36,7 @@ pub async fn build_with_cert(
     config: config::Config,
     cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
+    let config = Arc::new(config);
     // Start the data plane worker pool.
     let data_plane_pool = new_data_plane_pool(config.num_worker_threads);
 

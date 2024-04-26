@@ -14,6 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use std::time::Instant;
 
@@ -21,6 +22,7 @@ use bytes::Bytes;
 use drain::Watch;
 use http_body_util::Empty;
 use hyper::header::FORWARDED;
+use hyper::upgrade::Upgraded;
 
 use tokio::net::{TcpListener, TcpStream};
 
@@ -36,7 +38,7 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEP
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
-use crate::{proxy, socket};
+use crate::{assertions, proxy, socket};
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -52,7 +54,11 @@ impl Outbound {
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        pi.cfg.enable_original_source = Some(transparent);
+        if pi.cfg.enable_original_source.is_none() {
+            let mut cfg = (*pi.cfg).clone();
+            cfg.enable_original_source = Some(transparent);
+            pi.cfg = Arc::new(cfg);
+        }
 
         info!(
             address=%listener.local_addr().expect("local_addr available"),
@@ -78,11 +84,12 @@ impl Outbound {
         //
         // So use a drain to nuke tasks that might be stuck sending.
         let (sub_drain_signal, sub_drain) = drain::channel();
+        let pi = Arc::new(self.pi);
 
         let pool = proxy::pool::WorkloadHBONEPool::new(
-            self.pi.cfg.clone(),
-            self.pi.socket_factory.clone(),
-            self.pi.cert_manager.clone(),
+            pi.cfg.clone(),
+            pi.socket_factory.clone(),
+            pi.cert_manager.clone(),
         );
         let accept = async move {
             loop {
@@ -93,25 +100,25 @@ impl Outbound {
                 match socket {
                     Ok((stream, _remote)) => {
                         let mut oc = OutboundConnection {
-                            pi: self.pi.clone(),
+                            pi: pi.clone(),
                             id: TraceParent::new(),
                             pool: pool.clone(),
                         };
                         let span = info_span!("outbound", id=%oc.id);
-                        tokio::spawn(
-                            (async move {
-                                debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn START");
-                                // Since this task is spawned, make sure we are guaranteed to terminate
-                                tokio::select! {
-                                        _ = outbound_drain.signaled() => {
-                                            debug!("outbound drain signaled");
-                                        }
-                                        _ = oc.proxy(stream) => {}
+                        let serve_outbound_connection = (async move {
+                            debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn START");
+                            // Since this task is spawned, make sure we are guaranteed to terminate
+                            tokio::select! {
+                                _ = outbound_drain.signaled() => {
+                                    debug!("outbound drain signaled");
                                 }
-                                debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn DONE");
-                            })
-                            .instrument(span),
-                        );
+                                _ = oc.proxy(stream) => {}
+                            }
+                            debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn DONE");
+                        }).instrument(span);
+
+                        assertions::size_between_ref(1000, 1500, &serve_outbound_connection);
+                        tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
                         if util::is_runtime_shutdown(&e) {
@@ -121,7 +128,8 @@ impl Outbound {
                     }
                 }
             }
-        }.in_current_span();
+        }
+        .in_current_span();
 
         // Stop accepting once we drain.
         // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
@@ -138,7 +146,7 @@ impl Outbound {
 }
 
 pub(super) struct OutboundConnection {
-    pub(super) pi: ProxyInputs,
+    pub(super) pi: Arc<ProxyInputs>,
     pub(super) id: TraceParent,
     pub(super) pool: proxy::pool::WorkloadHBONEPool,
 }
@@ -201,7 +209,7 @@ impl OutboundConnection {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
         }
-        let req = match self.build_request(source_addr.ip(), dest_addr).await {
+        let req = match Box::pin(self.build_request(source_addr.ip(), dest_addr)).await {
             Ok(req) => req,
             Err(err) => {
                 metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
@@ -223,7 +231,6 @@ impl OutboundConnection {
             );
             return;
         }
-        let connection_metrics = Self::conn_metrics_from_request(&req);
         // TODO: should we use the original address or the actual address? Both seems nice!
         let _conn_guard =
             self.pi
@@ -236,14 +243,14 @@ impl OutboundConnection {
         } else {
             None
         };
-        let result_tracker = metrics::ConnectionResult::new(
+        let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
             req.gateway,
             hbone_target,
             start,
-            &connection_metrics,
+            Self::conn_metrics_from_request(&req),
             metrics,
-        );
+        ));
 
         let res = match req.protocol {
             Protocol::HBONE => {
@@ -270,6 +277,21 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
+        let upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
+
+        socket::copy_bidirectional(
+            stream,
+            &mut ::hyper_util::rt::TokioIo::new(upgraded),
+            connection_stats,
+        )
+        .await
+    }
+
+    async fn build_hbone_request(
+        &mut self,
+        remote_addr: SocketAddr,
+        req: &&Request,
+    ) -> Result<Upgraded, Error> {
         let mut allowed_sans: Vec<Identity> = Vec::new();
         for san in req.upstream_sans.iter() {
             match Identity::from_str(san) {
@@ -287,17 +309,15 @@ impl OutboundConnection {
         );
         let dst_identity = allowed_sans;
 
-        let pool_key = pool::WorkloadKey {
+        let pool_key = Box::new(pool::WorkloadKey {
             src_id: req.source.identity(),
             dst_id: dst_identity.clone(),
             src: remote_addr.ip(),
             dst: req.gateway,
-        };
+        });
 
         debug!("outbound - connection get START");
-        let mut connection = self
-            .pool
-            .connect(pool_key.clone())
+        let mut connection = Box::pin(self.pool.connect(&pool_key))
             .instrument(trace_span!("get pool conn"))
             .await?;
         debug!("outbound - connection get END");
@@ -334,14 +354,7 @@ impl OutboundConnection {
             return Err(Error::HttpStatus(code));
         }
         let upgraded = hyper::upgrade::on(response).await?;
-
-        socket::copy_bidirectional(
-            stream,
-            &mut ::hyper_util::rt::TokioIo::new(upgraded),
-            connection_stats,
-        )
-        .instrument(trace_span!("hbone client"))
-        .await
+        Ok(upgraded)
     }
 
     async fn proxy_to_tcp(
@@ -363,6 +376,7 @@ impl OutboundConnection {
         let mut outbound =
             super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref()).await?;
         // Proxying data between downstream and upstream
+
         socket::copy_bidirectional(stream, &mut outbound, connection_stats).await
     }
 
@@ -385,7 +399,7 @@ impl OutboundConnection {
         &self,
         downstream: IpAddr,
         target: SocketAddr,
-    ) -> Result<Request, Error> {
+    ) -> Result<Box<Request>, Error> {
         let downstream_network_addr = NetworkAddress {
             network: self.pi.cfg.network.clone(),
             address: downstream,
@@ -445,7 +459,7 @@ impl OutboundConnection {
 
                 let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
                 let id = waypoint_workload.identity();
-                return Ok(Request {
+                return Ok(Box::new(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     destination: target,
@@ -455,7 +469,7 @@ impl OutboundConnection {
                     gateway: waypoint_socket_address,
                     request_type: RequestType::ToServerWaypoint,
                     upstream_sans: waypoint_us.sans,
-                });
+                }));
             }
             // this was service addressed but we did not find a waypoint
             true
@@ -474,7 +488,7 @@ impl OutboundConnection {
             Some(us) => us,
             None => {
                 // For case no upstream found, passthrough it
-                return Ok(Request {
+                return Ok(Box::new(Request {
                     protocol: Protocol::TCP,
                     source: source_workload,
                     destination: target,
@@ -484,7 +498,7 @@ impl OutboundConnection {
                     gateway: target,
                     request_type: RequestType::Passthrough,
                     upstream_sans: vec![],
-                });
+                }));
             }
         };
 
@@ -526,7 +540,7 @@ impl OutboundConnection {
                         .await?;
                     let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
                     let id = waypoint_workload.identity();
-                    return Ok(Request {
+                    return Ok(Box::new(Request {
                         // Always use HBONE here
                         protocol: Protocol::HBONE,
                         source: source_workload,
@@ -538,7 +552,7 @@ impl OutboundConnection {
                         gateway: waypoint_socket_address,
                         request_type: RequestType::ToServerWaypoint,
                         upstream_sans: us.sans,
-                    });
+                    }));
                 }
                 // we expected the workload to have a waypoint, but could not find one
                 Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
@@ -552,7 +566,7 @@ impl OutboundConnection {
         };
 
         // For case no waypoint for both side and direct to remote node proxy
-        Ok(Request {
+        Ok(Box::new(Request {
             protocol: us.workload.protocol,
             source: source_workload,
             destination: SocketAddr::from((workload_ip, us.port)),
@@ -562,7 +576,7 @@ impl OutboundConnection {
             gateway: gw_addr,
             request_type: RequestType::Direct,
             upstream_sans: us.sans,
-        })
+        }))
     }
 }
 
@@ -629,10 +643,10 @@ mod tests {
         xds: XdsAddressType,
         expect: Option<ExpectedRequest<'_>>,
     ) {
-        let cfg = Config {
+        let cfg = Arc::new(Config {
             local_node: Some("local-node".to_string()),
             ..crate::config::parse_config().unwrap()
-        };
+        });
         let source = XdsWorkload {
             uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
             name: "source-workload".to_string(),
@@ -658,7 +672,7 @@ mod tests {
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
         let outbound = OutboundConnection {
-            pi: ProxyInputs {
+            pi: Arc::new(ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
                 state,
                 hbone_port: 15008,
@@ -667,7 +681,7 @@ mod tests {
                 socket_factory: sock_fact.clone(),
                 proxy_workload_info: None,
                 connection_manager: ConnectionManager::default(),
-            },
+            }),
             id: TraceParent::new(),
             pool: pool::WorkloadHBONEPool::new(cfg, sock_fact, cert_mgr.clone()),
         };

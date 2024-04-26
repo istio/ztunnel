@@ -76,7 +76,7 @@ impl Default for Fixture {
 
         let ipc = InPodConfig::new(&cfg).unwrap();
         let proxy_gen = ProxyFactory::new(
-            cfg,
+            Arc::new(cfg),
             dstate,
             cert_manager,
             Some(metrics),
