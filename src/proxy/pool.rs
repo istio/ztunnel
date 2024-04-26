@@ -221,6 +221,7 @@ impl PoolState {
     //
     // This function should ALWAYS return a connection if it wins the writelock for the provided key.
     // This function should NEVER return a connection if it does not win the writelock for the provided key.
+    // This function should ALWAYS propagate Error results to the caller
     //
     // It is important that the *initial* check here is authoritative, hence the locks, as
     // we must know if this is a connection for a key *nobody* has tried to start yet
@@ -288,6 +289,7 @@ impl PoolState {
     //
     // This function should ALWAYS return a connection if a writelock exists for the provided key.
     // This function should NEVER return a connection if no writelock exists for the provided key.
+    // This function should ALWAYS propagate Error results to the caller
     //
     // It is important that the *initial* check here is authoritative, hence the locks, as
     // we must know if this is a connection for a key *nobody* has tried to start yet
