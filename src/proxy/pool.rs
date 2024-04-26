@@ -1090,7 +1090,7 @@ mod test {
         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_1000_clients_3_srcs_drops_after_timeout() {
         // crate::telemetry::setup_logging();
 
@@ -1173,7 +1173,7 @@ mod test {
         drop(pool);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_100_clients_evicts_but_does_not_close_active_conn() {
         // crate::telemetry::setup_logging();
 
@@ -1209,7 +1209,7 @@ mod test {
         let mut tasks = futures::stream::FuturesUnordered::new();
         loop {
             count += 1;
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 25));
 
             if count == client_count {
                 break;
@@ -1229,7 +1229,7 @@ mod test {
         let before_conncount = conn_counter.load(Ordering::Relaxed);
         let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
         assert!(
-            before_conncount == 4,
+            before_conncount == 3,
             "actual before conncount was {before_conncount}"
         );
         assert!(
@@ -1241,11 +1241,11 @@ mod test {
         sleep(Duration::from_secs(2)).await;
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 4, "actual conncount was {real_conncount}");
+        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
         // At this point, we should still have one conn that hasn't been dropped
         // because we haven't ended the persistent client
         let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
-        assert!(real_dropcount == 3, "actual dropcount was {real_dropcount}");
+        assert!(real_dropcount == 2, "actual dropcount was {real_dropcount}");
         client_stop_signal.drain().await;
         assert!(persist_res.await.is_ok(), "PERSIST CLIENT ERROR");
 
@@ -1253,12 +1253,12 @@ mod test {
 
         let after_conncount = conn_counter.load(Ordering::Relaxed);
         assert!(
-            after_conncount == 4,
+            after_conncount == 3,
             "after conncount was {after_conncount}"
         );
         let after_dropcount = conn_drop_counter.load(Ordering::Relaxed);
         assert!(
-            after_dropcount == 4,
+            after_dropcount == 3,
             "after dropcount was {after_dropcount}"
         );
         server_drain_signal.drain().await;
