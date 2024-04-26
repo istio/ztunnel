@@ -395,7 +395,11 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
 async fn handle_jemalloc_pprof_heapgen(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
-    let mut prof_ctl = jemalloc_pprof::PROF_CTL.as_ref()?.lock().await;
+    let mut prof_ctl = jemalloc_pprof::PROF_CTL
+        .as_ref()
+        .expect("should init")
+        .lock()
+        .await;
     if !prof_ctl.activated() {
         return Ok(Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
@@ -405,7 +409,7 @@ async fn handle_jemalloc_pprof_heapgen(
     let pprof = prof_ctl.dump_pprof()?;
     Ok(Response::builder()
         .status(hyper::StatusCode::OK)
-        .body(Bytes::from(pprof?).into())
+        .body(Bytes::from(pprof).into())
         .expect("builder with known status code should not fail"))
 }
 

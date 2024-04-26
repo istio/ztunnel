@@ -20,7 +20,6 @@ use std::time::Instant;
 use bytes::Bytes;
 use drain::Watch;
 use http_body_util::Empty;
-use hyper::client::conn::http2;
 use hyper::header::FORWARDED;
 
 use tokio::net::{TcpListener, TcpStream};
@@ -37,7 +36,7 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEP
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
-use crate::{hyper_util, proxy, socket};
+use crate::{proxy, socket};
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -79,18 +78,24 @@ impl Outbound {
         //
         // So use a drain to nuke tasks that might be stuck sending.
         let (sub_drain_signal, sub_drain) = drain::channel();
+
+        let pool = proxy::pool::WorkloadHBONEPool::new(
+            self.pi.cfg.clone(),
+            self.pi.socket_factory.clone(),
+            self.pi.cert_manager.clone(),
+        );
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 let start_outbound_instant = Instant::now();
                 let outbound_drain = sub_drain.clone();
-                let outer_conn_drain = sub_drain.clone();
                 match socket {
                     Ok((stream, _remote)) => {
                         let mut oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
+                            pool: pool.clone(),
                         };
                         let span = info_span!("outbound", id=%oc.id);
                         tokio::spawn(
@@ -101,7 +106,7 @@ impl Outbound {
                                         _ = outbound_drain.signaled() => {
                                             debug!("outbound drain signaled");
                                         }
-                                        _ = oc.proxy(stream, outer_conn_drain.clone()) => {}
+                                        _ = oc.proxy(stream) => {}
                                 }
                                 debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn DONE");
                             })
@@ -135,21 +140,16 @@ impl Outbound {
 pub(super) struct OutboundConnection {
     pub(super) pi: ProxyInputs,
     pub(super) id: TraceParent,
+    pub(super) pool: proxy::pool::WorkloadHBONEPool,
 }
 
 impl OutboundConnection {
-    async fn proxy(&mut self, source_stream: TcpStream, outer_conn_drain: Watch) {
+    async fn proxy(&mut self, source_stream: TcpStream) {
         let source_addr =
             socket::to_canonical(source_stream.peer_addr().expect("must receive peer addr"));
         let dst_addr = socket::orig_dst_addr_or_default(&source_stream);
-        self.proxy_to(
-            source_stream,
-            source_addr,
-            dst_addr,
-            false,
-            Some(outer_conn_drain),
-        )
-        .await;
+        self.proxy_to(source_stream, source_addr, dst_addr, false)
+            .await;
     }
 
     // this is a cancellable outbound proxy. If `out_drain` is a Watch drain, will resolve
@@ -169,16 +169,15 @@ impl OutboundConnection {
     ) {
         match out_drain {
             Some(drain) => {
-                let outer_conn_drain = drain.clone();
                 tokio::select! {
                         _ = drain.signaled() => {
-                            info!("socks drain signaled");
+                            info!("drain signaled");
                         }
-                        res = self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough, Some(outer_conn_drain)) => res
+                        res = self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough) => res
                 }
             }
             None => {
-                self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough, None)
+                self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough)
                     .await;
             }
         }
@@ -190,7 +189,6 @@ impl OutboundConnection {
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
         block_passthrough: bool,
-        outer_conn_drain: Option<Watch>,
     ) {
         let start = Instant::now();
 
@@ -249,14 +247,8 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(
-                    &mut source_stream,
-                    source_addr,
-                    outer_conn_drain,
-                    &req,
-                    &result_tracker,
-                )
-                .await
+                self.proxy_to_hbone(&mut source_stream, source_addr, &req, &result_tracker)
+                    .await
             }
             Protocol::TCP => {
                 self.proxy_to_tcp(&mut source_stream, &req, &result_tracker)
@@ -270,7 +262,6 @@ impl OutboundConnection {
         &mut self,
         stream: &mut TcpStream,
         remote_addr: SocketAddr,
-        outer_conn_drain: Option<Watch>,
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
@@ -296,75 +287,20 @@ impl OutboundConnection {
         );
         let dst_identity = allowed_sans;
 
-        let pool_key = pool::Key {
+        let pool_key = pool::WorkloadKey {
             src_id: req.source.identity(),
             dst_id: dst_identity.clone(),
             src: remote_addr.ip(),
             dst: req.gateway,
         };
 
-        // Setup our connection future. This won't always run if we have an existing connection
-        // in the pool.
-        let connect = async {
-            let mut builder = http2::Builder::new(hyper_util::TokioExecutor);
-            let builder = builder
-                .initial_stream_window_size(self.pi.cfg.window_size)
-                .max_frame_size(self.pi.cfg.frame_size)
-                .initial_connection_window_size(self.pi.cfg.connection_window_size);
-
-            let local = self
-                .pi
-                .cfg
-                .enable_original_source
-                .unwrap_or_default()
-                .then_some(remote_addr.ip());
-            let id = &req.source.identity();
-            let cert = self.pi.cert_manager.fetch_certificate(id).await?;
-            let connector = cert.outbound_connector(dst_identity)?;
-            let tcp_stream =
-                super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref())
-                    .await?;
-            tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
-            let tls_stream = connector.connect(tcp_stream).await?;
-            let (request_sender, connection) = builder
-                .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
-                .await
-                .map_err(Error::HttpHandshake)?;
-
-            // spawn a task to poll the connection and drive the HTTP state
-            // if we got a drain for that connection, respect it in a race
-            match outer_conn_drain {
-                Some(conn_drain) => {
-                    tokio::spawn(async move {
-                        tokio::select! {
-                                _ = conn_drain.signaled() => {
-                                    debug!("draining outer HBONE connection");
-                                }
-                                res = connection=> {
-                                    match res {
-                                        Err(e) => {
-                                            error!("Error in HBONE connection handshake: {:?}", e);
-                                        }
-                                        Ok(_) => {
-                                            debug!("done with HBONE connection handshake: {:?}", res);
-                                        }
-                                    }
-                                }
-                        }
-                    });
-                }
-                None => {
-                    tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            error!("Error in HBONE connection handshake: {:?}", e);
-                        }
-                    });
-                }
-            }
-
-            Ok(request_sender)
-        };
-        let mut connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
+        debug!("outbound - connection get START");
+        let mut connection = self
+            .pool
+            .connect(pool_key.clone())
+            .instrument(trace_span!("get pool conn"))
+            .await?;
+        debug!("outbound - connection get END");
 
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
@@ -386,11 +322,15 @@ impl OutboundConnection {
         // There are scenarios (upstream hangup, etc) where this "send" will simply get stuck.
         // As in, stream processing deadlocks, and `send_request` never resolves to anything.
         // Probably related to https://github.com/hyperium/hyper/issues/3623
-        let response = connection.send_request(request).await?;
+        let response = connection
+            .send_request(request)
+            .instrument(trace_span!("send pool conn"))
+            .await?;
         debug!("outbound - connection send END");
 
         let code = response.status();
         if code != 200 {
+            debug!("outbound - connection send FAIL: {code}");
             return Err(Error::HttpStatus(code));
         }
         let upgraded = hyper::upgrade::on(response).await?;
@@ -714,19 +654,22 @@ mod tests {
             XdsAddressType::Workload(wl) => new_proxy_state(&[source, waypoint, wl], &[], &[]),
             XdsAddressType::Service(svc) => new_proxy_state(&[source, waypoint], &[svc], &[]),
         };
+
+        let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
+        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
         let outbound = OutboundConnection {
             pi: ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
                 state,
                 hbone_port: 15008,
-                cfg,
+                cfg: cfg.clone(),
                 metrics: test_proxy_metrics(),
-                pool: pool::Pool::new(),
-                socket_factory: std::sync::Arc::new(crate::proxy::DefaultSocketFactory),
+                socket_factory: sock_fact.clone(),
                 proxy_workload_info: None,
                 connection_manager: ConnectionManager::default(),
             },
             id: TraceParent::new(),
+            pool: pool::WorkloadHBONEPool::new(cfg, sock_fact, cert_mgr.clone()),
         };
 
         let req = outbound

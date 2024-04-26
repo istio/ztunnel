@@ -17,7 +17,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use drain::Watch;
@@ -119,6 +119,11 @@ impl Inbound {
                 let serve = crate::hyper_util::http2_server()
                     .initial_stream_window_size(self.pi.cfg.window_size)
                     .initial_connection_window_size(self.pi.cfg.connection_window_size)
+                    // well behaved clients should close connections.
+                    // not all clients are well-behaved. This will prune
+                    // connections when the client is not responding, to keep
+                    // us from holding many stale conns from deceased clients
+                    .keep_alive_interval(Some(Duration::from_secs(10)))
                     .max_frame_size(self.pi.cfg.frame_size)
                     // 64KB max; default is 16MB driven from Golang's defaults
                     // Since we know we are going to recieve a bounded set of headers, more is overkill.
