@@ -278,6 +278,9 @@ pub enum Error {
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
 
+    #[error("invalid source: {0}, should match {1:?}")]
+    MismatchedSource(IpAddr, Arc<WorkloadInfo>),
+
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
 
