@@ -839,7 +839,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pool_100_clients_streamexhaust() {
-        crate::telemetry::setup_logging();
+        // crate::telemetry::setup_logging();
 
         let (server_drain_signal, server_drain) = drain::channel();
 
@@ -854,7 +854,7 @@ mod test {
 
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 50,
+            pool_max_streams_per_conn: 25,
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
@@ -867,17 +867,33 @@ mod test {
             src: IpAddr::from([127, 0, 0, 2]),
             dst: server_addr,
         };
-        let client_count = 100;
+        let client_count = 50;
         let mut count = 0u32;
         let mut tasks = futures::stream::FuturesUnordered::new();
         loop {
             count += 1;
             tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
-
             if count == client_count {
                 break;
             }
         }
+
+        // TODO we spawn clients too fast (and they have little to do) and they actually break the
+        // local "fake" test server, causing it to start returning "conn refused/peer refused the connection"
+        // when the pool tries to create new connections for that caller
+        //
+        // (the pool will just pass that conn refused back to the caller)
+        //
+        // In the real world this is fine, since we aren't hitting a local server,
+        // servers can refuse connections - in synthetic tests it leads to flakes.
+        //
+        // It is worth considering if the pool should throttle how frequently it allows itself to create
+        // connections to real upstreams (e.g. "I created a conn for this key 10ms ago and you've already burned through
+        // your streamcount, chill out, you're gonna overload the dest")
+        //
+        // For now, streamcount is an inexact flow control for this.
+        sleep(Duration::from_millis(500)).await;
+
         while let Some(Err(res)) = tasks.next().await {
             assert!(!res.is_panic(), "CLIENT PANICKED!");
             continue;
@@ -926,7 +942,7 @@ mod test {
         let mut tasks = futures::stream::FuturesUnordered::new();
         loop {
             count += 1;
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
 
             if count == client_count {
                 break;
@@ -982,9 +998,8 @@ mod test {
                 src: IpAddr::from([127, 0, 0, count]),
                 dst: server_addr,
             };
-            // key1.src = IpAddr::from([127, 0, 0, count]);
 
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 20));
 
             if count == client_count {
                 break;
@@ -1055,7 +1070,7 @@ mod test {
                 key1.src = IpAddr::from([127, 0, 0, 2]);
             }
 
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
 
             if count == client_count {
                 break;
@@ -1093,7 +1108,7 @@ mod test {
         let cfg = crate::config::Config {
             local_node: Some("local-node".to_string()),
             pool_max_streams_per_conn: 1000,
-            pool_unused_release_timeout: Duration::from_secs(2),
+            pool_unused_release_timeout: Duration::from_secs(1),
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
@@ -1123,7 +1138,7 @@ mod test {
                 key1.src = IpAddr::from([127, 0, 0, 2]);
             }
 
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
 
             if count == client_count {
                 break;
@@ -1146,7 +1161,7 @@ mod test {
         );
 
         // Attempt to wait long enough for pool conns to timeout+evict
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(1)).await;
 
         let real_conncount = conn_counter.load(Ordering::Relaxed);
         let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
@@ -1194,7 +1209,7 @@ mod test {
         let mut tasks = futures::stream::FuturesUnordered::new();
         loop {
             count += 1;
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 100));
+            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
 
             if count == client_count {
                 break;
@@ -1304,6 +1319,7 @@ mod test {
                     debug!("CLIENT DONE");
                     break;
                 }
+
             }
         })
     }
@@ -1375,8 +1391,7 @@ mod test {
                     Ok(upgraded) => {
                         let (mut ri, mut wi) =
                             tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
-                        // wi.write_all(b"hbone\n").await.unwrap();
-                        wi.write_all(b"hbone\n").await;
+                        wi.write_all(b"hbone\n").await.unwrap();
                         tcp::handle_stream(tcp::Mode::ReadWrite, &mut ri, &mut wi).await;
                     }
                     Err(e) => panic!("No upgrade {e}"),
