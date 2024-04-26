@@ -101,19 +101,16 @@ impl ConnSpawner {
             .then_some(key.src);
         let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
         let connector = cert.outbound_connector(key.dst_id)?;
-        debug!("got connector for key");
         let tcp_stream =
             super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
-        debug!("got stream for key");
         tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
         let tls_stream = connector.connect(tcp_stream).await?;
-        debug!("connector connected, handshaking");
+        trace!("connector connected, handshaking");
         let (request_sender, connection) = builder
             .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
             .await
             .map_err(Error::HttpHandshake)?;
 
-        debug!("got TLS stream for key");
         // spawn a task to poll the connection and drive the HTTP state
         // if we got a drain for that connection, respect it in a race
         // it is important to have a drain here, or this connection will never terminate
@@ -200,7 +197,7 @@ impl PoolState {
         }
     }
 
-    // Just for safety's sake, since we are using a hash thanks to pingora supporting arbitrary Eq, Hash
+    // Just for safety's sake, since we are using a hash thanks to pingora NOT supporting arbitrary Eq, Hash
     // types, do a deep equality test before returning the conn, returning an error if the conn's key does
     // not equal the provided key
     //
@@ -215,6 +212,23 @@ impl PoolState {
         }
     }
 
+    // 1. Tries to get a writelock.
+    // 2. If successful, hold it, spawn a new connection, check it in, return a clone of it.
+    // 3. If not successful, return nothing.
+    //
+    // This is useful if we want to race someone else to the writelock to spawn a connection,
+    // and expect the losers to queue up and wait for the (singular) winner of the writelock
+    //
+    // This function should ALWAYS return a connection if it wins the writelock for the provided key.
+    // This function should NEVER return a connection if it does not win the writelock for the provided key.
+    //
+    // It is important that the *initial* check here is authoritative, hence the locks, as
+    // we must know if this is a connection for a key *nobody* has tried to start yet
+    // (i.e. no writelock for our key in the outer map)
+    // or if other things have already established conns for this key (writelock for our key in the outer map).
+    //
+    // This is so we can backpressure correctly if 1000 tasks all demand a new connection
+    // to the same key at once, and not eagerly open 1000 tunnel connections.
     async fn start_conn_if_win_writelock(
         &self,
         workload_key: &WorkloadKey,
@@ -265,16 +279,20 @@ impl PoolState {
         }
     }
 
-    // Does an initial, naive check to see if a conn exists for this key.
+    // Does an initial, naive check to see if we have a writelock inserted into the map for this key
     //
-    // If it does, WRITELOCK the mutex for that key, clone (or create), check in the clone,
-    // and return the other reference for use.
+    // If we do, take the writelock for that key, clone (or create) a connection, check it back in,
+    // and return a cloned ref, then drop the writelock.
     //
     // Otherwise, return None.
     //
+    // This function should ALWAYS return a connection if a writelock exists for the provided key.
+    // This function should NEVER return a connection if no writelock exists for the provided key.
+    //
     // It is important that the *initial* check here is authoritative, hence the locks, as
-    // we must know if this is a connection for a key *nobody* has tried to start yet,
-    // or if other things have already established conns for this key.
+    // we must know if this is a connection for a key *nobody* has tried to start yet
+    // (i.e. no writelock for our key in the outer map)
+    // or if other things have already established conns for this key (writelock for our key in the outer map).
     //
     // This is so we can backpressure correctly if 1000 tasks all demand a new connection
     // to the same key at once, and not eagerly open 1000 tunnel connections.
@@ -407,7 +425,7 @@ impl WorkloadHBONEPool {
     // one connection is created, before deciding if they should create more or just use that one.
     pub async fn connect(&mut self, workload_key: WorkloadKey) -> Result<ConnClient, Error> {
         trace!("pool connect START");
-        // TODO BML this may not be collision resistant/slow. It should be resistant enough for workloads tho.
+        // TODO BML this may not be collision resistant, or a fast hash. It should be resistant enough for workloads tho.
         // We are doing a deep-equals check at the end to mitigate any collisions, will see about bumping Pingora
         let mut s = DefaultHasher::new();
         workload_key.hash(&mut s);
@@ -418,16 +436,9 @@ impl WorkloadHBONEPool {
                 .pool_global_conn_count
                 .fetch_add(1, Ordering::SeqCst),
         );
-        // First, see if we can naively just check out a connection.
+        // First, see if we can naively take an inner lock for our specific key, and get a connection.
         // This should be the common case, except for the first establishment of a new connection/key.
         // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
-        //
-        // It is important that the *initial* check here is authoritative, hence the locks, as
-        // we must know if this is a connection for a key *nobody* has tried to start yet,
-        // or if other things have already established conns for this key.
-        //
-        // This is so we can backpressure correctly if 1000 tasks all demand a new connection
-        // to the same key at once, and not eagerly open 1000 tunnel connections.
         let existing_conn = self
             .state
             .checkout_conn_under_writelock(&workload_key, &pool_key)
@@ -439,12 +450,10 @@ impl WorkloadHBONEPool {
             return Ok(existing_conn.unwrap());
         }
 
-        // We couldn't get a conn. This means nobody has tried to establish any conns for this key yet,
+        // We couldn't get a writelock for this key. This means nobody has tried to establish any conns for this key yet,
+        // So, we will take a nonexclusive readlock on the outer lockmap, and attempt to insert one.
         //
-        // So, we will take a nonexclusive readlock on the lockmap, to see if an inner lock
-        // exists for our key.
-        //
-        // If not, we insert one.
+        // (if multiple threads try to insert one, only one will succeed.)
         {
             debug!(
                 "didn't find a connection for key {:#?}, making sure lockmap has entry",
@@ -466,7 +475,7 @@ impl WorkloadHBONEPool {
         }
 
         // If we get here, it means the following are true:
-        // 1. We have a guaranteed sharded mutex in the outer map for our current key.
+        // 1. We have a guaranteed sharded mutex in the outer map for our current key
         // 2. We can now, under readlock(nonexclusive) in the outer map, attempt to
         // take the inner writelock for our specific key (exclusive).
         //
@@ -480,7 +489,7 @@ impl WorkloadHBONEPool {
         // because holding a lock over an await is a great way to create deadlocks if the await you
         // hold it over does not resolve.
         //
-        // HOWEVER. Here we know this connection will either establish or timeout
+        // HOWEVER. Here we know this connection will either establish or timeout (or fail with error)
         // and we WANT other tasks to go back to sleep if a task is already trying to create a new connection for this key.
         //
         // So the downsides are actually useful (we WANT task contention -
@@ -495,10 +504,9 @@ impl WorkloadHBONEPool {
             None => {
                 debug!("we didn't win the lock, something else is creating a conn, wait for it");
                 // If we get here, it means the following are true:
-                // 1. At one point, there was a preexisting conn in the pool for this key.
-                // 2. When we checked, we got nothing for that key.
-                // 3. We could not get the exclusive inner writelock to add a new one for this key.
-                // 4. Someone else got the exclusive inner writelock, and is adding a new one for this key.
+                // 1. We have a writelock in the outer map for this key (either we inserted, or someone beat us to it - but it's there)
+                // 2. We could not get the exclusive inner writelock to add a new conn for this key.
+                // 3. Someone else got the exclusive inner writelock, and is adding a new conn for this key.
                 //
                 // So, loop and wait for the pool_watcher to tell us a new conn was enpooled,
                 // so we can pull it out and check it.
