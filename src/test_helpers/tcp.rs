@@ -38,6 +38,9 @@ pub enum Mode {
     ReadWrite,
     Write,
     Read,
+    // Forward acts as a TCP proxy.
+    // Currently, this hard-codes an assumption the backend is in ReadDoubleWrite mode
+    Forward(SocketAddr),
 }
 
 /// run_client reads and/or writes data as fast as possible
@@ -58,7 +61,7 @@ pub async fn run_client(
                 transferred += written;
                 r.read_exact(&mut buf[..written]).await?;
             }
-            Mode::ReadDoubleWrite => {
+            Mode::ReadDoubleWrite | Mode::Forward(_) => {
                 let written = w.write(&buf[..length]).await?;
                 transferred += written;
                 r.read_exact(&mut buf[..written * 2]).await?;
@@ -114,24 +117,24 @@ impl TestServer {
             socket.set_nodelay(true).unwrap();
 
             tokio::spawn(async move {
-                let (mut r, mut w) = socket.split();
-                handle_stream(self.mode, &mut r, &mut w).await;
+                handle_stream(self.mode, &mut socket).await;
             });
         }
     }
 }
 
-pub async fn handle_stream<R, W>(mode: Mode, r: &mut R, w: &mut W)
+pub async fn handle_stream<IO>(mode: Mode, rw: &mut IO)
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    IO: AsyncRead + AsyncWrite + Unpin,
 {
     match mode {
         Mode::ReadWrite => {
+            let (r, mut w) = tokio::io::split(rw);
             let mut r = tokio::io::BufReader::with_capacity(BUFFER_SIZE, r);
-            tokio::io::copy_buf(&mut r, w).await.expect("tcp copy");
+            tokio::io::copy_buf(&mut r, &mut w).await.expect("tcp copy");
         }
         Mode::ReadDoubleWrite => {
+            let (mut r, mut w) = tokio::io::split(rw);
             let mut buffer = vec![0; BUFFER_SIZE];
             loop {
                 let read = r.read(&mut buffer).await.expect("tcp ready");
@@ -149,6 +152,7 @@ where
             }
         }
         Mode::Write => {
+            let (_r, mut w) = tokio::io::split(rw);
             let buffer = vec![0; BUFFER_SIZE];
             loop {
                 let wrote = w.write(&buffer).await.expect("tcp ready");
@@ -158,6 +162,7 @@ where
             }
         }
         Mode::Read => {
+            let (mut r, _w) = tokio::io::split(rw);
             let mut buffer = vec![0; BUFFER_SIZE];
             loop {
                 let read = r.read(&mut buffer).await.expect("tcp ready");
@@ -165,6 +170,12 @@ where
                     break;
                 }
             }
+        }
+        Mode::Forward(addr) => {
+            let mut outbound = TcpStream::connect(addr).await.expect("tcp ready");
+
+            let res = tokio::io::copy_bidirectional(rw, &mut outbound).await;
+            error!("done with {res:?}");
         }
     }
 }
@@ -215,10 +226,11 @@ impl HboneTestServer {
                         tokio::task::spawn(async move {
                             match hyper::upgrade::on(req).await {
                                 Ok(upgraded) => {
-                                    let (mut ri, mut wi) = tokio::io::split(TokioIo::new(upgraded));
+                                    let mut io = TokioIo::new(upgraded);
+                                    // let (mut ri, mut wi) = tokio::io::split(TokioIo::new(upgraded));
                                     // Signal we are the waypoint so tests can validate this
-                                    wi.write_all(b"waypoint\n").await.unwrap();
-                                    handle_stream(mode, &mut ri, &mut wi).await;
+                                    io.write_all(b"waypoint\n").await.unwrap();
+                                    handle_stream(mode, &mut io).await;
                                 }
                                 Err(e) => error!("No upgrade {e}"),
                             }

@@ -233,7 +233,7 @@ impl OutboundConnection {
                 .track_outbound(source_addr, dest_addr, req.gateway);
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = if req.request_type == RequestType::ToServerWaypoint {
+        let hbone_target = if req.protocol == Protocol::HBONE {
             Some(req.destination)
         } else {
             None
