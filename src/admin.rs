@@ -31,13 +31,13 @@ use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{net::SocketAddr, time::Duration};
 
 use tokio::time;
 use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 pub trait AdminHandler: Sync + Send {
     fn path(&self) -> &'static str;
@@ -368,26 +368,39 @@ fn list_loggers() -> Response<Full<Bytes>> {
     }
 }
 
-fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
-    match tracing::level_filters::LevelFilter::from_str(level) {
-        Ok(level_filter) => {
-            // Valid level, continue processing
-            tracing::info!("Parsed level: {:?}", level_filter);
-            match telemetry::set_level(reset, level) {
-                Ok(_) => list_loggers(),
-                Err(e) => plaintext_response(
-                    hyper::StatusCode::BAD_REQUEST,
-                    format!("Failed to set new level: {}\n{}", e, HELP_STRING),
-                ),
+fn validate_log_level(level: &str) -> anyhow::Result<()> {
+    for clause in level.split(',') {
+        // We support 2 forms, compared to the underlying library
+        // <level>: supported, sets the default
+        // <scope>:<level>: supported, sets a scope's level
+        // <scope>: sets the scope to 'trace' level. NOT SUPPORTED.
+        match clause {
+            "off" | "error" | "warn" | "info" | "debug" | "trace" => continue,
+            s if s.contains('=') => {
+                EnvFilter::builder().parse(s)?;
             }
+            s => anyhow::bail!("level {s} is invalid"),
         }
-        Err(_) => {
+    }
+    Ok(())
+}
+
+fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
+    if !level.is_empty() {
+        if let Err(_e) = validate_log_level(level) {
             // Invalid level provided
-            plaintext_response(
+            return plaintext_response(
                 hyper::StatusCode::BAD_REQUEST,
                 format!("Invalid level provided: {}\n{}", level, HELP_STRING),
-            )
-        }
+            );
+        };
+    }
+    match telemetry::set_level(reset, level) {
+        Ok(_) => list_loggers(),
+        Err(e) => plaintext_response(
+            hyper::StatusCode::BAD_REQUEST,
+            format!("Failed to set new level: {}\n{}", e, HELP_STRING),
+        ),
     }
 }
 
@@ -780,13 +793,23 @@ mod tests {
 
         let resp = change_log_level(true, "invalid_level");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str.contains(HELP_STRING));
+        assert!(
+            resp_str.contains(HELP_STRING),
+            "got {resp_str} want {HELP_STRING}"
+        );
 
         let resp = change_log_level(true, "debug");
         let resp_str = get_response_str(resp).await;
         assert_eq!(
             resp_str,
             "current log level is hickory_server::server::server_future=off,debug\n"
+        );
+
+        let resp = change_log_level(true, "access=debug,info");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(
+            resp_str,
+            "current log level is hickory_server::server::server_future=off,access=debug,info\n"
         );
 
         let resp = change_log_level(true, "warn");
