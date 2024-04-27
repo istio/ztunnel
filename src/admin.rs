@@ -408,11 +408,13 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
 async fn handle_jemalloc_pprof_heapgen(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
-    let mut prof_ctl = jemalloc_pprof::PROF_CTL
-        .as_ref()
-        .expect("should init")
-        .lock()
-        .await;
+    let Some(prof_ctrl) = jemalloc_pprof::PROF_CTL.as_ref() else {
+        return Ok(Response::builder()
+            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+            .body("jemalloc profiling is not enabled".into())
+            .expect("builder with known status code should not fail"));
+    };
+    let mut prof_ctl = prof_ctrl.lock().await;
     if !prof_ctl.activated() {
         return Ok(Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
