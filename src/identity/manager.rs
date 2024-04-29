@@ -465,13 +465,15 @@ impl fmt::Debug for SecretManager {
 }
 
 impl SecretManager {
-    pub async fn new(cfg: crate::config::Config) -> Result<Self, Error> {
+    pub async fn new(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
         let caclient = CaClient::new(
-            cfg.ca_address.expect("ca_address must be set to use CA"),
+            cfg.ca_address
+                .clone()
+                .expect("ca_address must be set to use CA"),
             Box::new(tls::ControlPlaneAuthentication::RootCert(
                 cfg.ca_root_cert.clone(),
             )),
-            cfg.auth,
+            cfg.auth.clone(),
             cfg.proxy_mode == ProxyMode::Shared,
             cfg.secret_ttl.as_secs().try_into().unwrap_or(60 * 60 * 24),
         )

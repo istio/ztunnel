@@ -126,7 +126,7 @@ fn initialize_environment(
             None,
             config_source,
         );
-        let app = app::build_with_cert(config, cert_manager.clone())
+        let app = app::build_with_cert(Arc::new(config), cert_manager.clone())
             .await
             .unwrap();
 
@@ -456,7 +456,7 @@ fn hbone_connections(c: &mut Criterion) {
             None,
             config_source,
         );
-        let app = app::build_with_cert(config, cert_manager.clone())
+        let app = app::build_with_cert(Arc::new(config), cert_manager.clone())
             .await
             .unwrap();
         let ta = TestApp::from((&app, cert_manager));

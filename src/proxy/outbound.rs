@@ -277,7 +277,8 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
-        let (_conn_client, upgraded) = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
+        let (_conn_client, upgraded) =
+            Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
         socket::copy_bidirectional(
             stream,

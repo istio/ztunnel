@@ -137,7 +137,7 @@ impl WorkloadManager {
                 helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
             }
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
-            let app = crate::app::build_with_cert(cfg, cert_manager.clone()).await?;
+            let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
 
             // inpod mode doesn't have ore need these, so just put bogus values.
             let proxy_addresses = app.proxy_addresses.unwrap_or(proxy::Addresses {
