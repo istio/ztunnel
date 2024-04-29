@@ -14,6 +14,7 @@
 
 extern crate core;
 
+use std::sync::Arc;
 use tracing::info;
 use ztunnel::*;
 
@@ -29,7 +30,7 @@ pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0
 
 fn main() -> anyhow::Result<()> {
     telemetry::setup_logging();
-    let config: config::Config = config::parse_config()?;
+    let config = Arc::new(config::parse_config()?);
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
     match std::env::args().nth(1).as_deref() {
@@ -69,7 +70,7 @@ fn version() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn proxy(cfg: config::Config) -> anyhow::Result<()> {
+async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
     info!("version: {}", version::BuildInfo::new());
     info!("running with config: {}", serde_yaml::to_string(&cfg)?);
     app::build(cfg).await?.wait_termination().await

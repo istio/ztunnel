@@ -33,10 +33,9 @@ use crate::{admin, config, metrics, proxy, readiness, signal};
 use crate::{dns, xds};
 
 pub async fn build_with_cert(
-    config: config::Config,
+    config: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
 ) -> anyhow::Result<Bound> {
-    let config = Arc::new(config);
     // Start the data plane worker pool.
     let data_plane_pool = new_data_plane_pool(config.num_worker_threads);
 
@@ -281,7 +280,7 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
     tx
 }
 
-pub async fn build(config: config::Config) -> anyhow::Result<Bound> {
+pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
         mock_secret_manager()
     } else {

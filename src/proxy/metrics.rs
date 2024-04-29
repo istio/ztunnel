@@ -334,6 +334,11 @@ pub struct ConnectionResult {
     dst: (SocketAddr, Option<String>),
     hbone_target: Option<SocketAddr>,
     start: Instant,
+
+    // TODO: storing CommonTrafficLabels adds ~600 bytes retained throughout a connection life time.
+    // We can pre-fetch the metrics we need at initialization instead of storing this, then keep a more
+    // efficient representation for the fields we need to log. Ideally, this would even be optional
+    // in case logs were disabled.
     tl: CommonTrafficLabels,
     metrics: Arc<Metrics>,
 
