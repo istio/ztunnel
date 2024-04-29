@@ -117,7 +117,7 @@ impl Outbound {
                             debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn DONE");
                         }).instrument(span);
 
-                        assertions::size_between_ref(1000, 1500, &serve_outbound_connection);
+                        assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -277,7 +277,7 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
-        let upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
+        let (_conn_client, upgraded) = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
         socket::copy_bidirectional(
             stream,
@@ -291,7 +291,7 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &&Request,
-    ) -> Result<Upgraded, Error> {
+    ) -> Result<(pool::ConnClient, Upgraded), Error> {
         let mut allowed_sans: Vec<Identity> = Vec::new();
         for san in req.upstream_sans.iter() {
             match Identity::from_str(san) {
@@ -354,7 +354,9 @@ impl OutboundConnection {
             return Err(Error::HttpStatus(code));
         }
         let upgraded = hyper::upgrade::on(response).await?;
-        Ok(upgraded)
+        // Pass the connection back as well. I am not sure if this is expected behavior of hyper,
+        // but Upgraded is not enough to keep the connection alive so this leads to broken requests.
+        Ok((connection, upgraded))
     }
 
     async fn proxy_to_tcp(
@@ -375,8 +377,8 @@ impl OutboundConnection {
         };
         let mut outbound =
             super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref()).await?;
-        // Proxying data between downstream and upstream
 
+        // Proxying data between downstream and upstream
         socket::copy_bidirectional(stream, &mut outbound, connection_stats).await
     }
 
