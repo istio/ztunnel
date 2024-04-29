@@ -29,6 +29,7 @@ use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, xds};
+use futures_util::FutureExt;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioAsyncResolver;
@@ -470,9 +471,8 @@ impl DemandProxyState {
             );
             return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
         }
-        let ip = self
-            .load_balance_for_hostname(dst_workload, src_workload, metrics)
-            .await?;
+        let ip =
+            Box::pin(self.load_balance_for_hostname(dst_workload, src_workload, metrics)).await?;
         Ok(ip)
     }
 
@@ -499,6 +499,7 @@ impl DemandProxyState {
                     .inc();
                 // TODO: optimize so that if multiple requests to the same hostname come in at the same time,
                 // we don't start more than one background on-demand DNS task
+
                 Self::resolve_on_demand_dns(self.to_owned(), workload).await;
                 // try to get it again
                 let updated_rdns = state.get_ips_for_hostname(&hostname);
@@ -738,11 +739,12 @@ impl DemandProxyState {
     pub async fn fetch_on_demand(&self, key: String) {
         if let Some(demand) = &self.demand {
             debug!(%key, "sending demand request");
-            demand
-                .demand(xds::ADDRESS_TYPE.to_string(), key.clone())
-                .await
-                .recv()
-                .await;
+            Box::pin(
+                demand
+                    .demand(xds::ADDRESS_TYPE.to_string(), key.clone())
+                    .then(|o| o.recv()),
+            )
+            .await;
             debug!(%key, "on demand ready");
         }
     }
@@ -779,7 +781,7 @@ pub struct ProxyStateManager {
 
 impl ProxyStateManager {
     pub async fn new(
-        config: config::Config,
+        config: Arc<config::Config>,
         metrics: Metrics,
         awaiting_ready: tokio::sync::watch::Sender<()>,
         cert_manager: Arc<SecretManager>,
@@ -800,9 +802,9 @@ impl ProxyStateManager {
         } else {
             None
         };
-        if let Some(cfg) = config.local_xds_config {
+        if let Some(cfg) = &config.local_xds_config {
             let local_client = LocalClient {
-                cfg,
+                cfg: cfg.clone(),
                 state: state.clone(),
                 cert_fetcher,
             };
@@ -814,8 +816,8 @@ impl ProxyStateManager {
             state: DemandProxyState {
                 state,
                 demand,
-                dns_resolver_cfg: config.dns_resolver_cfg,
-                dns_resolver_opts: config.dns_resolver_opts,
+                dns_resolver_cfg: config.dns_resolver_cfg.clone(),
+                dns_resolver_opts: config.dns_resolver_opts.clone(),
             },
         })
     }

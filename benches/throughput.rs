@@ -30,7 +30,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use ztunnel::metrics::IncrementRecorder;
 use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 use ztunnel::state::workload::{Protocol, Workload};
 use ztunnel::test_helpers::app::TestApp;
@@ -127,7 +126,7 @@ fn initialize_environment(
             None,
             config_source,
         );
-        let app = app::build_with_cert(config, cert_manager.clone())
+        let app = app::build_with_cert(Arc::new(config), cert_manager.clone())
             .await
             .unwrap();
 
@@ -363,14 +362,16 @@ pub fn metrics(c: &mut Criterion) {
     let mut c = c.benchmark_group("metrics");
     c.bench_function("write", |b| {
         b.iter(|| {
-            metrics.increment(&proxy::ConnectionOpen {
+            let co = proxy::ConnectionOpen {
                 reporter: Default::default(),
                 source: Some(test_helpers::test_default_workload()),
                 derived_source: None,
                 destination: None,
                 destination_service: None,
                 connection_security_policy: Default::default(),
-            })
+            };
+            let tl = proxy::CommonTrafficLabels::from(co);
+            metrics.connection_opens.get_or_create(&tl).inc();
         })
     });
     c.bench_function("encode", |b| {
@@ -455,7 +456,7 @@ fn hbone_connections(c: &mut Criterion) {
             None,
             config_source,
         );
-        let app = app::build_with_cert(config, cert_manager.clone())
+        let app = app::build_with_cert(Arc::new(config), cert_manager.clone())
             .await
             .unwrap();
         let ta = TestApp::from((&app, cert_manager));

@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -38,7 +39,7 @@ use ztunnel::test_helpers::*;
 async fn test_shutdown_lifecycle() {
     helpers::initialize_telemetry();
 
-    let app = ztunnel::app::build(test_config()).await.unwrap();
+    let app = ztunnel::app::build(Arc::new(test_config())).await.unwrap();
 
     let shutdown = app.shutdown.trigger().clone();
     let (app, _shutdown) = tokio::join!(
@@ -57,7 +58,7 @@ async fn test_bind_conflict<F: FnOnce(&mut ztunnel::config::Config) -> &mut Sock
     let sa = f(&mut cfg);
     *sa = l.local_addr().unwrap();
 
-    assert!(ztunnel::app::build(cfg).await.is_err());
+    assert!(ztunnel::app::build(Arc::new(cfg)).await.is_err());
 }
 
 #[tokio::test]
@@ -85,7 +86,7 @@ async fn test_shutdown_drain() {
     helpers::initialize_telemetry();
 
     let cert_manager = new_secret_manager(Duration::from_secs(10));
-    let app = ztunnel::app::build_with_cert(test_config(), cert_manager.clone())
+    let app = ztunnel::app::build_with_cert(Arc::new(test_config()), cert_manager.clone())
         .await
         .unwrap();
     let ta = TestApp::from((&app, cert_manager));
@@ -128,7 +129,7 @@ async fn test_shutdown_forced_drain() {
     let cfg = test_config();
 
     let cert_manager = new_secret_manager(Duration::from_secs(10));
-    let app = ztunnel::app::build_with_cert(cfg, cert_manager.clone())
+    let app = ztunnel::app::build_with_cert(Arc::new(cfg), cert_manager.clone())
         .await
         .unwrap();
     let ta = TestApp::from((&app, cert_manager));
@@ -164,7 +165,7 @@ async fn test_shutdown_forced_drain() {
 async fn test_quit_lifecycle() {
     helpers::initialize_telemetry();
 
-    let app = ztunnel::app::build(test_config()).await.unwrap();
+    let app = ztunnel::app::build(Arc::new(test_config())).await.unwrap();
     let addr = app.admin_address;
 
     let (app, _shutdown) = tokio::join!(

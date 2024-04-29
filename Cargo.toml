@@ -57,7 +57,7 @@ http-body-04 = { package = "http-body", version = "0.4" }
 http-body-1 = { package = "http-body", version = "1.0.0-rc.2" }
 http-body-util = "0.1"
 http-types = { version = "2.12", default-features = false }
-hyper = { version = "1.2", features = ["full"] }
+hyper = { version = "1.3", features = ["full"] }
 hyper-rustls = { version = "0.27.0", default-features = false, features = ["logging", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 ipnet = { version = "2.9", features = ["serde"] }

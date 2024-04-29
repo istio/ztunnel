@@ -120,7 +120,7 @@ impl AdsServer {
         let tls_client_fetcher = Box::new(tls::ControlPlaneAuthentication::RootCert(
             cfg.xds_root_cert.clone(),
         ));
-        let xds_client = xds::Config::new(cfg, tls_client_fetcher)
+        let xds_client = xds::Config::new(Arc::new(cfg), tls_client_fetcher)
             .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, store_updater.clone())
             .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, store_updater)
             .build(metrics, block_tx);
