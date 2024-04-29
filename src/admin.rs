@@ -31,13 +31,14 @@ use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{net::SocketAddr, time::Duration};
 
 use tokio::time;
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter;
 
 pub trait AdminHandler: Sync + Send {
     fn path(&self) -> &'static str;
@@ -377,7 +378,7 @@ fn validate_log_level(level: &str) -> anyhow::Result<()> {
         match clause {
             "off" | "error" | "warn" | "info" | "debug" | "trace" => continue,
             s if s.contains('=') => {
-                EnvFilter::builder().parse(s)?;
+                filter::Targets::from_str(s)?;
             }
             s => anyhow::bail!("level {s} is invalid"),
         }
@@ -386,6 +387,9 @@ fn validate_log_level(level: &str) -> anyhow::Result<()> {
 }
 
 fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
+    if !reset && level.is_empty() {
+        return list_loggers();
+    }
     if !level.is_empty() {
         if let Err(_e) = validate_log_level(level) {
             // Invalid level provided
@@ -787,6 +791,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level() {
         helpers::initialize_telemetry();
+
+        // no changes
+        let resp = change_log_level(false, "");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(
+            resp_str,
+            "current log level is hickory_server::server::server_future=off,info\n"
+        );
 
         let resp = change_log_level(true, "");
         let resp_str = get_response_str(resp).await;
