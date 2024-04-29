@@ -15,6 +15,7 @@
 use itertools::Itertools;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
 
@@ -236,7 +237,7 @@ impl State {
 
 impl Config {
     pub fn new(
-        config: crate::config::Config,
+        config: Arc<crate::config::Config>,
         tls_builder: Box<dyn tls::ClientCertProvider>,
     ) -> Config {
         Config {
@@ -245,11 +246,11 @@ impl Config {
                 .clone()
                 .expect("xds_address must be set to use xds"),
             tls_builder,
-            auth: config.auth,
+            auth: config.auth.clone(),
             handlers: HashMap::new(),
             initial_requests: Vec::new(),
             on_demand: config.xds_on_demand,
-            proxy_metadata: config.proxy_metadata,
+            proxy_metadata: config.proxy_metadata.clone(),
         }
     }
 

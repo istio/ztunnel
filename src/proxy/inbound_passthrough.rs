@@ -27,8 +27,8 @@ use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::metrics::Reporter;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
-use crate::rbac;
 use crate::state::workload::NetworkAddress;
+use crate::{assertions, rbac};
 use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
@@ -49,7 +49,11 @@ impl InboundPassthrough {
 
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        pi.cfg.enable_original_source = Some(transparent);
+        if pi.cfg.enable_original_source.is_none() {
+            let mut cfg = (*pi.cfg).clone();
+            cfg.enable_original_source = Some(transparent);
+            pi.cfg = Arc::new(cfg);
+        }
 
         info!(
             address=%listener.local_addr().expect("local_addr available"),
@@ -79,19 +83,21 @@ impl InboundPassthrough {
                 let connection_manager = self.pi.connection_manager.clone();
                 match socket {
                     Ok((stream, remote)) => {
-                        tokio::spawn(
-                            async move {
-                                Self::proxy_inbound_plaintext(
-                                    pi, // pi cloned above; OK to move
-                                    socket::to_canonical(remote),
-                                    stream,
-                                    illegal_ports,
-                                    connection_manager,
-                                )
-                                .await
-                            }
-                            .in_current_span(),
-                        );
+                        let serve_client = async move {
+                            Self::proxy_inbound_plaintext(
+                                pi, // pi cloned above; OK to move
+                                socket::to_canonical(remote),
+                                stream,
+                                illegal_ports,
+                                connection_manager,
+                            )
+                            .await
+                        }
+                        .in_current_span();
+
+                        // This is pretty large right now. Fortunately with pooling this is less problematic than outbound.
+                        assertions::size_between_ref(3000, 5000, &serve_client);
+                        tokio::spawn(serve_client);
                     }
                     Err(e) => {
                         if util::is_runtime_shutdown(&e) {
@@ -186,22 +192,21 @@ impl InboundPassthrough {
             ..Default::default()
         };
         let ds = proxy::guess_inbound_service(&rbac_ctx.conn, &None, upstream_service, &upstream);
-        let connection_metrics = metrics::ConnectionOpen {
-            reporter: Reporter::destination,
-            source: source_workload,
-            derived_source: Some(derived_source),
-            destination: Some(upstream),
-            connection_security_policy: metrics::SecurityPolicy::unknown,
-            destination_service: ds,
-        };
-        let result_tracker = metrics::ConnectionResult::new(
+        let result_tracker = Arc::new(metrics::ConnectionResult::new(
             source_addr,
             dest_addr,
             None,
             start,
-            &connection_metrics,
+            metrics::ConnectionOpen {
+                reporter: Reporter::destination,
+                source: source_workload,
+                derived_source: Some(derived_source),
+                destination: Some(upstream),
+                connection_security_policy: metrics::SecurityPolicy::unknown,
+                destination_service: ds,
+            },
             pi.metrics,
-        );
+        ));
 
         let conn_guard = match connection_manager
             .assert_rbac(&pi.state, &rbac_ctx, None)
@@ -209,7 +214,8 @@ impl InboundPassthrough {
         {
             Ok(cg) => cg,
             Err(e) => {
-                result_tracker
+                Arc::into_inner(result_tracker)
+                    .expect("arc is not shared yet")
                     .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
                 return;
             }
@@ -221,7 +227,6 @@ impl InboundPassthrough {
             None
         };
 
-        let result_tracker = Arc::new(result_tracker);
         let send = async {
             let result_tracker = result_tracker.clone();
             trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");

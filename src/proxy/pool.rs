@@ -74,7 +74,7 @@ struct PoolState {
 }
 
 struct ConnSpawner {
-    cfg: config::Config,
+    cfg: Arc<config::Config>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     cert_manager: Arc<SecretManager>,
     timeout_rx: watch::Receiver<bool>,
@@ -383,7 +383,7 @@ impl WorkloadHBONEPool {
     // The pool will watch the provided drain signal and drain itself when notified.
     // Callers should then be safe to drop() the pool instance.
     pub fn new(
-        cfg: crate::config::Config,
+        cfg: Arc<crate::config::Config>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         cert_manager: Arc<SecretManager>,
     ) -> WorkloadHBONEPool {
@@ -428,7 +428,7 @@ impl WorkloadHBONEPool {
     //
     // If many `connects` request a connection to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
-    pub async fn connect(&mut self, workload_key: WorkloadKey) -> Result<ConnClient, Error> {
+    pub async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<ConnClient, Error> {
         trace!("pool connect START");
         // TODO BML this may not be collision resistant, or a fast hash. It should be resistant enough for workloads tho.
         // We are doing a deep-equals check at the end to mitigate any collisions, will see about bumping Pingora
@@ -446,7 +446,7 @@ impl WorkloadHBONEPool {
         // This will be done under outer readlock (nonexclusive)/inner keyed writelock (exclusive).
         let existing_conn = self
             .state
-            .checkout_conn_under_writelock(&workload_key, &pool_key)
+            .checkout_conn_under_writelock(workload_key, &pool_key)
             .await?;
 
         // Early return, no need to do anything else
@@ -502,7 +502,7 @@ impl WorkloadHBONEPool {
         trace!("fallback attempt - trying win win connlock");
         let res = match self
             .state
-            .start_conn_if_win_writelock(&workload_key, &pool_key)
+            .start_conn_if_win_writelock(workload_key, &pool_key)
             .await?
         {
             Some(client) => client,
@@ -525,7 +525,7 @@ impl WorkloadHBONEPool {
                             // Notifier fired, try and get a conn out for our key.
                             let existing_conn = self
                                 .state
-                                .checkout_conn_under_writelock(&workload_key, &pool_key)
+                                .checkout_conn_under_writelock(workload_key, &pool_key)
                                 .await?;
                             match existing_conn {
                                 None => {
@@ -683,7 +683,7 @@ mod test {
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
 
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -732,7 +732,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -782,7 +782,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -826,7 +826,7 @@ mod test {
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
 
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -871,7 +871,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -941,7 +941,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -996,7 +996,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let client_count = 100;
         let mut count = 0u8;
@@ -1057,7 +1057,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let mut key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -1125,7 +1125,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let mut key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -1208,7 +1208,7 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -1309,7 +1309,7 @@ mod test {
             let start = Instant::now();
 
             let mut c1 = pool
-                .connect(key.clone())
+                .connect(&key.clone())
                 // needs tokio_unstable, but useful
                 // .instrument(tracing::debug_span!("client_tid", tid=%tokio::task::id()))
                 .await
@@ -1355,7 +1355,7 @@ mod test {
             let start = Instant::now();
 
             let mut c1 = pool
-                .connect(key.clone())
+                .connect(&key.clone())
                 // needs tokio_unstable, but useful
                 // .instrument(tracing::debug_span!("client_tid", tid=%tokio::task::id()))
                 .await

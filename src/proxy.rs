@@ -99,7 +99,7 @@ pub struct Proxy {
 
 #[derive(Clone)]
 pub(super) struct ProxyInputs {
-    cfg: config::Config,
+    cfg: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
     connection_manager: ConnectionManager,
     hbone_port: u16,
@@ -112,7 +112,7 @@ pub(super) struct ProxyInputs {
 #[allow(clippy::too_many_arguments)]
 impl ProxyInputs {
     pub fn new(
-        cfg: config::Config,
+        cfg: Arc<config::Config>,
         cert_manager: Arc<SecretManager>,
         connection_manager: ConnectionManager,
         state: DemandProxyState,
@@ -135,7 +135,7 @@ impl ProxyInputs {
 
 impl Proxy {
     pub async fn new(
-        cfg: config::Config,
+        cfg: Arc<config::Config>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
         metrics: Metrics,

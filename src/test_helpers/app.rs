@@ -74,7 +74,7 @@ where
 {
     initialize_telemetry();
     let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
-    let app = app::build_with_cert(cfg, cert_manager.clone())
+    let app = app::build_with_cert(Arc::new(cfg), cert_manager.clone())
         .await
         .unwrap();
     let shutdown = app.shutdown.trigger().clone();

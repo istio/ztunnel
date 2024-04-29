@@ -62,7 +62,7 @@ pub trait AdminHandler2: Sync + Send {
 
 struct State {
     proxy_state: DemandProxyState,
-    config: Config,
+    config: Arc<Config>,
     shutdown_trigger: signal::ShutdownTrigger,
     cert_manager: Arc<SecretManager>,
     handlers: Vec<Arc<dyn AdminHandler2>>,
@@ -79,7 +79,7 @@ pub struct ConfigDump {
     proxy_state: DemandProxyState,
     static_config: LocalConfig,
     version: BuildInfo,
-    config: Config,
+    config: Arc<Config>,
     certificates: Vec<CertsDump>,
 }
 
@@ -103,7 +103,7 @@ pub struct CertsDump {
 
 impl Service {
     pub async fn new(
-        config: Config,
+        config: Arc<Config>,
         proxy_state: DemandProxyState,
         shutdown_trigger: signal::ShutdownTrigger,
         drain_rx: Watch,
@@ -478,6 +478,7 @@ mod tests {
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn diff_json<'a>(a: &'a serde_json::Value, b: &'a serde_json::Value) -> String {
@@ -744,7 +745,7 @@ mod tests {
             proxy_state,
             static_config: Default::default(),
             version: Default::default(),
-            config: default_config,
+            config: Arc::new(default_config),
             certificates: dump_certs(&manager).await,
         };
 

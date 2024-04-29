@@ -26,7 +26,7 @@ use prometheus_client::registry::Registry;
 use tracing::event;
 
 use crate::identity::Identity;
-use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorder, Recorder};
+use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorder};
 
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
@@ -187,8 +187,8 @@ impl CommonTrafficLabels {
     }
 }
 
-impl From<&ConnectionOpen> for CommonTrafficLabels {
-    fn from(c: &ConnectionOpen) -> Self {
+impl From<ConnectionOpen> for CommonTrafficLabels {
+    fn from(c: ConnectionOpen) -> Self {
         CommonTrafficLabels {
             reporter: c.reporter,
             request_protocol: RequestProtocol::tcp,
@@ -326,14 +326,6 @@ impl Metrics {
     }
 }
 
-impl Recorder<ConnectionOpen, u64> for Metrics {
-    fn record(&self, reason: &ConnectionOpen, count: u64) {
-        self.connection_opens
-            .get_or_create(&CommonTrafficLabels::from(reason))
-            .inc_by(count);
-    }
-}
-
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
 pub struct ConnectionResult {
     // Src address and name
@@ -342,6 +334,11 @@ pub struct ConnectionResult {
     dst: (SocketAddr, Option<String>),
     hbone_target: Option<SocketAddr>,
     start: Instant,
+
+    // TODO: storing CommonTrafficLabels adds ~600 bytes retained throughout a connection life time.
+    // We can pre-fetch the metrics we need at initialization instead of storing this, then keep a more
+    // efficient representation for the fields we need to log. Ideally, this would even be optional
+    // in case logs were disabled.
     tl: CommonTrafficLabels,
     metrics: Arc<Metrics>,
 
@@ -417,27 +414,22 @@ impl ConnectionResult {
         // That is, dst is the L4 address, while is the :authority.
         hbone_target: Option<SocketAddr>,
         start: Instant,
-        conn: &ConnectionOpen,
+        conn: ConnectionOpen,
         metrics: Arc<Metrics>,
     ) -> Self {
+        // for src and dest, try to get pod name but fall back to "canonical service"
+        let mut src = (src, conn.source.as_ref().map(|wl| wl.name.clone()));
+        let mut dst = (
+            dst,
+            conn.destination.as_ref().map(|wl| wl.name.clone()), // TODO: canonical
+        );
         let tl = CommonTrafficLabels::from(conn);
         metrics.connection_opens.get_or_create(&tl).inc();
+
         let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
-        // for src and dest, try to get pod name but fall back to "canonical service"
-        let src = (
-            src,
-            conn.source
-                .as_ref()
-                .map(|wl| wl.name.clone())
-                .or(tl.source_canonical_service.clone().inner()),
-        );
-        let dst = (
-            dst,
-            conn.destination
-                .as_ref()
-                .map(|wl| wl.name.clone())
-                .or(tl.destination_canonical_service.clone().inner()),
-        );
+
+        src.1 = src.1.or(tl.source_canonical_service.clone().inner());
+        dst.1 = dst.1.or(tl.destination_canonical_service.clone().inner());
         event!(
             target: "access",
             parent: None,

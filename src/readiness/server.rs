@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use drain::Watch;
@@ -31,7 +32,7 @@ pub struct Server {
 
 impl Server {
     pub async fn new(
-        config: config::Config,
+        config: Arc<config::Config>,
         drain_rx: Watch,
         ready: readiness::Ready,
     ) -> anyhow::Result<Self> {

@@ -29,7 +29,7 @@ use crate::proxy::Proxy;
 // Proxy factory creates ztunnel proxies using a socket factory.
 // this allows us to create our proxies the same way in regular mode and in inpod mode.
 pub struct ProxyFactory {
-    config: config::Config,
+    config: Arc<config::Config>,
     state: DemandProxyState,
     cert_manager: Arc<SecretManager>,
     proxy_metrics: Option<Arc<Metrics>>,
@@ -39,7 +39,7 @@ pub struct ProxyFactory {
 
 impl ProxyFactory {
     pub fn new(
-        config: config::Config,
+        config: Arc<config::Config>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
         proxy_metrics: Option<Metrics>,
