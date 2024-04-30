@@ -18,11 +18,9 @@ use std::sync::Arc;
 
 use std::time::Instant;
 
-use bytes::Bytes;
 use drain::Watch;
-use http_body_util::Empty;
+
 use hyper::header::FORWARDED;
-use hyper::upgrade::Upgraded;
 
 use tokio::net::{TcpListener, TcpStream};
 
@@ -35,11 +33,11 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
+use crate::proxy::pool::H2Stream;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::{assertions, proxy, socket};
-use crate::proxy::pool::H2Stream;
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -278,15 +276,9 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
-        let mut upgraded =
-            Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
+        let mut upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
-        socket::copy_bidirectional(
-            stream,
-            &mut upgraded,
-            connection_stats,
-        )
-        .await
+        socket::copy_bidirectional(stream, &mut upgraded, connection_stats).await
     }
 
     async fn build_hbone_request(
@@ -334,7 +326,7 @@ impl OutboundConnection {
             .body(())
             .expect("builder with known status code should not fail");
 
-        let  upgraded = Box::pin(self.pool.send_request_pooled(&pool_key, request))
+        let upgraded = Box::pin(self.pool.send_request_pooled(&pool_key, request))
             .instrument(trace_span!("outbound connect"))
             .await?;
         Ok(upgraded)
