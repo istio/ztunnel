@@ -25,7 +25,7 @@ use std::io::Cursor;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicI32, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -805,7 +805,6 @@ mod test {
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
     use tokio::task::{self, JoinHandle};
-    use tokio::time::sleep;
 
     use crate::test_helpers::helpers::initialize_telemetry;
     use tracing::info;
@@ -820,14 +819,19 @@ mod test {
                 $open,
                 "total connections opened"
             );
-            for _want in $drops..0 {
+            #[allow(clippy::reversed_empty_ranges)]
+            for _want in 0..$drops {
                 tokio::time::timeout(Duration::from_secs(2), $srv.drop_rx.recv())
                     .await
                     .expect("wanted drop")
                     .expect("wanted drop");
             }
-            assert!($srv.drop_rx.is_empty(), "after {} drops, we shouldn't have more, but got {}", $drops, $srv.drop_rx.len())
-
+            assert!(
+                $srv.drop_rx.is_empty(),
+                "after {} drops, we shouldn't have more, but got {}",
+                $drops,
+                $srv.drop_rx.len()
+            )
         };
     }
 
@@ -1630,8 +1634,7 @@ mod test {
 
         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
         let (drop_tx, drop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let (addr, handle) =
-            spawn_server(server_drain, conn_counter.clone(), drop_tx).await;
+        let (addr, handle) = spawn_server(server_drain, conn_counter.clone(), drop_tx).await;
 
         let cfg = crate::config::Config {
             pool_max_streams_per_conn: max_conns,
