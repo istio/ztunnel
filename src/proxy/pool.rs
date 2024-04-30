@@ -37,6 +37,7 @@ use crate::config;
 use crate::identity::{Identity, SecretManager};
 
 use flurry;
+use hyper::upgrade::Upgraded;
 
 use pingora_pool;
 
@@ -417,6 +418,19 @@ impl WorkloadHBONEPool {
             }),
             pool_watcher: timeout_rx,
         }
+    }
+
+
+    pub async fn send_request_pooled(&mut self, workload_key: &WorkloadKey, request: Request<Empty<Bytes>>) -> Result<Upgraded, Error> {
+        let mut connection = self.connect(&workload_key).await?;
+        let response = connection.send_request(request).await?;
+        let code = response.status();
+        if code != 200 {
+            debug!("outbound - connection send FAIL: {code}");
+            return Err(Error::HttpStatus(code));
+        }
+        let upgraded = hyper::upgrade::on(response).await?;
+        Ok(upgraded)
     }
 
     // Obtain a pooled connection. Will prefer to retrieve an existing conn from the pool, but
