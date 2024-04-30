@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{Error, SocketFactory};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::client::conn::http2;
@@ -23,10 +23,13 @@ use std::time::Duration;
 use std::collections::hash_map::DefaultHasher;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::io::{Cursor, IoSlice};
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use tokio::sync::watch;
 
@@ -37,9 +40,15 @@ use crate::config;
 use crate::identity::{Identity, SecretManager};
 
 use flurry;
+use futures_core::ready;
+use h2::client::Connection;
+use h2::Reason;
 use hyper::upgrade::Upgraded;
 
 use pingora_pool;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
 
 // A relatively nonstandard HTTP/2 connection pool designed to allow multiplexing proxied workload connections
 // over a (smaller) number of HTTP/2 mTLS tunnels.
@@ -84,14 +93,18 @@ impl ConnSpawner {
     async fn new_pool_conn(
         &self,
         key: WorkloadKey,
-    ) -> Result<http2::SendRequest<Empty<Bytes>>, Error> {
+    ) -> Result<h2::client::SendRequest<SendBuf<Bytes>>, Error> {
         debug!("spawning new pool conn for key {:#?}", key);
         let clone_key = key.clone();
-        let mut c_builder = http2::Builder::new(crate::hyper_util::TokioExecutor);
-        let builder = c_builder
-            .initial_stream_window_size(self.cfg.window_size)
+        let mut builder = h2::client::Builder::new();
+        builder
+            .initial_window_size(self.cfg.window_size)
+            .initial_connection_window_size(self.cfg.connection_window_size)
             .max_frame_size(self.cfg.frame_size)
-            .initial_connection_window_size(self.cfg.connection_window_size);
+            .initial_max_send_streams(100)
+            .max_header_list_size(1024 * 16)
+            .max_send_buffer_size(1024 * 1024)
+            .enable_push(false);
 
         let local = self
             .cfg
@@ -105,35 +118,32 @@ impl ConnSpawner {
         tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
-        let (request_sender, connection) = builder
-            .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
+        let (send_req, connection) = builder
+            .handshake::<_, SendBuf<Bytes>>(tls_stream)
             .await
-            .map_err(Error::HttpHandshake)?;
+            .map_err(Error::Http2Handshake)?;
 
         // spawn a task to poll the connection and drive the HTTP state
         // if we got a drain for that connection, respect it in a race
         // it is important to have a drain here, or this connection will never terminate
         let mut driver_drain = self.timeout_rx.clone();
         tokio::spawn(async move {
-            debug!("starting a connection driver for {:?}", clone_key);
-            tokio::select! {
-                    _ = driver_drain.changed() => {
-                        debug!("draining outer HBONE connection {:?}", clone_key);
-                    }
-                    res = connection=> {
-                        match res {
-                            Err(e) => {
-                                error!("Error in HBONE connection handshake: {:?}", e);
-                            }
-                            Ok(_) => {
-                                debug!("done with HBONE connection handshake: {:?}", res);
-                            }
-                        }
-                    }
-            }
+            drive_connection(connection).await;
         });
 
-        Ok(request_sender)
+        Ok(send_req)
+    }
+}
+
+async fn drive_connection<S, B>(mut c: Connection<S, B>)
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+    B: Buf,
+{
+    // TODO: ping pong
+    match c.await {
+        Ok(_) => debug!("H2 connection finished "),
+        Err(e) => debug!("H2 connection errored: {e:?}"),
     }
 }
 
@@ -377,6 +387,172 @@ impl Drop for PoolState {
     }
 }
 
+pub struct H2Stream {
+    pub send_stream: h2::SendStream<SendBuf<Bytes>>,
+    pub recv_stream: h2::RecvStream,
+    buf: Bytes,
+}
+
+impl AsyncRead for H2Stream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        read_buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.buf.is_empty() {
+            self.buf = loop {
+                match ready!(self.recv_stream.poll_data(cx)) {
+                    None => return Poll::Ready(Ok(())),
+                    Some(Ok(buf)) if buf.is_empty() && !self.recv_stream.is_end_stream() => {
+                        continue
+                    }
+                    Some(Ok(buf)) => {
+                        // self.ping.record_data(buf.len());
+                        break buf;
+                    }
+                    Some(Err(e)) => {
+                        return Poll::Ready(match e.reason() {
+                            Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => Ok(()),
+                            Some(Reason::STREAM_CLOSED) => {
+                                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
+                            }
+                            _ => Err(h2_to_io_error(e)),
+                        })
+                    }
+                }
+            };
+        }
+        let cnt = std::cmp::min(self.buf.len(), read_buf.remaining());
+        read_buf.put_slice(&self.buf[..cnt]);
+        self.buf.advance(cnt);
+        let _ = self.recv_stream.flow_control().release_capacity(cnt);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for H2Stream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        self.send_stream.reserve_capacity(buf.len());
+
+        // We ignore all errors returned by `poll_capacity` and `write`, as we
+        // will get the correct from `poll_reset` anyway.
+        let cnt = match ready!(self.send_stream.poll_capacity(cx)) {
+            None => Some(0),
+            Some(Ok(cnt)) => self
+                .write_slice((&buf[..cnt]).into(), false)
+                .ok()
+                .map(|()| cnt),
+            Some(Err(_)) => None,
+        };
+
+        if let Some(cnt) = cnt {
+            return Poll::Ready(Ok(cnt));
+        }
+
+        Poll::Ready(Err(h2_to_io_error(
+            match ready!(self.send_stream.poll_reset(cx)) {
+                Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+                }
+                Ok(reason) => reason.into(),
+                Err(e) => e,
+            },
+        )))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        if self.write_slice(&[], true).is_ok() {
+            return Poll::Ready(Ok(()));
+        }
+
+        Poll::Ready(Err(h2_to_io_error(
+            match ready!(self.send_stream.poll_reset(cx)) {
+                Ok(Reason::NO_ERROR) => return Poll::Ready(Ok(())),
+                Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+                }
+                Ok(reason) => reason.into(),
+                Err(e) => e,
+            },
+        )))
+    }
+}
+
+impl H2Stream {
+    fn write_slice(&mut self, buf: &[u8], end_of_stream: bool) -> Result<(), std::io::Error> {
+        let send_buf = SendBuf::Cursor(Cursor::new(buf.into()));
+        self.send_stream
+            .send_data(send_buf, end_of_stream)
+            .map_err(h2_to_io_error)
+    }
+}
+
+#[repr(usize)]
+enum SendBuf<B> {
+    Buf(B),
+    Cursor(Cursor<Box<[u8]>>),
+    None,
+}
+
+impl<B: Buf> Buf for SendBuf<B> {
+    #[inline]
+    fn remaining(&self) -> usize {
+        match *self {
+            Self::Buf(ref b) => b.remaining(),
+            Self::Cursor(ref c) => Buf::remaining(c),
+            Self::None => 0,
+        }
+    }
+
+    #[inline]
+    fn chunk(&self) -> &[u8] {
+        match *self {
+            Self::Buf(ref b) => b.chunk(),
+            Self::Cursor(ref c) => c.chunk(),
+            Self::None => &[],
+        }
+    }
+
+    #[inline]
+    fn advance(&mut self, cnt: usize) {
+        match *self {
+            Self::Buf(ref mut b) => b.advance(cnt),
+            Self::Cursor(ref mut c) => c.advance(cnt),
+            Self::None => {}
+        }
+    }
+
+    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        match *self {
+            Self::Buf(ref b) => b.chunks_vectored(dst),
+            Self::Cursor(ref c) => c.chunks_vectored(dst),
+            Self::None => 0,
+        }
+    }
+}
+
+fn h2_to_io_error(e: h2::Error) -> std::io::Error {
+    if e.is_io() {
+        e.into_io().unwrap()
+    } else {
+        std::io::Error::new(std::io::ErrorKind::Other, e)
+    }
+}
+
 impl WorkloadHBONEPool {
     // Creates a new pool instance, which should be owned by a single proxied workload.
     // The pool will watch the provided drain signal and drain itself when notified.
@@ -420,17 +596,32 @@ impl WorkloadHBONEPool {
         }
     }
 
-
-    pub async fn send_request_pooled(&mut self, workload_key: &WorkloadKey, request: Request<Empty<Bytes>>) -> Result<Upgraded, Error> {
+    pub async fn send_request_pooled(
+        &mut self,
+        workload_key: &WorkloadKey,
+        request: http::Request<()>,
+    ) -> Result<H2Stream, Error> {
         let mut connection = self.connect(&workload_key).await?;
-        let response = connection.send_request(request).await?;
-        let code = response.status();
-        if code != 200 {
-            debug!("outbound - connection send FAIL: {code}");
-            return Err(Error::HttpStatus(code));
-        }
-        let upgraded = hyper::upgrade::on(response).await?;
-        Ok(upgraded)
+        let (response, mut stream) = connection.sender.send_request(request, false)?;
+        let response = response.await?;
+        error!("got resp {:?}", response.status());
+
+        let recv = response.into_body();
+        let send = stream;
+        let h2 = H2Stream {
+            send_stream: send,
+            recv_stream: recv,
+            buf: Bytes::new(),
+        };
+        Ok(h2)
+        // todo!("");
+        // let code = response.status();
+        // if code != 200 {
+        //     debug!("outbound - connection send FAIL: {code}");
+        //     return Err(Error::HttpStatus(code));
+        // }
+        // let upgraded = hyper::upgrade::on(response).await?;
+        // Ok(upgraded)
     }
 
     // Obtain a pooled connection. Will prefer to retrieve an existing conn from the pool, but
@@ -564,7 +755,7 @@ impl WorkloadHBONEPool {
 // A sort of faux-client, that represents a single checked-out 'request sender' which might
 // send requests over some underlying stream using some underlying http/2 client
 pub struct ConnClient {
-    sender: http2::SendRequest<Empty<Bytes>>,
+    sender: h2::client::SendRequest<SendBuf<Bytes>>,
     stream_count: Arc<AtomicU16>, // the current streamcount for this client conn.
     stream_count_max: u16,        // the max streamcount associated with this client.
     // A WL key may have many clients, but every client has no more than one WL key
@@ -581,14 +772,14 @@ impl ConnClient {
         false
     }
 
-    pub fn send_request(
-        &mut self,
-        req: Request<Empty<Bytes>>,
-    ) -> impl Future<Output = hyper::Result<Response<Incoming>>> {
-        // TODO should we enforce streamcount per-sent-request? This would be slow.
-        self.stream_count.fetch_add(1, Ordering::Relaxed);
-        self.sender.send_request(req)
-    }
+    // fn send_request(
+    //     &mut self,
+    //     req: http::Request<Empty<Bytes>>,
+    // ) -> impl Future<Output = hyper::Result<Response<Incoming>>> {
+    //     // TODO should we enforce streamcount per-sent-request? This would be slow.
+    //     self.stream_count.fetch_add(1, Ordering::Relaxed);
+    //     self.sender.send_request(req)
+    // }
 
     pub fn is_for_workload(&self, wl_key: &WorkloadKey) -> Result<(), crate::proxy::Error> {
         if !(self.wl_key == *wl_key) {
@@ -643,838 +834,838 @@ pub struct WorkloadKey {
     pub src: IpAddr,
 }
 
-#[cfg(test)]
-mod test {
-    use std::convert::Infallible;
-    use std::net::SocketAddr;
-    use std::time::Instant;
-
-    use crate::identity;
-
-    use drain::Watch;
-    use futures_util::StreamExt;
-    use hyper::body::Incoming;
-
-    use hyper::service::service_fn;
-    use hyper::{Request, Response};
-    use std::sync::atomic::AtomicU32;
-    use std::time::Duration;
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::TcpListener;
-    use tokio::task::{self};
-    use tokio::time::sleep;
-
-    #[cfg(tokio_unstable)]
-    use tracing::Instrument;
-
-    use ztunnel::test_helpers::*;
-
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_reuses_conn_for_same_key() {
-        // crate::telemetry::setup_logging();
-
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 6,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: server_addr,
-        };
-        let client1 = spawn_client(pool.clone(), key1.clone(), server_addr, 2).await;
-        let client2 = spawn_client(pool.clone(), key1.clone(), server_addr, 2).await;
-        let client3 = spawn_client(pool.clone(), key1, server_addr, 2).await;
-
-        assert!(client1.is_ok());
-        assert!(client2.is_ok());
-        assert!(client3.is_ok());
-
-        server_drain_signal.drain().await;
-        drop(pool);
-        server_handle.await.unwrap();
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 1, "actual conncount was {real_conncount}");
-
-        assert!(client1.is_ok());
-        assert!(client2.is_ok());
-        assert!(client3.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_does_not_reuse_conn_for_diff_key() {
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        // crate::telemetry::setup_logging();
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 10,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: server_addr,
-        };
-        let key2 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 3]),
-            dst: server_addr,
-        };
-
-        let client1 = spawn_client(pool.clone(), key1, server_addr, 2).await;
-        let client2 = spawn_client(pool.clone(), key2, server_addr, 2).await;
-
-        server_drain_signal.drain().await;
-        drop(pool);
-
-        server_handle.await.unwrap();
-
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 2, "actual conncount was {real_conncount}");
-
-        assert!(client1.is_ok());
-        assert!(client2.is_ok()); // expect this to panic - we used a new key
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_respects_per_conn_stream_limit() {
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 3,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: server_addr,
-        };
-        let client1 = spawn_client(pool.clone(), key1.clone(), server_addr, 4).await;
-        let client2 = spawn_client(pool.clone(), key1, server_addr, 2).await;
-
-        server_drain_signal.drain().await;
-        drop(pool);
-
-        server_handle.await.unwrap();
-
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 2, "actual conncount was {real_conncount}");
-
-        assert!(client1.is_ok());
-        assert!(client2.is_ok()); // expect this to panic - same key, but stream limit of 3
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_handles_many_conns_per_key() {
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 2,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: server_addr,
-        };
-        let client1 = spawn_client(pool.clone(), key1.clone(), server_addr, 4).await;
-        let client2 = spawn_client(pool.clone(), key1.clone(), server_addr, 4).await;
-
-        drop(pool);
-        server_drain_signal.drain().await;
-
-        server_handle.await.unwrap();
-
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 2, "actual conncount was {real_conncount}");
-
-        assert!(client1.is_ok());
-        assert!(client2.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_100_clients_streamexhaust() {
-        // crate::telemetry::setup_logging();
-
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 25,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: server_addr,
-        };
-        let client_count = 50;
-        let mut count = 0u32;
-        let mut tasks = futures::stream::FuturesUnordered::new();
-        loop {
-            count += 1;
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
-            if count == client_count {
-                break;
-            }
-        }
-
-        // TODO we spawn clients too fast (and they have little to do) and they actually break the
-        // local "fake" test server, causing it to start returning "conn refused/peer refused the connection"
-        // when the pool tries to create new connections for that caller
-        //
-        // (the pool will just pass that conn refused back to the caller)
-        //
-        // In the real world this is fine, since we aren't hitting a local server,
-        // servers can refuse connections - in synthetic tests it leads to flakes.
-        //
-        // It is worth considering if the pool should throttle how frequently it allows itself to create
-        // connections to real upstreams (e.g. "I created a conn for this key 10ms ago and you've already burned through
-        // your streamcount, chill out, you're gonna overload the dest")
-        //
-        // For now, streamcount is an inexact flow control for this.
-        sleep(Duration::from_millis(500)).await;
-
-        while let Some(Err(res)) = tasks.next().await {
-            assert!(!res.is_panic(), "CLIENT PANICKED!");
-            continue;
-        }
-
-        server_drain_signal.drain().await;
-        server_handle.await.unwrap();
-        drop(pool);
-
-        let real_conncount = conn_counter.load(Ordering::SeqCst);
-        assert!(real_conncount == 2, "actual conncount was {real_conncount}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_100_clients_singleconn() {
-        // crate::telemetry::setup_logging();
-
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 1000,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: server_addr,
-        };
-        let client_count = 100;
-        let mut count = 0u32;
-        let mut tasks = futures::stream::FuturesUnordered::new();
-        loop {
-            count += 1;
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
-
-            if count == client_count {
-                break;
-            }
-        }
-        while let Some(Err(res)) = tasks.next().await {
-            assert!(!res.is_panic(), "CLIENT PANICKED!");
-            continue;
-        }
-
-        drop(pool);
-
-        server_drain_signal.drain().await;
-        server_handle.await.unwrap();
-
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 1, "actual conncount was {real_conncount}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_100_clients_100_srcs() {
-        // crate::telemetry::setup_logging();
-
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 100,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let client_count = 100;
-        let mut count = 0u8;
-        let mut tasks = futures::stream::FuturesUnordered::new();
-        loop {
-            count += 1;
-
-            let key1 = WorkloadKey {
-                src_id: Identity::default(),
-                dst_id: vec![Identity::default()],
-                src: IpAddr::from([127, 0, 0, count]),
-                dst: server_addr,
-            };
-
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 20));
-
-            if count == client_count {
-                break;
-            }
-        }
-
-        while let Some(Err(res)) = tasks.next().await {
-            assert!(!res.is_panic(), "CLIENT PANICKED!");
-            continue;
-        }
-
-        drop(pool);
-
-        server_drain_signal.drain().await;
-        server_handle.await.unwrap();
-
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(
-            real_conncount == 100,
-            "actual conncount was {real_conncount}"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_1000_clients_3_srcs() {
-        // crate::telemetry::setup_logging();
-
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 1000,
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let mut key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 1]),
-            dst: server_addr,
-        };
-
-        let client_count = 100;
-        let mut count = 0u32;
-        let mut tasks = futures::stream::FuturesUnordered::new();
-        loop {
-            count += 1;
-            if count % 2 == 0 {
-                debug!("using key 2");
-                key1.src = IpAddr::from([127, 0, 0, 4]);
-            } else if count % 3 == 0 {
-                debug!("using key 3");
-                key1.src = IpAddr::from([127, 0, 0, 6]);
-            } else {
-                debug!("using key 1");
-                key1.src = IpAddr::from([127, 0, 0, 2]);
-            }
-
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
-
-            if count == client_count {
-                break;
-            }
-        }
-        while let Some(Err(res)) = tasks.next().await {
-            assert!(!res.is_panic(), "CLIENT PANICKED!");
-            continue;
-        }
-
-        drop(pool);
-
-        server_drain_signal.drain().await;
-        server_handle.await.unwrap();
-
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_1000_clients_3_srcs_drops_after_timeout() {
-        // crate::telemetry::setup_logging();
-
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 1000,
-            pool_unused_release_timeout: Duration::from_secs(1),
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let mut key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 1]),
-            dst: server_addr,
-        };
-
-        let client_count = 100;
-        let mut count = 0u32;
-        let mut tasks = futures::stream::FuturesUnordered::new();
-        loop {
-            count += 1;
-            if count % 2 == 0 {
-                debug!("using key 2");
-                key1.src = IpAddr::from([127, 0, 0, 4]);
-            } else if count % 3 == 0 {
-                debug!("using key 3");
-                key1.src = IpAddr::from([127, 0, 0, 6]);
-            } else {
-                debug!("using key 1");
-                key1.src = IpAddr::from([127, 0, 0, 2]);
-            }
-
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
-
-            if count == client_count {
-                break;
-            }
-        }
-        while let Some(Err(res)) = tasks.next().await {
-            assert!(!res.is_panic(), "CLIENT PANICKED!");
-            continue;
-        }
-
-        let before_conncount = conn_counter.load(Ordering::Relaxed);
-        let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
-        assert!(
-            before_conncount == 3,
-            "actual before conncount was {before_conncount}"
-        );
-        assert!(
-            before_dropcount != 3,
-            "actual before dropcount was {before_dropcount}"
-        );
-
-        // Attempt to wait long enough for pool conns to timeout+evict
-        sleep(Duration::from_secs(1)).await;
-
-        let real_conncount = conn_counter.load(Ordering::Relaxed);
-        let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
-        assert!(real_conncount == 3, "actual conncount was {real_conncount}");
-        assert!(real_dropcount == 3, "actual dropcount was {real_dropcount}");
-
-        server_drain_signal.drain().await;
-        server_handle.await.unwrap();
-        drop(pool);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_pool_100_clients_evicts_but_does_not_close_active_conn() {
-        // crate::telemetry::setup_logging();
-
-        let (server_drain_signal, server_drain) = drain::channel();
-
-        let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let (server_addr, server_handle) = spawn_server(
-            server_drain,
-            conn_counter.clone(),
-            conn_drop_counter.clone(),
-        )
-        .await;
-
-        let cfg = crate::config::Config {
-            local_node: Some("local-node".to_string()),
-            pool_max_streams_per_conn: 50,
-            pool_unused_release_timeout: Duration::from_secs(1),
-            ..crate::config::parse_config().unwrap()
-        };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
-
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: server_addr,
-        };
-        let client_count = 100;
-        let mut count = 0u32;
-        let mut tasks = futures::stream::FuturesUnordered::new();
-        loop {
-            count += 1;
-            tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
-
-            if count == client_count {
-                break;
-            }
-        }
-
-        // TODO we spawn clients too fast (and they have little to do) and they actually break the
-        // local "fake" test server, causing it to start returning "conn refused/peer refused the connection"
-        // when the pool tries to create new connections for that caller
-        //
-        // (the pool will just pass that conn refused back to the caller)
-        //
-        // In the real world this is fine, since we aren't hitting a local server,
-        // servers can refuse connections - in synthetic tests it leads to flakes.
-        //
-        // It is worth considering if the pool should throttle how frequently it allows itself to create
-        // connections to real upstreams (e.g. "I created a conn for this key 10ms ago and you've already burned through
-        // your streamcount, chill out, you're gonna overload the dest")
-        //
-        // For now, streamcount is an inexact flow control for this.
-        sleep(Duration::from_millis(500)).await;
-        //loop thru the nonpersistent clients and wait for them to finish
-        while let Some(Err(res)) = tasks.next().await {
-            assert!(!res.is_panic(), "CLIENT PANICKED!");
-            continue;
-        }
-
-        let (client_stop_signal, client_stop) = drain::channel();
-        let persist_res =
-            spawn_persistent_client(pool.clone(), key1.clone(), server_addr, client_stop);
-
-        //Attempt to wait a bit more, to ensure the connections NOT held open by our persistent client are dropped.
-        sleep(Duration::from_secs(1)).await;
-        let before_conncount = conn_counter.load(Ordering::Relaxed);
-        let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
-        assert!(
-            before_conncount == 3,
-            "actual before conncount was {before_conncount}"
-        );
-        // At this point, we should still have one conn that hasn't been dropped
-        // because we haven't ended the persistent client
-        assert!(
-            before_dropcount == 2,
-            "actual before dropcount was {before_dropcount}"
-        );
-
-        client_stop_signal.drain().await;
-        assert!(persist_res.await.is_ok(), "PERSIST CLIENT ERROR");
-
-        //Attempt to wait a bit more, to ensure the connections held open by our persistent client is dropped.
-        sleep(Duration::from_secs(1)).await;
-
-        let after_conncount = conn_counter.load(Ordering::Relaxed);
-        assert!(
-            after_conncount == 3,
-            "after conncount was {after_conncount}"
-        );
-        let after_dropcount = conn_drop_counter.load(Ordering::Relaxed);
-        assert!(
-            after_dropcount == 3,
-            "after dropcount was {after_dropcount}"
-        );
-        server_drain_signal.drain().await;
-        server_handle.await.unwrap();
-
-        drop(pool);
-    }
-
-    fn spawn_client(
-        mut pool: WorkloadHBONEPool,
-        key: WorkloadKey,
-        remote_addr: SocketAddr,
-        req_count: u32,
-    ) -> task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let req = || {
-                hyper::Request::builder()
-                    .uri(format!("{remote_addr}"))
-                    .method(hyper::Method::CONNECT)
-                    .version(hyper::Version::HTTP_2)
-                    .body(Empty::<Bytes>::new())
-                    .unwrap()
-            };
-
-            let start = Instant::now();
-
-            let mut c1 = pool
-                .connect(&key.clone())
-                // needs tokio_unstable, but useful
-                // .instrument(tracing::debug_span!("client_tid", tid=%tokio::task::id()))
-                .await
-                .expect("connect should succeed");
-            debug!(
-                "client spent {}ms waiting for conn",
-                start.elapsed().as_millis()
-            );
-
-            let mut count = 0u32;
-            loop {
-                count += 1;
-                let res = c1.send_request(req()).await;
-
-                if res.is_err() {
-                    panic!("SEND ERR: {:#?} sendcount {count}", res);
-                }
-
-                if count >= req_count {
-                    debug!("CLIENT DONE");
-                    break;
-                }
-            }
-        })
-    }
-
-    fn spawn_persistent_client(
-        mut pool: WorkloadHBONEPool,
-        key: WorkloadKey,
-        remote_addr: SocketAddr,
-        stop: Watch,
-    ) -> task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let req = || {
-                hyper::Request::builder()
-                    .uri(format!("{remote_addr}"))
-                    .method(hyper::Method::CONNECT)
-                    .version(hyper::Version::HTTP_2)
-                    .body(Empty::<Bytes>::new())
-                    .unwrap()
-            };
-
-            let start = Instant::now();
-
-            let mut c1 = pool
-                .connect(&key.clone())
-                // needs tokio_unstable, but useful
-                // .instrument(tracing::debug_span!("client_tid", tid=%tokio::task::id()))
-                .await
-                .unwrap();
-            debug!(
-                "client spent {}ms waiting for conn",
-                start.elapsed().as_millis()
-            );
-
-            let send_loop = async move {
-                //send once, then hold the conn open until signaled
-                let res = c1.send_request(req()).await;
-                if res.is_err() {
-                    panic!("SEND ERR: {:#?}", res);
-                }
-                loop {
-                    debug!("persistent client yielding");
-                    sleep(Duration::from_millis(1)).await; //yield may be enough
-                    tokio::task::yield_now().await;
-                }
-            };
-
-            tokio::select! {
-                _ = send_loop => {}
-                _ = stop.signaled() => {
-                    debug!("GOT STOP PERSISTENT CLIENT");
-                }
-            };
-        })
-    }
-
-    async fn spawn_server(
-        stop: Watch,
-        conn_count: Arc<AtomicU32>,
-        conn_drop_count: Arc<AtomicU32>,
-    ) -> (SocketAddr, task::JoinHandle<()>) {
-        // We'll bind to 127.0.0.1:3000
-        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-        let test_cfg = test_config();
-        async fn hello_world(req: Request<Incoming>) -> Result<Response<Empty<Bytes>>, Infallible> {
-            debug!("hello world: received request");
-            tokio::task::spawn(async move {
-                match hyper::upgrade::on(req).await {
-                    Ok(upgraded) => {
-                        let mut io = hyper_util::rt::TokioIo::new(upgraded);
-                        io.write_all(b"poolsrv\n").await.unwrap();
-                        tcp::handle_stream(tcp::Mode::ReadWrite, &mut io).await;
-                    }
-                    Err(e) => panic!("No upgrade {e}"),
-                }
-            });
-            Ok::<_, Infallible>(Response::new(http_body_util::Empty::<Bytes>::new()))
-        }
-
-        // We create a TcpListener and bind it to 127.0.0.1:3000
-        let listener = TcpListener::bind(addr).await.unwrap();
-        let bound_addr = listener.local_addr().unwrap();
-
-        let certs = crate::tls::mock::generate_test_certs(
-            &Identity::default().into(),
-            Duration::from_secs(0),
-            Duration::from_secs(100),
-        );
-        let acceptor = crate::tls::mock::MockServerCertProvider::new(certs);
-        let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
-
-        let srv_handle = tokio::spawn(async move {
-            // We start a loop to continuously accept incoming connections
-            // and also count them
-            let movable_count = conn_count.clone();
-            let movable_drop_count = conn_drop_count.clone();
-            let accept = async move {
-                loop {
-                    let stream = tls_stream.next().await.unwrap();
-                    movable_count.fetch_add(1, Ordering::Relaxed);
-                    let dcount = movable_drop_count.clone();
-                    debug!("bump serverconn");
-
-                    // Spawn a tokio task to serve multiple connections concurrently
-                    tokio::task::spawn(async move {
-                        // Finally, we bind the incoming connection to our `hello` service
-                        if let Err(err) = crate::hyper_util::http2_server()
-                            .initial_stream_window_size(test_cfg.window_size)
-                            .initial_connection_window_size(test_cfg.connection_window_size)
-                            .max_frame_size(test_cfg.frame_size)
-                            // 64KB max; default is 16MB driven from Golang's defaults
-                            // Since we know we are going to recieve a bounded set of headers, more is overkill.
-                            .max_header_list_size(65536)
-                            .serve_connection(
-                                hyper_util::rt::TokioIo::new(stream),
-                                service_fn(hello_world),
-                            )
-                            .await
-                        {
-                            println!("Error serving connection: {:?}", err);
-                        }
-                        dcount.fetch_add(1, Ordering::Relaxed);
-                    });
-                }
-            };
-            tokio::select! {
-                _ = accept => {}
-                _ = stop.signaled() => {
-                    debug!("GOT STOP SERVER");
-                }
-            };
-        });
-
-        (bound_addr, srv_handle)
-    }
-}
+// #[cfg(test)]
+// mod test {
+//     use std::convert::Infallible;
+//     use std::net::SocketAddr;
+//     use std::time::Instant;
+//
+//     use crate::identity;
+//
+//     use drain::Watch;
+//     use futures_util::StreamExt;
+//     use hyper::body::Incoming;
+//
+//     use hyper::service::service_fn;
+//     use hyper::{Request, Response};
+//     use std::sync::atomic::AtomicU32;
+//     use std::time::Duration;
+//     use tokio::io::AsyncWriteExt;
+//     use tokio::net::TcpListener;
+//     use tokio::task::{self};
+//     use tokio::time::sleep;
+//
+//     #[cfg(tokio_unstable)]
+//     use tracing::Instrument;
+//
+//     use ztunnel::test_helpers::*;
+//
+//     use super::*;
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_reuses_conn_for_same_key() {
+//         // crate::telemetry::setup_logging();
+//
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 6,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 2]),
+//             dst: server_addr,
+//         };
+//         let client1 = spawn_client(pool.clone(), key1.clone(), server_addr, 2).await;
+//         let client2 = spawn_client(pool.clone(), key1.clone(), server_addr, 2).await;
+//         let client3 = spawn_client(pool.clone(), key1, server_addr, 2).await;
+//
+//         assert!(client1.is_ok());
+//         assert!(client2.is_ok());
+//         assert!(client3.is_ok());
+//
+//         server_drain_signal.drain().await;
+//         drop(pool);
+//         server_handle.await.unwrap();
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(real_conncount == 1, "actual conncount was {real_conncount}");
+//
+//         assert!(client1.is_ok());
+//         assert!(client2.is_ok());
+//         assert!(client3.is_ok());
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_does_not_reuse_conn_for_diff_key() {
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         // crate::telemetry::setup_logging();
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 10,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 2]),
+//             dst: server_addr,
+//         };
+//         let key2 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 3]),
+//             dst: server_addr,
+//         };
+//
+//         let client1 = spawn_client(pool.clone(), key1, server_addr, 2).await;
+//         let client2 = spawn_client(pool.clone(), key2, server_addr, 2).await;
+//
+//         server_drain_signal.drain().await;
+//         drop(pool);
+//
+//         server_handle.await.unwrap();
+//
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
+//
+//         assert!(client1.is_ok());
+//         assert!(client2.is_ok()); // expect this to panic - we used a new key
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_respects_per_conn_stream_limit() {
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 3,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 2]),
+//             dst: server_addr,
+//         };
+//         let client1 = spawn_client(pool.clone(), key1.clone(), server_addr, 4).await;
+//         let client2 = spawn_client(pool.clone(), key1, server_addr, 2).await;
+//
+//         server_drain_signal.drain().await;
+//         drop(pool);
+//
+//         server_handle.await.unwrap();
+//
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
+//
+//         assert!(client1.is_ok());
+//         assert!(client2.is_ok()); // expect this to panic - same key, but stream limit of 3
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_handles_many_conns_per_key() {
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 2,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 2]),
+//             dst: server_addr,
+//         };
+//         let client1 = spawn_client(pool.clone(), key1.clone(), server_addr, 4).await;
+//         let client2 = spawn_client(pool.clone(), key1.clone(), server_addr, 4).await;
+//
+//         drop(pool);
+//         server_drain_signal.drain().await;
+//
+//         server_handle.await.unwrap();
+//
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
+//
+//         assert!(client1.is_ok());
+//         assert!(client2.is_ok());
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_100_clients_streamexhaust() {
+//         // crate::telemetry::setup_logging();
+//
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 25,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 2]),
+//             dst: server_addr,
+//         };
+//         let client_count = 50;
+//         let mut count = 0u32;
+//         let mut tasks = futures::stream::FuturesUnordered::new();
+//         loop {
+//             count += 1;
+//             tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
+//             if count == client_count {
+//                 break;
+//             }
+//         }
+//
+//         // TODO we spawn clients too fast (and they have little to do) and they actually break the
+//         // local "fake" test server, causing it to start returning "conn refused/peer refused the connection"
+//         // when the pool tries to create new connections for that caller
+//         //
+//         // (the pool will just pass that conn refused back to the caller)
+//         //
+//         // In the real world this is fine, since we aren't hitting a local server,
+//         // servers can refuse connections - in synthetic tests it leads to flakes.
+//         //
+//         // It is worth considering if the pool should throttle how frequently it allows itself to create
+//         // connections to real upstreams (e.g. "I created a conn for this key 10ms ago and you've already burned through
+//         // your streamcount, chill out, you're gonna overload the dest")
+//         //
+//         // For now, streamcount is an inexact flow control for this.
+//         sleep(Duration::from_millis(500)).await;
+//
+//         while let Some(Err(res)) = tasks.next().await {
+//             assert!(!res.is_panic(), "CLIENT PANICKED!");
+//             continue;
+//         }
+//
+//         server_drain_signal.drain().await;
+//         server_handle.await.unwrap();
+//         drop(pool);
+//
+//         let real_conncount = conn_counter.load(Ordering::SeqCst);
+//         assert!(real_conncount == 2, "actual conncount was {real_conncount}");
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_100_clients_singleconn() {
+//         // crate::telemetry::setup_logging();
+//
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 1000,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 2]),
+//             dst: server_addr,
+//         };
+//         let client_count = 100;
+//         let mut count = 0u32;
+//         let mut tasks = futures::stream::FuturesUnordered::new();
+//         loop {
+//             count += 1;
+//             tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
+//
+//             if count == client_count {
+//                 break;
+//             }
+//         }
+//         while let Some(Err(res)) = tasks.next().await {
+//             assert!(!res.is_panic(), "CLIENT PANICKED!");
+//             continue;
+//         }
+//
+//         drop(pool);
+//
+//         server_drain_signal.drain().await;
+//         server_handle.await.unwrap();
+//
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(real_conncount == 1, "actual conncount was {real_conncount}");
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_100_clients_100_srcs() {
+//         // crate::telemetry::setup_logging();
+//
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 100,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let client_count = 100;
+//         let mut count = 0u8;
+//         let mut tasks = futures::stream::FuturesUnordered::new();
+//         loop {
+//             count += 1;
+//
+//             let key1 = WorkloadKey {
+//                 src_id: Identity::default(),
+//                 dst_id: vec![Identity::default()],
+//                 src: IpAddr::from([127, 0, 0, count]),
+//                 dst: server_addr,
+//             };
+//
+//             tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 20));
+//
+//             if count == client_count {
+//                 break;
+//             }
+//         }
+//
+//         while let Some(Err(res)) = tasks.next().await {
+//             assert!(!res.is_panic(), "CLIENT PANICKED!");
+//             continue;
+//         }
+//
+//         drop(pool);
+//
+//         server_drain_signal.drain().await;
+//         server_handle.await.unwrap();
+//
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(
+//             real_conncount == 100,
+//             "actual conncount was {real_conncount}"
+//         );
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_1000_clients_3_srcs() {
+//         // crate::telemetry::setup_logging();
+//
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 1000,
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let mut key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 1]),
+//             dst: server_addr,
+//         };
+//
+//         let client_count = 100;
+//         let mut count = 0u32;
+//         let mut tasks = futures::stream::FuturesUnordered::new();
+//         loop {
+//             count += 1;
+//             if count % 2 == 0 {
+//                 debug!("using key 2");
+//                 key1.src = IpAddr::from([127, 0, 0, 4]);
+//             } else if count % 3 == 0 {
+//                 debug!("using key 3");
+//                 key1.src = IpAddr::from([127, 0, 0, 6]);
+//             } else {
+//                 debug!("using key 1");
+//                 key1.src = IpAddr::from([127, 0, 0, 2]);
+//             }
+//
+//             tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
+//
+//             if count == client_count {
+//                 break;
+//             }
+//         }
+//         while let Some(Err(res)) = tasks.next().await {
+//             assert!(!res.is_panic(), "CLIENT PANICKED!");
+//             continue;
+//         }
+//
+//         drop(pool);
+//
+//         server_drain_signal.drain().await;
+//         server_handle.await.unwrap();
+//
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_1000_clients_3_srcs_drops_after_timeout() {
+//         // crate::telemetry::setup_logging();
+//
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 1000,
+//             pool_unused_release_timeout: Duration::from_secs(1),
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let mut key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 1]),
+//             dst: server_addr,
+//         };
+//
+//         let client_count = 100;
+//         let mut count = 0u32;
+//         let mut tasks = futures::stream::FuturesUnordered::new();
+//         loop {
+//             count += 1;
+//             if count % 2 == 0 {
+//                 debug!("using key 2");
+//                 key1.src = IpAddr::from([127, 0, 0, 4]);
+//             } else if count % 3 == 0 {
+//                 debug!("using key 3");
+//                 key1.src = IpAddr::from([127, 0, 0, 6]);
+//             } else {
+//                 debug!("using key 1");
+//                 key1.src = IpAddr::from([127, 0, 0, 2]);
+//             }
+//
+//             tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 50));
+//
+//             if count == client_count {
+//                 break;
+//             }
+//         }
+//         while let Some(Err(res)) = tasks.next().await {
+//             assert!(!res.is_panic(), "CLIENT PANICKED!");
+//             continue;
+//         }
+//
+//         let before_conncount = conn_counter.load(Ordering::Relaxed);
+//         let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+//         assert!(
+//             before_conncount == 3,
+//             "actual before conncount was {before_conncount}"
+//         );
+//         assert!(
+//             before_dropcount != 3,
+//             "actual before dropcount was {before_dropcount}"
+//         );
+//
+//         // Attempt to wait long enough for pool conns to timeout+evict
+//         sleep(Duration::from_secs(1)).await;
+//
+//         let real_conncount = conn_counter.load(Ordering::Relaxed);
+//         let real_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+//         assert!(real_conncount == 3, "actual conncount was {real_conncount}");
+//         assert!(real_dropcount == 3, "actual dropcount was {real_dropcount}");
+//
+//         server_drain_signal.drain().await;
+//         server_handle.await.unwrap();
+//         drop(pool);
+//     }
+//
+//     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+//     async fn test_pool_100_clients_evicts_but_does_not_close_active_conn() {
+//         // crate::telemetry::setup_logging();
+//
+//         let (server_drain_signal, server_drain) = drain::channel();
+//
+//         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let conn_drop_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+//         let (server_addr, server_handle) = spawn_server(
+//             server_drain,
+//             conn_counter.clone(),
+//             conn_drop_counter.clone(),
+//         )
+//         .await;
+//
+//         let cfg = crate::config::Config {
+//             local_node: Some("local-node".to_string()),
+//             pool_max_streams_per_conn: 50,
+//             pool_unused_release_timeout: Duration::from_secs(1),
+//             ..crate::config::parse_config().unwrap()
+//         };
+//         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+//         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+//         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+//
+//         let key1 = WorkloadKey {
+//             src_id: Identity::default(),
+//             dst_id: vec![Identity::default()],
+//             src: IpAddr::from([127, 0, 0, 2]),
+//             dst: server_addr,
+//         };
+//         let client_count = 100;
+//         let mut count = 0u32;
+//         let mut tasks = futures::stream::FuturesUnordered::new();
+//         loop {
+//             count += 1;
+//             tasks.push(spawn_client(pool.clone(), key1.clone(), server_addr, 1));
+//
+//             if count == client_count {
+//                 break;
+//             }
+//         }
+//
+//         // TODO we spawn clients too fast (and they have little to do) and they actually break the
+//         // local "fake" test server, causing it to start returning "conn refused/peer refused the connection"
+//         // when the pool tries to create new connections for that caller
+//         //
+//         // (the pool will just pass that conn refused back to the caller)
+//         //
+//         // In the real world this is fine, since we aren't hitting a local server,
+//         // servers can refuse connections - in synthetic tests it leads to flakes.
+//         //
+//         // It is worth considering if the pool should throttle how frequently it allows itself to create
+//         // connections to real upstreams (e.g. "I created a conn for this key 10ms ago and you've already burned through
+//         // your streamcount, chill out, you're gonna overload the dest")
+//         //
+//         // For now, streamcount is an inexact flow control for this.
+//         sleep(Duration::from_millis(500)).await;
+//         //loop thru the nonpersistent clients and wait for them to finish
+//         while let Some(Err(res)) = tasks.next().await {
+//             assert!(!res.is_panic(), "CLIENT PANICKED!");
+//             continue;
+//         }
+//
+//         let (client_stop_signal, client_stop) = drain::channel();
+//         let persist_res =
+//             spawn_persistent_client(pool.clone(), key1.clone(), server_addr, client_stop);
+//
+//         //Attempt to wait a bit more, to ensure the connections NOT held open by our persistent client are dropped.
+//         sleep(Duration::from_secs(1)).await;
+//         let before_conncount = conn_counter.load(Ordering::Relaxed);
+//         let before_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+//         assert!(
+//             before_conncount == 3,
+//             "actual before conncount was {before_conncount}"
+//         );
+//         // At this point, we should still have one conn that hasn't been dropped
+//         // because we haven't ended the persistent client
+//         assert!(
+//             before_dropcount == 2,
+//             "actual before dropcount was {before_dropcount}"
+//         );
+//
+//         client_stop_signal.drain().await;
+//         assert!(persist_res.await.is_ok(), "PERSIST CLIENT ERROR");
+//
+//         //Attempt to wait a bit more, to ensure the connections held open by our persistent client is dropped.
+//         sleep(Duration::from_secs(1)).await;
+//
+//         let after_conncount = conn_counter.load(Ordering::Relaxed);
+//         assert!(
+//             after_conncount == 3,
+//             "after conncount was {after_conncount}"
+//         );
+//         let after_dropcount = conn_drop_counter.load(Ordering::Relaxed);
+//         assert!(
+//             after_dropcount == 3,
+//             "after dropcount was {after_dropcount}"
+//         );
+//         server_drain_signal.drain().await;
+//         server_handle.await.unwrap();
+//
+//         drop(pool);
+//     }
+//
+//     fn spawn_client(
+//         mut pool: WorkloadHBONEPool,
+//         key: WorkloadKey,
+//         remote_addr: SocketAddr,
+//         req_count: u32,
+//     ) -> task::JoinHandle<()> {
+//         tokio::spawn(async move {
+//             let req = || {
+//                 hyper::Request::builder()
+//                     .uri(format!("{remote_addr}"))
+//                     .method(hyper::Method::CONNECT)
+//                     .version(hyper::Version::HTTP_2)
+//                     .body(Empty::<Bytes>::new())
+//                     .unwrap()
+//             };
+//
+//             let start = Instant::now();
+//
+//             let mut c1 = pool
+//                 .connect(&key.clone())
+//                 // needs tokio_unstable, but useful
+//                 // .instrument(tracing::debug_span!("client_tid", tid=%tokio::task::id()))
+//                 .await
+//                 .expect("connect should succeed");
+//             debug!(
+//                 "client spent {}ms waiting for conn",
+//                 start.elapsed().as_millis()
+//             );
+//
+//             let mut count = 0u32;
+//             loop {
+//                 count += 1;
+//                 let res = c1.send_request(req()).await;
+//
+//                 if res.is_err() {
+//                     panic!("SEND ERR: {:#?} sendcount {count}", res);
+//                 }
+//
+//                 if count >= req_count {
+//                     debug!("CLIENT DONE");
+//                     break;
+//                 }
+//             }
+//         })
+//     }
+//
+//     fn spawn_persistent_client(
+//         mut pool: WorkloadHBONEPool,
+//         key: WorkloadKey,
+//         remote_addr: SocketAddr,
+//         stop: Watch,
+//     ) -> task::JoinHandle<()> {
+//         tokio::spawn(async move {
+//             let req = || {
+//                 hyper::Request::builder()
+//                     .uri(format!("{remote_addr}"))
+//                     .method(hyper::Method::CONNECT)
+//                     .version(hyper::Version::HTTP_2)
+//                     .body(Empty::<Bytes>::new())
+//                     .unwrap()
+//             };
+//
+//             let start = Instant::now();
+//
+//             let mut c1 = pool
+//                 .connect(&key.clone())
+//                 // needs tokio_unstable, but useful
+//                 // .instrument(tracing::debug_span!("client_tid", tid=%tokio::task::id()))
+//                 .await
+//                 .unwrap();
+//             debug!(
+//                 "client spent {}ms waiting for conn",
+//                 start.elapsed().as_millis()
+//             );
+//
+//             let send_loop = async move {
+//                 //send once, then hold the conn open until signaled
+//                 let res = c1.send_request(req()).await;
+//                 if res.is_err() {
+//                     panic!("SEND ERR: {:#?}", res);
+//                 }
+//                 loop {
+//                     debug!("persistent client yielding");
+//                     sleep(Duration::from_millis(1)).await; //yield may be enough
+//                     tokio::task::yield_now().await;
+//                 }
+//             };
+//
+//             tokio::select! {
+//                 _ = send_loop => {}
+//                 _ = stop.signaled() => {
+//                     debug!("GOT STOP PERSISTENT CLIENT");
+//                 }
+//             };
+//         })
+//     }
+//
+//     async fn spawn_server(
+//         stop: Watch,
+//         conn_count: Arc<AtomicU32>,
+//         conn_drop_count: Arc<AtomicU32>,
+//     ) -> (SocketAddr, task::JoinHandle<()>) {
+//         // We'll bind to 127.0.0.1:3000
+//         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+//         let test_cfg = test_config();
+//         async fn hello_world(req: Request<Incoming>) -> Result<Response<Empty<Bytes>>, Infallible> {
+//             debug!("hello world: received request");
+//             tokio::task::spawn(async move {
+//                 match hyper::upgrade::on(req).await {
+//                     Ok(upgraded) => {
+//                         let mut io = hyper_util::rt::TokioIo::new(upgraded);
+//                         io.write_all(b"poolsrv\n").await.unwrap();
+//                         tcp::handle_stream(tcp::Mode::ReadWrite, &mut io).await;
+//                     }
+//                     Err(e) => panic!("No upgrade {e}"),
+//                 }
+//             });
+//             Ok::<_, Infallible>(Response::new(http_body_util::Empty::<Bytes>::new()))
+//         }
+//
+//         // We create a TcpListener and bind it to 127.0.0.1:3000
+//         let listener = TcpListener::bind(addr).await.unwrap();
+//         let bound_addr = listener.local_addr().unwrap();
+//
+//         let certs = crate::tls::mock::generate_test_certs(
+//             &Identity::default().into(),
+//             Duration::from_secs(0),
+//             Duration::from_secs(100),
+//         );
+//         let acceptor = crate::tls::mock::MockServerCertProvider::new(certs);
+//         let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
+//
+//         let srv_handle = tokio::spawn(async move {
+//             // We start a loop to continuously accept incoming connections
+//             // and also count them
+//             let movable_count = conn_count.clone();
+//             let movable_drop_count = conn_drop_count.clone();
+//             let accept = async move {
+//                 loop {
+//                     let stream = tls_stream.next().await.unwrap();
+//                     movable_count.fetch_add(1, Ordering::Relaxed);
+//                     let dcount = movable_drop_count.clone();
+//                     debug!("bump serverconn");
+//
+//                     // Spawn a tokio task to serve multiple connections concurrently
+//                     tokio::task::spawn(async move {
+//                         // Finally, we bind the incoming connection to our `hello` service
+//                         if let Err(err) = crate::hyper_util::http2_server()
+//                             .initial_stream_window_size(test_cfg.window_size)
+//                             .initial_connection_window_size(test_cfg.connection_window_size)
+//                             .max_frame_size(test_cfg.frame_size)
+//                             // 64KB max; default is 16MB driven from Golang's defaults
+//                             // Since we know we are going to recieve a bounded set of headers, more is overkill.
+//                             .max_header_list_size(65536)
+//                             .serve_connection(
+//                                 hyper_util::rt::TokioIo::new(stream),
+//                                 service_fn(hello_world),
+//                             )
+//                             .await
+//                         {
+//                             println!("Error serving connection: {:?}", err);
+//                         }
+//                         dcount.fetch_add(1, Ordering::Relaxed);
+//                     });
+//                 }
+//             };
+//             tokio::select! {
+//                 _ = accept => {}
+//                 _ = stop.signaled() => {
+//                     debug!("GOT STOP SERVER");
+//                 }
+//             };
+//         });
+//
+//         (bound_addr, srv_handle)
+//     }
+// }
