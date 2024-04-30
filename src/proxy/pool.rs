@@ -13,8 +13,7 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::{Error, SocketFactory};
-use bytes::{Buf, Bytes};
+use super::{h2_client, Error, SocketFactory};
 
 use std::time::Duration;
 
@@ -23,31 +22,26 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 
 use std::hash::{Hash, Hasher};
-use std::io::Cursor;
+
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicI32, AtomicU16, Ordering};
+
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use tokio::sync::watch;
 
 use tokio::sync::Mutex;
-use tracing::{debug, error, trace};
+use tracing::{debug, trace};
 
 use crate::config;
 use crate::identity::{Identity, SecretManager};
 
 use flurry;
-use futures_core::ready;
-use h2::client::Connection;
-use h2::Reason;
 
 use pingora_pool;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use tokio::sync::watch::Receiver;
+use crate::proxy::h2_client::{H2ConnectClient, H2Stream};
 
 // A relatively nonstandard HTTP/2 connection pool designed to allow multiplexing proxied workload connections
 // over a (smaller) number of HTTP/2 mTLS tunnels.
@@ -90,15 +84,6 @@ struct ConnSpawner {
 impl ConnSpawner {
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
         debug!("spawning new pool conn for {}", key);
-        let mut builder = h2::client::Builder::new();
-        builder
-            .initial_window_size(self.cfg.window_size)
-            .initial_connection_window_size(self.cfg.connection_window_size)
-            .max_frame_size(self.cfg.frame_size)
-            .initial_max_send_streams(self.cfg.pool_max_streams_per_conn as usize)
-            .max_header_list_size(1024 * 16)
-            .max_send_buffer_size(1024 * 1024)
-            .enable_push(false);
 
         let local = self
             .cfg
@@ -112,57 +97,14 @@ impl ConnSpawner {
         tcp_stream.set_nodelay(true)?;
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
-        let (send_req, connection) = builder
-            .handshake::<_, SendBuf>(tls_stream)
-            .await
-            .map_err(Error::Http2Handshake)?;
-
-        // We store max as u16, so if they report above that max size we just cap at u16::MAX
-        let max_allowed_streams = std::cmp::min(
-            self.cfg.pool_max_streams_per_conn,
-            connection
-                .max_concurrent_send_streams()
-                .try_into()
-                .unwrap_or(u16::MAX),
-        );
-        // spawn a task to poll the connection and drive the HTTP state
-        // if we got a drain for that connection, respect it in a race
-        // it is important to have a drain here, or this connection will never terminate
-        let driver_drain = self.timeout_rx.clone();
-        tokio::spawn(async move {
-            drive_connection(connection, driver_drain).await;
-        });
-
+        let sender =
+            h2_client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
+                .await?;
         let client = ConnClient {
-            sender: send_req,
-            stream_count: Arc::new(AtomicU16::new(0)),
-            stream_count_max: max_allowed_streams,
+            sender,
             wl_key: key,
         };
         Ok(client)
-    }
-}
-
-async fn drive_connection<S, B>(c: Connection<S, B>, mut driver_drain: Receiver<bool>)
-where
-    S: AsyncRead + AsyncWrite + Send + Unpin,
-    B: Buf,
-{
-    // TODO: ping pong
-    tokio::select! {
-        _ = driver_drain.changed() => {
-            debug!("draining outer HBONE connection");
-        }
-        res = c => {
-            match res {
-                Err(e) => {
-                    error!("Error in HBONE connection handshake: {:?}", e);
-                }
-                Ok(_) => {
-                    debug!("done with HBONE connection handshake: {:?}", res);
-                }
-            }
-        }
     }
 }
 
@@ -345,7 +287,7 @@ impl PoolState {
             pool_key.key
         );
         let existing = self.guarded_get(&pool_key.key, workload_key)?.filter(|e| {
-            if e.at_max_streamcount() {
+            if e.sender.at_max_streamcount() {
                 debug!(
                     "found existing connection {}, but streamcount is maxed; removing from pool",
                     workload_key
@@ -377,136 +319,6 @@ impl Drop for PoolState {
     fn drop(&mut self) {
         debug!("poolstate dropping, stopping all connection drivers and cancelling all outstanding eviction timeout spawns");
         let _ = self.timeout_tx.send(true);
-    }
-}
-
-pub struct H2Stream {
-    send_stream: h2::SendStream<SendBuf>,
-    recv_stream: h2::RecvStream,
-    buf: Bytes,
-    active_count: Arc<AtomicU16>,
-}
-
-impl Drop for H2Stream {
-    fn drop(&mut self) {
-        let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
-        trace!("dropping h2stream, has {} active streams left", left - 1);
-    }
-}
-
-impl AsyncRead for H2Stream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        read_buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.buf.is_empty() {
-            self.buf = loop {
-                match ready!(self.recv_stream.poll_data(cx)) {
-                    None => return Poll::Ready(Ok(())),
-                    Some(Ok(buf)) if buf.is_empty() && !self.recv_stream.is_end_stream() => {
-                        continue
-                    }
-                    Some(Ok(buf)) => {
-                        // TODO: implement ping
-                        // self.ping.record_data(buf.len());
-                        break buf;
-                    }
-                    Some(Err(e)) => {
-                        return Poll::Ready(match e.reason() {
-                            Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => Ok(()),
-                            Some(Reason::STREAM_CLOSED) => {
-                                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
-                            }
-                            _ => Err(h2_to_io_error(e)),
-                        })
-                    }
-                }
-            };
-        }
-        let cnt = std::cmp::min(self.buf.len(), read_buf.remaining());
-        read_buf.put_slice(&self.buf[..cnt]);
-        self.buf.advance(cnt);
-        let _ = self.recv_stream.flow_control().release_capacity(cnt);
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl AsyncWrite for H2Stream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        self.send_stream.reserve_capacity(buf.len());
-
-        // We ignore all errors returned by `poll_capacity` and `write`, as we
-        // will get the correct from `poll_reset` anyway.
-        let cnt = match ready!(self.send_stream.poll_capacity(cx)) {
-            None => Some(0),
-            Some(Ok(cnt)) => self.write_slice(&buf[..cnt], false).ok().map(|()| cnt),
-            Some(Err(_)) => None,
-        };
-
-        if let Some(cnt) = cnt {
-            return Poll::Ready(Ok(cnt));
-        }
-
-        Poll::Ready(Err(h2_to_io_error(
-            match ready!(self.send_stream.poll_reset(cx)) {
-                Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
-                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
-                }
-                Ok(reason) => reason.into(),
-                Err(e) => e,
-            },
-        )))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        if self.write_slice(&[], true).is_ok() {
-            return Poll::Ready(Ok(()));
-        }
-
-        Poll::Ready(Err(h2_to_io_error(
-            match ready!(self.send_stream.poll_reset(cx)) {
-                Ok(Reason::NO_ERROR) => return Poll::Ready(Ok(())),
-                Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
-                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
-                }
-                Ok(reason) => reason.into(),
-                Err(e) => e,
-            },
-        )))
-    }
-}
-
-impl H2Stream {
-    fn write_slice(&mut self, buf: &[u8], end_of_stream: bool) -> Result<(), std::io::Error> {
-        let send_buf: SendBuf = Cursor::new(buf.into());
-        self.send_stream
-            .send_data(send_buf, end_of_stream)
-            .map_err(h2_to_io_error)
-    }
-}
-
-type SendBuf = Cursor<Box<[u8]>>;
-
-fn h2_to_io_error(e: h2::Error) -> std::io::Error {
-    if e.is_io() {
-        e.into_io().unwrap()
-    } else {
-        std::io::Error::new(std::io::ErrorKind::Other, e)
     }
 }
 
@@ -554,7 +366,7 @@ impl WorkloadHBONEPool {
     ) -> Result<H2Stream, Error> {
         let mut connection = self.connect(workload_key).await?;
 
-        connection.send_request(request).await
+        connection.sender.send_request(request).await
     }
 
     // Obtain a pooled connection. Will prefer to retrieve an existing conn from the pool, but
@@ -684,46 +496,16 @@ impl WorkloadHBONEPool {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 // A sort of faux-client, that represents a single checked-out 'request sender' which might
 // send requests over some underlying stream using some underlying http/2 client
 struct ConnClient {
-    sender: h2::client::SendRequest<SendBuf>,
-    stream_count: Arc<AtomicU16>, // the current streamcount for this client conn.
-    stream_count_max: u16,        // the max streamcount associated with this client.
+    sender: H2ConnectClient,
     // A WL key may have many clients, but every client has no more than one WL key
     wl_key: WorkloadKey, // the WL key associated with this client.
 }
 
 impl ConnClient {
-    fn at_max_streamcount(&self) -> bool {
-        let curr_count = self.stream_count.load(Ordering::Relaxed);
-        trace!("checking streamcount: {curr_count} >= {}", self.stream_count_max);
-        error!("howardjohn checking streamcount: {curr_count} >= {}", self.stream_count_max);
-        curr_count >= self.stream_count_max
-    }
-
-    async fn send_request(&mut self, req: http::Request<()>) -> Result<H2Stream, Error> {
-        let cur = self.stream_count.fetch_add(1, Ordering::SeqCst);
-        trace!(current_streams=cur, "sending request");
-        let (response, stream) = self.sender.send_request(req, false)?;
-        let response = response.await?;
-        if response.status() != 200 {
-            return Err(Error::HttpStatus(response.status()));
-        }
-
-        let recv = response.into_body();
-        let send = stream;
-        let h2 = H2Stream {
-            send_stream: send,
-            recv_stream: recv,
-            buf: Bytes::new(),
-            // TODO: we need to make this Drop() sooner, in case we fail, etc
-            active_count: self.stream_count.clone(),
-        };
-        Ok(h2)
-    }
-
     pub fn is_for_workload(&self, wl_key: &WorkloadKey) -> Result<(), crate::proxy::Error> {
         if !(self.wl_key == *wl_key) {
             Err(crate::proxy::Error::Generic(
@@ -738,30 +520,7 @@ impl ConnClient {
 // This is currently only for debugging
 impl Drop for ConnClient {
     fn drop(&mut self) {
-        trace!(
-            "dropping ConnClient for key {} with streamcount: {:?}/{}",
-            self.wl_key,
-            self.stream_count,
-            self.stream_count_max
-        )
-    }
-}
-
-// This is currently only for debugging
-impl Clone for ConnClient {
-    fn clone(&self) -> Self {
-        trace!(
-            "cloning ConnClient for key {} with streamcount: {:?}/{}",
-            self.wl_key,
-            self.stream_count,
-            self.stream_count_max
-        );
-        ConnClient {
-            sender: self.sender.clone(),
-            stream_count: self.stream_count.clone(),
-            stream_count_max: self.stream_count_max,
-            wl_key: self.wl_key.clone(),
-        }
+        trace!("dropping ConnClient for key {}", self.wl_key,)
     }
 }
 
@@ -808,6 +567,7 @@ mod test {
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
     use tokio::task::{self};
+    use tracing::error;
 
     use crate::test_helpers::helpers::initialize_telemetry;
 
@@ -1020,7 +780,7 @@ mod test {
         // We shouldn't drop anything yet
         assert_opens_drops!(srv, 1, 0);
         // This should spill over into a new connection, which should drop
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 3).await;
+        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 4).await;
         assert_opens_drops!(srv, 2, 1);
 
         // Trigger the persistent client to stop, we should evict that connection as well
@@ -1115,21 +875,20 @@ mod test {
             );
 
             let _ = stop.signaled().await;
-            debug!("GOT STOP PERSISTENT CLIENT");
+            debug!("persistent client stop");
             // Close our connection
             drop(c1);
         })
     }
 
-    async fn spawn_server(
-        conn_count: Arc<AtomicU32>,
-        drop_tx: UnboundedSender<()>,
-    ) -> SocketAddr {
+    async fn spawn_server(conn_count: Arc<AtomicU32>, drop_tx: UnboundedSender<()>) -> SocketAddr {
         use http_body_util::Empty;
         // We'll bind to 127.0.0.1:3000
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let test_cfg = test_config();
-        async fn hello_world(req: Request<Incoming>) -> Result<Response<Empty<Bytes>>, Infallible> {
+        async fn hello_world(
+            req: Request<Incoming>,
+        ) -> Result<Response<Empty<bytes::Bytes>>, Infallible> {
             debug!("hello world: received request");
             tokio::task::spawn(async move {
                 match hyper::upgrade::on(req).await {
@@ -1141,7 +900,7 @@ mod test {
                     Err(e) => panic!("No upgrade {e}"),
                 }
             });
-            Ok::<_, Infallible>(Response::new(http_body_util::Empty::<Bytes>::new()))
+            Ok::<_, Infallible>(Response::new(http_body_util::Empty::<bytes::Bytes>::new()))
         }
 
         // We create a TcpListener and bind it to 127.0.0.1:3000
