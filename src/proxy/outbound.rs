@@ -39,6 +39,7 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::{assertions, proxy, socket};
+use crate::proxy::pool::H2Stream;
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -277,12 +278,12 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
-        let upgraded =
+        let mut upgraded =
             Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
         socket::copy_bidirectional(
             stream,
-            &mut ::hyper_util::rt::TokioIo::new(upgraded),
+            &mut upgraded,
             connection_stats,
         )
         .await
@@ -292,7 +293,7 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &&Request,
-    ) -> Result<Upgraded, Error> {
+    ) -> Result<H2Stream, Error> {
         let mut allowed_sans: Vec<Identity> = Vec::new();
         for san in req.upstream_sans.iter() {
             match Identity::from_str(san) {
@@ -323,14 +324,14 @@ impl OutboundConnection {
             f.set_host(&svc.hostname);
         }
 
-        let request = hyper::Request::builder()
+        let request = http::Request::builder()
             .uri(&req.destination.to_string())
             .method(hyper::Method::CONNECT)
             .version(hyper::Version::HTTP_2)
             .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
             .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
             .header(TRACEPARENT_HEADER, self.id.header())
-            .body(Empty::<Bytes>::new())
+            .body(())
             .expect("builder with known status code should not fail");
 
         let  upgraded = Box::pin(self.pool.send_request_pooled(&pool_key, request))
