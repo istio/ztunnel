@@ -366,7 +366,7 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        info!(
+        debug!(
             "Proxying to {} using TCP via {} type {:?}",
             req.destination, req.gateway, req.request_type
         );
