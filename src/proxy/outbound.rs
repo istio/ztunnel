@@ -277,7 +277,7 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
-        let (_conn_client, upgraded) =
+        let upgraded =
             Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
         socket::copy_bidirectional(
@@ -292,7 +292,7 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &&Request,
-    ) -> Result<(pool::ConnClient, Upgraded), Error> {
+    ) -> Result<Upgraded, Error> {
         let mut allowed_sans: Vec<Identity> = Vec::new();
         for san in req.upstream_sans.iter() {
             match Identity::from_str(san) {
@@ -317,12 +317,6 @@ impl OutboundConnection {
             dst: req.gateway,
         });
 
-        debug!("outbound - connection get START");
-        let mut connection = Box::pin(self.pool.connect(&pool_key))
-            .instrument(trace_span!("get pool conn"))
-            .await?;
-        debug!("outbound - connection get END");
-
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
         if let Some(svc) = &req.destination_service {
@@ -339,25 +333,10 @@ impl OutboundConnection {
             .body(Empty::<Bytes>::new())
             .expect("builder with known status code should not fail");
 
-        debug!("outbound - connection send START");
-        // There are scenarios (upstream hangup, etc) where this "send" will simply get stuck.
-        // As in, stream processing deadlocks, and `send_request` never resolves to anything.
-        // Probably related to https://github.com/hyperium/hyper/issues/3623
-        let response = connection
-            .send_request(request)
-            .instrument(trace_span!("send pool conn"))
+        let  upgraded = Box::pin(self.pool.send_request_pooled(&pool_key, request))
+            .instrument(trace_span!("outbound connect"))
             .await?;
-        debug!("outbound - connection send END");
-
-        let code = response.status();
-        if code != 200 {
-            debug!("outbound - connection send FAIL: {code}");
-            return Err(Error::HttpStatus(code));
-        }
-        let upgraded = hyper::upgrade::on(response).await?;
-        // Pass the connection back as well. I am not sure if this is expected behavior of hyper,
-        // but Upgraded is not enough to keep the connection alive so this leads to broken requests.
-        Ok((connection, upgraded))
+        Ok(upgraded)
     }
 
     async fn proxy_to_tcp(
