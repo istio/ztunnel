@@ -1,3 +1,4 @@
+patch = { crates-io = { h2 = { git = "https://github.com/howardjohn/h2", rev = "a9dae872ba67f0f7f518190d410cadcdda24628a" } } }
 [package]
 name = "ztunnel"
 version = "0.0.0"
