@@ -487,8 +487,8 @@ impl Inbound {
             };
 
             let Some(target_waypoint) = (match hbone_target {
-                Address::Service(svc) => svc.waypoint.clone(),
-                Address::Workload(wl) => wl.waypoint,
+                Address::Service(ref svc) => &svc.waypoint,
+                Address::Workload(ref wl) => &wl.waypoint,
             }) else {
                 // can't sandwich if the HBONE target doesn't want a Waypoint.
                 return Some(None);
@@ -509,7 +509,6 @@ impl Inbound {
                         // target points to a different waypoint
                         return Some(None);
                     }
-                    // TODO: should we store this as an Arc in Address::Service?
                     Some((conn_wl, vec![svc]))
                 }
                 Address::Workload(wl) => {
@@ -518,7 +517,8 @@ impl Inbound {
                         return Some(None);
                     }
                     let svc = state.services.get_by_workload(&wl);
-                    Some((*wl, svc))
+                    // TODO: use Arc more pervasive and remove this clone.
+                    Some((Arc::unwrap_or_clone(wl), svc))
                 }
             })
         };

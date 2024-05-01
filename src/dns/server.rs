@@ -355,7 +355,7 @@ impl Store {
                     // Didn't find a service, try a workload.
                     if let Some(wl) = state.workloads.find_hostname(&search_name_str) {
                         return Some(ServerMatch {
-                            server: Address::Workload(Box::new(wl)),
+                            server: Address::Workload(wl),
                             name: search_name,
                             alias,
                         });

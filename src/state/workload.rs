@@ -141,7 +141,7 @@ pub mod address {
     #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
     #[serde(untagged)]
     pub enum Address {
-        Workload(Box<Workload>),
+        Workload(Arc<Workload>),
         Service(Arc<Service>),
     }
 }
@@ -630,11 +630,16 @@ impl WorkloadStore {
         self.by_addr.get(addr).map(|wl| wl.deref().clone())
     }
 
+    /// Finds the workload by address, as an arc. TODO: make find_address and other functions directly return an Arc too
+    pub fn find_address_arc(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
+        self.by_addr.get(addr).map(|wl| wl.clone())
+    }
+
     /// Finds the workload by hostname.
-    pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Workload> {
+    pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Arc<Workload>> {
         self.by_hostname
             .get(hostname.as_ref())
-            .map(|wl| wl.deref().clone())
+            .map(|wl| wl.clone())
     }
 
     /// Finds the workload by uid.
