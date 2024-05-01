@@ -206,7 +206,7 @@ impl ProxyState {
     /// Find either a workload or a service by address.
     pub fn find_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
-        match self.workloads.find_address(network_addr) {
+        match self.workloads.find_address_arc(network_addr) {
             None => {
                 // 2. handle service
                 if let Some(svc) = self.services.get_by_vip(network_addr) {
@@ -214,7 +214,7 @@ impl ProxyState {
                 }
                 None
             }
-            Some(wl) => Some(Address::Workload(Box::new(wl))),
+            Some(wl) => Some(Address::Workload(wl)),
         }
     }
 
@@ -227,7 +227,7 @@ impl ProxyState {
                 // Workload hostnames are globally unique, so ignore the namespace.
                 self.workloads
                     .find_hostname(&name.hostname)
-                    .map(|wl| Address::Workload(Box::new(wl)))
+                    .map(|wl| Address::Workload(wl))
             }
             Some(svc) => Some(Address::Service(svc)),
         }
