@@ -227,7 +227,7 @@ impl ProxyState {
                 // Workload hostnames are globally unique, so ignore the namespace.
                 self.workloads
                     .find_hostname(&name.hostname)
-                    .map(|wl| Address::Workload(wl))
+                    .map(Address::Workload)
             }
             Some(svc) => Some(Address::Service(svc)),
         }
@@ -620,6 +620,9 @@ impl DemandProxyState {
         if let Some(wl) = fetch(addr) {
             return Some(wl);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         self.fetch_on_demand(addr.to_string()).await;
         fetch(addr)
     }
@@ -631,6 +634,9 @@ impl DemandProxyState {
         if let Some(wl) = self.state.read().unwrap().workloads.find_address(addr) {
             return Some(wl);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         self.fetch_on_demand(addr.to_string()).await;
         self.state.read().unwrap().workloads.find_address(addr)
     }
@@ -641,6 +647,9 @@ impl DemandProxyState {
         debug!(%uid, "fetch workload");
         if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
             return Some(wl);
+        }
+        if !self.supports_on_demand() {
+            return None;
         }
         self.fetch_on_demand(uid.to_string()).await;
         self.state.read().unwrap().workloads.find_uid(uid)
@@ -717,6 +726,9 @@ impl DemandProxyState {
         if let Some(address) = self.state.read().unwrap().find_address(network_addr) {
             return Some(address);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(network_addr.to_string()).await;
         self.state.read().unwrap().find_address(network_addr)
@@ -730,11 +742,19 @@ impl DemandProxyState {
         if let Some(address) = self.state.read().unwrap().find_hostname(hostname) {
             return Some(address);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(hostname.to_string()).await;
         self.state.read().unwrap().find_hostname(hostname)
     }
 
+    pub fn supports_on_demand(&self) -> bool {
+        self.demand.is_some()
+    }
+
+    /// fetch_on_demand looks up the provided key on-demand and waits for it to return
     pub async fn fetch_on_demand(&self, key: String) {
         if let Some(demand) = &self.demand {
             debug!(%key, "sending demand request");

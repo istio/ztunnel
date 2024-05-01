@@ -134,9 +134,9 @@ pub mod application_tunnel {
 }
 
 pub mod address {
-    use std::sync::Arc;
     use crate::state::service::Service;
     use crate::state::workload::Workload;
+    use std::sync::Arc;
 
     #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
     #[serde(untagged)]
@@ -632,14 +632,12 @@ impl WorkloadStore {
 
     /// Finds the workload by address, as an arc. TODO: make find_address and other functions directly return an Arc too
     pub fn find_address_arc(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
-        self.by_addr.get(addr).map(|wl| wl.clone())
+        self.by_addr.get(addr).cloned()
     }
 
     /// Finds the workload by hostname.
     pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Arc<Workload>> {
-        self.by_hostname
-            .get(hostname.as_ref())
-            .map(|wl| wl.clone())
+        self.by_hostname.get(hostname.as_ref()).cloned()
     }
 
     /// Finds the workload by uid.
