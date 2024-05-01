@@ -129,7 +129,14 @@ impl PoolState {
     //
     // Note that this simply removes the client ref from this pool - if other things hold client/streamrefs refs,
     // they must also drop those before the underlying connection is fully closed.
-    fn checkin_conn(&self, conn: ConnClient, pool_key: pingora_pool::ConnectionMeta) {
+    fn maybe_checkin_conn(&self, conn: ConnClient, pool_key: pingora_pool::ConnectionMeta) {
+        if conn.sender.will_be_at_max_streamcount() {
+            debug!(
+                "checked out connection for {:?} is now at max streamcount; removing from pool",
+                pool_key
+            );
+            return;
+        }
         let (evict, pickup) = self.connected_pool.put(&pool_key, conn);
         let rx = self.spawner.timeout_rx.clone();
         let pool_ref = self.connected_pool.clone();
@@ -227,7 +234,7 @@ impl PoolState {
                     "checking in new conn for {} with pk {:?}",
                     workload_key, pool_key
                 );
-                self.checkin_conn(client.clone(), pool_key.clone());
+                self.maybe_checkin_conn(client.clone(), pool_key.clone());
                 Ok(Some(client))
                 // END take inner writelock
             }
@@ -297,16 +304,9 @@ impl PoolState {
             }
         };
 
-        if !returned_connection.sender.will_be_at_max_streamcount() {
-            // For any connection, we will check in a copy and return the other unless its already maxed out
-            // TODO: in the future, we can keep track of these and start to use them once they finish some streams.
-            self.checkin_conn(returned_connection.clone(), pool_key.clone());
-        } else {
-            debug!(
-                "checked out connection for {} is now at max streamcount; removing from pool",
-                workload_key
-            );
-        }
+        // For any connection, we will check in a copy and return the other unless its already maxed out
+        // TODO: in the future, we can keep track of these and start to use them once they finish some streams.
+        self.maybe_checkin_conn(returned_connection.clone(), pool_key.clone());
         Ok(Some(returned_connection))
     }
 }
@@ -395,9 +395,9 @@ impl WorkloadHBONEPool {
             .await?;
 
         // Early return, no need to do anything else
-        if existing_conn.is_some() {
+        if let Some(e) = existing_conn {
             debug!("initial attempt - found existing conn, done");
-            return Ok(existing_conn.unwrap());
+            return Ok(e);
         }
 
         // We couldn't get a writelock for this key. This means nobody has tried to establish any conns for this key yet,
@@ -564,7 +564,7 @@ mod test {
     use tokio::net::TcpListener;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-    use tracing::error;
+    use tracing::{error, Instrument};
 
     use crate::test_helpers::helpers::initialize_telemetry;
 
@@ -603,19 +603,14 @@ mod test {
     async fn connections_reused() {
         let (pool, mut srv) = setup_test(3).await;
 
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: srv.addr,
-        };
+        let key = key(&srv, 2);
 
         // Pool allows 3. When we spawn 2 concurrently, we should open a single connection and keep it alive
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 2).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
         assert_opens_drops!(srv, 1, 0);
 
         // Since the last two closed, we are free to re-use the same connection
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 2).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
         assert_opens_drops!(srv, 1, 0);
 
         // Once we drop the pool, we should drop the connections as well
@@ -627,18 +622,8 @@ mod test {
     async fn unique_keys_have_unique_connections() {
         let (pool, mut srv) = setup_test(3).await;
 
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: srv.addr,
-        };
-        let key2 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 3]),
-            dst: srv.addr,
-        };
+        let key1 = key(&srv, 1);
+        let key2 = key(&srv, 2);
 
         test_client(pool.clone(), key1, srv.addr).await;
         test_client(pool.clone(), key2, srv.addr).await;
@@ -652,22 +637,17 @@ mod test {
     async fn connection_limits() {
         let (pool, mut srv) = setup_test(2).await;
 
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: srv.addr,
-        };
+        let key = key(&srv, 1);
 
         // Pool allows 2. When we spawn 4 concurrently, so we need 2 connections
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 4).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 4).await;
         assert_opens_drops!(srv, 2, 2);
 
         // This should require 3 connections (2 already opened, 1 new). However, due to an inefficiency
         // in our pool, we don't properly reuse streams that hit the max.
         // The first batch of 4 will start a connection for the first 2 connections, and each max out so they
         // are not returned to the pool.
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 5).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 5).await;
         assert_opens_drops!(srv, 5, 2);
 
         // Once we drop the pool, we should drop the rest of the connections as well (3 new ones, and the one already checked above)
@@ -676,18 +656,25 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_pool() {
+        // Test an edge case of a pool size of 1. Probably users shouldn't have pool size 1, and if
+        // they do, we should just disable the pool. For now, we don't do that, so make sure it works.
+        let (pool, mut srv) = setup_test(1).await;
+
+        let key = key(&srv, 1);
+
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
+        assert_opens_drops!(srv, 2, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stress_test_single_source() {
         let (pool, mut srv) = setup_test(101).await;
 
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: srv.addr,
-        };
+        let key = key(&srv, 1);
 
         // Spin up 100 requests, they should all work
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 100).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 100).await;
         assert_opens_drops!(srv, 1, 0);
 
         // Once we drop the pool, we should drop the connections as well
@@ -702,13 +689,7 @@ mod test {
         // Spin up 100 requests each from their own source, they should all work
         let mut tasks = vec![];
         for count in 0..100 {
-            let key = WorkloadKey {
-                src_id: Identity::default(),
-                dst_id: vec![Identity::default()],
-                src: IpAddr::from([127, 0, 0, count]),
-                dst: srv.addr,
-            };
-
+            let key = key(&srv, count);
             tasks.push(test_client(pool.clone(), key.clone(), srv.addr));
         }
         future::join_all(tasks).await;
@@ -724,13 +705,7 @@ mod test {
         // Spin up 300 requests each from 3 different sources, they should all work
         let mut tasks = vec![];
         for count in 0..300u16 {
-            let key = WorkloadKey {
-                src_id: Identity::default(),
-                dst_id: vec![Identity::default()],
-                src: IpAddr::from([127, 0, 0, (count % 3) as u8]),
-                dst: srv.addr,
-            };
-
+            let key = key(&srv, (count % 3) as u8);
             tasks.push(test_client(pool.clone(), key.clone(), srv.addr));
         }
         future::join_all(tasks).await;
@@ -742,15 +717,10 @@ mod test {
     async fn idle_eviction() {
         let (pool, mut srv) = setup_test_with_idle(3, Duration::from_millis(100)).await;
 
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: srv.addr,
-        };
+        let key = key(&srv, 1);
 
         // Pool allows 3. When we spawn 2 concurrently, we should open a single connection and keep it alive
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 2).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
         // After 100ms, we should drop everything
         assert_opens_drops!(srv, 1, 1);
     }
@@ -759,22 +729,15 @@ mod test {
     async fn idle_eviction_with_persistent() {
         let (pool, mut srv) = setup_test_with_idle(4, Duration::from_millis(100)).await;
 
-        let key1 = WorkloadKey {
-            src_id: Identity::default(),
-            dst_id: vec![Identity::default()],
-            src: IpAddr::from([127, 0, 0, 2]),
-            dst: srv.addr,
-        };
-
+        let key = key(&srv, 1);
         let (client_stop_signal, client_stop) = drain::channel();
         // Spin up 1 connection
-        spawn_persistent_client(pool.clone(), key1.clone(), srv.addr, client_stop).await;
-        error!("persist done");
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 2).await;
+        spawn_persistent_client(pool.clone(), key.clone(), srv.addr, client_stop).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
         // We shouldn't drop anything yet
         assert_opens_drops!(srv, 1, 0);
         // This should spill over into a new connection, which should drop
-        spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 4).await;
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 4).await;
         assert_opens_drops!(srv, 2, 1);
 
         // Trigger the persistent client to stop, we should evict that connection as well
@@ -791,7 +754,7 @@ mod test {
         let (shutdown_send, _shutdown_recv) = tokio::sync::broadcast::channel::<()>(1);
 
         let mut tasks = vec![];
-        for _ in 0..req_count {
+        for req_num in 0..req_count {
             let req = || {
                 hyper::Request::builder()
                     .uri(format!("{remote_addr}"))
@@ -805,6 +768,7 @@ mod test {
 
             let c1 = pool
                 .send_request_pooled(&key.clone(), req())
+                .instrument(tracing::debug_span!("client", request = req_num))
                 .await
                 .expect("connect should succeed");
             debug!(
@@ -892,6 +856,7 @@ mod test {
                     }
                     Err(e) => panic!("No upgrade {e}"),
                 }
+                debug!("hello world: completed request");
             });
             Ok::<_, Infallible>(Response::new(http_body_util::Empty::<bytes::Bytes>::new()))
         }
@@ -927,8 +892,6 @@ mod test {
                             .initial_stream_window_size(test_cfg.window_size)
                             .initial_connection_window_size(test_cfg.connection_window_size)
                             .max_frame_size(test_cfg.frame_size)
-                            // 64KB max; default is 16MB driven from Golang's defaults
-                            // Since we know we are going to recieve a bounded set of headers, more is overkill.
                             .max_header_list_size(65536)
                             .serve_connection(
                                 hyper_util::rt::TokioIo::new(stream),
@@ -982,5 +945,14 @@ mod test {
         conn_counter: Arc<AtomicU32>,
         drop_rx: UnboundedReceiver<()>,
         addr: SocketAddr,
+    }
+
+    fn key(srv: &TestServer, ip: u8) -> WorkloadKey {
+        WorkloadKey {
+            src_id: Identity::default(),
+            dst_id: vec![Identity::default()],
+            src: IpAddr::from([127, 0, 0, ip]),
+            dst: srv.addr,
+        }
     }
 }
