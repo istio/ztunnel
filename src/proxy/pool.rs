@@ -29,7 +29,6 @@ use std::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::watch;
-use tokio::task;
 
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace};
@@ -64,7 +63,6 @@ struct PoolState {
     connected_pool: Arc<pingora_pool::ConnectionPool<ConnClient>>,
     // this must be an atomic/concurrent-safe list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
     established_conn_writelock: flurry::HashMap<u64, Option<Arc<Mutex<()>>>>,
-    close_pollers: futures::stream::FuturesUnordered<task::JoinHandle<()>>,
     pool_unused_release_timeout: Duration,
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
@@ -165,7 +163,7 @@ impl PoolState {
         let pool_ref = self.connected_pool.clone();
         let pool_key_ref = pool_key.clone();
         let release_timeout = self.pool_unused_release_timeout;
-        self.close_pollers.push(tokio::spawn(async move {
+        tokio::spawn(async move {
             debug!(
                 "starting an idle timeout for connection {:#?}",
                 pool_key_ref
@@ -177,7 +175,7 @@ impl PoolState {
                 "connection {:#?} was removed/checked out/timed out of the pool",
                 pool_key_ref
             )
-        }));
+        });
         let _ = self.pool_notifier.send(true);
     }
 
@@ -412,7 +410,6 @@ impl WorkloadHBONEPool {
                 // the pool is expected to track before the inner hashmap resizes.
                 connected_pool: Arc::new(pingora_pool::ConnectionPool::new(500)),
                 established_conn_writelock: flurry::HashMap::new(),
-                close_pollers: futures::stream::FuturesUnordered::new(),
                 pool_unused_release_timeout: pool_duration,
                 pool_global_conn_count: AtomicI32::new(0),
                 max_streamcount: max_count,
