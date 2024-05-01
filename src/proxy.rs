@@ -506,7 +506,7 @@ pub async fn freebind_connect(
 pub fn guess_inbound_service(
     conn: &Connection,
     for_host_header: &Option<String>,
-    upstream_service: Vec<Service>,
+    upstream_service: Vec<Arc<Service>>,
     dest: &Workload,
 ) -> Option<ServiceDescription> {
     // First, if the client told us what Service they were reaching, look for that
@@ -514,7 +514,7 @@ pub fn guess_inbound_service(
     if let Some(found) = upstream_service
         .iter()
         .find(|s| for_host_header.as_ref() == Some(&s.hostname))
-        .map(ServiceDescription::from)
+        .map(|s| ServiceDescription::from(s.as_ref()))
     {
         return Some(found);
     }
@@ -539,7 +539,7 @@ pub fn guess_inbound_service(
             }
             false
         })
-        .map(ServiceDescription::from)
+        .map(|s| ServiceDescription::from(s.as_ref()))
 }
 
 // Checks that the source identiy and address match the upstream's waypoint

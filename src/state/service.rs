@@ -230,8 +230,8 @@ pub struct ServiceStore {
 
 impl ServiceStore {
     /// Returns the [Service] matching the given VIP.
-    pub fn get_by_vip(&self, vip: &NetworkAddress) -> Option<Service> {
-        self.by_vip.get(vip).map(|s| s.deref().clone())
+    pub fn get_by_vip(&self, vip: &NetworkAddress) -> Option<Arc<Service>> {
+        self.by_vip.get(vip).cloned()
     }
 
     /// Returns the list of [Service]s matching the given hostname. Istio `ServiceEntry`
@@ -250,7 +250,7 @@ impl ServiceStore {
         })
     }
 
-    pub fn get_by_workload(&self, workload: &Workload) -> Vec<Service> {
+    pub fn get_by_workload(&self, workload: &Workload) -> Vec<Arc<Service>> {
         let Some(svc) = self.workload_to_services.get(&workload.uid) else {
             return Vec::new();
         };
@@ -266,7 +266,7 @@ impl ServiceStore {
     /// # Arguments
     ///
     /// * `host` - the namespaced hostname.
-    pub fn get_by_namespaced_host(&self, host: &NamespacedHostname) -> Option<Service> {
+    pub fn get_by_namespaced_host(&self, host: &NamespacedHostname) -> Option<Arc<Service>> {
         // Get the list of services that match the hostname. Typically there will only be one, but
         // ServiceEntry allows configuring arbitrary hostnames on a per-namespace basis.
         match self.by_host.get(&host.hostname) {
@@ -275,7 +275,7 @@ impl ServiceStore {
                 // Return the service that matches the requested namespace.
                 for service in services {
                     if service.namespace == host.namespace {
-                        return Some(service.deref().clone());
+                        return Some(service.clone());
                     }
                 }
                 None
@@ -286,7 +286,8 @@ impl ServiceStore {
     /// Adds an endpoint for the service VIP.
     pub fn insert_endpoint(&mut self, ep: Endpoint) {
         let ep_uid = endpoint_uid(&ep.workload_uid, ep.address.as_ref());
-        if let Some(mut svc) = self.get_by_namespaced_host(&ep.service) {
+        if let Some(svc) = self.get_by_namespaced_host(&ep.service) {
+            let mut svc = Arc::unwrap_or_clone(svc);
             // Clone the service and add the endpoint.
             svc.endpoints.insert(ep_uid, ep);
 
@@ -331,7 +332,8 @@ impl ServiceStore {
 
         // Now remove the endpoint from all Services.
         for svc in &services_to_update {
-            if let Some(mut svc) = self.get_by_namespaced_host(svc) {
+            if let Some(svc) = self.get_by_namespaced_host(svc) {
+                let mut svc = Arc::unwrap_or_clone(svc);
                 svc.endpoints.remove(endpoint_uid);
 
                 // Update the service.

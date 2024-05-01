@@ -347,7 +347,7 @@ impl Store {
                         .unwrap();
 
                     return Some(ServerMatch {
-                        server: Address::Service(Box::new(service)),
+                        server: Address::Service(Arc::new(service)),
                         name: search_name,
                         alias,
                     });

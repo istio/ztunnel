@@ -416,7 +416,7 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Service>), Error> {
+    ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Arc<Service>>), Error> {
         let dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
             address: hbone_addr.ip(),
@@ -459,7 +459,7 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Option<(Workload, Vec<Service>)> {
+    ) -> Option<(Workload, Vec<Arc<Service>>)> {
         let connection_dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
             address: conn.dst.ip(),
@@ -471,7 +471,7 @@ impl Inbound {
 
         // Outer option tells us whether or not we can retry
         // Some(None) means we have enough information to decide this isn't sandwich
-        let lookup = || -> Option<Option<(Workload, Vec<Service>)>> {
+        let lookup = || -> Option<Option<(Workload, Vec<Arc<Service>>)>> {
             let state = state.read();
 
             // TODO Allow HBONE address to be a hostname. We have to respect rules about
@@ -509,7 +509,8 @@ impl Inbound {
                         // target points to a different waypoint
                         return Some(None);
                     }
-                    Some((conn_wl, vec![*svc]))
+                    // TODO: should we store this as an Arc in Address::Service?
+                    Some((conn_wl, vec![svc]))
                 }
                 Address::Workload(wl) => {
                     if !wl.workload_ips.contains(&conn.dst.ip()) {
