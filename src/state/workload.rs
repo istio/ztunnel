@@ -134,6 +134,7 @@ pub mod application_tunnel {
 }
 
 pub mod address {
+    use std::sync::Arc;
     use crate::state::service::Service;
     use crate::state::workload::Workload;
 
@@ -141,7 +142,7 @@ pub mod address {
     #[serde(untagged)]
     pub enum Address {
         Workload(Box<Workload>),
-        Service(Box<Service>),
+        Service(Arc<Service>),
     }
 }
 

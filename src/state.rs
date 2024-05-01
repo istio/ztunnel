@@ -210,7 +210,7 @@ impl ProxyState {
             None => {
                 // 2. handle service
                 if let Some(svc) = self.services.get_by_vip(network_addr) {
-                    return Some(Address::Service(Box::new(svc)));
+                    return Some(Address::Service(svc));
                 }
                 None
             }
@@ -229,7 +229,7 @@ impl ProxyState {
                     .find_hostname(&name.hostname)
                     .map(|wl| Address::Workload(Box::new(wl)))
             }
-            Some(svc) => Some(Address::Service(Box::new(svc))),
+            Some(svc) => Some(Address::Service(svc)),
         }
     }
 
@@ -264,7 +264,7 @@ impl ProxyState {
                 workload: wl,
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
-                destination_service: Some((&svc).into()),
+                destination_service: Some(ServiceDescription::from(svc.as_ref())),
             };
             return Some(us);
         }
@@ -607,7 +607,7 @@ impl DemandProxyState {
     pub async fn fetch_workload_services(
         &self,
         addr: &NetworkAddress,
-    ) -> Option<(Workload, Vec<Service>)> {
+    ) -> Option<(Workload, Vec<Arc<Service>>)> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload and service");
         let fetch = |addr: &NetworkAddress| {
