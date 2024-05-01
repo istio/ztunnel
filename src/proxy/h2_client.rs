@@ -1,3 +1,21 @@
+// Copyright Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// This code draws major inspiration from 2 Apache-2.0 licensed codebases:
+// * https://github.com/cloudflare/pingora/blob/main/pingora-core/src/protocols/http/v2/client.rs
+// * https://github.com/hyperium/hyper/blob/master/src/proto/h2/client.rs
+
 use crate::config;
 use crate::proxy::Error;
 use bytes::Buf;
@@ -8,14 +26,16 @@ use h2::{Reason, SendStream};
 use http::Request;
 use std::io::Cursor;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
 use tokio_rustls::client::TlsStream;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 // H2Stream represents an active HTTP2 stream. Consumers can only Read/Write
 pub struct H2Stream {
@@ -55,7 +75,9 @@ impl AsyncRead for H2Stream {
                         continue
                     }
                     Some(Ok(buf)) => {
-                        // TODO: implement ping
+                        // TODO: Hyper and Go make their pinging data aware and don't send pings when data is received
+                        // Pingora, and our implementation, currently don't do this.
+                        // We may want to; if so, modify here.
                         // self.ping.record_data(buf.len());
                         break buf;
                     }
@@ -200,13 +222,14 @@ pub struct H2ConnectClient {
 }
 
 impl H2ConnectClient {
-    pub fn at_max_streamcount(&self) -> bool {
-        let curr_count = self.stream_count.load(Ordering::Relaxed);
+    // will_be_at_max_streamcount checks if a stream will be maxed out if we send one more request on it
+    pub fn will_be_at_max_streamcount(&self) -> bool {
+        let future_count = self.stream_count.load(Ordering::Relaxed) + 1;
         trace!(
-            "checking streamcount: {curr_count} >= {}",
+            "checking streamcount: {future_count} >= {}",
             self.max_allowed_streams
         );
-        curr_count >= self.max_allowed_streams
+        future_count >= self.max_allowed_streams
     }
 
     pub async fn send_request(&mut self, req: http::Request<()>) -> Result<H2Stream, Error> {
@@ -244,17 +267,28 @@ impl H2ConnectClient {
     }
 }
 
-async fn drive_connection<S, B>(c: Connection<S, B>, mut driver_drain: Receiver<bool>)
+async fn drive_connection<S, B>(mut conn: Connection<S, B>, mut driver_drain: Receiver<bool>)
 where
     S: AsyncRead + AsyncWrite + Send + Unpin,
     B: Buf,
 {
-    // TODO: ping pong
+    let ping_pong = conn
+        .ping_pong()
+        .expect("ping_pong should only be called once");
+    // for ping to inform this fn to drop the connection
+    let (ping_drop_tx, ping_drop_rx) = oneshot::channel::<()>();
+    // for this fn to inform ping to give up when it is already dropped
+    let dropped = Arc::new(AtomicBool::new(false));
+    tokio::task::spawn(do_ping_pong(ping_pong, ping_drop_tx, dropped.clone()));
+
     tokio::select! {
         _ = driver_drain.changed() => {
             debug!("draining outer HBONE connection");
         }
-        res = c => {
+        _ = ping_drop_rx => {
+            warn!("HBONE ping timeout/error");
+        }
+        res = conn => {
             match res {
                 Err(e) => {
                     error!("Error in HBONE connection handshake: {:?}", e);
@@ -263,6 +297,48 @@ where
                     debug!("done with HBONE connection handshake: {:?}", res);
                 }
             }
+        }
+    }
+    // Signal to the ping_pong it should also stop.
+    dropped.store(true, Ordering::Relaxed);
+}
+
+async fn do_ping_pong(
+    mut ping_pong: h2::PingPong,
+    tx: oneshot::Sender<()>,
+    dropped: Arc<AtomicBool>,
+) {
+    const PING_INTERVAL: Duration = Duration::from_secs(10);
+    const PING_TIMEOUT: Duration = Duration::from_secs(20);
+    // delay before sending the first ping, no need to race with the first request
+    tokio::time::sleep(PING_INTERVAL).await;
+    loop {
+        if dropped.load(Ordering::Relaxed) {
+            return;
+        }
+        let ping_fut = ping_pong.ping(h2::Ping::opaque());
+        log::debug!("ping sent");
+        match tokio::time::timeout(PING_TIMEOUT, ping_fut).await {
+            Err(_) => {
+                log::error!("ping timeout");
+                let _ = tx.send(());
+                return;
+            }
+            Ok(r) => match r {
+                Ok(_) => {
+                    log::debug!("pong received");
+                    tokio::time::sleep(PING_INTERVAL).await;
+                }
+                Err(e) => {
+                    if dropped.load(Ordering::Relaxed) {
+                        // drive_connection() exits first, no need to error again
+                        return;
+                    }
+                    log::error!("ping error: {e}");
+                    let _ = tx.send(());
+                    return;
+                }
+            },
         }
     }
 }
