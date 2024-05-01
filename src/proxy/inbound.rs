@@ -264,12 +264,9 @@ impl Inbound {
             dst: upstream_addr,
             ..conn
         };
-        let from_gateway = proxy::check_from_network_gateway(
-            &pi.state,
-            &upstream,
-            conn.src_identity.as_ref(),
-        )
-        .await;
+        let from_gateway =
+            proxy::check_from_network_gateway(&pi.state, &upstream, conn.src_identity.as_ref())
+                .await;
 
         if from_gateway {
             debug!("request from gateway");
@@ -431,7 +428,7 @@ impl Inbound {
         } else if let Some((us_wl, us_svc)) =
             // For sandwich, we redirect the connection to target this waypoint instance
             // and the HBONE target remains the same. Walk the WDS graph to see if they're related.
-            Self::find_sandwich_upstream(&state, conn, hbone_addr).await
+            Self::find_sandwich_upstream(state, conn, hbone_addr).await
         {
             let next_hop = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
             (next_hop, us_wl, us_svc)
@@ -527,6 +524,9 @@ impl Inbound {
             return res;
         }
 
+        if !state.supports_on_demand() {
+            return None;
+        }
         tokio::join![
             state.fetch_on_demand(connection_dst.to_string()),
             state.fetch_on_demand(hbone_dst.to_string()),
