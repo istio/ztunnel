@@ -235,7 +235,7 @@ impl Inbound {
 
         // Determine the next hop.
         let (upstream_addr, inbound_protocol, upstream, upstream_service) =
-            match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
+            match Self::find_inbound_upstream(&pi.state, &conn, hbone_addr).await {
                 Ok(res) => res,
                 Err(e) => {
                     metrics::log_early_deny(conn.src, conn.dst, Reporter::destination, e);
@@ -265,7 +265,7 @@ impl Inbound {
             ..conn
         };
         let from_gateway = proxy::check_from_network_gateway(
-            pi.state.clone(),
+            &pi.state,
             &upstream,
             conn.src_identity.as_ref(),
         )
@@ -413,7 +413,7 @@ impl Inbound {
     }
 
     async fn find_inbound_upstream(
-        state: DemandProxyState,
+        state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
     ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Service>), Error> {
@@ -431,7 +431,7 @@ impl Inbound {
         } else if let Some((us_wl, us_svc)) =
             // For sandwich, we redirect the connection to target this waypoint instance
             // and the HBONE target remains the same. Walk the WDS graph to see if they're related.
-            Self::find_sandwich_upstream(state, conn, hbone_addr).await
+            Self::find_sandwich_upstream(&state, conn, hbone_addr).await
         {
             let next_hop = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
             (next_hop, us_wl, us_svc)
@@ -456,7 +456,7 @@ impl Inbound {
     }
 
     async fn find_sandwich_upstream(
-        state: DemandProxyState,
+        state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
     ) -> Option<(Workload, Vec<Service>)> {

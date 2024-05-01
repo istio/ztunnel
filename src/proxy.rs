@@ -544,7 +544,7 @@ pub fn guess_inbound_service(
 
 // Checks that the source identiy and address match the upstream's waypoint
 async fn check_from_waypoint(
-    state: DemandProxyState,
+    state: &DemandProxyState,
     upstream: &Workload,
     src_identity: Option<&Identity>,
     src_ip: &IpAddr,
@@ -558,7 +558,7 @@ async fn check_from_waypoint(
 // Checks if the connection's source identity is the identity for the upstream's network
 // gateway
 async fn check_from_network_gateway(
-    state: DemandProxyState,
+    state: &DemandProxyState,
     upstream: &Workload,
     src_identity: Option<&Identity>,
 ) -> bool {
@@ -569,7 +569,7 @@ async fn check_from_network_gateway(
 // Check if the source's identity matches any workloads that make up the given gateway
 // TODO: This can be made more accurate by also checking addresses.
 async fn check_gateway_address<F>(
-    state: DemandProxyState,
+    state: &DemandProxyState,
     gateway_address: Option<&GatewayAddress>,
     predicate: F,
 ) -> bool

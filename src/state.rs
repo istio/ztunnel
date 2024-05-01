@@ -482,14 +482,13 @@ impl DemandProxyState {
         src_workload: &Workload,
         metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
-        let mut state: DemandProxyState = self.clone();
         let labels = OnDemandDnsLabels::new()
             .with_destination(workload)
             .with_source(src_workload);
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
-        let rdns = match state.get_ips_for_hostname(&workload.hostname) {
+        let rdns = match self.get_ips_for_hostname(&workload.hostname) {
             Some(r) => r,
             None => {
                 metrics
@@ -500,9 +499,9 @@ impl DemandProxyState {
                 // TODO: optimize so that if multiple requests to the same hostname come in at the same time,
                 // we don't start more than one background on-demand DNS task
 
-                Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                Self::resolve_on_demand_dns(self, workload).await;
                 // try to get it again
-                let updated_rdns = state.get_ips_for_hostname(&hostname);
+                let updated_rdns = self.get_ips_for_hostname(&hostname);
                 match updated_rdns {
                     Some(rdns) => rdns,
                     None => {
@@ -522,7 +521,7 @@ impl DemandProxyState {
         Ok(*ip)
     }
 
-    async fn resolve_on_demand_dns(mut state: DemandProxyState, workload: &Workload) {
+    async fn resolve_on_demand_dns(state: &DemandProxyState, workload: &Workload) {
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         trace!("dns workload async task started for {:?}", &hostname);
@@ -582,7 +581,7 @@ impl DemandProxyState {
         state.set_ips_for_hostname(hostname, rdns);
     }
 
-    pub fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
+    pub fn set_ips_for_hostname(&self, hostname: String, rdns: ResolvedDns) {
         self.state
             .write()
             .unwrap()
@@ -591,7 +590,7 @@ impl DemandProxyState {
             .insert(hostname, rdns);
     }
 
-    pub fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
+    pub fn get_ips_for_hostname(&self, hostname: &String) -> Option<ResolvedDns> {
         self.state
             .read()
             .unwrap()
