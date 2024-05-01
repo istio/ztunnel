@@ -18,11 +18,9 @@ use std::sync::Arc;
 
 use std::time::Instant;
 
-use bytes::Bytes;
 use drain::Watch;
-use http_body_util::Empty;
+
 use hyper::header::FORWARDED;
-use hyper::upgrade::Upgraded;
 
 use tokio::net::{TcpListener, TcpStream};
 
@@ -35,6 +33,7 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
+use crate::proxy::h2_client::H2Stream;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
@@ -277,22 +276,16 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
-        let (_conn_client, upgraded) =
-            Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
+        let mut upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
-        socket::copy_bidirectional(
-            stream,
-            &mut ::hyper_util::rt::TokioIo::new(upgraded),
-            connection_stats,
-        )
-        .await
+        socket::copy_bidirectional(stream, &mut upgraded, connection_stats).await
     }
 
     async fn build_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
         req: &&Request,
-    ) -> Result<(pool::ConnClient, Upgraded), Error> {
+    ) -> Result<H2Stream, Error> {
         let mut allowed_sans: Vec<Identity> = Vec::new();
         for san in req.upstream_sans.iter() {
             match Identity::from_str(san) {
@@ -317,47 +310,26 @@ impl OutboundConnection {
             dst: req.gateway,
         });
 
-        debug!("outbound - connection get START");
-        let mut connection = Box::pin(self.pool.connect(&pool_key))
-            .instrument(trace_span!("get pool conn"))
-            .await?;
-        debug!("outbound - connection get END");
-
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
         if let Some(svc) = &req.destination_service {
             f.set_host(&svc.hostname);
         }
 
-        let request = hyper::Request::builder()
+        let request = http::Request::builder()
             .uri(&req.destination.to_string())
             .method(hyper::Method::CONNECT)
             .version(hyper::Version::HTTP_2)
             .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
             .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
             .header(TRACEPARENT_HEADER, self.id.header())
-            .body(Empty::<Bytes>::new())
+            .body(())
             .expect("builder with known status code should not fail");
 
-        debug!("outbound - connection send START");
-        // There are scenarios (upstream hangup, etc) where this "send" will simply get stuck.
-        // As in, stream processing deadlocks, and `send_request` never resolves to anything.
-        // Probably related to https://github.com/hyperium/hyper/issues/3623
-        let response = connection
-            .send_request(request)
-            .instrument(trace_span!("send pool conn"))
+        let upgraded = Box::pin(self.pool.send_request_pooled(&pool_key, request))
+            .instrument(trace_span!("outbound connect"))
             .await?;
-        debug!("outbound - connection send END");
-
-        let code = response.status();
-        if code != 200 {
-            debug!("outbound - connection send FAIL: {code}");
-            return Err(Error::HttpStatus(code));
-        }
-        let upgraded = hyper::upgrade::on(response).await?;
-        // Pass the connection back as well. I am not sure if this is expected behavior of hyper,
-        // but Upgraded is not enough to keep the connection alive so this leads to broken requests.
-        Ok((connection, upgraded))
+        Ok(upgraded)
     }
 
     async fn proxy_to_tcp(
