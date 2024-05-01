@@ -1038,8 +1038,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "h2"
 version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "816ec7294445779408f36fe57bc5b7fc1cf59664059096c65f905c1c61f58069"
+source = "git+https://github.com/howardjohn/h2?rev=a9dae872ba67f0f7f518190d410cadcdda24628a#a9dae872ba67f0f7f518190d410cadcdda24628a"
 dependencies = [
  "bytes",
  "fnv",
@@ -2031,9 +2030,9 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pingora-pool"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4569e3bef52b0abab239a5cf3287c71307615ca61be7fc7799d71fdaab33d81"
+checksum = "a2a68d712c0c907f515f50e13e605bcd2df45e9b2993fd6093c119b0d9aa1dd6"
 dependencies = [
  "crossbeam-queue",
  "log",
@@ -2046,9 +2045,9 @@ dependencies = [
 
 [[package]]
 name = "pingora-timeout"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0be182194d34e1b28608eaa49ee0fb86e5b7ab1d21a1d7a2b4d402446fda47e1"
+checksum = "a542dbde4f01760d4edda41b4f58fd90e005be7ac51e97313e9efca43776f825"
 dependencies = [
  "futures",
  "once_cell",
