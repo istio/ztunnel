@@ -286,17 +286,7 @@ impl PoolState {
             workload_key,
             pool_key.key
         );
-        let existing = self.guarded_get(&pool_key.key, workload_key)?.filter(|e| {
-            if e.sender.at_max_streamcount() {
-                debug!(
-                    "found existing connection {}, but streamcount is maxed; removing from pool",
-                    workload_key
-                );
-                return false;
-            }
-            true
-        });
-        let returned_connection = match existing {
+        let returned_connection = match self.guarded_get(&pool_key.key, workload_key)? {
             Some(existing) => {
                 debug!("re-using connection for {}", workload_key);
                 existing
@@ -307,8 +297,16 @@ impl PoolState {
             }
         };
 
-        // For any connection, we will check in a copy and return the other
-        self.checkin_conn(returned_connection.clone(), pool_key.clone());
+        if !returned_connection.sender.will_be_at_max_streamcount() {
+            // For any connection, we will check in a copy and return the other unless its already maxed out
+            // TODO: in the future, we can keep track of these and start to use them once they finish some streams.
+            self.checkin_conn(returned_connection.clone(), pool_key.clone());
+        } else {
+            debug!(
+                "checked out connection for {} is now at max streamcount; removing from pool",
+                workload_key
+            );
+        }
         Ok(Some(returned_connection))
     }
 }
@@ -566,7 +564,6 @@ mod test {
     use tokio::net::TcpListener;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-    use tokio::task::{self};
     use tracing::error;
 
     use crate::test_helpers::helpers::initialize_telemetry;
@@ -664,27 +661,23 @@ mod test {
 
         // Pool allows 2. When we spawn 4 concurrently, so we need 2 connections
         spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 4).await;
-        // assert_opens_drops!(srv, 2, 1);
-        // TODO: we should be able to assert here
+        assert_opens_drops!(srv, 2, 2);
 
         // This should require 3 connections (2 already opened, 1 new). However, due to an inefficiency
         // in our pool, we don't properly reuse streams that hit the max.
-        // The first batch of 4 will start a connection for the first 2 connections, then on the third
-        // will evict the initial one and start a new one.
-        // This leaves one in the pool. We use that here (handles 2), and need to create 2 more connections
-        // for the remaining
+        // The first batch of 4 will start a connection for the first 2 connections, and each max out so they
+        // are not returned to the pool.
         spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 5).await;
-        // assert_opens_drops!(srv, 4, 2);
-        // TODO: we should be able to assert here
+        assert_opens_drops!(srv, 5, 2);
 
         // Once we drop the pool, we should drop the rest of the connections as well (3 new ones, and the one already checked above)
         drop(pool);
-        assert_opens_drops!(srv, 4, 4);
+        assert_opens_drops!(srv, 5, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stress_test_single_source() {
-        let (pool, mut srv) = setup_test(100).await;
+        let (pool, mut srv) = setup_test(101).await;
 
         let key1 = WorkloadKey {
             src_id: Identity::default(),
@@ -775,7 +768,8 @@ mod test {
 
         let (client_stop_signal, client_stop) = drain::channel();
         // Spin up 1 connection
-        spawn_persistent_client(pool.clone(), key1.clone(), srv.addr, client_stop);
+        spawn_persistent_client(pool.clone(), key1.clone(), srv.addr, client_stop).await;
+        error!("persist done");
         spawn_clients_concurrently(pool.clone(), key1.clone(), srv.addr, 2).await;
         // We shouldn't drop anything yet
         assert_opens_drops!(srv, 1, 0);
@@ -850,35 +844,34 @@ mod test {
         );
     }
 
-    fn spawn_persistent_client(
+    async fn spawn_persistent_client(
         mut pool: WorkloadHBONEPool,
         key: WorkloadKey,
         remote_addr: SocketAddr,
         stop: Watch,
-    ) -> task::JoinHandle<()> {
+    ) {
+        let req = || {
+            http::Request::builder()
+                .uri(format!("{remote_addr}"))
+                .method(http::Method::CONNECT)
+                .version(http::Version::HTTP_2)
+                .body(())
+                .unwrap()
+        };
+
+        let start = Instant::now();
+
+        let c1 = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        debug!(
+            "client spent {}ms waiting for conn",
+            start.elapsed().as_millis()
+        );
         tokio::spawn(async move {
-            let req = || {
-                http::Request::builder()
-                    .uri(format!("{remote_addr}"))
-                    .method(http::Method::CONNECT)
-                    .version(http::Version::HTTP_2)
-                    .body(())
-                    .unwrap()
-            };
-
-            let start = Instant::now();
-
-            let c1 = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
-            debug!(
-                "client spent {}ms waiting for conn",
-                start.elapsed().as_millis()
-            );
-
             let _ = stop.signaled().await;
             debug!("persistent client stop");
             // Close our connection
             drop(c1);
-        })
+        });
     }
 
     async fn spawn_server(conn_count: Arc<AtomicU32>, drop_tx: UnboundedSender<()>) -> SocketAddr {
