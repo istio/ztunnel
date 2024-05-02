@@ -18,7 +18,7 @@
 
 use crate::config;
 use crate::proxy::Error;
-use crate::proxy::Error::H2;
+
 use bytes::Buf;
 use bytes::Bytes;
 use futures_core::ready;
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io;
+
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
