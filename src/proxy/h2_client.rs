@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
@@ -38,12 +38,14 @@ use tokio_rustls::client::TlsStream;
 use tracing::{debug, error, trace, warn};
 
 // H2Stream represents an active HTTP2 stream. Consumers can only Read/Write
-pub struct H2Stream {
-    send_stream: h2::SendStream<SendBuf>,
-    recv_stream: h2::RecvStream,
-    buf: Bytes,
-    active_count: Arc<AtomicU16>,
-}
+// pin_project_lite::pin_project! {
+    pub struct H2Stream {
+        send_stream: h2::SendStream<SendBuf>,
+        recv_stream: h2::RecvStream,
+        buf: Bytes,
+        active_count: Arc<AtomicU16>,
+    }
+// }
 
 impl H2Stream {
     fn write_slice(&mut self, buf: &[u8], end_of_stream: bool) -> Result<(), std::io::Error> {
@@ -58,6 +60,47 @@ impl Drop for H2Stream {
     fn drop(&mut self) {
         let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
         trace!("dropping h2stream, has {} active streams left", left - 1);
+    }
+}
+
+impl AsyncBufRead for H2Stream {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
+        const EOF: Poll<std::io::Result<&[u8]>> = Poll::Ready(Ok(&[]));
+        let this = self.get_mut();
+        let self_buf = &mut this.buf;
+        {
+            if !self_buf.chunk().is_empty() {
+                let chunk = (*self_buf).chunk();
+                return Poll::Ready(Ok(chunk));
+            }
+        }
+        loop {
+            match ready!(this.recv_stream.poll_data(cx)) {
+                None => return EOF,
+                Some(Ok(buf)) if buf.is_empty() && !this.recv_stream.is_end_stream() => continue,
+                Some(Ok(buf)) => {
+                    // TODO: Hyper and Go make their pinging data aware and don't send pings when data is received
+                    // Pingora, and our implementation, currently don't do this.
+                    // We may want to; if so, modify here.
+                    // this.ping.record_data(buf.len());
+                    let _ = this.recv_stream.flow_control().release_capacity(buf.len());
+                    *self_buf = buf;
+                }
+                Some(Err(e)) => {
+                    return Poll::Ready(match e.reason() {
+                        Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => Ok(&[]),
+                        Some(Reason::STREAM_CLOSED) => {
+                            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
+                        }
+                        _ => Err(h2_to_io_error(e)),
+                    })
+                }
+            }
+        }
+    }
+
+    fn consume(mut self: Pin<&mut Self>, amt: usize) {
+        self.as_mut().buf.advance(amt)
     }
 }
 
