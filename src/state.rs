@@ -886,7 +886,7 @@ mod tests {
         test_helpers::assert_eventually(
             Duration::from_secs(5),
             || mock_proxy_state.fetch_destination(&dst),
-            Some(Address::Workload(Box::new(
+            Some(Address::Workload(Arc::new(
                 test_helpers::test_default_workload(),
             ))),
         )
@@ -900,7 +900,7 @@ mod tests {
         test_helpers::assert_eventually(
             Duration::from_secs(5),
             || mock_proxy_state.fetch_destination(&dst),
-            Some(Address::Service(Box::new(
+            Some(Address::Service(Arc::new(
                 test_helpers::mock_default_service(),
             ))),
         )
