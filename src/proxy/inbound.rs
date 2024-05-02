@@ -670,7 +670,7 @@ mod tests {
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };
         let res = Inbound::find_inbound_upstream(
-            state,
+            &state,
             &conn,
             format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap(),
         )

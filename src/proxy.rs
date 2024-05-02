@@ -640,7 +640,7 @@ mod tests {
         let upstream_with_address = mock_wokload_with_gateway(Some(mock_default_gateway_address()));
         assert!(
             check_from_network_gateway(
-                state.clone(),
+                &state,
                 &upstream_with_address,
                 from_gw_conn.as_ref(),
             )
@@ -648,7 +648,7 @@ mod tests {
         );
         assert!(
             !check_from_network_gateway(
-                state.clone(),
+                &state,
                 &upstream_with_address,
                 not_from_gw_conn.as_ref(),
             )
@@ -660,14 +660,14 @@ mod tests {
             mock_wokload_with_gateway(Some(mock_default_gateway_hostname()));
         assert!(
             check_from_network_gateway(
-                state.clone(),
+                &state,
                 &upstream_with_hostname,
                 from_gw_conn.as_ref(),
             )
             .await
         );
         assert!(
-            !check_from_network_gateway(state, &upstream_with_hostname, not_from_gw_conn.as_ref())
+            !check_from_network_gateway(&state, &upstream_with_hostname, not_from_gw_conn.as_ref())
                 .await
         );
     }
