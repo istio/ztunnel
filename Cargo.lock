@@ -1038,7 +1038,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "h2"
 version = "0.4.4"
-source = "git+https://github.com/howardjohn/h2?rev=a9dae872ba67f0f7f518190d410cadcdda24628a#a9dae872ba67f0f7f518190d410cadcdda24628a"
+source = "git+https://github.com/hyperium/h2?rev=be129832df989bf28940da3618827e190ae64ef2#be129832df989bf28940da3618827e190ae64ef2"
 dependencies = [
  "bytes",
  "fnv",
