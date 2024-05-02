@@ -484,7 +484,7 @@ impl OutboundConnection {
             .await?;
 
         let from_waypoint = proxy::check_from_waypoint(
-            self.pi.state.clone(),
+            &self.pi.state,
             &us.workload,
             Some(&source_workload.identity()),
             &downstream_network_addr.address,

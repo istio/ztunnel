@@ -100,12 +100,13 @@ impl Inbound {
 
         let (sub_drain_signal, sub_drain) = drain::channel();
 
+        let pi = Arc::new(self.pi);
         while let Some(tls) = stream.next().await {
+            let pi = pi.clone();
             let (raw_socket, ssl) = tls.get_ref();
             let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
             let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
-            let pi = self.pi.clone();
             let connection_manager = pi.connection_manager.clone();
             let drain = sub_drain.clone();
             let network = pi.cfg.network.clone();
@@ -120,44 +121,46 @@ impl Inbound {
                 };
                 debug!(%conn, "accepted connection");
                 let enable_original_source = pi.cfg.enable_original_source;
-                let serve = crate::hyper_util::http2_server()
-                    .initial_stream_window_size(pi.cfg.window_size)
-                    .initial_connection_window_size(pi.cfg.connection_window_size)
-                    // well behaved clients should close connections.
-                    // not all clients are well-behaved. This will prune
-                    // connections when the client is not responding, to keep
-                    // us from holding many stale conns from deceased clients
-                    .keep_alive_interval(Some(Duration::from_secs(10)))
-                    .max_frame_size(pi.cfg.frame_size)
-                    // 64KB max; default is 16MB driven from Golang's defaults
-                    // Since we know we are going to recieve a bounded set of headers, more is overkill.
-                    .max_header_list_size(65536)
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(tls),
-                        service_fn(move |req| {
-                            Self::serve_connect(
-                                pi.clone(),
-                                conn.clone(),
-                                enable_original_source.unwrap_or_default(),
-                                req,
-                                illegal_ports.clone(),
-                                connection_manager.clone(),
-                            )
-                            .map(|status| {
-                                let resp: Response<Empty<Bytes>> = Response::builder()
-                                    .status(status)
-                                    .body(Empty::new())
-                                    .expect("builder with known status code should not fail");
-                                Ok::<_, hyper::Error>(resp)
-                            })
-                        }),
-                    );
+                let serve = Box::pin(
+                    crate::hyper_util::http2_server()
+                        .initial_stream_window_size(pi.cfg.window_size)
+                        .initial_connection_window_size(pi.cfg.connection_window_size)
+                        // well behaved clients should close connections.
+                        // not all clients are well-behaved. This will prune
+                        // connections when the client is not responding, to keep
+                        // us from holding many stale conns from deceased clients
+                        .keep_alive_interval(Some(Duration::from_secs(10)))
+                        .max_frame_size(pi.cfg.frame_size)
+                        // 64KB max; default is 16MB driven from Golang's defaults
+                        // Since we know we are going to recieve a bounded set of headers, more is overkill.
+                        .max_header_list_size(65536)
+                        .serve_connection(
+                            hyper_util::rt::TokioIo::new(tls),
+                            service_fn(move |req| {
+                                Self::serve_connect(
+                                    pi.clone(),
+                                    conn.clone(),
+                                    enable_original_source.unwrap_or_default(),
+                                    req,
+                                    illegal_ports.clone(),
+                                    connection_manager.clone(),
+                                )
+                                .map(|status| {
+                                    let resp: Response<Empty<Bytes>> = Response::builder()
+                                        .status(status)
+                                        .body(Empty::new())
+                                        .expect("builder with known status code should not fail");
+                                    Ok::<_, hyper::Error>(resp)
+                                })
+                            }),
+                        ),
+                );
                 // Wait for drain to signal or connection serving to complete
                 match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
                     // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
                     futures_util::future::Either::Left((_shutdown, mut server)) => {
                         debug!("inbound serve got drain {:?}", server);
-                        let drain = std::pin::Pin::new(&mut server);
+                        let drain = std::pin::Pin::as_mut(&mut server);
                         drain.graceful_shutdown();
                         // There are scenarios where the http2 server never resolves after
                         // `graceful_shutdown`, which will hang the whole task.
@@ -181,8 +184,7 @@ impl Inbound {
                     }
                 }
             };
-            // This is pretty obscene right now. Fortunately with pooling this is less problematic than outbound.
-            assertions::size_between_ref(10_000, 12_000, &serve_client);
+            assertions::size_between_ref(1500, 2500, &serve_client);
             tokio::task::spawn(serve_client);
         }
         info!("draining connections");
@@ -206,7 +208,7 @@ impl Inbound {
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
-        pi: ProxyInputs,
+        pi: Arc<ProxyInputs>,
         conn: Connection,
         enable_original_source: bool,
         req: Request<Incoming>,
@@ -235,7 +237,7 @@ impl Inbound {
 
         // Determine the next hop.
         let (upstream_addr, inbound_protocol, upstream, upstream_service) =
-            match Self::find_inbound_upstream(pi.state.clone(), &conn, hbone_addr).await {
+            match Self::find_inbound_upstream(&pi.state, &conn, hbone_addr).await {
                 Ok(res) => res,
                 Err(e) => {
                     metrics::log_early_deny(conn.src, conn.dst, Reporter::destination, e);
@@ -264,12 +266,9 @@ impl Inbound {
             dst: upstream_addr,
             ..conn
         };
-        let from_gateway = proxy::check_from_network_gateway(
-            pi.state.clone(),
-            &upstream,
-            conn.src_identity.as_ref(),
-        )
-        .await;
+        let from_gateway =
+            proxy::check_from_network_gateway(&pi.state, &upstream, conn.src_identity.as_ref())
+                .await;
 
         if from_gateway {
             debug!("request from gateway");
@@ -322,7 +321,7 @@ impl Inbound {
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
             },
-            pi.metrics,
+            pi.metrics.clone(),
         ));
 
         let conn_guard = match connection_manager
@@ -413,10 +412,10 @@ impl Inbound {
     }
 
     async fn find_inbound_upstream(
-        state: DemandProxyState,
+        state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Service>), Error> {
+    ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Arc<Service>>), Error> {
         let dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
             address: hbone_addr.ip(),
@@ -456,10 +455,10 @@ impl Inbound {
     }
 
     async fn find_sandwich_upstream(
-        state: DemandProxyState,
+        state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Option<(Workload, Vec<Service>)> {
+    ) -> Option<(Workload, Vec<Arc<Service>>)> {
         let connection_dst = &NetworkAddress {
             network: conn.dst_network.to_string(),
             address: conn.dst.ip(),
@@ -471,7 +470,7 @@ impl Inbound {
 
         // Outer option tells us whether or not we can retry
         // Some(None) means we have enough information to decide this isn't sandwich
-        let lookup = || -> Option<Option<(Workload, Vec<Service>)>> {
+        let lookup = || -> Option<Option<(Workload, Vec<Arc<Service>>)>> {
             let state = state.read();
 
             // TODO Allow HBONE address to be a hostname. We have to respect rules about
@@ -487,8 +486,8 @@ impl Inbound {
             };
 
             let Some(target_waypoint) = (match hbone_target {
-                Address::Service(svc) => svc.waypoint.clone(),
-                Address::Workload(wl) => wl.waypoint,
+                Address::Service(ref svc) => &svc.waypoint,
+                Address::Workload(ref wl) => &wl.waypoint,
             }) else {
                 // can't sandwich if the HBONE target doesn't want a Waypoint.
                 return Some(None);
@@ -509,7 +508,7 @@ impl Inbound {
                         // target points to a different waypoint
                         return Some(None);
                     }
-                    Some((conn_wl, vec![*svc]))
+                    Some((conn_wl, vec![svc]))
                 }
                 Address::Workload(wl) => {
                     if !wl.workload_ips.contains(&conn.dst.ip()) {
@@ -517,7 +516,8 @@ impl Inbound {
                         return Some(None);
                     }
                     let svc = state.services.get_by_workload(&wl);
-                    Some((*wl, svc))
+                    // TODO: use Arc more pervasive and remove this clone.
+                    Some((Arc::unwrap_or_clone(wl), svc))
                 }
             })
         };
@@ -526,6 +526,9 @@ impl Inbound {
             return res;
         }
 
+        if !state.supports_on_demand() {
+            return None;
+        }
         tokio::join![
             state.fetch_on_demand(connection_dst.to_string()),
             state.fetch_on_demand(hbone_dst.to_string()),
@@ -670,7 +673,7 @@ mod tests {
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };
         let res = Inbound::find_inbound_upstream(
-            state,
+            &state,
             &conn,
             format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap(),
         )
