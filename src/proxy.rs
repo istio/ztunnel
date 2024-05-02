@@ -44,6 +44,7 @@ use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
 pub mod connection_manager;
+pub mod h2_client;
 mod inbound;
 mod inbound_passthrough;
 #[allow(non_camel_case_types)]
@@ -259,8 +260,14 @@ pub enum Error {
     #[error("http handshake failed: {0}")]
     HttpHandshake(#[source] hyper::Error),
 
+    #[error("http2 handshake failed: {0}")]
+    Http2Handshake(#[source] h2::Error),
+
     #[error("http failed: {0}")]
     Http(#[from] hyper::Error),
+
+    #[error("h2 failed: {0}")]
+    H2(#[from] h2::Error),
 
     #[error("no upgrade available: {0}")]
     NoUpgrade(hyper::Error),
