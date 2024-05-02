@@ -173,8 +173,7 @@ mod linux {
 }
 
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
-const BUFFER_SIZE: usize = 4096;
-// const BUFFER_SIZE: usize = 16_384 - 64;
+const BUFFER_SIZE: usize = 16_384 - 64;
 
 pub async fn copy_bidirectional<A, B>(
     downstream: &mut A,
