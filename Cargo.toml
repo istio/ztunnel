@@ -102,6 +102,7 @@ pingora-pool = "0.1.0"
 flurry = "0.5.0"
 h2 = "0.4"
 http = "1.1"
+internment = { version = "0.8.3", features = ["arc-interner", "arc"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
