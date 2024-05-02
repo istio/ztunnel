@@ -120,7 +120,7 @@ impl Inbound {
                 };
                 debug!(%conn, "accepted connection");
                 let enable_original_source = pi.cfg.enable_original_source;
-                let serve = crate::hyper_util::http2_server()
+                let serve = Box::pin(crate::hyper_util::http2_server()
                     .initial_stream_window_size(pi.cfg.window_size)
                     .initial_connection_window_size(pi.cfg.connection_window_size)
                     // well behaved clients should close connections.
@@ -151,13 +151,13 @@ impl Inbound {
                                 Ok::<_, hyper::Error>(resp)
                             })
                         }),
-                    );
+                    ));
                 // Wait for drain to signal or connection serving to complete
                 match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
                     // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
                     futures_util::future::Either::Left((_shutdown, mut server)) => {
                         debug!("inbound serve got drain {:?}", server);
-                        let drain = std::pin::Pin::new(&mut server);
+                        let drain = std::pin::Pin::as_mut(&mut server);
                         drain.graceful_shutdown();
                         // There are scenarios where the http2 server never resolves after
                         // `graceful_shutdown`, which will hang the whole task.
@@ -181,8 +181,7 @@ impl Inbound {
                     }
                 }
             };
-            // This is pretty obscene right now. Fortunately with pooling this is less problematic than outbound.
-            assertions::size_between_ref(10_000, 12_000, &serve_client);
+            assertions::size_between_ref(1500, 2500, &serve_client);
             tokio::task::spawn(serve_client);
         }
         info!("draining connections");
