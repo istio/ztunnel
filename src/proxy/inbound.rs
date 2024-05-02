@@ -121,38 +121,40 @@ impl Inbound {
                 };
                 debug!(%conn, "accepted connection");
                 let enable_original_source = pi.cfg.enable_original_source;
-                let serve = Box::pin(crate::hyper_util::http2_server()
-                    .initial_stream_window_size(pi.cfg.window_size)
-                    .initial_connection_window_size(pi.cfg.connection_window_size)
-                    // well behaved clients should close connections.
-                    // not all clients are well-behaved. This will prune
-                    // connections when the client is not responding, to keep
-                    // us from holding many stale conns from deceased clients
-                    .keep_alive_interval(Some(Duration::from_secs(10)))
-                    .max_frame_size(pi.cfg.frame_size)
-                    // 64KB max; default is 16MB driven from Golang's defaults
-                    // Since we know we are going to recieve a bounded set of headers, more is overkill.
-                    .max_header_list_size(65536)
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(tls),
-                        service_fn(move |req| {
-                            Self::serve_connect(
-                                pi.clone(),
-                                conn.clone(),
-                                enable_original_source.unwrap_or_default(),
-                                req,
-                                illegal_ports.clone(),
-                                connection_manager.clone(),
-                            )
-                            .map(|status| {
-                                let resp: Response<Empty<Bytes>> = Response::builder()
-                                    .status(status)
-                                    .body(Empty::new())
-                                    .expect("builder with known status code should not fail");
-                                Ok::<_, hyper::Error>(resp)
-                            })
-                        }),
-                    ));
+                let serve = Box::pin(
+                    crate::hyper_util::http2_server()
+                        .initial_stream_window_size(pi.cfg.window_size)
+                        .initial_connection_window_size(pi.cfg.connection_window_size)
+                        // well behaved clients should close connections.
+                        // not all clients are well-behaved. This will prune
+                        // connections when the client is not responding, to keep
+                        // us from holding many stale conns from deceased clients
+                        .keep_alive_interval(Some(Duration::from_secs(10)))
+                        .max_frame_size(pi.cfg.frame_size)
+                        // 64KB max; default is 16MB driven from Golang's defaults
+                        // Since we know we are going to recieve a bounded set of headers, more is overkill.
+                        .max_header_list_size(65536)
+                        .serve_connection(
+                            hyper_util::rt::TokioIo::new(tls),
+                            service_fn(move |req| {
+                                Self::serve_connect(
+                                    pi.clone(),
+                                    conn.clone(),
+                                    enable_original_source.unwrap_or_default(),
+                                    req,
+                                    illegal_ports.clone(),
+                                    connection_manager.clone(),
+                                )
+                                .map(|status| {
+                                    let resp: Response<Empty<Bytes>> = Response::builder()
+                                        .status(status)
+                                        .body(Empty::new())
+                                        .expect("builder with known status code should not fail");
+                                    Ok::<_, hyper::Error>(resp)
+                                })
+                            }),
+                        ),
+                );
                 // Wait for drain to signal or connection serving to complete
                 match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
                     // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
