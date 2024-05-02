@@ -18,6 +18,7 @@
 
 use crate::config;
 use crate::proxy::Error;
+use crate::proxy::Error::H2;
 use bytes::Buf;
 use bytes::Bytes;
 use futures_core::ready;
@@ -30,6 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::io;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -38,16 +40,35 @@ use tokio_rustls::client::TlsStream;
 use tracing::{debug, error, trace, warn};
 
 // H2Stream represents an active HTTP2 stream. Consumers can only Read/Write
-// pin_project_lite::pin_project! {
-    pub struct H2Stream {
-        send_stream: h2::SendStream<SendBuf>,
-        recv_stream: h2::RecvStream,
-        buf: Bytes,
-        active_count: Arc<AtomicU16>,
-    }
-// }
 
-impl H2Stream {
+pub struct H2Stream {
+    read: H2StreamReadHalf,
+    write: H2StreamWriteHalf,
+}
+
+pub struct H2StreamReadHalf {
+    recv_stream: h2::RecvStream,
+    buf: Bytes,
+    half_dropped: Arc<()>,
+    active_count: Arc<AtomicU16>,
+}
+
+pub struct H2StreamWriteHalf {
+    send_stream: h2::SendStream<SendBuf>,
+    half_dropped: Arc<()>,
+    active_count: Arc<AtomicU16>,
+}
+
+impl crate::socket::BufferedSplitter for H2Stream {
+    type R = H2StreamReadHalf;
+    type W = H2StreamWriteHalf;
+    fn split(self) -> (H2StreamReadHalf, H2StreamWriteHalf) {
+        let H2Stream { read, write } = self;
+        (read, write)
+    }
+}
+
+impl H2StreamWriteHalf {
     fn write_slice(&mut self, buf: &[u8], end_of_stream: bool) -> Result<(), std::io::Error> {
         let send_buf: SendBuf = Cursor::new(buf.into());
         self.send_stream
@@ -56,14 +77,35 @@ impl H2Stream {
     }
 }
 
-impl Drop for H2Stream {
+impl Drop for H2StreamReadHalf {
     fn drop(&mut self) {
-        let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
-        trace!("dropping h2stream, has {} active streams left", left - 1);
+        let mut half_dropped = Arc::new(());
+        std::mem::swap(&mut self.half_dropped, &mut half_dropped);
+        if Arc::into_inner(half_dropped).is_none() {
+            // other half already dropped
+            let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
+            trace!("dropping H2StreamReadHalf, has {} active streams left", left - 1);
+        } else {
+            trace!("dropping H2StreamReadHalf, write half remains");
+        }
     }
 }
 
-impl AsyncBufRead for H2Stream {
+impl Drop for H2StreamWriteHalf {
+    fn drop(&mut self) {
+        let mut half_dropped = Arc::new(());
+        std::mem::swap(&mut self.half_dropped, &mut half_dropped);
+        if Arc::into_inner(half_dropped).is_none() {
+            // other half already dropped
+            let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
+            trace!("dropping H2StreamWriteHalf, has {} active streams left", left - 1);
+        } else {
+            trace!("dropping H2StreamWriteHalf, read half remains");
+        }
+    }
+}
+
+impl AsyncBufRead for H2StreamReadHalf {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
         const EOF: Poll<std::io::Result<&[u8]>> = Poll::Ready(Ok(&[]));
         let this = self.get_mut();
@@ -104,7 +146,7 @@ impl AsyncBufRead for H2Stream {
     }
 }
 
-impl AsyncRead for H2Stream {
+impl AsyncRead for H2StreamReadHalf {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -144,7 +186,7 @@ impl AsyncRead for H2Stream {
     }
 }
 
-impl AsyncWrite for H2Stream {
+impl AsyncWrite for H2StreamWriteHalf {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -302,12 +344,20 @@ impl H2ConnectClient {
             }
         };
 
-        let h2 = H2Stream {
-            send_stream: send,
+
+        let dropped = Arc::new(());
+        let read = H2StreamReadHalf {
             recv_stream: recv,
-            buf: Bytes::new(),
-            active_count: self.stream_count.clone(),
+            buf: Default::default(),
+            half_dropped: dropped.clone(),
+            active_count: self.stream_count.clone()
         };
+        let write = H2StreamWriteHalf {
+            send_stream: send,
+            half_dropped: dropped,
+            active_count: self.stream_count.clone()
+        };
+        let h2 = H2Stream { read, write };
         Ok(h2)
     }
 
