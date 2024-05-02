@@ -32,7 +32,6 @@ use {
     std::io::ErrorKind,
     tracing::warn,
 };
-use crate::proxy::h2_client::H2Stream;
 
 #[cfg(target_os = "linux")]
 pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
@@ -174,9 +173,7 @@ mod linux {
 }
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
-pub trait BufferedSplitter: Unpin
-where
-{
+pub trait BufferedSplitter: Unpin {
     type R: AsyncBufRead + Unpin;
     type W: AsyncWrite + Unpin;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W);
@@ -186,7 +183,6 @@ where
 impl<I> BufferedSplitter for I
 where
     I: AsyncRead + AsyncWrite + Unpin,
-
 {
     type R = io::BufReader<io::ReadHalf<I>>;
     type W = io::WriteHalf<I>;
