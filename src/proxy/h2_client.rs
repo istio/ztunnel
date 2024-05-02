@@ -232,6 +232,21 @@ impl H2ConnectClient {
         future_count >= self.max_allowed_streams
     }
 
+    pub fn ready_to_use(&mut self) -> bool {
+        let cx = &mut Context::from_waker(futures::task::noop_waker_ref());
+        match self.sender.poll_ready(cx) {
+            Poll::Ready(Ok(_)) => true,
+            // We may have gotten GoAway, etc
+            Poll::Ready(Err(_)) => false,
+            Poll::Pending => {
+                // Given our current usage, I am not sure this can ever be the case.
+                // If it is, though, err on the safe side and do not use the connection
+                warn!("checked out connection is Pending, skipping");
+                false
+            }
+        }
+    }
+
     pub async fn send_request(&mut self, req: http::Request<()>) -> Result<H2Stream, Error> {
         let cur = self.stream_count.fetch_add(1, Ordering::SeqCst);
         trace!(current_streams = cur, "sending request");
