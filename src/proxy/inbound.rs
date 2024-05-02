@@ -100,12 +100,13 @@ impl Inbound {
 
         let (sub_drain_signal, sub_drain) = drain::channel();
 
+        let pi = Arc::new(self.pi);
         while let Some(tls) = stream.next().await {
+            let pi = pi.clone();
             let (raw_socket, ssl) = tls.get_ref();
             let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
             let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
-            let pi = self.pi.clone();
             let connection_manager = pi.connection_manager.clone();
             let drain = sub_drain.clone();
             let network = pi.cfg.network.clone();
@@ -205,7 +206,7 @@ impl Inbound {
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
-        pi: ProxyInputs,
+        pi: Arc<ProxyInputs>,
         conn: Connection,
         enable_original_source: bool,
         req: Request<Incoming>,
@@ -318,7 +319,7 @@ impl Inbound {
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
             },
-            pi.metrics,
+            pi.metrics.clone(),
         ));
 
         let conn_guard = match connection_manager
