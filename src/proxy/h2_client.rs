@@ -273,6 +273,9 @@ impl H2ConnectClient {
         &mut self,
         req: Request<()>,
     ) -> Result<(SendStream<SendBuf>, h2::RecvStream), Error> {
+        // "This function must return `Ready` before `send_request` is called"
+        // We should always be ready though, because we make sure we don't go over the max stream limit out of band.
+        futures::future::poll_fn(|cx| self.sender.poll_ready(cx)).await?;
         let (response, stream) = self.sender.send_request(req, false)?;
         let response = response.await?;
         if response.status() != 200 {
