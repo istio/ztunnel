@@ -293,15 +293,26 @@ impl PoolState {
             workload_key,
             pool_key.key
         );
-        let returned_connection = match self.guarded_get(&pool_key.key, workload_key)? {
-            Some(existing) => {
-                debug!("re-using connection for {}", workload_key);
-                existing
-            }
-            None => {
-                trace!("new connection needed for {}", workload_key);
-                self.spawner.new_pool_conn(workload_key.clone()).await?
-            }
+        let returned_connection = loop {
+            match self.guarded_get(&pool_key.key, workload_key)? {
+                Some(mut existing) => {
+                    if !existing.sender.ready_to_use() {
+                        // We checked this out, and will not check it back in
+                        // Loop again to find another/make a new one
+                        debug!(
+                            "checked out broken connection for {}, dropping it",
+                            workload_key
+                        );
+                        continue;
+                    }
+                    debug!("re-using connection for {}", workload_key);
+                    break existing;
+                }
+                None => {
+                    debug!("new connection needed for {}", workload_key);
+                    break self.spawner.new_pool_conn(workload_key.clone()).await?;
+                }
+            };
         };
 
         // For any connection, we will check in a copy and return the other unless its already maxed out
@@ -562,7 +573,9 @@ mod test {
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
+
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+    use tokio::sync::oneshot;
 
     use tracing::{error, Instrument};
 
@@ -653,6 +666,25 @@ mod test {
         // Once we drop the pool, we should drop the rest of the connections as well (3 new ones, and the one already checked above)
         drop(pool);
         assert_opens_drops!(srv, 5, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_goaway() {
+        let (pool, mut srv) = setup_test(2).await;
+
+        let key = key(&srv, 1);
+
+        // Establish one connection, it will be pooled
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 1).await;
+        assert_opens_drops!(srv, 1, 0);
+
+        // Trigger server GOAWAY. Wait for the server to finish
+        srv.goaway_tx.send(()).unwrap();
+        assert_opens_drops!(srv, 1, 1);
+
+        // Open a new connection. We should create a new one, since the last one is busted
+        spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 1).await;
+        assert_opens_drops!(srv, 2, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -838,7 +870,11 @@ mod test {
         });
     }
 
-    async fn spawn_server(conn_count: Arc<AtomicU32>, drop_tx: UnboundedSender<()>) -> SocketAddr {
+    async fn spawn_server(
+        conn_count: Arc<AtomicU32>,
+        drop_tx: UnboundedSender<()>,
+        goaway: oneshot::Receiver<()>,
+    ) -> SocketAddr {
         use http_body_util::Empty;
         // We'll bind to 127.0.0.1:3000
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -873,6 +909,7 @@ mod test {
         let acceptor = crate::tls::mock::MockServerCertProvider::new(certs);
         let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
 
+        let mut goaway = Some(goaway);
         tokio::spawn(async move {
             // We start a loop to continuously accept incoming connections
             // and also count them
@@ -880,28 +917,50 @@ mod test {
             let drop_tx = drop_tx.clone();
             let accept = async move {
                 loop {
+                    let goaway_rx = goaway.take();
                     let stream = tls_stream.next().await.unwrap();
                     conn_count.fetch_add(1, Ordering::SeqCst);
                     debug!("server stream started");
                     let drop_tx = drop_tx.clone();
 
+                    let server = crate::hyper_util::http2_server()
+                        .initial_stream_window_size(test_cfg.window_size)
+                        .initial_connection_window_size(test_cfg.connection_window_size)
+                        .max_frame_size(test_cfg.frame_size)
+                        .max_header_list_size(65536)
+                        .serve_connection(
+                            hyper_util::rt::TokioIo::new(stream),
+                            service_fn(hello_world),
+                        );
+
                     // Spawn a tokio task to serve multiple connections concurrently
                     tokio::task::spawn(async move {
-                        // Finally, we bind the incoming connection to our `hello` service
-                        if let Err(err) = crate::hyper_util::http2_server()
-                            .initial_stream_window_size(test_cfg.window_size)
-                            .initial_connection_window_size(test_cfg.connection_window_size)
-                            .max_frame_size(test_cfg.frame_size)
-                            .max_header_list_size(65536)
-                            .serve_connection(
-                                hyper_util::rt::TokioIo::new(stream),
-                                service_fn(hello_world),
-                            )
-                            .await
-                        {
-                            error!("Error serving connection: {:?}", err);
+                        let recv = async move {
+                            match goaway_rx {
+                                Some(rx) => {
+                                    let _ = rx.await;
+                                }
+                                None => futures_util::future::pending::<()>().await,
+                            };
+                        };
+                        let res = match futures_util::future::select(Box::pin(recv), server).await {
+                            futures_util::future::Either::Left((_shutdown, mut server)) => {
+                                debug!("server drain starting... {_shutdown:?}");
+                                let drain = std::pin::Pin::new(&mut server);
+                                drain.graceful_shutdown();
+                                let _res = server.await;
+                                debug!("server drain done");
+                                Ok(())
+                            }
+                            // Serving finished, just return the result.
+                            futures_util::future::Either::Right((res, _shutdown)) => {
+                                debug!("inbound serve done {:?}", res);
+                                res
+                            }
+                        };
+                        if let Err(err) = res {
+                            error!("server failed: {err:?}");
                         }
-                        debug!("server stream done");
                         let _ = drop_tx.send(());
                     });
                 }
@@ -923,7 +982,8 @@ mod test {
         initialize_telemetry();
         let conn_counter: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
         let (drop_tx, drop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let addr = spawn_server(conn_counter.clone(), drop_tx).await;
+        let (goaway_tx, goaway_rx) = oneshot::channel::<()>();
+        let addr = spawn_server(conn_counter.clone(), drop_tx, goaway_rx).await;
 
         let cfg = crate::config::Config {
             pool_max_streams_per_conn: max_conns,
@@ -936,6 +996,7 @@ mod test {
         let server = TestServer {
             conn_counter,
             drop_rx,
+            goaway_tx,
             addr,
         };
         (pool, server)
@@ -944,6 +1005,7 @@ mod test {
     struct TestServer {
         conn_counter: Arc<AtomicU32>,
         drop_rx: UnboundedReceiver<()>,
+        goaway_tx: oneshot::Sender<()>,
         addr: SocketAddr,
     }
 
