@@ -506,7 +506,7 @@ pub async fn freebind_connect(
 pub fn guess_inbound_service(
     conn: &Connection,
     for_host_header: &Option<String>,
-    upstream_service: Vec<Service>,
+    upstream_service: Vec<Arc<Service>>,
     dest: &Workload,
 ) -> Option<ServiceDescription> {
     // First, if the client told us what Service they were reaching, look for that
@@ -514,7 +514,7 @@ pub fn guess_inbound_service(
     if let Some(found) = upstream_service
         .iter()
         .find(|s| for_host_header.as_ref() == Some(&s.hostname))
-        .map(ServiceDescription::from)
+        .map(|s| ServiceDescription::from(s.as_ref()))
     {
         return Some(found);
     }
@@ -539,12 +539,12 @@ pub fn guess_inbound_service(
             }
             false
         })
-        .map(ServiceDescription::from)
+        .map(|s| ServiceDescription::from(s.as_ref()))
 }
 
 // Checks that the source identiy and address match the upstream's waypoint
 async fn check_from_waypoint(
-    state: DemandProxyState,
+    state: &DemandProxyState,
     upstream: &Workload,
     src_identity: Option<&Identity>,
     src_ip: &IpAddr,
@@ -558,7 +558,7 @@ async fn check_from_waypoint(
 // Checks if the connection's source identity is the identity for the upstream's network
 // gateway
 async fn check_from_network_gateway(
-    state: DemandProxyState,
+    state: &DemandProxyState,
     upstream: &Workload,
     src_identity: Option<&Identity>,
 ) -> bool {
@@ -569,7 +569,7 @@ async fn check_from_network_gateway(
 // Check if the source's identity matches any workloads that make up the given gateway
 // TODO: This can be made more accurate by also checking addresses.
 async fn check_gateway_address<F>(
-    state: DemandProxyState,
+    state: &DemandProxyState,
     gateway_address: Option<&GatewayAddress>,
     predicate: F,
 ) -> bool
@@ -639,35 +639,23 @@ mod tests {
 
         let upstream_with_address = mock_wokload_with_gateway(Some(mock_default_gateway_address()));
         assert!(
-            check_from_network_gateway(
-                state.clone(),
-                &upstream_with_address,
-                from_gw_conn.as_ref(),
-            )
-            .await
+            check_from_network_gateway(&state, &upstream_with_address, from_gw_conn.as_ref(),)
+                .await
         );
         assert!(
-            !check_from_network_gateway(
-                state.clone(),
-                &upstream_with_address,
-                not_from_gw_conn.as_ref(),
-            )
-            .await
+            !check_from_network_gateway(&state, &upstream_with_address, not_from_gw_conn.as_ref(),)
+                .await
         );
 
         // using hostname (will check the service variant of address::Address)
         let upstream_with_hostname =
             mock_wokload_with_gateway(Some(mock_default_gateway_hostname()));
         assert!(
-            check_from_network_gateway(
-                state.clone(),
-                &upstream_with_hostname,
-                from_gw_conn.as_ref(),
-            )
-            .await
+            check_from_network_gateway(&state, &upstream_with_hostname, from_gw_conn.as_ref(),)
+                .await
         );
         assert!(
-            !check_from_network_gateway(state, &upstream_with_hostname, not_from_gw_conn.as_ref())
+            !check_from_network_gateway(&state, &upstream_with_hostname, not_from_gw_conn.as_ref())
                 .await
         );
     }

@@ -206,15 +206,15 @@ impl ProxyState {
     /// Find either a workload or a service by address.
     pub fn find_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
-        match self.workloads.find_address(network_addr) {
+        match self.workloads.find_address_arc(network_addr) {
             None => {
                 // 2. handle service
                 if let Some(svc) = self.services.get_by_vip(network_addr) {
-                    return Some(Address::Service(Box::new(svc)));
+                    return Some(Address::Service(svc));
                 }
                 None
             }
-            Some(wl) => Some(Address::Workload(Box::new(wl))),
+            Some(wl) => Some(Address::Workload(wl)),
         }
     }
 
@@ -227,9 +227,9 @@ impl ProxyState {
                 // Workload hostnames are globally unique, so ignore the namespace.
                 self.workloads
                     .find_hostname(&name.hostname)
-                    .map(|wl| Address::Workload(Box::new(wl)))
+                    .map(Address::Workload)
             }
-            Some(svc) => Some(Address::Service(Box::new(svc))),
+            Some(svc) => Some(Address::Service(svc)),
         }
     }
 
@@ -264,7 +264,7 @@ impl ProxyState {
                 workload: wl,
                 port: *target_port,
                 sans: svc.subject_alt_names.clone(),
-                destination_service: Some((&svc).into()),
+                destination_service: Some(ServiceDescription::from(svc.as_ref())),
             };
             return Some(us);
         }
@@ -482,14 +482,13 @@ impl DemandProxyState {
         src_workload: &Workload,
         metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
-        let mut state: DemandProxyState = self.clone();
         let labels = OnDemandDnsLabels::new()
             .with_destination(workload)
             .with_source(src_workload);
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
-        let rdns = match state.get_ips_for_hostname(&workload.hostname) {
+        let rdns = match self.get_ips_for_hostname(&workload.hostname) {
             Some(r) => r,
             None => {
                 metrics
@@ -500,9 +499,9 @@ impl DemandProxyState {
                 // TODO: optimize so that if multiple requests to the same hostname come in at the same time,
                 // we don't start more than one background on-demand DNS task
 
-                Self::resolve_on_demand_dns(self.to_owned(), workload).await;
+                Self::resolve_on_demand_dns(self, workload).await;
                 // try to get it again
-                let updated_rdns = state.get_ips_for_hostname(&hostname);
+                let updated_rdns = self.get_ips_for_hostname(&hostname);
                 match updated_rdns {
                     Some(rdns) => rdns,
                     None => {
@@ -522,7 +521,7 @@ impl DemandProxyState {
         Ok(*ip)
     }
 
-    async fn resolve_on_demand_dns(mut state: DemandProxyState, workload: &Workload) {
+    async fn resolve_on_demand_dns(state: &DemandProxyState, workload: &Workload) {
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
         trace!("dns workload async task started for {:?}", &hostname);
@@ -582,7 +581,7 @@ impl DemandProxyState {
         state.set_ips_for_hostname(hostname, rdns);
     }
 
-    pub fn set_ips_for_hostname(&mut self, hostname: String, rdns: ResolvedDns) {
+    pub fn set_ips_for_hostname(&self, hostname: String, rdns: ResolvedDns) {
         self.state
             .write()
             .unwrap()
@@ -591,7 +590,7 @@ impl DemandProxyState {
             .insert(hostname, rdns);
     }
 
-    pub fn get_ips_for_hostname(&mut self, hostname: &String) -> Option<ResolvedDns> {
+    pub fn get_ips_for_hostname(&self, hostname: &String) -> Option<ResolvedDns> {
         self.state
             .read()
             .unwrap()
@@ -608,7 +607,7 @@ impl DemandProxyState {
     pub async fn fetch_workload_services(
         &self,
         addr: &NetworkAddress,
-    ) -> Option<(Workload, Vec<Service>)> {
+    ) -> Option<(Workload, Vec<Arc<Service>>)> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload and service");
         let fetch = |addr: &NetworkAddress| {
@@ -621,6 +620,9 @@ impl DemandProxyState {
         if let Some(wl) = fetch(addr) {
             return Some(wl);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         self.fetch_on_demand(addr.to_string()).await;
         fetch(addr)
     }
@@ -632,6 +634,9 @@ impl DemandProxyState {
         if let Some(wl) = self.state.read().unwrap().workloads.find_address(addr) {
             return Some(wl);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         self.fetch_on_demand(addr.to_string()).await;
         self.state.read().unwrap().workloads.find_address(addr)
     }
@@ -642,6 +647,9 @@ impl DemandProxyState {
         debug!(%uid, "fetch workload");
         if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
             return Some(wl);
+        }
+        if !self.supports_on_demand() {
+            return None;
         }
         self.fetch_on_demand(uid.to_string()).await;
         self.state.read().unwrap().workloads.find_uid(uid)
@@ -718,6 +726,9 @@ impl DemandProxyState {
         if let Some(address) = self.state.read().unwrap().find_address(network_addr) {
             return Some(address);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(network_addr.to_string()).await;
         self.state.read().unwrap().find_address(network_addr)
@@ -731,11 +742,19 @@ impl DemandProxyState {
         if let Some(address) = self.state.read().unwrap().find_hostname(hostname) {
             return Some(address);
         }
+        if !self.supports_on_demand() {
+            return None;
+        }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(hostname.to_string()).await;
         self.state.read().unwrap().find_hostname(hostname)
     }
 
+    pub fn supports_on_demand(&self) -> bool {
+        self.demand.is_some()
+    }
+
+    /// fetch_on_demand looks up the provided key on-demand and waits for it to return
     pub async fn fetch_on_demand(&self, key: String) {
         if let Some(demand) = &self.demand {
             debug!(%key, "sending demand request");
@@ -867,7 +886,7 @@ mod tests {
         test_helpers::assert_eventually(
             Duration::from_secs(5),
             || mock_proxy_state.fetch_destination(&dst),
-            Some(Address::Workload(Box::new(
+            Some(Address::Workload(Arc::new(
                 test_helpers::test_default_workload(),
             ))),
         )
@@ -881,7 +900,7 @@ mod tests {
         test_helpers::assert_eventually(
             Duration::from_secs(5),
             || mock_proxy_state.fetch_destination(&dst),
-            Some(Address::Service(Box::new(
+            Some(Address::Service(Arc::new(
                 test_helpers::mock_default_service(),
             ))),
         )
