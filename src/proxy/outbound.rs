@@ -253,7 +253,7 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(&mut source_stream, source_addr, &req, &result_tracker)
+                self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
                     .await
             }
             Protocol::TCP => {
@@ -266,7 +266,7 @@ impl OutboundConnection {
 
     async fn proxy_to_hbone(
         &mut self,
-        stream: &mut TcpStream,
+        stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
         connection_stats: &ConnectionResult,
@@ -276,9 +276,9 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
 
-        let mut upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
+        let upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
-        socket::copy_bidirectional(stream, &mut upgraded, connection_stats).await
+        socket::copy_bidirectional(stream, upgraded, connection_stats).await
     }
 
     async fn build_hbone_request(

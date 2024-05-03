@@ -172,26 +172,46 @@ mod linux {
     }
 }
 
+// BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
+pub trait BufferedSplitter: Unpin {
+    type R: AsyncBufRead + Unpin;
+    type W: AsyncWrite + Unpin;
+    fn split_into_buffered_reader(self) -> (Self::R, Self::W);
+}
+
+// Generic BufferedSplitter for anything that can Read/Write.
+impl<I> BufferedSplitter for I
+where
+    I: AsyncRead + AsyncWrite + Unpin,
+{
+    type R = io::BufReader<io::ReadHalf<I>>;
+    type W = io::WriteHalf<I>;
+    fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
+        let (rh, wh) = tokio::io::split(self);
+        let rb = io::BufReader::with_capacity(BUFFER_SIZE, rh);
+        (rb, wh)
+    }
+}
+
 // TLS record size max is 16k. But we also have a H2 frame header, so leave a bit of room for that.
 const BUFFER_SIZE: usize = 16_384 - 64;
 
 pub async fn copy_bidirectional<A, B>(
-    downstream: &mut A,
-    upstream: &mut B,
+    downstream: A,
+    upstream: B,
     stats: &ConnectionResult,
 ) -> Result<(), crate::proxy::Error>
 where
-    A: AsyncRead + AsyncWrite + Unpin,
-    B: AsyncRead + AsyncWrite + Unpin,
+    A: BufferedSplitter,
+    B: BufferedSplitter,
 {
     use tokio::io::AsyncWriteExt;
-    let (mut rd, mut wd) = tokio::io::split(downstream);
-    let (mut ru, mut wu) = tokio::io::split(upstream);
+    let (mut rd, mut wd) = downstream.split_into_buffered_reader();
+    let (mut ru, mut wu) = upstream.split_into_buffered_reader();
 
     let (mut sent, mut received): (u64, u64) = (0, 0);
 
     let downstream_to_upstream = async {
-        let mut rd = io::BufReader::with_capacity(BUFFER_SIZE, &mut rd);
         let res = copy_buf(&mut rd, &mut wu, stats, false).await;
         trace!(?res, "send");
         sent = res?;
@@ -199,7 +219,6 @@ where
     };
 
     let upstream_to_downstream = async {
-        let mut ru = io::BufReader::with_capacity(BUFFER_SIZE, &mut ru);
         let res = copy_buf(&mut ru, &mut wd, stats, true).await;
         trace!(?res, "recieve");
         received = res?;

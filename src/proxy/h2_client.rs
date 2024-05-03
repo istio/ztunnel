@@ -18,6 +18,7 @@
 
 use crate::config;
 use crate::proxy::Error;
+
 use bytes::Buf;
 use bytes::Bytes;
 use futures_core::ready;
@@ -30,7 +31,8 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
@@ -38,14 +40,35 @@ use tokio_rustls::client::TlsStream;
 use tracing::{debug, error, trace, warn};
 
 // H2Stream represents an active HTTP2 stream. Consumers can only Read/Write
+
 pub struct H2Stream {
-    send_stream: h2::SendStream<SendBuf>,
+    read: H2StreamReadHalf,
+    write: H2StreamWriteHalf,
+}
+
+pub struct H2StreamReadHalf {
     recv_stream: h2::RecvStream,
     buf: Bytes,
+    half_dropped: Arc<()>,
     active_count: Arc<AtomicU16>,
 }
 
-impl H2Stream {
+pub struct H2StreamWriteHalf {
+    send_stream: h2::SendStream<SendBuf>,
+    half_dropped: Arc<()>,
+    active_count: Arc<AtomicU16>,
+}
+
+impl crate::socket::BufferedSplitter for H2Stream {
+    type R = H2StreamReadHalf;
+    type W = H2StreamWriteHalf;
+    fn split_into_buffered_reader(self) -> (H2StreamReadHalf, H2StreamWriteHalf) {
+        let H2Stream { read, write } = self;
+        (read, write)
+    }
+}
+
+impl H2StreamWriteHalf {
     fn write_slice(&mut self, buf: &[u8], end_of_stream: bool) -> Result<(), std::io::Error> {
         let send_buf: SendBuf = Cursor::new(buf.into());
         self.send_stream
@@ -54,54 +77,92 @@ impl H2Stream {
     }
 }
 
-impl Drop for H2Stream {
+impl Drop for H2StreamReadHalf {
     fn drop(&mut self) {
-        let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
-        trace!("dropping h2stream, has {} active streams left", left - 1);
-    }
-}
-
-impl AsyncRead for H2Stream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        read_buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.buf.is_empty() {
-            self.buf = loop {
-                match ready!(self.recv_stream.poll_data(cx)) {
-                    None => return Poll::Ready(Ok(())),
-                    Some(Ok(buf)) if buf.is_empty() && !self.recv_stream.is_end_stream() => {
-                        continue
-                    }
-                    Some(Ok(buf)) => {
-                        // TODO: Hyper and Go make their pinging data aware and don't send pings when data is received
-                        // Pingora, and our implementation, currently don't do this.
-                        // We may want to; if so, modify here.
-                        // self.ping.record_data(buf.len());
-                        break buf;
-                    }
-                    Some(Err(e)) => {
-                        return Poll::Ready(match e.reason() {
-                            Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => Ok(()),
-                            Some(Reason::STREAM_CLOSED) => {
-                                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
-                            }
-                            _ => Err(h2_to_io_error(e)),
-                        })
-                    }
-                }
-            };
+        let mut half_dropped = Arc::new(());
+        std::mem::swap(&mut self.half_dropped, &mut half_dropped);
+        if Arc::into_inner(half_dropped).is_none() {
+            // other half already dropped
+            let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
+            trace!(
+                "dropping H2StreamReadHalf, has {} active streams left",
+                left - 1
+            );
+        } else {
+            trace!("dropping H2StreamReadHalf, write half remains");
         }
-        let cnt = std::cmp::min(self.buf.len(), read_buf.remaining());
-        read_buf.put_slice(&self.buf[..cnt]);
-        self.buf.advance(cnt);
-        let _ = self.recv_stream.flow_control().release_capacity(cnt);
-        Poll::Ready(Ok(()))
     }
 }
 
-impl AsyncWrite for H2Stream {
+impl Drop for H2StreamWriteHalf {
+    fn drop(&mut self) {
+        let mut half_dropped = Arc::new(());
+        std::mem::swap(&mut self.half_dropped, &mut half_dropped);
+        if Arc::into_inner(half_dropped).is_none() {
+            // other half already dropped
+            let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
+            trace!(
+                "dropping H2StreamWriteHalf, has {} active streams left",
+                left - 1
+            );
+        } else {
+            trace!("dropping H2StreamWriteHalf, read half remains");
+        }
+    }
+}
+
+impl AsyncBufRead for H2StreamReadHalf {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
+        const EOF: Poll<std::io::Result<&[u8]>> = Poll::Ready(Ok(&[]));
+        let this = self.get_mut();
+        let self_buf = &mut this.buf;
+        loop {
+            {
+                if !self_buf.chunk().is_empty() {
+                    let chunk = (*self_buf).chunk();
+                    return Poll::Ready(Ok(chunk));
+                }
+            }
+            match ready!(this.recv_stream.poll_data(cx)) {
+                None => return EOF,
+                Some(Ok(buf)) if buf.is_empty() && !this.recv_stream.is_end_stream() => continue,
+                Some(Ok(buf)) => {
+                    // TODO: Hyper and Go make their pinging data aware and don't send pings when data is received
+                    // Pingora, and our implementation, currently don't do this.
+                    // We may want to; if so, modify here.
+                    // this.ping.record_data(buf.len());
+                    let _ = this.recv_stream.flow_control().release_capacity(buf.len());
+                    *self_buf = buf;
+                }
+                Some(Err(e)) => {
+                    return Poll::Ready(match e.reason() {
+                        Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => Ok(&[]),
+                        Some(Reason::STREAM_CLOSED) => {
+                            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
+                        }
+                        _ => Err(h2_to_io_error(e)),
+                    })
+                }
+            }
+        }
+    }
+
+    fn consume(mut self: Pin<&mut Self>, amt: usize) {
+        self.as_mut().buf.advance(amt)
+    }
+}
+
+impl AsyncRead for H2StreamReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _read_buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        panic!("H2StreamReadHalf should never be read directly; use poll_fill_buf");
+    }
+}
+
+impl AsyncWrite for H2StreamWriteHalf {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -259,12 +320,19 @@ impl H2ConnectClient {
             }
         };
 
-        let h2 = H2Stream {
-            send_stream: send,
+        let dropped = Arc::new(());
+        let read = H2StreamReadHalf {
             recv_stream: recv,
-            buf: Bytes::new(),
+            buf: Default::default(),
+            half_dropped: dropped.clone(),
             active_count: self.stream_count.clone(),
         };
+        let write = H2StreamWriteHalf {
+            send_stream: send,
+            half_dropped: dropped,
+            active_count: self.stream_count.clone(),
+        };
+        let h2 = H2Stream { read, write };
         Ok(h2)
     }
 
