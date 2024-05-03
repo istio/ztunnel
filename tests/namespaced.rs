@@ -184,6 +184,7 @@ mod namespaced {
             ("target", "access"),
             ("src.workload", "client"),
             ("dst.workload", "waypoint"),
+            ("dst.namespace", "default"),
             ("dst.hbone_addr", &hbone_addr),
             ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),
