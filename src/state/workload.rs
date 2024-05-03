@@ -343,7 +343,7 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
     }
 }
 
-impl TryFrom<XdsWorkload> for Workload {
+impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
     type Error = WorkloadError;
     fn try_from(resource: XdsWorkload) -> Result<Self, Self::Error> {
         let wp = match &resource.waypoint {
@@ -368,7 +368,7 @@ impl TryFrom<XdsWorkload> for Workload {
             .collect::<Result<Vec<_>, _>>()?;
 
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
-        Ok(Workload {
+        Ok((Workload {
             workload_ips: addresses,
             waypoint: wp,
             network_gateway: network_gw,
@@ -424,7 +424,7 @@ impl TryFrom<XdsWorkload> for Workload {
                     result.into()
                 }
             },
-        })
+        }, resource.services))
     }
 }
 

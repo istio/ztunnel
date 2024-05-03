@@ -126,9 +126,10 @@ impl ProxyStateUpdateMutator {
         // Clone services, so we can pass full ownership of the rest of XdsWorkload to build our Workload
         // object, which doesn't include Services.
         // In theory, I think we could avoid this if Workload::try_from returning the services.
-        let services = w.services.clone();
+        // let services = w.services.clone();
         // Convert the workload.
-        let workload = Arc::new(Workload::try_from(w)?);
+        let (workload, services): (Workload, HashMap<String, PortList>) = w.try_into()?;
+        let workload = Arc::new(workload);
 
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove_for_insert(state, &workload.uid);
