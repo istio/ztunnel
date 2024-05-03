@@ -151,11 +151,12 @@ pub struct Endpoint {
 }
 
 pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> Strng {
-    format!(
-        "{}:{}",
-        workload_uid,
-        address.map(|a| a.to_string()).unwrap_or_default()
-    ).into()
+    let addr = address.map(|a| a.to_string()).unwrap_or_default();
+    let mut res = String::with_capacity(1 +addr.len() + workload_uid.len());
+    res.push_str(workload_uid);
+    res.push(':');
+    res.push_str(&addr);
+    res.into()
 }
 
 impl TryFrom<&XdsService> for Service {
