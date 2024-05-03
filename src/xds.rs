@@ -34,7 +34,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
-use crate::rbac;
+use crate::{rbac, strng};
 use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
@@ -158,7 +158,7 @@ impl ProxyStateUpdateMutator {
 
     fn remove_internal(&self, state: &mut ProxyState, xds_name: &String, for_insert: bool) {
         // remove workload by UID; if xds_name is a service then this will no-op
-        if let Some(prev) = state.workloads.remove(xds_name) {
+        if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
             // Also remove service endpoints for the workload.
             for wip in prev.workload_ips.iter() {
                 let prev_addr = &network_addr(&prev.network, *wip);

@@ -643,7 +643,7 @@ impl DemandProxyState {
     }
 
     // only support workload
-    pub async fn fetch_workload_by_uid(&self, uid: &str) -> Option<Workload> {
+    pub async fn fetch_workload_by_uid(&self, uid: &Strng) -> Option<Workload> {
         // Wait for it on-demand, *if* needed
         debug!(%uid, "fetch workload");
         if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {

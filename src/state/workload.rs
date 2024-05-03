@@ -14,7 +14,7 @@
 
 use crate::identity::Identity;
 
-use crate::xds;
+use crate::{strng, xds};
 use crate::xds::istio::workload::{Port, PortList};
 use bytes::Bytes;
 use serde::de::Visitor;
@@ -325,8 +325,8 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                 xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
                     GatewayAddress {
                         destination: gatewayaddress::Destination::Hostname(NamespacedHostname {
-                            namespace: hn.namespace.into(),
-                            hostname: hn.hostname.into(),
+                            namespace: hn.namespace.as_str().into(),
+                            hostname: hn.hostname.as_str().into(),
                         }),
                         hbone_mtls_port: value.hbone_mtls_port as u16,
                         hbone_single_tls_port: if value.hbone_single_tls_port == 0 {
@@ -415,7 +415,7 @@ impl TryFrom<&XdsWorkload> for Workload {
             native_tunnel: resource.native_tunnel,
             application_tunnel,
 
-            authorization_policies: resource.authorization_policies,
+            authorization_policies: resource.authorization_policies.iter().map(strng::new).collect(),
 
             locality: resource.locality.map(Locality::from).unwrap_or_default(),
 
@@ -424,7 +424,7 @@ impl TryFrom<&XdsWorkload> for Workload {
                 if result.is_empty() {
                     "Kubernetes".into()
                 } else {
-                    result
+                    result.into()
                 }
             },
         })
@@ -638,12 +638,12 @@ impl WorkloadStore {
     }
 
     /// Finds the workload by hostname.
-    pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Arc<Workload>> {
-        self.by_hostname.get(hostname.as_ref()).cloned()
+    pub fn find_hostname(&self, hostname: &Strng) -> Option<Arc<Workload>> {
+        self.by_hostname.get(hostname).cloned()
     }
 
     /// Finds the workload by uid.
-    pub fn find_uid(&self, uid: &str) -> Option<Workload> {
+    pub fn find_uid(&self, uid: &Strng) -> Option<Workload> {
         self.by_uid.get(uid).map(|wl| wl.deref().clone())
     }
 

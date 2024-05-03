@@ -15,6 +15,7 @@
 use crate::rbac::{Authorization, RbacScope};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::watch;
+use crate::strng;
 use crate::strng::Strng;
 
 /// A PolicyStore encapsulates all policy information about workloads in the mesh
@@ -66,7 +67,7 @@ impl PolicyStore {
             }
             RbacScope::Namespace => {
                 self.by_namespace
-                    .entry(rbac.namespace.into())
+                    .entry(strng::new(&rbac.namespace))
                     .or_default()
                     .insert(key.clone());
             }

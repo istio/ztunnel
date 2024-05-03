@@ -1,4 +1,6 @@
 use std::fmt::Error;
+use std::ops::Deref;
+use std::rc::Rc;
 use internment::ArcIntern;
 use prometheus_client::encoding::{EncodeLabelKey, LabelSetEncoder, LabelValueEncoder};
 
@@ -14,7 +16,15 @@ pub struct RichStrng(Strng);
 
 impl prometheus_client::encoding::EncodeLabelValue for RichStrng {
     fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), Error> {
-        prometheus_client::encoding::EncodeLabelValue::encode(self.0.as_ref(), encoder)
+        prometheus_client::encoding::EncodeLabelValue::encode(&self.0.as_ref(), encoder)
+    }
+}
+
+impl Deref for RichStrng {
+    type Target = Strng;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
