@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Recorder};
 
 use crate::state::workload::Workload;
+use crate::strng::{RichStrng, Strng};
 
 pub struct Metrics {
     pub requests: Family<DnsLabels, Counter>,
@@ -77,19 +78,19 @@ impl DeferRecorder for Metrics {}
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct DnsLabels {
-    request_query_type: String,
-    request_protocol: String,
+    request_query_type: RichStrng,
+    request_protocol: RichStrng,
 
     // Source workload.
-    source_canonical_service: DefaultedUnknown<String>,
-    source_canonical_revision: DefaultedUnknown<String>,
+    source_canonical_service: DefaultedUnknown<RichStrng>,
+    source_canonical_revision: DefaultedUnknown<RichStrng>,
 }
 
 impl DnsLabels {
     pub fn new(r: &Request) -> Self {
         Self {
-            request_query_type: r.query().query_type().to_string().to_lowercase(),
-            request_protocol: r.protocol().to_string().to_lowercase(),
+            request_query_type: r.query().query_type().to_string().to_lowercase().into(),
+            request_protocol: r.protocol().to_string().to_lowercase().into(),
             source_canonical_service: Default::default(),
             source_canonical_revision: Default::default(),
         }

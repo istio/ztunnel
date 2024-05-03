@@ -43,6 +43,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
+use crate::strng::Strng;
 
 pub mod policy;
 pub mod service;
@@ -52,7 +53,7 @@ pub mod workload;
 pub struct Upstream {
     pub workload: Workload,
     pub port: u16,
-    pub sans: Vec<String>,
+    pub sans: Vec<Strng>,
     pub destination_service: Option<ServiceDescription>,
 }
 
@@ -153,8 +154,8 @@ pub struct ProxyState {
 struct ProxyStateSerialization<'a> {
     workloads: &'a HashMap<NetworkAddress, Arc<Workload>>,
     services: &'a HashMap<NetworkAddress, Arc<Service>>,
-    staged_services: &'a HashMap<NamespacedHostname, HashMap<String, Endpoint>>,
-    policies: &'a HashMap<String, Authorization>,
+    staged_services: &'a HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
+    policies: &'a HashMap<Strng, Authorization>,
 }
 
 impl serde::Serialize for ProxyState {
@@ -179,12 +180,12 @@ pub struct ResolvedDnsStore {
     //
     // in a future with support for per-pod DNS resolv.conf settings we may need
     // to change this to a map from source workload uid to resolved IP addresses.
-    by_hostname: HashMap<String, ResolvedDns>,
+    by_hostname: HashMap<Strng, ResolvedDns>,
 }
 
 #[derive(serde::Serialize, Default, Debug, Clone)]
 pub struct ResolvedDns {
-    hostname: String,
+    hostname: Strng,
     ips: HashSet<IpAddr>,
     #[serde(skip_serializing)]
     initial_query: Option<std::time::Instant>,
@@ -395,7 +396,7 @@ impl DemandProxyState {
 
         // We can get policies from namespace, global, and workload...
         let ns = state.policies.get_by_namespace(&wl.namespace);
-        let global = state.policies.get_by_namespace("");
+        let global = state.policies.get_by_namespace(&crate::strng::new(""));
         let workload = wl.authorization_policies.iter();
 
         // Aggregate all of them based on type
@@ -505,7 +506,7 @@ impl DemandProxyState {
                 match updated_rdns {
                     Some(rdns) => rdns,
                     None => {
-                        return Err(Error::NoResolvedAddresses(workload_uid));
+                        return Err(Error::NoResolvedAddresses(workload_uid.to_string()));
                     }
                 }
             }
@@ -516,14 +517,14 @@ impl DemandProxyState {
         // Randomly pick an IP
         // TODO: do this more efficiently, and not just randomly
         let Some(ip) = rdns.ips.iter().choose(&mut rand::thread_rng()) else {
-            return Err(Error::EmptyResolvedAddresses(workload_uid));
+            return Err(Error::EmptyResolvedAddresses(workload_uid.to_string()));
         };
         Ok(*ip)
     }
 
     async fn resolve_on_demand_dns(state: &DemandProxyState, workload: &Workload) {
-        let workload_uid = workload.uid.to_owned();
-        let hostname = workload.hostname.to_owned();
+        let workload_uid = workload.uid.clone();
+        let hostname = workload.hostname.clone();
         trace!("dns workload async task started for {:?}", &hostname);
 
         let resolver_result = TokioAsyncResolver::new(
@@ -532,7 +533,7 @@ impl DemandProxyState {
             TokioConnectionProvider::default(),
         );
 
-        let resp = resolver_result.lookup_ip(&hostname).await;
+        let resp = resolver_result.lookup_ip(hostname.as_ref()).await;
         if resp.is_err() {
             warn!(
                 "system dns async resolution: error response for workload {} is: {:?}",
@@ -581,7 +582,7 @@ impl DemandProxyState {
         state.set_ips_for_hostname(hostname, rdns);
     }
 
-    pub fn set_ips_for_hostname(&self, hostname: String, rdns: ResolvedDns) {
+    pub fn set_ips_for_hostname(&self, hostname: Strng, rdns: ResolvedDns) {
         self.state
             .write()
             .unwrap()
@@ -590,7 +591,7 @@ impl DemandProxyState {
             .insert(hostname, rdns);
     }
 
-    pub fn get_ips_for_hostname(&self, hostname: &String) -> Option<ResolvedDns> {
+    pub fn get_ips_for_hostname(&self, hostname: &Strng) -> Option<ResolvedDns> {
         self.state
             .read()
             .unwrap()
@@ -698,13 +699,13 @@ impl DemandProxyState {
                     Ok(_) => Ok(Some(upstream)),
                     Err(e) => {
                         debug!(%wl.name, "failed to set gateway address for upstream: {}", e);
-                        Err(WaypointError::FindWaypointError(wl.name.to_owned()))
+                        Err(WaypointError::FindWaypointError(wl.name.to_string()))
                     }
                 }
             }
             None => {
                 debug!(%wl.name, "waypoint upstream not found");
-                Err(WaypointError::FindWaypointError(wl.name.to_owned()))
+                Err(WaypointError::FindWaypointError(wl.name.to_string()))
             }
         }
     }

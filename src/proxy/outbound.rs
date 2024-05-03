@@ -38,6 +38,7 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::{assertions, proxy, socket};
+use crate::strng::Strng;
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -313,7 +314,7 @@ impl OutboundConnection {
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
         if let Some(svc) = &req.destination_service {
-            f.set_host(&svc.hostname);
+            f.set_host(svc.hostname.as_ref());
         }
 
         let request = http::Request::builder()
@@ -580,7 +581,7 @@ struct Request {
     gateway: SocketAddr,
     request_type: RequestType,
 
-    upstream_sans: Vec<String>,
+    upstream_sans: Vec<Strng>,
 }
 
 #[derive(PartialEq, Debug)]

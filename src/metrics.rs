@@ -25,6 +25,7 @@ pub mod meta;
 pub mod server;
 
 pub use server::*;
+use crate::strng::{RichStrng, Strng};
 
 /// Creates a metrics sub registry for Istio.
 pub fn sub_registry(registry: &mut Registry) -> &mut Registry {
@@ -117,6 +118,8 @@ impl<T> Default for DefaultedUnknown<T> {
     }
 }
 
+// Surely there is a less verbose way to do this, but I cannot find one.
+
 impl From<String> for DefaultedUnknown<String> {
     fn from(t: String) -> Self {
         if t.is_empty() {
@@ -124,6 +127,42 @@ impl From<String> for DefaultedUnknown<String> {
         } else {
             DefaultedUnknown(Some(t))
         }
+    }
+}
+
+impl From<RichStrng> for DefaultedUnknown<RichStrng> {
+    fn from(t: RichStrng) -> Self {
+        if t.is_empty() {
+            DefaultedUnknown(None)
+        } else {
+            DefaultedUnknown(Some(t))
+        }
+    }
+}
+
+impl From<String> for DefaultedUnknown<RichStrng> {
+    fn from(t: String) -> Self {
+        if t.is_empty() {
+            DefaultedUnknown(None)
+        } else {
+            DefaultedUnknown(Some(t.into()))
+        }
+    }
+}
+
+impl From<Strng> for DefaultedUnknown<RichStrng> {
+    fn from(t: Strng) -> Self {
+        if t.is_empty() {
+            DefaultedUnknown(None)
+        } else {
+            DefaultedUnknown(Some(t.into()))
+        }
+    }
+}
+
+impl From<Option<Strng>> for DefaultedUnknown<RichStrng> {
+    fn from(t: Option<Strng>) -> Self {
+        DefaultedUnknown(t.map(RichStrng::from))
     }
 }
 

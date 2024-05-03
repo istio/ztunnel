@@ -329,7 +329,7 @@ impl Store {
             for mut search_name in get_wildcards(&alias.name) {
                 // Convert the name to a string for lookup, removing the trailing '.'.
                 search_name.set_fqdn(false);
-                let search_name_str = search_name.to_string();
+                let search_name_str = search_name.to_string().into();
                 search_name.set_fqdn(true);
 
                 // First, lookup the host as a service.

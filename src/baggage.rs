@@ -16,14 +16,15 @@ use hyper::{
     header::{GetAll, ToStrError},
     http::HeaderValue,
 };
+use crate::strng::Strng;
 
 #[derive(Default)]
 pub struct Baggage {
-    pub cluster_id: Option<String>,
-    pub namespace: Option<String>,
-    pub workload_name: Option<String>,
-    pub service_name: Option<String>,
-    pub revision: Option<String>,
+    pub cluster_id: Option<Strng>,
+    pub namespace: Option<Strng>,
+    pub workload_name: Option<Strng>,
+    pub service_name: Option<Strng>,
+    pub revision: Option<Strng>,
 }
 
 pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToStrError> {
@@ -37,7 +38,7 @@ pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToS
             if parts.len() > 1 {
                 let val = match parts[1] {
                     "" => None,
-                    s => Some(s.to_string()),
+                    s => Some(s.into()),
                 };
                 match parts[0] {
                     "k8s.cluster.name" => baggage.cluster_id = val,

@@ -513,7 +513,7 @@ pub fn guess_inbound_service(
     // Note: the set of Services we look for is bounded, so we won't blindly trust bogus info.
     if let Some(found) = upstream_service
         .iter()
-        .find(|s| for_host_header.as_ref() == Some(&s.hostname))
+        .find(|s| for_host_header.as_deref() == Some(s.hostname.as_ref()))
         .map(|s| ServiceDescription::from(s.as_ref()))
     {
         return Some(found);

@@ -94,7 +94,7 @@ impl CertFetcherImpl {
         // Only shared mode fetches other workloads's certs
         self.proxy_mode == ProxyMode::Shared &&
             // We only get certs for our own node
-            Some(&w.node) == self.local_node.as_ref() &&
+            Some(w.node.as_ref()) == self.local_node.as_deref() &&
             // If it doesn't support HBONE it *probably* doesn't need a cert.
             (w.native_tunnel || w.protocol == Protocol::HBONE)
     }

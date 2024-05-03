@@ -34,15 +34,16 @@ use super::Error::{self, Spiffe};
 
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use keyed_priority_queue::KeyedPriorityQueue;
+use crate::strng::Strng;
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub enum Identity {
     Spiffe {
-        trust_domain: String,
-        namespace: String,
-        service_account: String,
+        trust_domain: Strng,
+        namespace: Strng,
+        service_account: Strng,
     },
 }
 
@@ -78,9 +79,9 @@ impl FromStr for Identity {
             return Err(Spiffe(s.to_string()));
         }
         Ok(Identity::Spiffe {
-            trust_domain: split[0].to_string(),
-            namespace: split[2].to_string(),
-            service_account: split[4].to_string(),
+            trust_domain: split[0].into(),
+            namespace: split[2].into(),
+            service_account: split[4].into(),
         })
     }
 }
@@ -107,9 +108,9 @@ impl Default for Identity {
         const SERVICE_ACCOUNT: &str = "ztunnel";
         const NAMESPACE: &str = "istio-system";
         Identity::Spiffe {
-            trust_domain: TRUST_DOMAIN.to_string(),
-            namespace: NAMESPACE.to_string(),
-            service_account: SERVICE_ACCOUNT.to_string(),
+            trust_domain: TRUST_DOMAIN.into(),
+            namespace: NAMESPACE.into(),
+            service_account: SERVICE_ACCOUNT.into(),
         }
     }
 }

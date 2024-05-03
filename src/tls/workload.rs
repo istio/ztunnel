@@ -34,6 +34,7 @@ use crate::tls;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
 use tracing::{debug, trace};
+use crate::strng::Strng;
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -49,11 +50,11 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 #[derive(Debug)]
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
-    trust_domain: Option<String>,
+    trust_domain: Option<Strng>,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<String>) -> Arc<Self> {
+    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
         Arc::new(Self { base, trust_domain })
     }
 

@@ -253,7 +253,7 @@ impl ProxyStateUpdateMutator {
 
     pub fn remove_authorization(&self, state: &mut ProxyState, name: String) {
         info!("handling RBAC delete {}", name);
-        state.policies.remove(name);
+        state.policies.remove(name.into());
     }
 }
 
@@ -300,8 +300,8 @@ fn service_endpoints(
         // Parse the namespaced hostname for the service.
         let namespaced_host = match namespaced_host.split_once('/') {
             Some((namespace, hostname)) => NamespacedHostname {
-                namespace: namespace.to_string(),
-                hostname: hostname.to_string(),
+                namespace: namespace.into(),
+                hostname: hostname.into(),
             },
             None => {
                 return Err(anyhow::anyhow!(
