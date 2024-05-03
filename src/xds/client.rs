@@ -619,6 +619,7 @@ impl AdsClient {
             tls_grpc_channel,
             self.config.auth.clone(),
         )
+        .max_decoding_message_size(200 * 1024 * 1024)
         .delta_aggregated_resources(tonic::Request::new(outbound))
         .await;
 
