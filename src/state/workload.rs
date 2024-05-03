@@ -14,8 +14,9 @@
 
 use crate::identity::Identity;
 
-use crate::{strng, xds};
+use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
+use crate::{strng, xds};
 use bytes::Bytes;
 use serde::de::Visitor;
 use serde::Deserialize;
@@ -35,7 +36,6 @@ use tracing::{error, trace};
 use xds::istio::workload::ApplicationTunnel as XdsApplicationTunnel;
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;
-use crate::strng::Strng;
 
 #[derive(
     Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
@@ -376,63 +376,70 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
             .collect::<Result<Vec<_>, _>>()?;
 
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
-        Ok((Workload {
-            workload_ips: addresses,
-            waypoint: wp,
-            network_gateway: network_gw,
-            gateway_address: None,
+        Ok((
+            Workload {
+                workload_ips: addresses,
+                waypoint: wp,
+                network_gateway: network_gw,
+                gateway_address: None,
 
-            protocol: Protocol::from(xds::istio::workload::TunnelProtocol::try_from(
-                resource.tunnel_protocol,
-            )?),
+                protocol: Protocol::from(xds::istio::workload::TunnelProtocol::try_from(
+                    resource.tunnel_protocol,
+                )?),
 
-            uid: resource.uid.into(),
-            name: resource.name.into(),
-            namespace: resource.namespace.into(),
-            trust_domain: {
-                let result = resource.trust_domain;
-                if result.is_empty() {
-                    "cluster.local".into()
-                } else {
-                    result.into()
-                }
+                uid: resource.uid.into(),
+                name: resource.name.into(),
+                namespace: resource.namespace.into(),
+                trust_domain: {
+                    let result = resource.trust_domain;
+                    if result.is_empty() {
+                        "cluster.local".into()
+                    } else {
+                        result.into()
+                    }
+                },
+                service_account: {
+                    let result = resource.service_account;
+                    if result.is_empty() {
+                        "default".into()
+                    } else {
+                        result.into()
+                    }
+                },
+                node: resource.node.into(),
+                hostname: resource.hostname.into(),
+                network: resource.network.into(),
+                workload_name: resource.workload_name.into(),
+                workload_type: workload_type.into(),
+                canonical_name: resource.canonical_name.into(),
+                canonical_revision: resource.canonical_revision.into(),
+
+                status: HealthStatus::from(xds::istio::workload::WorkloadStatus::try_from(
+                    resource.status,
+                )?),
+
+                native_tunnel: resource.native_tunnel,
+                application_tunnel,
+
+                authorization_policies: resource
+                    .authorization_policies
+                    .iter()
+                    .map(strng::new)
+                    .collect(),
+
+                locality: resource.locality.map(Locality::from).unwrap_or_default(),
+
+                cluster_id: {
+                    let result = resource.cluster_id;
+                    if result.is_empty() {
+                        "Kubernetes".into()
+                    } else {
+                        result.into()
+                    }
+                },
             },
-            service_account: {
-                let result = resource.service_account;
-                if result.is_empty() {
-                    "default".into()
-                } else {
-                    result.into()
-                }
-            },
-            node: resource.node.into(),
-            hostname: resource.hostname.into(),
-            network: resource.network.into(),
-            workload_name: resource.workload_name.into(),
-            workload_type: workload_type.into(),
-            canonical_name: resource.canonical_name.into(),
-            canonical_revision: resource.canonical_revision.into(),
-
-            status: HealthStatus::from(xds::istio::workload::WorkloadStatus::try_from(
-                resource.status,
-            )?),
-
-            native_tunnel: resource.native_tunnel,
-            application_tunnel,
-
-            authorization_policies: resource.authorization_policies.iter().map(strng::new).collect(),
-
-            locality: resource.locality.map(Locality::from).unwrap_or_default(),
-
-            cluster_id: {
-                let result = resource.cluster_id;
-                if result.is_empty() {
-                    "Kubernetes".into()
-                } else {
-                    result.into()
-                }
-            },
-        }, resource.services))
+            resource.services,
+        ))
     }
 }
 
@@ -1222,8 +1229,8 @@ mod tests {
             name: "some name".into(),
             ..Default::default()
         })
-            .try_into()
-            .unwrap();
+        .try_into()
+        .unwrap();
         for _ in 0..1000 {
             if let Some(us) =
                 state

@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use crate::rbac::{Authorization, RbacScope};
-use std::collections::{HashMap, HashSet};
-use tokio::sync::watch;
 use crate::strng;
 use crate::strng::Strng;
+use std::collections::{HashMap, HashSet};
+use tokio::sync::watch;
 
 /// A PolicyStore encapsulates all policy information about workloads in the mesh
 #[derive(Default, Debug)]
@@ -49,7 +49,7 @@ impl PolicyStore {
 
     pub fn get_by_namespace(&self, namespace: &Strng) -> Vec<Strng> {
         self.by_namespace
-            .get(namespace.into())
+            .get(namespace)
             .into_iter()
             .flatten()
             .cloned()

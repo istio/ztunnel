@@ -42,4 +42,5 @@ pub mod istio {
 }
 
 pub const ADDRESS_TYPE: Strng = strng::literal!("type.googleapis.com/istio.workload.Address");
-pub const AUTHORIZATION_TYPE: Strng = strng::literal!("type.googleapis.com/istio.security.Authorization");
+pub const AUTHORIZATION_TYPE: Strng =
+    strng::literal!("type.googleapis.com/istio.security.Authorization");

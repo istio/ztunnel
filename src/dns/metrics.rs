@@ -23,7 +23,7 @@ use std::time::Duration;
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Recorder};
 
 use crate::state::workload::Workload;
-use crate::strng::{RichStrng, Strng};
+use crate::strng::RichStrng;
 
 pub struct Metrics {
     pub requests: Family<DnsLabels, Counter>,

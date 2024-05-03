@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::strng::Strng;
 use hyper::{
     header::{GetAll, ToStrError},
     http::HeaderValue,
 };
-use crate::strng::Strng;
 
 #[derive(Default)]
 pub struct Baggage {

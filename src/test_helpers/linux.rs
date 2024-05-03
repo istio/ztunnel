@@ -406,7 +406,8 @@ impl<'a> TestWorkloadBuilder<'a> {
         self.w.workload.uid = format!(
             "cluster1//v1/Pod/{}/{}",
             self.w.workload.namespace, self.w.workload.name,
-        ).into();
+        )
+        .into();
         let uid = self.w.workload.uid.clone();
 
         // update the endpoints for the service.

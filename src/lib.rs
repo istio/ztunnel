@@ -31,12 +31,12 @@ pub mod readiness;
 pub mod signal;
 pub mod socket;
 pub mod state;
+pub mod strng;
 pub mod telemetry;
 pub mod time;
 pub mod tls;
 pub mod version;
 pub mod xds;
-pub mod strng;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;

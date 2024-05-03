@@ -31,7 +31,8 @@ use crate::xds;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Authorization { // TODO move all of this
+pub struct Authorization {
+    // TODO move all of this
     pub name: String,
     pub namespace: String,
     pub scope: RbacScope,

@@ -30,11 +30,11 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::strng::Strng;
 use crate::tls;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
 use tracing::{debug, trace};
-use crate::strng::Strng;
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {

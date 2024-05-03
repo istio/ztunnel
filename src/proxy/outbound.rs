@@ -37,8 +37,8 @@ use crate::proxy::h2_client::H2Stream;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
-use crate::{assertions, proxy, socket};
 use crate::strng::Strng;
+use crate::{assertions, proxy, socket};
 
 pub struct Outbound {
     pi: ProxyInputs,

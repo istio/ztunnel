@@ -25,8 +25,8 @@ use crate::identity::Identity;
 pub mod meta;
 pub mod server;
 
-pub use server::*;
 use crate::strng::{RichStrng, Strng};
+pub use server::*;
 
 /// Creates a metrics sub registry for Istio.
 pub fn sub_registry(registry: &mut Registry) -> &mut Registry {

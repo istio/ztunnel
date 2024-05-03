@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use itertools::Itertools;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
@@ -30,12 +29,12 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::metrics::IncrementRecorder;
+use crate::strng::Strng;
 use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
 use crate::{identity, strng, tls};
-use crate::strng::Strng;
 
 use super::Error;
 
@@ -166,7 +165,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         // Collecting after handle() is important, as the split() will cache the side we use last.
         // Updates >>> Errors (hopefully), so we want this one to do the allocations.
         let decode_failures: Vec<_> = decode_failures
-            .map(|r| r.err().expect("must be err"))
+            .map(|r| r.expect_err("must be err"))
             .collect();
 
         // after we update the proxy cache, we can update our xds cache. it's important that we do this after
@@ -1062,9 +1061,7 @@ mod tests {
                 info!("workload manager: {}", e);
             }
         });
-        let result = demander
-            .demand(ADDRESS_TYPE, "foo0".into())
-            .await;
+        let result = demander.demand(ADDRESS_TYPE, "foo0".into()).await;
 
         let mut conn = conn_receiver.recv().await.unwrap();
 

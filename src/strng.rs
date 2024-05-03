@@ -1,9 +1,8 @@
 use std::fmt::Error;
 use std::ops::Deref;
-use std::rc::Rc;
-use std::sync::Arc;
+
 use arcstr::ArcStr;
-use prometheus_client::encoding::{EncodeLabelKey, LabelSetEncoder, LabelValueEncoder};
+use prometheus_client::encoding::LabelValueEncoder;
 
 pub type Strng = ArcStr;
 
@@ -33,7 +32,9 @@ impl Deref for RichStrng {
 }
 
 impl<T> From<T> for RichStrng
-    where T: Into<Strng>{
+where
+    T: Into<Strng>,
+{
     fn from(value: T) -> Self {
         RichStrng(value.into())
     }
@@ -42,27 +43,23 @@ impl<T> From<T> for RichStrng
 #[cfg(test)]
 mod test {
     use super::*;
-    fn as_ref_fn<A: AsRef<str>>(s: A) {
-
-    }
-    fn into_string_fn<A: Into<String>>(s: A) {
-
-    }
-    fn string_fn(s: String) {
-
-    }
-    fn str_fn(s: &str) {
-
-    }
+    fn as_ref_fn<A: AsRef<str>>(_s: A) {}
+    fn into_string_fn<A: Into<String>>(_s: A) {}
+    fn string_fn(_s: String) {}
+    fn str_fn(_s: &str) {}
 
     #[test]
     fn interning() {
+        // Mostly we just thinly wrap ArcString, so just validate our assumptions about the library
         let a = new("abc");
         let b = new("abc");
-        assert_eq!(std::mem::size_of::<Strng>(), 16);
+        assert_eq!(std::mem::size_of::<Strng>(), 8);
         assert_eq!(std::format!("{a}"), "abc");
         assert_eq!(super::format!("{a}"), "abc");
         assert_eq!(ArcStr::strong_count(&a), ArcStr::strong_count(&b));
+        assert_eq!(ArcStr::strong_count(&a), Some(1));
+        let c = a.clone();
+        assert_eq!(ArcStr::strong_count(&a), ArcStr::strong_count(&c));
         assert_eq!(ArcStr::strong_count(&a), Some(2));
         assert_eq!("abc", b.to_string());
 
@@ -70,6 +67,6 @@ mod test {
         as_ref_fn(new("abc"));
         into_string_fn(&*new("abc"));
         string_fn(a.to_string());
-        as_ref_fn(new("abc"));
+        str_fn(&new("abc"));
     }
 }

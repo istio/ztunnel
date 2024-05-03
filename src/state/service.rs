@@ -17,7 +17,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::{error, trace};
+use tracing::trace;
 
 use xds::istio::workload::Service as XdsService;
 
@@ -27,9 +27,9 @@ use crate::state::workload::{
     WorkloadError,
 };
 use crate::strng::Strng;
-use crate::{strng, xds};
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::PortList;
+use crate::{strng, xds};
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -152,7 +152,7 @@ pub struct Endpoint {
 
 pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> Strng {
     let addr = address.map(|a| a.to_string()).unwrap_or_default();
-    let mut res = String::with_capacity(1 +addr.len() + workload_uid.len());
+    let mut res = String::with_capacity(1 + addr.len() + workload_uid.len());
     res.push_str(workload_uid);
     res.push(':');
     res.push_str(&addr);
@@ -214,14 +214,14 @@ impl TryFrom<&XdsService> for Service {
 pub struct ServiceStore {
     /// Maintains a mapping of service key -> (endpoint UID -> workload endpoint)
     /// this is used to handle ordering issues if workloads are received before services.
-    pub  staged_services: HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
+    pub staged_services: HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
 
     /// Maintains a mapping of workload UID to service. This is used only to handle removal of
     /// service endpoints when a workload is removed.
     pub workload_to_services: HashMap<Strng, HashSet<NamespacedHostname>>,
 
     /// Allows for lookup of services by network address, the service's xds secondary key.
-    pub  by_vip: HashMap<NetworkAddress, Arc<Service>>,
+    pub by_vip: HashMap<NetworkAddress, Arc<Service>>,
 
     /// Allows for lookup of services by hostname, and then by namespace. XDS uses a combination
     /// of hostname and namespace as the primary key. In most cases, there will be a single

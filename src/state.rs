@@ -23,6 +23,7 @@ use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
     NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
 };
+use crate::strng::Strng;
 use crate::tls;
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
@@ -43,7 +44,6 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
-use crate::strng::Strng;
 
 pub mod policy;
 pub mod service;
@@ -761,7 +761,7 @@ impl DemandProxyState {
             debug!(%key, "sending demand request");
             Box::pin(
                 demand
-                    .demand(xds::ADDRESS_TYPE.into(), key.clone())
+                    .demand(xds::ADDRESS_TYPE, key.clone())
                     .then(|o| o.recv()),
             )
             .await;

@@ -34,13 +34,13 @@ use xds::istio::workload::Workload as XdsWorkload;
 
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
-use crate::{rbac, strng};
 use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service, ServiceStore};
 use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
 use crate::state::ProxyState;
-use crate::{tls, xds};
 use crate::strng::Strng;
+use crate::{rbac, strng};
+use crate::{tls, xds};
 
 use self::service::discovery::v3::DeltaDiscoveryRequest;
 
@@ -258,7 +258,10 @@ impl ProxyStateUpdateMutator {
 }
 
 impl Handler<XdsWorkload> for ProxyStateUpdater {
-    fn handle(&self, updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsWorkload>>>) -> Result<(), Vec<RejectedConfig>> {
+    fn handle(
+        &self,
+        updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsWorkload>>>,
+    ) -> Result<(), Vec<RejectedConfig>> {
         // use deepsize::DeepSizeOf;
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsWorkload>| {
@@ -276,7 +279,10 @@ impl Handler<XdsWorkload> for ProxyStateUpdater {
 }
 
 impl Handler<XdsAddress> for ProxyStateUpdater {
-    fn handle(&self, updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAddress>>>) -> Result<(), Vec<RejectedConfig>> {
+    fn handle(
+        &self,
+        updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAddress>>>,
+    ) -> Result<(), Vec<RejectedConfig>> {
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsAddress>| {
             match res {
@@ -295,7 +301,7 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
 fn insert_service_endpoints(
     workload: &Workload,
     services: &HashMap<String, PortList>,
-    services_state: &mut ServiceStore
+    services_state: &mut ServiceStore,
 ) -> anyhow::Result<()> {
     for (namespaced_host, ports) in services {
         // Parse the namespaced hostname for the service.
@@ -337,7 +343,10 @@ impl Handler<XdsAuthorization> for ProxyStateUpdater {
         true
     }
 
-    fn handle(&self, updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAuthorization>>>) -> Result<(), Vec<RejectedConfig>> {
+    fn handle(
+        &self,
+        updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAuthorization>>>,
+    ) -> Result<(), Vec<RejectedConfig>> {
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsAuthorization>| {
             match res {
@@ -349,7 +358,7 @@ impl Handler<XdsAuthorization> for ProxyStateUpdater {
             Ok(())
         };
         let mut len_updates = 0;
-        let updates = updates.inspect(|_| len_updates+=1);
+        let updates = updates.inspect(|_| len_updates += 1);
         match handle_single_resource(updates, handle) {
             Ok(()) => {
                 state.policies.send();

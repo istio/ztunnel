@@ -407,7 +407,9 @@ pub fn new_proxy_state(
             },
         };
         let handler = &updater as &dyn Handler<XdsAddress>;
-        handler.handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter())).unwrap();
+        handler
+            .handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter()))
+            .unwrap();
     }
     for s in xds_services {
         let res = XdsResource {
@@ -417,7 +419,9 @@ pub fn new_proxy_state(
             },
         };
         let handler = &updater as &dyn Handler<XdsAddress>;
-        handler.handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter())).unwrap();
+        handler
+            .handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter()))
+            .unwrap();
     }
     for a in xds_authorizations {
         let res = XdsResource {
@@ -425,7 +429,9 @@ pub fn new_proxy_state(
             resource: a.clone(),
         };
         let handler = &updater as &dyn Handler<XdsAuthorization>;
-        handler.handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter())).unwrap();
+        handler
+            .handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter()))
+            .unwrap();
     }
     DemandProxyState::new(
         state,

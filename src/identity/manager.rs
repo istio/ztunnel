@@ -32,9 +32,9 @@ use crate::tls;
 use super::CaClient;
 use super::Error::{self, Spiffe};
 
+use crate::strng::Strng;
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use keyed_priority_queue::KeyedPriorityQueue;
-use crate::strng::Strng;
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
 

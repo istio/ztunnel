@@ -457,6 +457,7 @@ mod tests {
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
     use crate::identity;
+    use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
@@ -475,7 +476,6 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType as XdsWorkloadType;
-    use crate::strng;
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
