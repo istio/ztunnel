@@ -138,9 +138,12 @@ impl ProxyStateUpdateMutator {
         self.cert_fetcher.prefetch_cert(&workload);
 
         // Lock and upstate the stores.
+        let track = self
+            .cert_fetcher
+            .should_track_certificates_for_removal(&workload);
+        state.workloads.insert(workload.clone(), track);
         // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
         // But we shouldn't include them in load balancing we do to Services.
-        state.workloads.insert(workload.clone());
         if workload.status == HealthStatus::Healthy {
             insert_service_endpoints(&workload, &services, &mut state.services)?;
         }
@@ -174,7 +177,12 @@ impl ProxyStateUpdateMutator {
 
             // This is a real removal (not a removal before insertion), and nothing else references the cert
             // Clear it out
-            if !for_insert && !state.workloads.has_identity(&prev.identity()) {
+            if !for_insert
+                && self
+                    .cert_fetcher
+                    .should_track_certificates_for_removal(&prev)
+                && !state.workloads.has_identity(&prev.identity())
+            {
                 self.cert_fetcher.clear_cert(&prev.identity());
             }
             // We removed a workload, no reason to attempt to remove a service with the same name
@@ -457,7 +465,10 @@ impl LocalClient {
             trace!("inserting local workload {}", &wl.workload.uid);
             self.cert_fetcher.prefetch_cert(&wl.workload);
             let w = Arc::new(wl.workload);
-            state.workloads.insert(w.clone());
+            state.workloads.insert(
+                w.clone(),
+                self.cert_fetcher.should_track_certificates_for_removal(&w),
+            );
 
             let services: HashMap<String, PortList> = wl
                 .services

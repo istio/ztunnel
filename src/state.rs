@@ -876,7 +876,7 @@ mod tests {
         let mut state = ProxyState::default();
         state
             .workloads
-            .insert(Arc::new(test_helpers::test_default_workload()));
+            .insert(Arc::new(test_helpers::test_default_workload()), true);
         state.services.insert(test_helpers::mock_default_service());
 
         let mock_proxy_state = DemandProxyState::new(
@@ -950,7 +950,7 @@ mod tests {
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
             ..test_helpers::test_default_workload()
         };
-        state.workloads.insert(Arc::new(wl));
+        state.workloads.insert(Arc::new(wl), true);
 
         let mock_proxy_state = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
@@ -1153,9 +1153,11 @@ mod tests {
             }),
             ..test_helpers::mock_default_service()
         };
-        state.workloads.insert(Arc::new(wl_no_locality.clone()));
-        state.workloads.insert(Arc::new(wl_match.clone()));
-        state.workloads.insert(Arc::new(wl_almost.clone()));
+        state
+            .workloads
+            .insert(Arc::new(wl_no_locality.clone()), true);
+        state.workloads.insert(Arc::new(wl_match.clone()), true);
+        state.workloads.insert(Arc::new(wl_almost.clone()), true);
         state.services.insert(strict_svc.clone());
         state.services.insert(failover_svc.clone());
 

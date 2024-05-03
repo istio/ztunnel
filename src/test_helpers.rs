@@ -367,7 +367,9 @@ pub fn local_xds_config(
     Ok(b.into_inner().freeze())
 }
 
-pub async fn assert_eventually<F, T, Fut>(dur: Duration, f: F, expected: T)
+/// check_eventually runs a function many times until it reaches the expected result.
+/// If it doesn't the last result is returned
+pub async fn check_eventually<F, T, Fut>(dur: Duration, f: F, expected: T) -> Result<(), T>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = T>,
@@ -381,14 +383,25 @@ where
         attempts += 1;
         last = f().await;
         if last == expected {
-            return;
+            return Ok(());
         }
         trace!("attempt {attempts} with delay {delay:?}");
         if SystemTime::now().add(delay) > end {
-            panic!("assert_eventually failed after {attempts}: last response: {last:?}")
+            return Err(last);
         }
         tokio::time::sleep(delay).await;
         delay *= 2;
+    }
+}
+
+pub async fn assert_eventually<F, T, Fut>(dur: Duration, f: F, expected: T)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = T>,
+    T: Eq + Debug,
+{
+    if let Err(last) = check_eventually(dur, f, expected).await {
+        panic!("assert_eventually failed: last response: {last:?}")
     }
 }
 

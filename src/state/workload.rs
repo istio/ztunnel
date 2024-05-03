@@ -597,12 +597,12 @@ pub struct WorkloadStore {
     by_uid: HashMap<Strng, Arc<Workload>>,
     /// byHostname maps workload hostname to workloads.
     by_hostname: HashMap<Strng, Arc<Workload>>,
-    // Identity->Set of UIDs
+    // Identity->Set of UIDs. Only stores local nodes
     by_identity: HashMap<Identity, HashSet<Strng>>,
 }
 
 impl WorkloadStore {
-    pub fn insert(&mut self, w: Arc<Workload>) {
+    pub fn insert(&mut self, w: Arc<Workload>, track_identity: bool) {
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove(&w.uid);
 
@@ -614,6 +614,13 @@ impl WorkloadStore {
             self.by_hostname.insert(w.hostname.clone(), w.clone());
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
+        // Only track local nodes to avoid overhead
+        if track_identity {
+            self.by_identity
+                .entry(w.identity())
+                .or_default()
+                .insert(w.uid.clone());
+        }
     }
 
     pub fn remove(&mut self, uid: &Strng) -> Option<Workload> {
