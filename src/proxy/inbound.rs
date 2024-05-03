@@ -602,6 +602,7 @@ pub fn parse_forwarded_host<T>(req: &Request<T>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::Inbound;
+    use crate::strng;
 
     use std::{
         net::SocketAddr,
@@ -704,18 +705,18 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, vip, ep_ip, waypoint)| {
-            let ep_uid = format!("cluster1//v1/Pod/default/{name}");
+            let ep_uid = strng::format!("cluster1//v1/Pod/default/{name}");
             let ep_addr = Some(NetworkAddress {
                 address: ep_ip.parse().unwrap(),
                 network: "".to_string(),
             });
             Service {
-                name: name.to_string(),
-                namespace: "default".to_string(),
-                hostname: format!("{name}.default.svc.cluster.local"),
+                name: name.into(),
+                namespace: "default".into(),
+                hostname: strng::format!("{name}.default.svc.cluster.local"),
                 vips: vec![NetworkAddress {
                     address: vip.parse().unwrap(),
-                    network: "".to_string(),
+                    network: "".into(),
                 }],
                 ports: std::collections::HashMap::new(),
                 endpoints: vec![(
@@ -723,8 +724,8 @@ mod tests {
                     Endpoint {
                         workload_uid: ep_uid,
                         service: NamespacedHostname {
-                            hostname: format!("{name}.default.svc.cluster.local"),
-                            namespace: "default".to_string(),
+                            hostname: strng::format!("{name}.default.svc.cluster.local"),
+                            namespace: "default".into(),
                         },
                         address: ep_addr,
                         port: std::collections::HashMap::new(),
@@ -732,7 +733,7 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
-                subject_alt_names: vec![format!("{name}.default.svc.cluster.local")],
+                subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
                 waypoint: waypoint.service_attached(),
                 load_balancer: None,
             }
@@ -754,10 +755,10 @@ mod tests {
             workload_ips: vec![ip.parse().unwrap()],
             waypoint: waypoint.workload_attached(),
             protocol: Protocol::HBONE,
-            uid: format!("cluster1//v1/Pod/default/{name}"),
-            name: format!("workload-{name}"),
-            namespace: "default".to_string(),
-            service_account: format!("service-account-{name}"),
+            uid: strng::format!("cluster1//v1/Pod/default/{name}"),
+            name: strng::format!("workload-{name}"),
+            namespace: "default".into(),
+            service_account: strng::format!("service-account-{name}"),
             application_tunnel: app_tunnel,
             ..test_helpers::test_default_workload()
         });
@@ -766,7 +767,7 @@ mod tests {
             state.services.insert(svc);
         }
         for wl in workloads {
-            state.workloads.insert(wl);
+            state.workloads.insert(Arc::new(wl));
         }
 
         Ok(DemandProxyState::new(

@@ -20,7 +20,7 @@ use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
 use crate::xds::{LocalConfig, LocalWorkload};
-use crate::{config, identity, proxy};
+use crate::{config, identity, proxy, strng};
 
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
@@ -204,9 +204,9 @@ impl WorkloadManager {
         TestWorkloadBuilder::new(name, self)
             .on_node(node)
             .identity(identity::Identity::Spiffe {
-                trust_domain: "cluster.local".to_string(),
-                namespace: "default".to_string(),
-                service_account: name.to_string(),
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: name.into(),
             })
     }
 
@@ -222,9 +222,9 @@ impl WorkloadManager {
             .on_node(node)
             .uncaptured() // Waypoints are not captured.
             .identity(identity::Identity::Spiffe {
-                trust_domain: "cluster.local".to_string(),
-                namespace: "default".to_string(),
-                service_account: name.to_string(),
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: name.into(),
             })
             .register()
             .await
@@ -255,9 +255,9 @@ impl<'a> TestServiceBuilder<'a> {
     pub fn new(name: &str, manager: &'a mut WorkloadManager) -> TestServiceBuilder<'a> {
         TestServiceBuilder {
             s: Service {
-                name: name.to_string(),
-                namespace: "default".to_string(),
-                hostname: format!("{name}.default.svc.cluster.local"),
+                name: name.into(),
+                namespace: "default".into(),
+                hostname: strng::format!("{name}.default.svc.cluster.local"),
                 vips: vec![],
                 ports: Default::default(),
                 endpoints: Default::default(), // populated later when workloads are added
@@ -316,10 +316,10 @@ impl<'a> TestWorkloadBuilder<'a> {
             captured: false,
             w: LocalWorkload {
                 workload: Workload {
-                    name: name.to_string(),
-                    namespace: "default".to_string(),
-                    service_account: "default".to_string(),
-                    node: "".to_string(),
+                    name: name.into(),
+                    namespace: "default".into(),
+                    service_account: "default".into(),
+                    node: "".into(),
                     ..test_default_workload()
                 },
                 services: Default::default(),
@@ -380,7 +380,7 @@ impl<'a> TestWorkloadBuilder<'a> {
 
     /// Configure the workload to run a given node
     pub fn on_node(mut self, node: &str) -> Self {
-        self.w.workload.node = node.to_string();
+        self.w.workload.node = node.into();
         if self.manager.ztunnels.contains_key(node) {
             self.captured = true;
             self.w.workload.protocol = HBONE;
@@ -406,7 +406,7 @@ impl<'a> TestWorkloadBuilder<'a> {
         self.w.workload.uid = format!(
             "cluster1//v1/Pod/{}/{}",
             self.w.workload.namespace, self.w.workload.name,
-        );
+        ).into();
         let uid = self.w.workload.uid.clone();
 
         // update the endpoints for the service.
@@ -420,7 +420,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                 };
 
                 let ep = Endpoint {
-                    workload_uid: self.w.workload.uid.to_string(),
+                    workload_uid: self.w.workload.uid.as_str().into(),
                     service: service_name.clone(),
                     address: Some(ep_network_addr.clone()),
                     port: ports.to_owned(),
@@ -431,11 +431,11 @@ impl<'a> TestWorkloadBuilder<'a> {
             }
         }
 
-        info!("registered {}", self.w.workload.uid);
+        info!("registered {}", &self.w.workload.uid);
         self.manager.workloads.push(self.w);
         if self.captured {
             // Setup redirection
-            let zt_info = self.manager.ztunnels.get_mut(&node).unwrap();
+            let zt_info = self.manager.ztunnels.get_mut(node.as_str()).unwrap();
             if self.manager.mode == InPod {
                 // In the new pod network
                 network_namespace
@@ -446,7 +446,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                     .fd_sender
                     .as_mut()
                     .unwrap()
-                    .send_and_wait((uid, fd))
+                    .send_and_wait((uid.to_string(), fd))
                     .await?;
             } else {
                 let our_ip = network_namespace.ip();

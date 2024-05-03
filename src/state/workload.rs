@@ -66,17 +66,17 @@ pub enum HealthStatus {
 
 #[derive(Default, Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Locality {
-    pub region: String,
-    pub zone: String,
-    pub subzone: String,
+    pub region: Strng,
+    pub zone: Strng,
+    pub subzone: Strng,
 }
 
 impl From<xds::istio::workload::Locality> for Locality {
     fn from(value: xds::istio::workload::Locality) -> Self {
         Locality {
-            region: value.region,
-            zone: value.zone,
-            subzone: value.subzone,
+            region: value.region.into(),
+            zone: value.zone.into(),
+            subzone: value.subzone.into(),
         }
     }
 }
@@ -340,6 +340,14 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
             None => return Err(WorkloadError::MissingGatewayAddress),
         };
         Ok(gw_addr)
+    }
+}
+
+impl TryFrom<XdsWorkload> for Workload {
+    type Error = WorkloadError;
+    fn try_from(resource: XdsWorkload) -> Result<Self, Self::Error> {
+        let (w, _): (Workload, HashMap<String, PortList>) = resource.try_into()?;
+        Ok(w)
     }
 }
 
@@ -817,9 +825,9 @@ mod tests {
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
-                uid: uid1.to_owned(),
+                uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
-                name: "some name".to_string(),
+                name: "some name".into(),
                 ..test_helpers::test_default_workload()
             })
         );
@@ -827,29 +835,29 @@ mod tests {
         assert_eq!(state.read().unwrap().services.num_services(), 0);
         assert_eq!(state.read().unwrap().services.num_staged_services(), 0);
 
-        updater.remove(&mut state.write().unwrap(), &"/invalid".to_string());
+        updater.remove(&mut state.write().unwrap(), &"/invalid".into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
-                uid: uid1.to_owned(),
+                uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
-                name: "some name".to_string(),
+                name: "some name".into(),
                 ..test_helpers::test_default_workload()
             })
         );
 
-        updater.remove(&mut state.write().unwrap(), &uid2);
+        updater.remove(&mut state.write().unwrap(), &uid2.as_str().into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
-                uid: uid1.to_owned(),
+                uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
-                name: "some name".to_string(),
+                name: "some name".into(),
                 ..test_helpers::test_default_workload()
             })
         );
 
-        updater.remove(&mut state.write().unwrap(), &uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             None
@@ -864,7 +872,7 @@ mod tests {
                 XdsWorkload {
                     uid: uid1.to_owned(),
                     addresses: vec![xds_ip1.clone()],
-                    name: "some name".to_string(),
+                    name: "some name".into(),
                     services: service1.clone(),
                     ..Default::default()
                 },
@@ -941,8 +949,8 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_namespaced_host(&NamespacedHostname {
-                    namespace: "ns".to_string(),
-                    hostname: "svc1.ns.svc.cluster.local".to_string(),
+                    namespace: "ns".into(),
+                    hostname: "svc1.ns.svc.cluster.local".into(),
                 })
                 .unwrap()),
             (state
@@ -1012,8 +1020,8 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_namespaced_host(&NamespacedHostname {
-                    namespace: "ns".to_string(),
-                    hostname: "svc1.ns.svc.cluster.local".to_string()
+                    namespace: "ns".into(),
+                    hostname: "svc1.ns.svc.cluster.local".into()
                 })
                 .unwrap()),
             (state
@@ -1028,7 +1036,7 @@ mod tests {
         );
 
         assert_vips(&demand, vec!["some name", "some name2"]);
-        updater.remove(&mut state.write().unwrap(), &uid2);
+        updater.remove(&mut state.write().unwrap(), &uid2.as_str().into());
 
         // we need to ensure both copies of the service stored are the same.
         // this is important because we mutate the service endpoints in place
@@ -1039,8 +1047,8 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_namespaced_host(&NamespacedHostname {
-                    namespace: "ns".to_string(),
-                    hostname: "svc1.ns.svc.cluster.local".to_string()
+                    namespace: "ns".into(),
+                    hostname: "svc1.ns.svc.cluster.local".into()
                 })
                 .unwrap()),
             (state
@@ -1055,7 +1063,7 @@ mod tests {
         );
 
         assert_vips(&demand, vec!["some name"]);
-        updater.remove(&mut state.write().unwrap(), &uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());
         assert_vips(&demand, vec![]);
 
         // Add 2 workload with VIP
@@ -1118,7 +1126,7 @@ mod tests {
         // Remove the VIP entirely
         updater.remove(
             &mut state.write().unwrap(),
-            &"ns/svc1.ns.svc.cluster.local".to_string(),
+            &"ns/svc1.ns.svc.cluster.local".into(),
         );
         assert_eq!(state.read().unwrap().services.num_vips(), 0);
         assert_eq!((state.read().unwrap().services.num_services()), 0);
@@ -1200,7 +1208,7 @@ mod tests {
             .unwrap();
         assert_eq!((state.read().unwrap().services.num_staged_services()), 1); // VIP should be staged again
 
-        updater.remove(&mut state.write().unwrap(), &uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1.into());
         assert_eq!((state.read().unwrap().services.num_staged_services()), 0); // should remove the VIP if no longer needed
     }
 
@@ -1210,8 +1218,8 @@ mod tests {
         let mut found: HashSet<String> = HashSet::new();
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
-        let wl: Workload = (&XdsWorkload {
-            name: "some name".to_string(),
+        let wl: Workload = (XdsWorkload {
+            name: "some name".into(),
             ..Default::default()
         })
             .try_into()
@@ -1225,8 +1233,8 @@ mod tests {
                     .find_upstream("", &wl, "127.0.1.1:80".parse().unwrap())
             {
                 let n = &us.workload.name; // borrow name instead of cloning
-                found.insert(n.to_owned()); // insert an owned copy of the borrowed n
-                wants.remove(n); // remove using the borrow
+                found.insert(n.to_string()); // insert an owned copy of the borrowed n
+                wants.remove(&n.to_string()); // remove using the borrow
             }
         }
         if !wants.is_empty() {

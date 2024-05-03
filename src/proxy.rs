@@ -620,7 +620,7 @@ mod tests {
         let w = mock_default_gateway_workload();
         let s = mock_default_gateway_service();
         let mut state = state::ProxyState::default();
-        state.workloads.insert(w);
+        state.workloads.insert(Arc::new(w));
         state.services.insert(s);
         let state = state::DemandProxyState::new(
             Arc::new(RwLock::new(state)),
@@ -630,9 +630,9 @@ mod tests {
         );
 
         let gateawy_id = Identity::Spiffe {
-            trust_domain: "cluster.local".to_string(),
-            namespace: "gatewayns".to_string(),
-            service_account: "default".to_string(),
+            trust_domain: "cluster.local".into(),
+            namespace: "gatewayns".into(),
+            service_account: "default".into(),
         };
         let from_gw_conn = Some(gateawy_id);
         let not_from_gw_conn = Some(Identity::default());
@@ -668,20 +668,20 @@ mod tests {
             network_gateway: gw,
             gateway_address: None,
             protocol: Default::default(),
-            uid: "".to_string(),
-            name: "app".to_string(),
-            namespace: "appns".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "default".to_string(),
-            network: "".to_string(),
-            workload_name: "app".to_string(),
-            workload_type: "deployment".to_string(),
-            canonical_name: "app".to_string(),
-            canonical_revision: "".to_string(),
-            hostname: "".to_string(),
-            node: "".to_string(),
+            uid: "".into(),
+            name: "app".into(),
+            namespace: "appns".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
+            network: "".into(),
+            workload_name: "app".into(),
+            workload_type: "deployment".into(),
+            canonical_name: "app".into(),
+            canonical_revision: "".into(),
+            hostname: "".into(),
+            node: "".into(),
             status: Default::default(),
-            cluster_id: "Kubernetes".to_string(),
+            cluster_id: "Kubernetes".into(),
 
             authorization_policies: Vec::new(),
             native_tunnel: false,
@@ -697,20 +697,20 @@ mod tests {
             network_gateway: None,
             gateway_address: None,
             protocol: Default::default(),
-            uid: "".to_string(),
-            name: "gateway".to_string(),
-            namespace: "gatewayns".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "default".to_string(),
-            network: "".to_string(),
-            workload_name: "gateway".to_string(),
-            workload_type: "deployment".to_string(),
-            canonical_name: "".to_string(),
-            canonical_revision: "".to_string(),
-            hostname: "".to_string(),
-            node: "".to_string(),
+            uid: "".into(),
+            name: "gateway".into(),
+            namespace: "gatewayns".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
+            network: "".into(),
+            workload_name: "gateway".into(),
+            workload_type: "deployment".into(),
+            canonical_name: "".into(),
+            canonical_revision: "".into(),
+            hostname: "".into(),
+            node: "".into(),
             status: Default::default(),
-            cluster_id: "Kubernetes".to_string(),
+            cluster_id: "Kubernetes".into(),
 
             authorization_policies: Vec::new(),
             native_tunnel: false,
@@ -722,14 +722,14 @@ mod tests {
     fn mock_default_gateway_service() -> Service {
         let vip1 = NetworkAddress {
             address: IpAddr::V4(Ipv4Addr::new(127, 0, 10, 1)),
-            network: "".to_string(),
+            network: "".into(),
         };
         let vips = vec![vip1];
         let mut ports = HashMap::new();
         ports.insert(8080, 80);
         let mut endpoints = HashMap::new();
         let addr = Some(NetworkAddress {
-            network: "".to_string(),
+            network: "".into(),
             address: IpAddr::V4(mock_default_gateway_ipaddr()),
         });
         endpoints.insert(
@@ -737,17 +737,17 @@ mod tests {
             Endpoint {
                 workload_uid: mock_default_gateway_workload().uid,
                 service: NamespacedHostname {
-                    namespace: "gatewayns".to_string(),
-                    hostname: "gateway".to_string(),
+                    namespace: "gatewayns".into(),
+                    hostname: "gateway".into(),
                 },
                 address: addr,
                 port: ports.clone(),
             },
         );
         Service {
-            name: "gateway".to_string(),
-            namespace: "gatewayns".to_string(),
-            hostname: "gateway".to_string(),
+            name: "gateway".into(),
+            namespace: "gatewayns".into(),
+            hostname: "gateway".into(),
             vips,
             ports,
             endpoints,
@@ -760,7 +760,7 @@ mod tests {
     fn mock_default_gateway_address() -> GatewayAddress {
         GatewayAddress {
             destination: Destination::Address(NetworkAddress {
-                network: "".to_string(),
+                network: "".into(),
                 address: IpAddr::V4(mock_default_gateway_ipaddr()),
             }),
             hbone_mtls_port: 15008,
@@ -771,8 +771,8 @@ mod tests {
     fn mock_default_gateway_hostname() -> GatewayAddress {
         GatewayAddress {
             destination: Destination::Hostname(state::workload::NamespacedHostname {
-                namespace: "gatewayns".to_string(),
-                hostname: "gateway".to_string(),
+                namespace: "gatewayns".into(),
+                hostname: "gateway".into(),
             }),
             hbone_mtls_port: 15008,
             hbone_single_tls_port: Some(15003),

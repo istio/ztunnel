@@ -262,28 +262,27 @@ impl Config {
         }
     }
 
-    pub fn with_watched_handler<F>(self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
+    pub fn with_watched_handler<F>(self, type_url: Strng, f: impl Handler<F>) -> Config
     where
         F: 'static + prost::Message + Default,
     {
-        let type_url: String = type_url.into();
         let no_on_demand = f.no_on_demand();
         self.with_handler(type_url.clone(), f)
             .watch(type_url, no_on_demand)
     }
 
-    fn with_handler<F>(mut self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
+    fn with_handler<F>(mut self, type_url: Strng, f: impl Handler<F>) -> Config
     where
         F: 'static + prost::Message + Default,
     {
         let h = HandlerWrapper { h: Box::new(f) };
-        self.handlers.insert(type_url.into().into(), Box::new(h));
+        self.handlers.insert(type_url, Box::new(h));
         self
     }
 
-    fn watch(mut self, type_url: impl Into<String>, no_on_demand: bool) -> Config {
+    fn watch(mut self, type_url: Strng, no_on_demand: bool) -> Config {
         self.initial_requests
-            .push(self.construct_initial_request(&type_url.into(), no_on_demand));
+            .push(self.construct_initial_request(type_url, no_on_demand));
         self
     }
 
@@ -368,7 +367,7 @@ impl Config {
     }
     fn construct_initial_request(
         &self,
-        request_type: &str,
+        request_type: Strng,
         no_on_demand: bool,
     ) -> DeltaDiscoveryRequest {
         let node = self.node();
@@ -381,7 +380,7 @@ impl Config {
             (vec![], vec![])
         };
         DeltaDiscoveryRequest {
-            type_url: request_type.to_owned(),
+            type_url: request_type.to_string(),
             node: Some(node.clone()),
             resource_names_subscribe: sub,
             resource_names_unsubscribe: unsub,
@@ -826,7 +825,7 @@ mod tests {
         let start_time = SystemTime::now();
         let converted = match expected_address {
             Some(a) => match a.r#type {
-                Some(XdsType::Workload(w)) => Some(Workload::try_from(&w).unwrap()),
+                Some(XdsType::Workload(w)) => Some(Workload::try_from(w).unwrap()),
                 Some(XdsType::Service(_s)) => None,
                 _ => None,
             },
@@ -1064,7 +1063,7 @@ mod tests {
             }
         });
         let result = demander
-            .demand(ADDRESS_TYPE.to_string(), "foo0".to_string())
+            .demand(ADDRESS_TYPE, "foo0".into())
             .await;
 
         let mut conn = conn_receiver.recv().await.unwrap();

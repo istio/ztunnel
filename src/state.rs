@@ -869,7 +869,7 @@ mod tests {
         let mut state = ProxyState::default();
         state
             .workloads
-            .insert(test_helpers::test_default_workload());
+            .insert(Arc::new(test_helpers::test_default_workload()));
         state.services.insert(test_helpers::mock_default_service());
 
         let mock_proxy_state = DemandProxyState::new(
@@ -895,8 +895,8 @@ mod tests {
 
         // Some from Hostname
         let dst = Destination::Hostname(NamespacedHostname {
-            namespace: "default".to_string(),
-            hostname: "defaulthost".to_string(),
+            namespace: "default".into(),
+            hostname: "defaulthost".into(),
         });
         test_helpers::assert_eventually(
             Duration::from_secs(5),
@@ -909,7 +909,7 @@ mod tests {
 
         // None from Address
         let dst = Destination::Address(NetworkAddress {
-            network: "".to_string(),
+            network: "".into(),
             address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
         });
         test_helpers::assert_eventually(
@@ -921,8 +921,8 @@ mod tests {
 
         // None from Hostname
         let dst = Destination::Hostname(NamespacedHostname {
-            namespace: "default".to_string(),
-            hostname: "nothost".to_string(),
+            namespace: "default".into(),
+            hostname: "nothost".into(),
         });
         test_helpers::assert_eventually(
             Duration::from_secs(5),
@@ -936,14 +936,14 @@ mod tests {
     async fn assert_rbac_with_dest_workload_info() {
         let mut state = ProxyState::default();
         let wl = Workload {
-            name: "test".to_string(),
-            namespace: "default".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "defaultacct".to_string(),
+            name: "test".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "defaultacct".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
             ..test_helpers::test_default_workload()
         };
-        state.workloads.insert(wl);
+        state.workloads.insert(Arc::new(wl));
 
         let mock_proxy_state = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
@@ -953,10 +953,10 @@ mod tests {
         );
 
         let wi = WorkloadInfo {
-            name: "test".to_string(),
-            namespace: "default".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "defaultacct".to_string(),
+            name: "test".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "defaultacct".into(),
         };
 
         let mut ctx = crate::state::ProxyRbacContext {
@@ -979,25 +979,25 @@ mod tests {
         // now make sure it fails when we change just one property of the workload info
         {
             let mut wi = wi.clone();
-            wi.name = "not-test".to_string();
+            wi.name = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
             assert!(!mock_proxy_state.assert_rbac(&ctx).await);
         }
         {
             let mut wi = wi.clone();
-            wi.namespace = "not-test".to_string();
+            wi.namespace = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
             assert!(!mock_proxy_state.assert_rbac(&ctx).await);
         }
         {
             let mut wi = wi.clone();
-            wi.service_account = "not-test".to_string();
+            wi.service_account = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
             assert!(!mock_proxy_state.assert_rbac(&ctx).await);
         }
         {
             let mut wi = wi.clone();
-            wi.trust_domain = "not-test".to_string();
+            wi.trust_domain = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
             assert!(!mock_proxy_state.assert_rbac(&ctx).await);
         }
@@ -1007,116 +1007,116 @@ mod tests {
     async fn test_load_balance() {
         let mut state = ProxyState::default();
         let wl_no_locality = Workload {
-            uid: "cluster1//v1/Pod/default/wl_no_locality".to_string(),
-            name: "wl_no_locality".to_string(),
-            namespace: "default".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "default".to_string(),
+            uid: "cluster1//v1/Pod/default/wl_no_locality".into(),
+            name: "wl_no_locality".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))],
             ..test_helpers::test_default_workload()
         };
         let wl_match = Workload {
-            uid: "cluster1//v1/Pod/default/wl_match".to_string(),
-            name: "wl_match".to_string(),
-            namespace: "default".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "default".to_string(),
+            uid: "cluster1//v1/Pod/default/wl_match".into(),
+            name: "wl_match".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
-            network: "network".to_string(),
+            network: "network".into(),
             locality: Locality {
-                region: "reg".to_string(),
-                zone: "zone".to_string(),
-                subzone: "".to_string(),
+                region: "reg".into(),
+                zone: "zone".into(),
+                subzone: "".into(),
             },
             ..test_helpers::test_default_workload()
         };
         let wl_almost = Workload {
-            uid: "cluster1//v1/Pod/default/wl_almost".to_string(),
-            name: "wl_almost".to_string(),
-            namespace: "default".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "default".to_string(),
+            uid: "cluster1//v1/Pod/default/wl_almost".into(),
+            name: "wl_almost".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3))],
-            network: "network".to_string(),
+            network: "network".into(),
             locality: Locality {
-                region: "reg".to_string(),
-                zone: "not-zone".to_string(),
-                subzone: "".to_string(),
+                region: "reg".into(),
+                zone: "not-zone".into(),
+                subzone: "".into(),
             },
             ..test_helpers::test_default_workload()
         };
         let _ep_almost = Workload {
-            uid: "cluster1//v1/Pod/default/ep_almost".to_string(),
-            name: "wl_almost".to_string(),
-            namespace: "default".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "default".to_string(),
+            uid: "cluster1//v1/Pod/default/ep_almost".into(),
+            name: "wl_almost".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 4))],
-            network: "network".to_string(),
+            network: "network".into(),
             locality: Locality {
-                region: "reg".to_string(),
-                zone: "other-not-zone".to_string(),
-                subzone: "".to_string(),
+                region: "reg".into(),
+                zone: "other-not-zone".into(),
+                subzone: "".into(),
             },
             ..test_helpers::test_default_workload()
         };
         let _ep_no_match = Workload {
-            uid: "cluster1//v1/Pod/default/ep_no_match".to_string(),
-            name: "wl_almost".to_string(),
-            namespace: "default".to_string(),
-            trust_domain: "cluster.local".to_string(),
-            service_account: "default".to_string(),
+            uid: "cluster1//v1/Pod/default/ep_no_match".into(),
+            name: "wl_almost".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))],
-            network: "not-network".to_string(),
+            network: "not-network".into(),
             locality: Locality {
-                region: "not-reg".to_string(),
-                zone: "unmatched-zone".to_string(),
-                subzone: "".to_string(),
+                region: "not-reg".into(),
+                zone: "unmatched-zone".into(),
+                subzone: "".into(),
             },
             ..test_helpers::test_default_workload()
         };
         let endpoints = HashMap::from([
             (
-                "cluster1//v1/Pod/default/ep_almost".to_string(),
+                "cluster1//v1/Pod/default/ep_almost".into(),
                 Endpoint {
-                    workload_uid: "cluster1//v1/Pod/default/ep_almost".to_string(),
+                    workload_uid: "cluster1//v1/Pod/default/ep_almost".into(),
                     service: NamespacedHostname {
-                        namespace: TEST_SERVICE_NAMESPACE.to_string(),
-                        hostname: "example.com".to_string(),
+                        namespace: TEST_SERVICE_NAMESPACE.into(),
+                        hostname: "example.com".into(),
                     },
                     address: Some(NetworkAddress {
                         address: "192.168.0.4".parse().unwrap(),
-                        network: "".to_string(),
+                        network: "".into(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
                 },
             ),
             (
-                "cluster1//v1/Pod/default/ep_no_match".to_string(),
+                "cluster1//v1/Pod/default/ep_no_match".into(),
                 Endpoint {
-                    workload_uid: "cluster1//v1/Pod/default/ep_almost".to_string(),
+                    workload_uid: "cluster1//v1/Pod/default/ep_almost".into(),
                     service: NamespacedHostname {
-                        namespace: TEST_SERVICE_NAMESPACE.to_string(),
-                        hostname: "example.com".to_string(),
+                        namespace: TEST_SERVICE_NAMESPACE.into(),
+                        hostname: "example.com".into(),
                     },
                     address: Some(NetworkAddress {
                         address: "192.168.0.5".parse().unwrap(),
-                        network: "".to_string(),
+                        network: "".into(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
                 },
             ),
             (
-                "cluster1//v1/Pod/default/wl_match".to_string(),
+                "cluster1//v1/Pod/default/wl_match".into(),
                 Endpoint {
-                    workload_uid: "cluster1//v1/Pod/default/wl_match".to_string(),
+                    workload_uid: "cluster1//v1/Pod/default/wl_match".into(),
                     service: NamespacedHostname {
-                        namespace: TEST_SERVICE_NAMESPACE.to_string(),
-                        hostname: "example.com".to_string(),
+                        namespace: TEST_SERVICE_NAMESPACE.into(),
+                        hostname: "example.com".into(),
                     },
                     address: Some(NetworkAddress {
                         address: "192.168.0.2".parse().unwrap(),
-                        network: "".to_string(),
+                        network: "".into(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
                 },
@@ -1146,9 +1146,9 @@ mod tests {
             }),
             ..test_helpers::mock_default_service()
         };
-        state.workloads.insert(wl_no_locality.clone());
-        state.workloads.insert(wl_match.clone());
-        state.workloads.insert(wl_almost.clone());
+        state.workloads.insert(Arc::new(wl_no_locality.clone()));
+        state.workloads.insert(Arc::new(wl_match.clone()));
+        state.workloads.insert(Arc::new(wl_almost.clone()));
         state.services.insert(strict_svc.clone());
         state.services.insert(failover_svc.clone());
 

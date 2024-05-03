@@ -158,9 +158,9 @@ pub fn mock_default_service() -> Service {
     ports.insert(8080, 80);
     let endpoints = HashMap::new();
     Service {
-        name: "".to_string(),
-        namespace: "default".to_string(),
-        hostname: "defaulthost".to_string(),
+        name: "".into(),
+        namespace: "default".into(),
+        hostname: "defaulthost".into(),
         vips,
         ports,
         endpoints,
@@ -177,20 +177,20 @@ pub fn test_default_workload() -> Workload {
         network_gateway: None,
         gateway_address: None,
         protocol: Default::default(),
-        uid: "".to_string(),
-        name: "".to_string(),
-        namespace: "".to_string(),
-        trust_domain: "cluster.local".to_string(),
-        service_account: "default".to_string(),
-        network: "".to_string(),
-        workload_name: "".to_string(),
-        workload_type: "deployment".to_string(),
-        canonical_name: "".to_string(),
-        canonical_revision: "".to_string(),
-        hostname: "".to_string(),
-        node: "".to_string(),
+        uid: "".into(),
+        name: "".into(),
+        namespace: "".into(),
+        trust_domain: "cluster.local".into(),
+        service_account: "default".into(),
+        network: "".into(),
+        workload_name: "".into(),
+        workload_type: "deployment".into(),
+        canonical_name: "".into(),
+        canonical_revision: "".into(),
+        hostname: "".into(),
+        node: "".into(),
         status: Default::default(),
-        cluster_id: "Kubernetes".to_string(),
+        cluster_id: "Kubernetes".into(),
 
         authorization_policies: Vec::new(),
         native_tunnel: false,
@@ -217,13 +217,13 @@ fn test_custom_workload(
     };
     let workload = Workload {
         workload_ips: wips,
-        hostname: host,
+        hostname: host.into(),
         protocol,
-        uid: format!("cluster1//v1/Pod/default/{}", name),
-        name: name.to_string(),
-        namespace: "default".to_string(),
-        service_account: "default".to_string(),
-        node: "local".to_string(),
+        uid: format!("cluster1//v1/Pod/default/{}", name).into(),
+        name: name.into(),
+        namespace: "default".into(),
+        service_account: "default".into(),
+        node: "local".into(),
         ..test_default_workload()
     };
     let mut services = HashMap::new();
@@ -250,27 +250,27 @@ fn test_custom_svc(
         }),
     };
     Ok(Service {
-        name: name.to_string(),
-        namespace: TEST_SERVICE_NAMESPACE.to_string(),
-        hostname: hostname.to_string(),
+        name: name.into(),
+        namespace: TEST_SERVICE_NAMESPACE.into(),
+        hostname: hostname.into(),
         vips: vec![NetworkAddress {
-            network: "".to_string(),
+            network: "".into(),
             address: vip.parse()?,
         }],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: HashMap::from([(
-            format!("cluster1//v1/Pod/default/{}", workload_name),
+            format!("cluster1//v1/Pod/default/{}", workload_name).into(),
             Endpoint {
-                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name),
+                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
                 service: NamespacedHostname {
-                    namespace: TEST_SERVICE_NAMESPACE.to_string(),
-                    hostname: hostname.to_string(),
+                    namespace: TEST_SERVICE_NAMESPACE.into(),
+                    hostname: hostname.into(),
                 },
                 address: addr,
                 port: HashMap::from([(80u16, echo_port)]),
             },
         )]),
-        subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".to_string()],
+        subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".into()],
         waypoint: None,
         load_balancer: None,
     })
@@ -337,14 +337,14 @@ pub fn local_xds_config(
             workload: Workload {
                 workload_ips: vec![TEST_WORKLOAD_WAYPOINT.parse()?],
                 protocol: HBONE,
-                uid: "cluster1//v1/Pod/default/local-waypoint".to_string(),
-                name: "local-waypoint".to_string(),
-                namespace: "default".to_string(),
-                service_account: "default".to_string(),
-                node: "local".to_string(),
+                uid: "cluster1//v1/Pod/default/local-waypoint".into(),
+                name: "local-waypoint".into(),
+                namespace: "default".into(),
+                service_account: "default".into(),
+                node: "local".into(),
                 waypoint: Some(GatewayAddress {
                     destination: gatewayaddress::Destination::Address(NetworkAddress {
-                        network: "".to_string(),
+                        network: "".into(),
                         address: waypoint_ip,
                     }),
                     hbone_mtls_port: 15008,
@@ -401,31 +401,31 @@ pub fn new_proxy_state(
 
     for w in xds_workloads {
         let res = XdsResource {
-            name: w.name.clone(),
+            name: w.name.as_str().into(),
             resource: XdsAddress {
                 r#type: Some(address::Type::Workload(w.clone())),
             },
         };
         let handler = &updater as &dyn Handler<XdsAddress>;
-        handler.handle(vec![XdsUpdate::Update(res)]).unwrap();
+        handler.handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter())).unwrap();
     }
     for s in xds_services {
         let res = XdsResource {
-            name: s.name.clone(),
+            name: s.name.as_str().into(),
             resource: XdsAddress {
                 r#type: Some(address::Type::Service(s.clone())),
             },
         };
         let handler = &updater as &dyn Handler<XdsAddress>;
-        handler.handle(vec![XdsUpdate::Update(res)]).unwrap();
+        handler.handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter())).unwrap();
     }
     for a in xds_authorizations {
         let res = XdsResource {
-            name: a.name.clone(),
+            name: a.name.as_str().into(),
             resource: a.clone(),
         };
         let handler = &updater as &dyn Handler<XdsAuthorization>;
-        handler.handle(vec![XdsUpdate::Update(res)]).unwrap();
+        handler.handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter())).unwrap();
     }
     DemandProxyState::new(
         state,

@@ -228,16 +228,16 @@ pub mod mock {
             if error {
                 let mut state = self.state.write().await;
                 state.fetches.push(Identity::Spiffe {
-                    trust_domain: "error".to_string(),
-                    namespace: "error".to_string(),
-                    service_account: "error".to_string(),
+                    trust_domain: "error".into(),
+                    namespace: "error".into(),
+                    service_account: "error".into(),
                 });
             } else {
                 let mut state = self.state.write().await;
                 state.fetches.push(Identity::Spiffe {
-                    trust_domain: "success".to_string(),
-                    namespace: "success".to_string(),
-                    service_account: "success".to_string(),
+                    trust_domain: "success".into(),
+                    namespace: "success".into(),
+                    service_account: "success".into(),
                 });
             }
         }
@@ -285,9 +285,9 @@ mod tests {
     #[tokio::test]
     async fn wrong_identity() {
         let id = Identity::Spiffe {
-            service_account: "wrong-sa".to_string(),
-            namespace: "foo".to_string(),
-            trust_domain: "cluster.local".to_string(),
+            service_account: "wrong-sa".into(),
+            namespace: "foo".into(),
+            trust_domain: "cluster.local".into(),
         };
         let certs = tls::mock::generate_test_certs(
             &id.into(),

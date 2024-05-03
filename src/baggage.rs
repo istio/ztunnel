@@ -72,11 +72,11 @@ pub mod tests {
         let header_value = HeaderValue::from_str(baggage_str)?;
         hm.append(BAGGAGE_HEADER, header_value);
         let baggage = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
-        assert_eq!(baggage.cluster_id, Some("K1".to_string()));
-        assert_eq!(baggage.namespace, Some("NS1".to_string()));
-        assert_eq!(baggage.workload_name, Some("N1".to_string()));
-        assert_eq!(baggage.service_name, Some("N2".to_string()));
-        assert_eq!(baggage.revision, Some("V1".to_string()));
+        assert_eq!(baggage.cluster_id, Some("K1".into()));
+        assert_eq!(baggage.namespace, Some("NS1".into()));
+        assert_eq!(baggage.workload_name, Some("N1".into()));
+        assert_eq!(baggage.service_name, Some("N2".into()));
+        assert_eq!(baggage.revision, Some("V1".into()));
         Ok(())
     }
 
@@ -113,11 +113,11 @@ pub mod tests {
         hm.append(BAGGAGE_HEADER, HeaderValue::from_str("service.name=N2")?);
         hm.append(BAGGAGE_HEADER, HeaderValue::from_str("service.version=V1")?);
         let baggage = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
-        assert_eq!(baggage.cluster_id, Some("K1".to_string()));
-        assert_eq!(baggage.namespace, Some("NS1".to_string()));
-        assert_eq!(baggage.workload_name, Some("N1".to_string()));
-        assert_eq!(baggage.service_name, Some("N2".to_string()));
-        assert_eq!(baggage.revision, Some("V1".to_string()));
+        assert_eq!(baggage.cluster_id, Some("K1".into()));
+        assert_eq!(baggage.namespace, Some("NS1".into()));
+        assert_eq!(baggage.workload_name, Some("N1".into()));
+        assert_eq!(baggage.service_name, Some("N2".into()));
+        assert_eq!(baggage.revision, Some("V1".into()));
         Ok(())
     }
 

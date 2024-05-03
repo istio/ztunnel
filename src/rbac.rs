@@ -444,9 +444,9 @@ mod tests {
     fn tls_conn() -> Connection {
         Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "namespace".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "namespace".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -457,9 +457,9 @@ mod tests {
     fn tls_conn_alt() -> Connection {
         Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td-alt".to_string(),
-                namespace: "ns-alt".to_string(),
-                service_account: "sa=alt".to_string(),
+                trust_domain: "td-alt".into(),
+                namespace: "ns-alt".into(),
+                service_account: "sa=alt".into(),
             }),
             src: "127.0.0.3:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -505,9 +505,9 @@ mod tests {
         // Can match either namespace...
         assert!(pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "a".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "a".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -515,9 +515,9 @@ mod tests {
         }));
         assert!(pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "b".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "b".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -526,9 +526,9 @@ mod tests {
         // Policy is applied regardless of network
         assert!(pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "b".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "b".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "remote".to_string(),
@@ -537,9 +537,9 @@ mod tests {
         // Wrong namespace
         assert!(!pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "bad".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "bad".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -548,9 +548,9 @@ mod tests {
         // Wrong port
         assert!(!pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "b".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "b".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -576,9 +576,9 @@ mod tests {
         // Can match either namespace...
         assert!(pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "a".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "a".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -586,9 +586,9 @@ mod tests {
         }));
         assert!(pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "b".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "b".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),
@@ -597,9 +597,9 @@ mod tests {
         // Wrong namespace
         assert!(!pol.matches(&Connection {
             src_identity: Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "bad".to_string(),
-                service_account: "account".to_string(),
+                trust_domain: "td".into(),
+                namespace: "bad".into(),
+                service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
             dst_network: "".to_string(),

@@ -11,6 +11,9 @@ pub fn new<A: AsRef<str>>(s: A) -> Strng {
     s.as_ref().into()
 }
 
+pub use arcstr::format;
+pub use arcstr::literal;
+
 /// RichStrng wraps Strng to let us implement arbitrary methods. How annoying.
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq)]
 pub struct RichStrng(Strng);
@@ -42,10 +45,13 @@ mod test {
     fn as_ref_fn<A: AsRef<str>>(s: A) {
 
     }
+    fn into_string_fn<A: Into<String>>(s: A) {
+
+    }
     fn string_fn(s: String) {
 
     }
-    fn str_fn(s: &s) {
+    fn str_fn(s: &str) {
 
     }
 
@@ -54,14 +60,16 @@ mod test {
         let a = new("abc");
         let b = new("abc");
         assert_eq!(std::mem::size_of::<Strng>(), 16);
-        assert_eq!(format!("{a}"), "abc");
-        assert_eq!(a.refcount(), b.refcount());
-        assert_eq!(a.refcount(), 2);
+        assert_eq!(std::format!("{a}"), "abc");
+        assert_eq!(super::format!("{a}"), "abc");
+        assert_eq!(ArcStr::strong_count(&a), ArcStr::strong_count(&b));
+        assert_eq!(ArcStr::strong_count(&a), Some(2));
         assert_eq!("abc", b.to_string());
 
         // Compile time assertion we can call function in various ways
         as_ref_fn(new("abc"));
+        into_string_fn(&*new("abc"));
         string_fn(a.to_string());
-        as_ref_fn(a.as_ref());
+        as_ref_fn(new("abc"));
     }
 }

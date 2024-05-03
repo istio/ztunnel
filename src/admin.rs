@@ -475,6 +475,7 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType as XdsWorkloadType;
+    use crate::strng;
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
@@ -519,9 +520,9 @@ mod tests {
         for i in 0..2 {
             manager
                 .fetch_certificate(&identity::Identity::Spiffe {
-                    trust_domain: "trust_domain".to_string(),
-                    namespace: "namespace".to_string(),
-                    service_account: format!("sa-{i}"),
+                    trust_domain: "trust_domain".into(),
+                    namespace: "namespace".into(),
+                    service_account: strng::format!("sa-{i}"),
                 })
                 .await
                 .unwrap();

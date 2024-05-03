@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::strng;
+use crate::strng::Strng;
+
 // We don't control the codegen, so disable any code warnings in the
 // proto modules.
 #[allow(warnings)]
@@ -38,5 +41,5 @@ pub mod istio {
     }
 }
 
-pub const ADDRESS_TYPE: &str = "type.googleapis.com/istio.workload.Address";
-pub const AUTHORIZATION_TYPE: &str = "type.googleapis.com/istio.security.Authorization";
+pub const ADDRESS_TYPE: Strng = strng::literal!("type.googleapis.com/istio.workload.Address");
+pub const AUTHORIZATION_TYPE: Strng = strng::literal!("type.googleapis.com/istio.security.Authorization");

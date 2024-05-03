@@ -671,9 +671,9 @@ mod namespaced {
     async fn trust_domain_mismatch_rejected() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(InPod);
         let id = identity::Identity::Spiffe {
-            trust_domain: "clusterset.local".to_string(), // change to mismatched trustdomain
-            service_account: "my-app".to_string(),
-            namespace: "default".to_string(),
+            trust_domain: "clusterset.local".into(), // change to mismatched trustdomain
+            service_account: "my-app".into(),
+            namespace: "default".into(),
         };
 
         let _ = manager.deploy_ztunnel(DEFAULT_NODE).await?;
