@@ -442,7 +442,7 @@ impl ConnectionResult {
 
             dst.addr = %dst.0,
             dst.hbone_addr = hbone_target.map(display),
-            dst.service = tl.destination_service.as_deref().map(display),,
+            dst.service = tl.destination_service.display(),
             dst.workload = dst.1.as_deref().map(display),
             dst.namespace = tl.destination_workload_namespace.display(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
