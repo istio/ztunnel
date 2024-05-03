@@ -56,6 +56,7 @@ run ztunnel (as root) with:
 ```shell
 RUST_LOG=debug INPOD_ENABLED=true INPOD_UDS=/tmp/ztunnel FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run --features testing
 ```
+
 (note: to run ztunnel as root, consider using `export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E"` so cargo `sudo` the binary)
 
 see the ztunnel sockets:
