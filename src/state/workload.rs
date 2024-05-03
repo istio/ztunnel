@@ -578,13 +578,13 @@ pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
 #[derive(Default, Debug)]
 pub struct WorkloadStore {
     /// byAddress maps workload network addresses to workloads
-    pub(super) by_addr: HashMap<NetworkAddress, Arc<Workload>>,
+    pub by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
-    by_uid: HashMap<Strng, Arc<Workload>>,
+    pub by_uid: HashMap<Strng, Arc<Workload>>,
     /// byHostname maps workload hostname to workloads.
-    by_hostname: HashMap<Strng, Arc<Workload>>,
+    pub by_hostname: HashMap<Strng, Arc<Workload>>,
     // Identity->Set of UIDs
-    by_identity: HashMap<Identity, HashSet<Strng>>,
+    pub by_identity: HashMap<Identity, HashSet<Strng>>,
 }
 
 impl WorkloadStore {

@@ -259,6 +259,7 @@ impl ProxyStateUpdateMutator {
 
 impl Handler<XdsWorkload> for ProxyStateUpdater {
     fn handle(&self, updates: Vec<XdsUpdate<XdsWorkload>>) -> Result<(), Vec<RejectedConfig>> {
+        // use deepsize::DeepSizeOf;
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsWorkload>| {
             match res {
@@ -287,7 +288,19 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
             }
             Ok(())
         };
-        handle_single_resource(updates, handle)
+        let res = handle_single_resource(updates, handle);
+        error!("deep size of s.workloads.by_identity: {}", state.workloads.by_identity.len());
+        error!("deep size of s.workloads.by_addr: {}", state.workloads.by_addr.len());
+        error!("deep size of s.workloads.by_hostname: {}", state.workloads.by_hostname.len());
+        error!("deep size of s.workloads.by_uid: {}", state.workloads.by_uid.len());
+
+        error!("deep size of s.state.services.staged_services: {}", state.services.staged_services.len());
+        error!("deep size of s.state.services.workload_to_services: {}", state.services.workload_to_services.len());
+        error!("deep size of s.state.services.by_vip: {}", state.services.by_vip.len());
+        error!("deep size of s.state.services.by_host: {}", state.services.by_host.len());
+        let size = internment::deep_size_of_arc_interned::<str>();
+        error!("intern size: {size}");
+        res
     }
 }
 

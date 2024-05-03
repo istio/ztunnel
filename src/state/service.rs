@@ -17,7 +17,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::trace;
+use tracing::{error, trace};
 
 use xds::istio::workload::Service as XdsService;
 
@@ -213,20 +213,20 @@ impl TryFrom<&XdsService> for Service {
 pub struct ServiceStore {
     /// Maintains a mapping of service key -> (endpoint UID -> workload endpoint)
     /// this is used to handle ordering issues if workloads are received before services.
-    pub(super) staged_services: HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
+    pub  staged_services: HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
 
     /// Maintains a mapping of workload UID to service. This is used only to handle removal of
     /// service endpoints when a workload is removed.
-    workload_to_services: HashMap<Strng, HashSet<NamespacedHostname>>,
+    pub workload_to_services: HashMap<Strng, HashSet<NamespacedHostname>>,
 
     /// Allows for lookup of services by network address, the service's xds secondary key.
-    pub(super) by_vip: HashMap<NetworkAddress, Arc<Service>>,
+    pub  by_vip: HashMap<NetworkAddress, Arc<Service>>,
 
     /// Allows for lookup of services by hostname, and then by namespace. XDS uses a combination
     /// of hostname and namespace as the primary key. In most cases, there will be a single
     /// service for a given hostname. However, `ServiceEntry` allows hostnames to be overridden
     /// on a per-namespace basis.
-    by_host: HashMap<Strng, Vec<Arc<Service>>>,
+    pub by_host: HashMap<Strng, Vec<Arc<Service>>>,
 }
 
 impl ServiceStore {
