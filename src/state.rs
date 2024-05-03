@@ -533,7 +533,7 @@ impl DemandProxyState {
             TokioConnectionProvider::default(),
         );
 
-        let resp = resolver_result.lookup_ip(hostname.as_ref()).await;
+        let resp = resolver_result.lookup_ip(hostname.as_str()).await;
         if resp.is_err() {
             warn!(
                 "system dns async resolution: error response for workload {} is: {:?}",

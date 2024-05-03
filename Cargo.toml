@@ -105,6 +105,7 @@ http = "1.1"
 internment = { version = "0.8.3", default-features = false, features = ["arc", "serde", "deepsize"] }
 deepsize = "0.2.0"
 split-iter = "0.1.0"
+arcstr = { version = "1.1.5", features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"

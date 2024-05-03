@@ -1,12 +1,13 @@
 use std::fmt::Error;
 use std::ops::Deref;
 use std::rc::Rc;
-use internment::ArcIntern;
+use std::sync::Arc;
+use arcstr::ArcStr;
 use prometheus_client::encoding::{EncodeLabelKey, LabelSetEncoder, LabelValueEncoder};
 
-pub type Strng = ArcIntern<str>;
+pub type Strng = ArcStr;
 
-pub fn new<A: AsRef<str>>(s: A) -> ArcIntern<str> {
+pub fn new<A: AsRef<str>>(s: A) -> Strng {
     s.as_ref().into()
 }
 

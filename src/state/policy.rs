@@ -81,7 +81,7 @@ impl PolicyStore {
             return;
         };
         if let Some(key) = match rbac.scope {
-            RbacScope::Global => Some("".into()),
+            RbacScope::Global => Some(strng::new("")),
             RbacScope::Namespace => Some(rbac.namespace.into()),
             RbacScope::WorkloadSelector => None,
         } {

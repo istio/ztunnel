@@ -314,7 +314,7 @@ impl OutboundConnection {
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
         if let Some(svc) = &req.destination_service {
-            f.set_host(svc.hostname.as_ref());
+            f.set_host(svc.hostname.as_str());
         }
 
         let request = http::Request::builder()
