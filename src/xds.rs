@@ -263,7 +263,7 @@ impl ProxyStateUpdateMutator {
 }
 
 impl Handler<XdsWorkload> for ProxyStateUpdater {
-    fn handle(&self, updates: Vec<XdsUpdate<XdsWorkload>>) -> Result<(), Vec<RejectedConfig>> {
+    fn handle(&self, updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsWorkload>>>) -> Result<(), Vec<RejectedConfig>> {
         // use deepsize::DeepSizeOf;
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsWorkload>| {
@@ -281,7 +281,7 @@ impl Handler<XdsWorkload> for ProxyStateUpdater {
 }
 
 impl Handler<XdsAddress> for ProxyStateUpdater {
-    fn handle(&self, updates: Vec<XdsUpdate<XdsAddress>>) -> Result<(), Vec<RejectedConfig>> {
+    fn handle(&self, updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAddress>>>) -> Result<(), Vec<RejectedConfig>> {
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsAddress>| {
             match res {
@@ -354,7 +354,7 @@ impl Handler<XdsAuthorization> for ProxyStateUpdater {
         true
     }
 
-    fn handle(&self, updates: Vec<XdsUpdate<XdsAuthorization>>) -> Result<(), Vec<RejectedConfig>> {
+    fn handle(&self, updates: Box<&mut dyn Iterator<Item = XdsUpdate<XdsAuthorization>>>) -> Result<(), Vec<RejectedConfig>> {
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsAuthorization>| {
             match res {
@@ -365,7 +365,8 @@ impl Handler<XdsAuthorization> for ProxyStateUpdater {
             }
             Ok(())
         };
-        let len_updates = updates.len(); //get len now, handle_single_resource takes ownership of the vec
+        let mut len_updates = 0;
+        let updates = updates.inspect(|_| len_updates+=1);
         match handle_single_resource(updates, handle) {
             Ok(()) => {
                 state.policies.send();
