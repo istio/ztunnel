@@ -46,23 +46,6 @@ pub enum Identity {
     },
 }
 
-// struct PrioritizedFetch {
-//     identity: Identity,
-//     priority: Priority
-// }
-//
-// impl Ord for PrioritizedFetch {
-//     fn cmp(&self, other: &Self) -> Ordering {
-//         self.cmp(other)
-//     }
-// }
-//
-// impl PartialOrd for PrioritizedFetch {
-//     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-//         Some(self.cmp(other))
-//     }
-// }
-
 impl EncodeLabelValue for Identity {
     fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
         writer.write_str(&self.to_string())
@@ -117,8 +100,7 @@ impl fmt::Display for Identity {
     }
 }
 
-// TODO we shouldn't have a "default identity" outside of tests
-// #[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl Default for Identity {
     fn default() -> Self {
         const TRUST_DOMAIN: &str = "cluster.local";
