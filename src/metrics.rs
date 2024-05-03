@@ -98,7 +98,7 @@ where
     }
 }
 
-#[derive(Default, Hash, PartialEq, Eq, Clone, Debug)]
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
 // DefaultedUnknown is a wrapper around an Option that encodes as "unknown" when missing, rather than ""
 pub struct DefaultedUnknown<T>(Option<T>);
 
@@ -108,6 +108,12 @@ impl<T> DefaultedUnknown<T> {
     }
     pub fn as_ref(&self) -> Option<&T> {
         self.0.as_ref()
+    }
+}
+
+impl<T> Default for DefaultedUnknown<T> {
+    fn default() -> Self {
+        Self(None)
     }
 }
 
