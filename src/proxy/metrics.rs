@@ -217,7 +217,6 @@ pub struct CommonTrafficLabels {
     source_version: DefaultedUnknown<String>,
     source_cluster: DefaultedUnknown<String>,
 
-    // TODO: never set
     destination_service: DefaultedUnknown<String>,
     destination_service_namespace: DefaultedUnknown<String>,
     destination_service_name: DefaultedUnknown<String>,
@@ -442,8 +441,9 @@ impl ConnectionResult {
 
             dst.addr = %dst.0,
             dst.hbone_addr = hbone_target.map(|r| r.to_string()),
+            dst.service = tl.destination_service.as_ref(),
             dst.workload = dst.1,
-            dst.namespace = tl.destination_canonical_service.as_ref(),
+            dst.namespace = tl.destination_workload_namespace.as_ref(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             direction = if tl.reporter == Reporter::source {
@@ -525,7 +525,7 @@ impl ConnectionResult {
             dst.hbone_addr = self.hbone_target.map(|r| r.to_string()),
             dst.service = tl.destination_service.as_ref(),
             dst.workload = self.dst.1,
-            dst.namespace = tl.destination_canonical_service.as_ref(),
+            dst.namespace = tl.destination_workload_namespace.as_ref(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             direction = if tl.reporter == Reporter::source {
