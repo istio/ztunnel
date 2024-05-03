@@ -256,9 +256,9 @@ impl ProxyStateUpdateMutator {
         Ok(())
     }
 
-    pub fn remove_authorization(&self, state: &mut ProxyState, name: String) {
+    pub fn remove_authorization(&self, state: &mut ProxyState, name: Strng) {
         info!("handling RBAC delete {}", name);
-        state.policies.remove(name.into());
+        state.policies.remove(name);
     }
 }
 

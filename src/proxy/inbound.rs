@@ -47,7 +47,7 @@ use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
-use crate::{assertions, proxy, socket, tls};
+use crate::{assertions, proxy, socket, strng, tls};
 
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -530,8 +530,8 @@ impl Inbound {
             return None;
         }
         tokio::join![
-            state.fetch_on_demand(connection_dst.to_string()),
-            state.fetch_on_demand(hbone_dst.to_string()),
+            state.fetch_on_demand(strng::new(connection_dst.to_string())),
+            state.fetch_on_demand(strng::new(hbone_dst.to_string())),
         ];
         lookup().flatten()
     }

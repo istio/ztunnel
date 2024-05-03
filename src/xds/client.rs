@@ -34,7 +34,8 @@ use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{identity, tls};
+use crate::{identity, strng, tls};
+use crate::strng::Strng;
 
 use super::Error;
 
@@ -51,8 +52,8 @@ const ISTIO_METAJSON_PREFIX: &str = "ISTIO_METAJSON_";
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub struct ResourceKey {
-    pub name: String,
-    pub type_url: String,
+    pub name: Strng,
+    pub type_url: Strng,
 }
 
 impl Display for ResourceKey {
@@ -63,12 +64,12 @@ impl Display for ResourceKey {
 
 #[derive(Debug)]
 pub struct RejectedConfig {
-    name: String,
+    name: Strng,
     reason: anyhow::Error,
 }
 
 impl RejectedConfig {
-    pub fn new(name: String, reason: anyhow::Error) -> Self {
+    pub fn new(name: Strng, reason: anyhow::Error) -> Self {
         Self { name, reason }
     }
 }
@@ -136,7 +137,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         state: &mut State,
         res: DeltaDiscoveryResponse,
     ) -> Result<(), Vec<RejectedConfig>> {
-        let type_url = res.type_url.clone();
+        let type_url = strng::new(res.type_url);
         let removes = &res.removed_resources;
 
         // Keep track of any failures but keep going
@@ -145,7 +146,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
             .iter()
             .map(|raw| {
                 decode_proto::<T>(raw).map_err(|err| RejectedConfig {
-                    name: raw.name.clone(),
+                    name: raw.name.as_str().into(),
                     reason: err.into(),
                 })
             })
@@ -155,7 +156,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
             // We already filtered to ok
             .map(|r| r.expect("must be ok"))
             .map(XdsUpdate::Update)
-            .chain(removes.iter().cloned().map(XdsUpdate::Remove));
+            .chain(removes.iter().cloned().map(|s| XdsUpdate::Remove(s.into())));
 
         // First, call handlers that update the proxy state.
         // other wise on-demand notifications might observe a cache without their resource
@@ -172,11 +173,11 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         // as we make on demand notifications here, so the proxy cache must be updated first.
         for name in res.removed_resources {
             let k = ResourceKey {
-                name,
-                type_url: res.type_url.clone(),
+                name: name.into(),
+                type_url: type_url.clone(),
             };
             debug!("received delete resource {k}");
-            if let Some(rm) = state.known_resources.get_mut(&res.type_url) {
+            if let Some(rm) = state.known_resources.get_mut(&k.type_url) {
                 rm.remove(&k.name);
             }
             state.notify_on_demand(&k);
@@ -184,7 +185,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
 
         for r in res.resources {
             let key = ResourceKey {
-                name: r.name,
+                name: r.name.into(),
                 type_url: type_url.clone(),
             };
             state.notify_on_demand(&key);
@@ -209,14 +210,14 @@ pub struct Config {
     tls_builder: Box<dyn tls::ClientCertProvider>,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
-    handlers: HashMap<String, Box<dyn RawHandler>>,
+    handlers: HashMap<Strng, Box<dyn RawHandler>>,
     initial_requests: Vec<DeltaDiscoveryRequest>,
     on_demand: bool,
 }
 
 pub struct State {
     /// Stores all known workload resources. Map from type_url to name
-    known_resources: HashMap<String, HashSet<String>>,
+    known_resources: HashMap<Strng, HashSet<Strng>>,
 
     /// pending stores a list of all resources that are pending and XDS push
     pending: HashMap<ResourceKey, oneshot::Sender<()>>,
@@ -234,7 +235,7 @@ impl State {
             }
         }
     }
-    fn add_resource(&mut self, type_url: String, name: String) {
+    fn add_resource(&mut self, type_url: Strng, name: Strng) {
         self.known_resources
             .entry(type_url)
             .or_default()
@@ -265,7 +266,7 @@ impl Config {
     where
         F: 'static + prost::Message + Default,
     {
-        let type_url = type_url.into();
+        let type_url: String = type_url.into();
         let no_on_demand = f.no_on_demand();
         self.with_handler(type_url.clone(), f)
             .watch(type_url, no_on_demand)
@@ -276,7 +277,7 @@ impl Config {
         F: 'static + prost::Message + Default,
     {
         let h = HandlerWrapper { h: Box::new(f) };
-        self.handlers.insert(type_url.into(), Box::new(h));
+        self.handlers.insert(type_url.into().into(), Box::new(h));
         self
     }
 
@@ -454,7 +455,7 @@ impl Display for XdsSignal {
 
 impl Demander {
     /// Demand requests a given workload by name
-    pub async fn demand(&self, type_url: String, name: String) -> Demanded {
+    pub async fn demand(&self, type_url: Strng, name: Strng) -> Demanded {
         let (tx, rx) = oneshot::channel::<()>();
         self.demand
             .send((tx, ResourceKey { name, type_url }))
@@ -594,10 +595,10 @@ impl AdsClient {
                 req.initial_resource_versions = self
                     .state
                     .known_resources
-                    .get(req.type_url.as_str())
+                    .get(&strng::new(&req.type_url))
                     .map(|hs| {
                         hs.iter()
-                            .map(|n| (n.to_owned(), "".to_string())) // Proto expects Name -> Version. We don't care about version
+                            .map(|n| (n.to_string(), "".to_string())) // Proto expects Name -> Version. We don't care about version
                             .collect()
                     })
                     .unwrap_or_default();
@@ -675,7 +676,7 @@ impl AdsClient {
             "received response"
         );
         let handler_response: Result<(), Vec<RejectedConfig>> =
-            match self.config.handlers.get(&type_url) {
+            match self.config.handlers.get(&strng::new(&type_url)) {
                 Some(h) => h.handle(&mut self.state, response),
                 None => {
                     error!(%type_url, "unknown type");
@@ -730,8 +731,8 @@ impl AdsClient {
         self.state.pending.insert(demand_event, tx);
         self.state.add_resource(type_url.clone(), name.clone());
         send.send(DeltaDiscoveryRequest {
-            type_url,
-            resource_names_subscribe: vec![name],
+            type_url: type_url.to_string(),
+            resource_names_subscribe: vec![name.to_string()],
             ..Default::default()
         })
         .await
@@ -742,21 +743,21 @@ impl AdsClient {
 
 #[derive(Clone, Debug)]
 pub struct XdsResource<T: prost::Message> {
-    pub name: String,
+    pub name: Strng,
     pub resource: T,
 }
 
 #[derive(Debug)]
 pub enum XdsUpdate<T: prost::Message> {
     Update(XdsResource<T>),
-    Remove(String),
+    Remove(Strng),
 }
 
 impl<T: prost::Message> XdsUpdate<T> {
-    pub fn name(&self) -> String {
+    pub fn name(&self) -> Strng {
         match self {
             XdsUpdate::Update(ref r) => r.name.clone(),
-            XdsUpdate::Remove(n) => n.to_string(),
+            XdsUpdate::Remove(n) => n.clone(),
         }
     }
 }
@@ -764,7 +765,7 @@ impl<T: prost::Message> XdsUpdate<T> {
 fn decode_proto<T: prost::Message + Default>(
     resource: &ProtoResource,
 ) -> Result<XdsResource<T>, AdsError> {
-    let name = resource.name.clone();
+    let name = resource.name.as_str().into();
     resource
         .resource
         .as_ref()

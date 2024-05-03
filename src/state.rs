@@ -624,7 +624,7 @@ impl DemandProxyState {
         if !self.supports_on_demand() {
             return None;
         }
-        self.fetch_on_demand(addr.to_string()).await;
+        self.fetch_on_demand(addr.to_string().into()).await;
         fetch(addr)
     }
 
@@ -638,7 +638,7 @@ impl DemandProxyState {
         if !self.supports_on_demand() {
             return None;
         }
-        self.fetch_on_demand(addr.to_string()).await;
+        self.fetch_on_demand(addr.to_string().into()).await;
         self.state.read().unwrap().workloads.find_address(addr)
     }
 
@@ -652,7 +652,7 @@ impl DemandProxyState {
         if !self.supports_on_demand() {
             return None;
         }
-        self.fetch_on_demand(uid.to_string()).await;
+        self.fetch_on_demand(uid.clone()).await;
         self.state.read().unwrap().workloads.find_uid(uid)
     }
 
@@ -731,7 +731,7 @@ impl DemandProxyState {
             return None;
         }
         // if both cache not found, start on demand fetch
-        self.fetch_on_demand(network_addr.to_string()).await;
+        self.fetch_on_demand(network_addr.to_string().into()).await;
         self.state.read().unwrap().find_address(network_addr)
     }
 
@@ -747,7 +747,7 @@ impl DemandProxyState {
             return None;
         }
         // if both cache not found, start on demand fetch
-        self.fetch_on_demand(hostname.to_string()).await;
+        self.fetch_on_demand(hostname.to_string().into()).await;
         self.state.read().unwrap().find_hostname(hostname)
     }
 
@@ -756,12 +756,12 @@ impl DemandProxyState {
     }
 
     /// fetch_on_demand looks up the provided key on-demand and waits for it to return
-    pub async fn fetch_on_demand(&self, key: String) {
+    pub async fn fetch_on_demand(&self, key: Strng) {
         if let Some(demand) = &self.demand {
             debug!(%key, "sending demand request");
             Box::pin(
                 demand
-                    .demand(xds::ADDRESS_TYPE.to_string(), key.clone())
+                    .demand(xds::ADDRESS_TYPE.into(), key.clone())
                     .then(|o| o.recv()),
             )
             .await;
