@@ -343,12 +343,9 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
     }
 }
 
-impl TryFrom<&XdsWorkload> for Workload {
+impl TryFrom<XdsWorkload> for Workload {
     type Error = WorkloadError;
-    fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
-        // TODO can we avoid the clone?
-        let resource: XdsWorkload = resource.to_owned();
-
+    fn try_from(resource: XdsWorkload) -> Result<Self, Self::Error> {
         let wp = match &resource.waypoint {
             Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,

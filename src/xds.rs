@@ -40,6 +40,7 @@ use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
 use crate::state::ProxyState;
 use crate::{tls, xds};
+use crate::strng::Strng;
 
 use self::service::discovery::v3::DeltaDiscoveryRequest;
 
@@ -122,16 +123,20 @@ impl ProxyStateUpdateMutator {
     pub fn insert_workload(&self, state: &mut ProxyState, w: XdsWorkload) -> anyhow::Result<()> {
         debug!("handling insert {}", w.uid);
 
+        // Clone services, so we can pass full ownership of the rest of XdsWorkload to build our Workload
+        // object, which doesn't include Services.
+        // In theory, I think we could avoid this if Workload::try_from returning the services.
+        let services = w.services.clone();
         // Convert the workload.
-        let workload = Workload::try_from(&w)?;
+        let workload = Workload::try_from(w)?;
 
         // First, remove the entry entirely to make sure things are cleaned up properly.
-        self.remove_for_insert(state, &w.uid);
+        self.remove_for_insert(state, &workload.uid);
 
         // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
         // But we shouldn't include them in load balancing we do to Services.
         let mut endpoints = if workload.status == HealthStatus::Healthy {
-            service_endpoints(&workload, &w.services)?
+            service_endpoints(&workload, &services)?
         } else {
             Vec::new()
         };
@@ -148,15 +153,15 @@ impl ProxyStateUpdateMutator {
         Ok(())
     }
 
-    pub fn remove(&self, state: &mut ProxyState, xds_name: &String) {
+    pub fn remove(&self, state: &mut ProxyState, xds_name: &Strng) {
         self.remove_internal(state, xds_name, false);
     }
 
-    fn remove_for_insert(&self, state: &mut ProxyState, xds_name: &String) {
+    fn remove_for_insert(&self, state: &mut ProxyState, xds_name: &Strng) {
         self.remove_internal(state, xds_name, true);
     }
 
-    fn remove_internal(&self, state: &mut ProxyState, xds_name: &String, for_insert: bool) {
+    fn remove_internal(&self, state: &mut ProxyState, xds_name: &Strng, for_insert: bool) {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
             // Also remove service endpoints for the workload.
@@ -266,7 +271,7 @@ impl Handler<XdsWorkload> for ProxyStateUpdater {
                 XdsUpdate::Update(w) => self.updater.insert_workload(&mut state, w.resource)?,
                 XdsUpdate::Remove(name) => {
                     debug!("handling delete {}", name);
-                    self.updater.remove(&mut state, &name)
+                    self.updater.remove(&mut state, &strng::new(name))
                 }
             }
             Ok(())
@@ -283,7 +288,7 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
                 XdsUpdate::Update(w) => self.updater.insert_address(&mut state, w.resource)?,
                 XdsUpdate::Remove(name) => {
                     debug!("handling delete {}", name);
-                    self.updater.remove(&mut state, &name)
+                    self.updater.remove(&mut state, &strng::new(name))
                 }
             }
             Ok(())
