@@ -37,7 +37,8 @@ use crate::proxy::h2_client::H2Stream;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
-use crate::{assertions, proxy, socket};
+use crate::strng::Strng;
+use crate::{assertions, proxy, socket, strng};
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -313,7 +314,7 @@ impl OutboundConnection {
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
         if let Some(svc) = &req.destination_service {
-            f.set_host(&svc.hostname);
+            f.set_host(svc.hostname.as_str());
         }
 
         let request = http::Request::builder()
@@ -376,7 +377,7 @@ impl OutboundConnection {
         target: SocketAddr,
     ) -> Result<Box<Request>, Error> {
         let downstream_network_addr = NetworkAddress {
-            network: self.pi.cfg.network.clone(),
+            network: strng::new(&self.pi.cfg.network),
             address: downstream,
         };
         let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await {
@@ -396,7 +397,7 @@ impl OutboundConnection {
             .pi
             .state
             .fetch_destination(&Destination::Address(NetworkAddress {
-                network: self.pi.cfg.network.clone(),
+                network: strng::new(&self.pi.cfg.network),
                 address: target.ip(),
             }))
             .await
@@ -415,7 +416,7 @@ impl OutboundConnection {
                 let waypoint_us = self
                     .pi
                     .state
-                    .fetch_upstream(&self.pi.cfg.network, &source_workload, waypoint_vip)
+                    .fetch_upstream(self.pi.cfg.network.clone(), &source_workload, waypoint_vip)
                     .await
                     .ok_or(proxy::Error::UnknownWaypoint(
                         "unable to determine waypoint upstream".to_string(),
@@ -457,7 +458,7 @@ impl OutboundConnection {
         let us = match self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, &source_workload, target)
+            .fetch_upstream(source_workload.network.clone(), &source_workload, target)
             .await
         {
             Some(us) => us,
@@ -580,7 +581,7 @@ struct Request {
     gateway: SocketAddr,
     request_type: RequestType,
 
-    upstream_sans: Vec<String>,
+    upstream_sans: Vec<Strng>,
 }
 
 #[derive(PartialEq, Debug)]

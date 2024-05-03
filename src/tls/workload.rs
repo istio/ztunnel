@@ -30,6 +30,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::strng::Strng;
 use crate::tls;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
@@ -49,11 +50,11 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 #[derive(Debug)]
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
-    trust_domain: Option<String>,
+    trust_domain: Option<Strng>,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<String>) -> Arc<Self> {
+    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
         Arc::new(Self { base, trust_domain })
     }
 

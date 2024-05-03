@@ -453,6 +453,7 @@ mod tests {
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
     use crate::identity;
+    use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
@@ -515,9 +516,9 @@ mod tests {
         for i in 0..2 {
             manager
                 .fetch_certificate(&identity::Identity::Spiffe {
-                    trust_domain: "trust_domain".to_string(),
-                    namespace: "namespace".to_string(),
-                    service_account: format!("sa-{i}"),
+                    trust_domain: "trust_domain".into(),
+                    namespace: "namespace".into(),
+                    service_account: strng::format!("sa-{i}"),
                 })
                 .await
                 .unwrap();
