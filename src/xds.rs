@@ -36,7 +36,7 @@ use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::{rbac, strng};
 use crate::rbac::Authorization;
-use crate::state::service::{endpoint_uid, Endpoint, Service};
+use crate::state::service::{endpoint_uid, Endpoint, Service, ServiceStore};
 use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
 use crate::state::ProxyState;
 use crate::{tls, xds};
@@ -128,26 +128,20 @@ impl ProxyStateUpdateMutator {
         // In theory, I think we could avoid this if Workload::try_from returning the services.
         let services = w.services.clone();
         // Convert the workload.
-        let workload = Workload::try_from(w)?;
+        let workload = Arc::new(Workload::try_from(w)?);
 
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove_for_insert(state, &workload.uid);
-
-        // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
-        // But we shouldn't include them in load balancing we do to Services.
-        let mut endpoints = if workload.status == HealthStatus::Healthy {
-            service_endpoints(&workload, &services)?
-        } else {
-            Vec::new()
-        };
 
         // Prefetch the cert for the workload.
         self.cert_fetcher.prefetch_cert(&workload);
 
         // Lock and upstate the stores.
-        state.workloads.insert(workload);
-        while let Some(endpoint) = endpoints.pop() {
-            state.services.insert_endpoint(endpoint);
+        // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
+        // But we shouldn't include them in load balancing we do to Services.
+        state.workloads.insert(workload.clone());
+        if workload.status == HealthStatus::Healthy {
+            insert_service_endpoints(&workload, &services, &mut state.services)?;
         }
 
         Ok(())
@@ -309,11 +303,11 @@ impl Handler<XdsAddress> for ProxyStateUpdater {
     }
 }
 
-fn service_endpoints(
+fn insert_service_endpoints(
     workload: &Workload,
     services: &HashMap<String, PortList>,
-) -> anyhow::Result<Vec<Endpoint>> {
-    let mut out = Vec::new();
+    services_state: &mut ServiceStore
+) -> anyhow::Result<()> {
     for (namespaced_host, ports) in services {
         // Parse the namespaced hostname for the service.
         let namespaced_host = match namespaced_host.split_once('/') {
@@ -330,7 +324,7 @@ fn service_endpoints(
 
         // Create service endpoints for all the workload IPs.
         for wip in &workload.workload_ips {
-            out.push(Endpoint {
+            services_state.insert_endpoint(Endpoint {
                 workload_uid: workload.uid.clone(),
                 service: namespaced_host.clone(),
                 address: Some(network_addr(&workload.network, *wip)),
@@ -338,7 +332,7 @@ fn service_endpoints(
             })
         }
         if workload.workload_ips.is_empty() {
-            out.push(Endpoint {
+            services_state.insert_endpoint(Endpoint {
                 workload_uid: workload.uid.clone(),
                 service: namespaced_host.clone(),
                 address: None,
@@ -346,7 +340,7 @@ fn service_endpoints(
             })
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 impl Handler<XdsAuthorization> for ProxyStateUpdater {
@@ -463,8 +457,9 @@ impl LocalClient {
         let num_policies = r.policies.len();
         for wl in r.workloads {
             trace!("inserting local workload {}", &wl.workload.uid);
-            state.workloads.insert(wl.workload.clone());
             self.cert_fetcher.prefetch_cert(&wl.workload);
+            let w = Arc::new(wl.workload);
+            state.workloads.insert(w.clone());
 
             let services: HashMap<String, PortList> = wl
                 .services
@@ -472,10 +467,7 @@ impl LocalClient {
                 .map(|(k, v)| (k, PortList::from(v)))
                 .collect();
 
-            let mut endpoints = service_endpoints(&wl.workload, &services)?;
-            while let Some(ep) = endpoints.pop() {
-                state.services.insert_endpoint(ep)
-            }
+            insert_service_endpoints(&w, &services, &mut state.services)?;
         }
         for rbac in r.policies {
             state.policies.insert(rbac);

@@ -585,11 +585,10 @@ pub struct WorkloadStore {
 }
 
 impl WorkloadStore {
-    pub fn insert(&mut self, w: Workload) {
+    pub fn insert(&mut self, w: Arc<Workload>) {
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove(&w.uid);
 
-        let w = Arc::new(w);
         for ip in &w.workload_ips {
             self.by_addr
                 .insert(network_addr(&w.network, *ip), w.clone());
