@@ -1,0 +1,23 @@
+#[cfg(target_os = "linux")]
+fn main() {
+    use std::os::fd::AsRawFd;
+    use ztunnel::test_helpers::inpod::start_ztunnel_server;
+
+    let uds = std::env::var("INPOD_UDS").unwrap();
+    let netns = std::env::args().nth(1).unwrap();
+    let mut netns_base_dir = std::path::PathBuf::from("/var/run/netns");
+    netns_base_dir.push(netns);
+    let netns_file = std::fs::File::open(netns_base_dir).unwrap();
+
+    let fd = netns_file.as_raw_fd();
+
+    let mut sender = start_ztunnel_server(uds);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        sender.send(("uid-0".to_string(), fd)).await.unwrap();
+        sender.wait_forever().await.unwrap();
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

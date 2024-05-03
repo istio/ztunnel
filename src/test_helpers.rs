@@ -477,10 +477,15 @@ impl<T: Send + Sync + 'static> MpscAckSender<T> {
         Ok(())
     }
     pub async fn wait(&mut self) -> anyhow::Result<()> {
+        timeout(Duration::from_secs(2), self.wait_forever())
+            .await?
+    }
+    pub async fn wait_forever(&mut self) -> anyhow::Result<()> {
         debug!("wait for ack...");
 
-        timeout(Duration::from_secs(2), self.ack_rx.recv())
-            .await?
+        self.ack_rx
+            .recv()
+            .await
             .ok_or(anyhow!("failed to receive ack"))?;
         debug!("got ack");
         Ok(())
