@@ -943,7 +943,7 @@ mod tests {
                         dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 80),
                         src_identity: None,
                         src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 80),
-                        dst_network: "".to_string(),
+                        dst_network: "".into(),
                     };
                     let rbac_ctx = crate::state::ProxyRbacContext {
                         conn: conn.clone(),

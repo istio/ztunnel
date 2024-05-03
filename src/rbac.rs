@@ -28,14 +28,13 @@ use crate::identity::Identity;
 
 use crate::state::workload::{byte_to_ip, WorkloadError};
 use crate::strng::Strng;
-use crate::xds;
+use crate::{strng, xds};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Authorization {
-    // TODO move all of this
-    pub name: String,
-    pub namespace: String,
+    pub name: Strng,
+    pub namespace: Strng,
     pub scope: RbacScope,
     pub action: RbacAction,
     pub rules: Vec<Vec<Vec<RbacMatch>>>,
@@ -46,7 +45,7 @@ pub struct Connection {
     pub src: SocketAddr,
     pub dst: SocketAddr,
     pub src_identity: Option<Identity>,
-    pub dst_network: String,
+    pub dst_network: Strng,
 }
 
 struct OptionDisplay<'a, T>(&'a Option<T>);
@@ -86,7 +85,7 @@ impl Authorization {
         let id = conn
             .src_identity
             .as_ref()
-            .map(|i| i.to_string())
+            .map(|i| i.to_strng())
             .unwrap_or_default();
         let ns = conn
             .src_identity
@@ -242,14 +241,14 @@ impl RbacMatch {
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StringMatch {
-    Prefix(String),
-    Suffix(String),
-    Exact(String),
+    Prefix(Strng),
+    Suffix(Strng),
+    Exact(Strng),
     Presence(),
 }
 
 impl StringMatch {
-    pub fn matches_principal(&self, check: &str) -> bool {
+    pub fn matches_principal(&self, check: &Strng) -> bool {
         // Istio matches all assumes spiffe:// prefix. This includes prefix matches.
         // A prefix match for "*foo" means "spiffe://*foo".
         // So we strip it, and fail if it isn't present.
@@ -261,9 +260,9 @@ impl StringMatch {
 
     pub fn matches(&self, check: &str) -> bool {
         match self {
-            StringMatch::Prefix(pre) => check.starts_with(pre),
-            StringMatch::Suffix(suf) => check.ends_with(suf),
-            StringMatch::Exact(exact) => exact == check,
+            StringMatch::Prefix(pre) => check.starts_with(pre.as_str()),
+            StringMatch::Suffix(suf) => check.ends_with(suf.as_str()),
+            StringMatch::Exact(exact) => exact.as_str() == check,
             StringMatch::Presence() => !check.is_empty(),
         }
     }
@@ -301,11 +300,10 @@ impl From<xds::istio::security::Action> for RbacAction {
     }
 }
 
-impl TryFrom<&XdsRbac> for Authorization {
+impl TryFrom<XdsRbac> for Authorization {
     type Error = WorkloadError;
 
-    fn try_from(resource: &XdsRbac) -> Result<Self, Self::Error> {
-        let resource: XdsRbac = resource.to_owned();
+    fn try_from(resource: XdsRbac) -> Result<Self, Self::Error> {
         let rules = resource
             .rules
             .into_iter()
@@ -322,8 +320,8 @@ impl TryFrom<&XdsRbac> for Authorization {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Authorization {
-            name: resource.name,
-            namespace: resource.namespace,
+            name: strng::new(&resource.name),
+            namespace: strng::new(&resource.namespace),
             scope: RbacScope::from(xds::istio::security::Scope::try_from(resource.scope)?),
             action: RbacAction::from(xds::istio::security::Action::try_from(resource.action)?),
             rules,
@@ -395,9 +393,9 @@ impl TryFrom<&XdsAddress> for IpNet {
 impl From<&XdsStringMatch> for Option<StringMatch> {
     fn from(resource: &XdsStringMatch) -> Self {
         resource.match_type.as_ref().map(|m| match m {
-            MatchType::Exact(s) => StringMatch::Exact(s.to_owned()),
-            MatchType::Prefix(s) => StringMatch::Prefix(s.to_owned()),
-            MatchType::Suffix(s) => StringMatch::Suffix(s.to_owned()),
+            MatchType::Exact(s) => StringMatch::Exact(s.into()),
+            MatchType::Prefix(s) => StringMatch::Prefix(s.into()),
+            MatchType::Suffix(s) => StringMatch::Suffix(s.into()),
             MatchType::Presence(_) => StringMatch::Presence(),
         })
     }
@@ -420,7 +418,7 @@ mod tests {
                     $name: $m,
                     ..Default::default()
                 };
-                let pol = allow_policy(stringify!($name).to_string(), vec![vec![vec![m]]]);
+                let pol = allow_policy(stringify!($name), vec![vec![vec![m]]]);
                 $(
                     assert_eq!(pol.matches($con), $res, "{}", $con);
                 )*
@@ -428,10 +426,10 @@ mod tests {
         };
     }
 
-    fn allow_policy(name: String, rules: Vec<Vec<Vec<RbacMatch>>>) -> Authorization {
+    fn allow_policy(name: &str, rules: Vec<Vec<Vec<RbacMatch>>>) -> Authorization {
         Authorization {
-            name,
-            namespace: "namespace".to_string(),
+            name: name.into(),
+            namespace: "namespace".into(),
             scope: RbacScope::Global,
             action: RbacAction::Allow,
             rules,
@@ -442,7 +440,7 @@ mod tests {
         Connection {
             src_identity: None,
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
     }
@@ -455,7 +453,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:8080".parse().unwrap(),
         }
     }
@@ -468,7 +466,7 @@ mod tests {
                 service_account: "sa=alt".into(),
             }),
             src: "127.0.0.3:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.4:9090".parse().unwrap(),
         }
     }
@@ -476,29 +474,29 @@ mod tests {
     #[test]
     fn rbac_empty_policy() {
         assert!(!allow_policy(
-            "empty".to_string(),
+            "empty",
             vec![vec![vec![RbacMatch {
                 ..Default::default()
             }]]]
         )
         .matches(&plaintext_conn()));
-        assert!(allow_policy("empty".to_string(), vec![vec![vec![]]]).matches(&plaintext_conn()));
-        assert!(allow_policy("empty".to_string(), vec![vec![]]).matches(&plaintext_conn()));
-        assert!(!allow_policy("empty".to_string(), vec![]).matches(&plaintext_conn()));
+        assert!(allow_policy("empty", vec![vec![vec![]]]).matches(&plaintext_conn()));
+        assert!(allow_policy("empty", vec![vec![]]).matches(&plaintext_conn()));
+        assert!(!allow_policy("empty", vec![]).matches(&plaintext_conn()));
     }
 
     #[test]
     fn rbac_nesting() {
         let pol = allow_policy(
-            "nested".to_string(),
+            "nested",
             vec![vec![
                 vec![
                     RbacMatch {
-                        namespaces: vec![StringMatch::Exact("a".to_string())],
+                        namespaces: vec![StringMatch::Exact("a".into())],
                         ..Default::default()
                     },
                     RbacMatch {
-                        namespaces: vec![StringMatch::Exact("b".to_string())],
+                        namespaces: vec![StringMatch::Exact("b".into())],
                         ..Default::default()
                     },
                 ],
@@ -516,7 +514,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         assert!(pol.matches(&Connection {
@@ -526,7 +524,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         // Policy is applied regardless of network
@@ -537,7 +535,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "remote".to_string(),
+            dst_network: "remote".into(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         // Wrong namespace
@@ -548,7 +546,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         // Wrong port
@@ -559,7 +557,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:12345".parse().unwrap(),
         }));
     }
@@ -567,14 +565,14 @@ mod tests {
     #[test]
     fn rbac_multi_rule() {
         let pol = allow_policy(
-            "nested".to_string(),
+            "nested",
             vec![
                 vec![vec![RbacMatch {
-                    namespaces: vec![StringMatch::Exact("a".to_string())],
+                    namespaces: vec![StringMatch::Exact("a".into())],
                     ..Default::default()
                 }]],
                 vec![vec![RbacMatch {
-                    namespaces: vec![StringMatch::Exact("b".to_string())],
+                    namespaces: vec![StringMatch::Exact("b".into())],
                     ..Default::default()
                 }]],
             ],
@@ -587,7 +585,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         assert!(pol.matches(&Connection {
@@ -597,7 +595,7 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
         // Wrong namespace
@@ -608,25 +606,25 @@ mod tests {
                 service_account: "account".into(),
             }),
             src: "127.0.0.1:1234".parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: "127.0.0.2:80".parse().unwrap(),
         }));
     }
 
-    rbac_test!(namespaces, vec![StringMatch::Exact("namespace".to_string())],
+    rbac_test!(namespaces, vec![StringMatch::Exact("namespace".into())],
         &plaintext_conn() => false,
         &tls_conn() => true,
         &tls_conn_alt() => false);
-    rbac_test!(not_namespaces, vec![StringMatch::Exact("namespace".to_string())],
+    rbac_test!(not_namespaces, vec![StringMatch::Exact("namespace".into())],
         &plaintext_conn() => true,
         &tls_conn() => false,
         &tls_conn_alt() => true);
 
-    rbac_test!(principals, vec![StringMatch::Exact("td/ns/namespace/sa/account".to_string())],
+    rbac_test!(principals, vec![StringMatch::Exact("td/ns/namespace/sa/account".into())],
         &plaintext_conn() => false,
         &tls_conn() => true,
         &tls_conn_alt() => false);
-    rbac_test!(not_principals, vec![StringMatch::Exact("td/ns/namespace/sa/account".to_string())],
+    rbac_test!(not_principals, vec![StringMatch::Exact("td/ns/namespace/sa/account".into())],
         &plaintext_conn() => true,
         &tls_conn() => false,
         &tls_conn_alt() => true);
@@ -662,15 +660,15 @@ mod tests {
         &tls_conn() => false,
         &tls_conn_alt() => true);
 
-    #[test_case(StringMatch::Exact("foo".to_string()), "foo", true; "exact match")]
-    #[test_case(StringMatch::Exact("foo".to_string()), "not", false; "exact mismatch")]
-    #[test_case(StringMatch::Exact("foo".to_string()), "", false; "exact empty mismatch")]
-    #[test_case(StringMatch::Prefix("foo".to_string()), "foobar", true; "prefix match")]
-    #[test_case(StringMatch::Prefix("foo".to_string()), "notfoo", false; "prefix mismatch")]
-    #[test_case(StringMatch::Prefix("foo".to_string()), "", false; "prefix empty mismatch")]
-    #[test_case(StringMatch::Suffix("foo".to_string()), "barfoo", true; "suffix match")]
-    #[test_case(StringMatch::Suffix("foo".to_string()), "foonot", false; "suffix mismatch")]
-    #[test_case(StringMatch::Suffix("foo".to_string()), "", false; "suffix empty mismatch")]
+    #[test_case(StringMatch::Exact("foo".into()), "foo", true; "exact match")]
+    #[test_case(StringMatch::Exact("foo".into()), "not", false; "exact mismatch")]
+    #[test_case(StringMatch::Exact("foo".into()), "", false; "exact empty mismatch")]
+    #[test_case(StringMatch::Prefix("foo".into()), "foobar", true; "prefix match")]
+    #[test_case(StringMatch::Prefix("foo".into()), "notfoo", false; "prefix mismatch")]
+    #[test_case(StringMatch::Prefix("foo".into()), "", false; "prefix empty mismatch")]
+    #[test_case(StringMatch::Suffix("foo".into()), "barfoo", true; "suffix match")]
+    #[test_case(StringMatch::Suffix("foo".into()), "foonot", false; "suffix mismatch")]
+    #[test_case(StringMatch::Suffix("foo".into()), "", false; "suffix empty mismatch")]
     #[test_case(StringMatch::Presence(), "foo", true; "presence match")]
     #[test_case(StringMatch::Presence(), "", false; "presence mismatch")]
     fn string_match(matcher: StringMatch, matchee: &str, expect: bool) {

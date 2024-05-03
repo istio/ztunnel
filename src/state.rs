@@ -969,7 +969,7 @@ mod tests {
                     Ipv4Addr::new(192, 168, 0, 1),
                     1234,
                 )),
-                dst_network: "".to_string(),
+                dst_network: "".into(),
                 dst: std::net::SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(192, 168, 0, 2),
                     8080,

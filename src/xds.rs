@@ -245,7 +245,7 @@ impl ProxyStateUpdateMutator {
     ) -> anyhow::Result<()> {
         info!("handling RBAC update {}", r.name);
 
-        let rbac = rbac::Authorization::try_from(&r)?;
+        let rbac = rbac::Authorization::try_from(r)?;
         trace!("insert policy {}", serde_json::to_string(&rbac)?);
         state.policies.insert(rbac);
         Ok(())

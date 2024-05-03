@@ -453,13 +453,13 @@ mod namespaced {
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         manager
             .add_policy(Authorization {
-                name: "deny_bypass".to_string(),
-                namespace: "default".to_string(),
+                name: "deny_bypass".into(),
+                namespace: "default".into(),
                 scope: ztunnel::rbac::RbacScope::Namespace,
                 action: ztunnel::rbac::RbacAction::Allow,
                 rules: vec![vec![vec![RbacMatch {
                     principals: vec![StringMatch::Exact(
-                        "spiffe://cluster.local/ns/default/sa/waypoint".to_string(),
+                        "spiffe://cluster.local/ns/default/sa/waypoint".into(),
                     )],
                     ..Default::default()
                 }]]],

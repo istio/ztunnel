@@ -27,7 +27,7 @@ use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
-use crate::tls;
+use crate::{strng, tls};
 
 use super::CaClient;
 use super::Error::{self, Spiffe};
@@ -95,6 +95,20 @@ impl fmt::Display for Identity {
                 service_account,
             } => write!(
                 f,
+                "spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"
+            ),
+        }
+    }
+}
+
+impl Identity {
+    pub fn to_strng(self: &Identity) -> Strng {
+        match self {
+            Identity::Spiffe {
+                trust_domain,
+                namespace,
+                service_account,
+            } => strng::format!(
                 "spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"
             ),
         }

@@ -116,7 +116,7 @@ impl Inbound {
                 let conn = Connection {
                     src_identity,
                     src,
-                    dst_network: network, // inbound request must be on our network
+                    dst_network: strng::new(&network), // inbound request must be on our network
                     dst,
                 };
                 debug!(%conn, "accepted connection");
@@ -670,7 +670,7 @@ mod tests {
         let conn = Connection {
             src_identity: None,
             src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
-            dst_network: "".to_string(),
+            dst_network: "".into(),
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };
         let res = Inbound::find_inbound_upstream(

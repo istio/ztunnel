@@ -28,7 +28,7 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
 use crate::state::workload::NetworkAddress;
-use crate::{assertions, rbac};
+use crate::{assertions, rbac, strng};
 use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
@@ -170,7 +170,7 @@ impl InboundPassthrough {
                 // inbound request must be on our network since this is passthrough
                 // rather than HBONE, which can be tunneled across networks through gateways.
                 // by definition, without the gateway our source must be on our network.
-                dst_network: pi.cfg.network.clone(),
+                dst_network: strng::new(&pi.cfg.network),
                 dst: dest_addr,
             },
             dest_workload_info: pi.proxy_workload_info.clone(),
