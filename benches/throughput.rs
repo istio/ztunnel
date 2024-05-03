@@ -39,7 +39,7 @@ use ztunnel::test_helpers::TEST_WORKLOAD_SOURCE;
 use ztunnel::test_helpers::TEST_WORKLOAD_TCP;
 use ztunnel::test_helpers::{helpers, tcp};
 use ztunnel::xds::LocalWorkload;
-use ztunnel::{app, identity, metrics, proxy, test_helpers};
+use ztunnel::{app, identity, metrics, proxy, strng, test_helpers};
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -412,10 +412,10 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
             workload: Workload {
                 workload_ips: vec![hbone_connection_ip(i)],
                 protocol: Protocol::HBONE,
-                uid: format!("cluster1//v1/Pod/default/local-source{}", i),
-                name: format!("workload-{}", i),
-                namespace: format!("namespace-{}", i),
-                service_account: format!("service-account-{}", i),
+                uid: strng::format!("cluster1//v1/Pod/default/local-source{}", i),
+                name: strng::format!("workload-{}", i),
+                namespace: strng::format!("namespace-{}", i),
+                service_account: strng::format!("service-account-{}", i),
                 ..test_helpers::test_default_workload()
             },
             services: Default::default(),

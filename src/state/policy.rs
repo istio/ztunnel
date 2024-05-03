@@ -57,11 +57,11 @@ impl PolicyStore {
     }
 
     pub fn insert(&mut self, rbac: Authorization) {
-        let key: Strng = rbac.to_key().into();
+        let key: Strng = rbac.to_key();
         match rbac.scope {
             RbacScope::Global => {
                 self.by_namespace
-                    .entry("".into())
+                    .entry(strng::literal!(""))
                     .or_default()
                     .insert(key.clone());
             }
@@ -81,7 +81,7 @@ impl PolicyStore {
             return;
         };
         if let Some(key) = match rbac.scope {
-            RbacScope::Global => Some(strng::new("")),
+            RbacScope::Global => Some(strng::literal!("")),
             RbacScope::Namespace => Some(rbac.namespace.into()),
             RbacScope::WorkloadSelector => None,
         } {

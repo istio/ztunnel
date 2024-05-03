@@ -27,6 +27,7 @@ use xds::istio::security::StringMatch as XdsStringMatch;
 use crate::identity::Identity;
 
 use crate::state::workload::{byte_to_ip, WorkloadError};
+use crate::strng::Strng;
 use crate::xds;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -72,11 +73,15 @@ impl Display for Connection {
 }
 
 impl Authorization {
-    pub fn to_key(&self) -> String {
-        format!("{}/{}", self.namespace, self.name)
+    pub fn to_key(&self) -> Strng {
+        let mut res = String::with_capacity(1 + self.namespace.len() + self.name.len());
+        res.push_str(&self.namespace);
+        res.push('/');
+        res.push_str(&self.name);
+        res.into()
     }
 
-    #[instrument(level = "trace", skip_all, fields(policy=self.to_key()))]
+    #[instrument(level = "trace", skip_all, fields(policy=self.to_key().as_str()))]
     pub fn matches(&self, conn: &Connection) -> bool {
         let id = conn
             .src_identity

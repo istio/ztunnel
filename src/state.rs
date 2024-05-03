@@ -396,7 +396,7 @@ impl DemandProxyState {
 
         // We can get policies from namespace, global, and workload...
         let ns = state.policies.get_by_namespace(&wl.namespace);
-        let global = state.policies.get_by_namespace(&crate::strng::new(""));
+        let global = state.policies.get_by_namespace(&crate::strng::literal!(""));
         let workload = wl.authorization_policies.iter();
 
         // Aggregate all of them based on type
@@ -426,10 +426,10 @@ impl DemandProxyState {
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key(), "deny policy match");
+                debug!(policy = pol.to_key().as_str(), "deny policy match");
                 return false;
             } else {
-                trace!(policy = pol.to_key(), "deny policy does not match");
+                trace!(policy = pol.to_key().as_str(), "deny policy does not match");
             }
         }
         // "If there are no ALLOW policies for the workload, allow the request."
@@ -440,10 +440,13 @@ impl DemandProxyState {
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key(), "allow policy match");
+                debug!(policy = pol.to_key().as_str(), "allow policy match");
                 return true;
             } else {
-                trace!(policy = pol.to_key(), "allow policy does not match");
+                trace!(
+                    policy = pol.to_key().as_str(),
+                    "allow policy does not match"
+                );
             }
         }
         // "Deny the request."

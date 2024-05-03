@@ -1,13 +1,33 @@
+// Copyright Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fmt::Error;
 use std::ops::Deref;
 
 use arcstr::ArcStr;
 use prometheus_client::encoding::LabelValueEncoder;
 
+/// 'Strng' provides a string type that has better properties for our use case:
+/// * Cheap cloning (ref counting)
+/// * Efficient storage (8 bytes vs 24 bytes)
+/// * Immutable
+/// This is mostly provided by a library, ArcStr, we just provide a very thin wrapper around it
+/// for some flexibility.
 pub type Strng = ArcStr;
 
 pub fn new<A: AsRef<str>>(s: A) -> Strng {
-    s.as_ref().into()
+    Strng::from(s.as_ref())
 }
 
 pub use arcstr::format;

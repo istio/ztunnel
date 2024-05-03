@@ -26,6 +26,7 @@ use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
+use std::fmt::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::str::FromStr;
@@ -240,7 +241,7 @@ impl fmt::Display for Workload {
             self.name,
             self.uid,
             self.gateway_address
-                .map(|x| format!("{x}"))
+                .map(|x| x.to_string())
                 .unwrap_or_else(|| "None".into()),
             self.protocol
         )
@@ -325,8 +326,8 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                 xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
                     GatewayAddress {
                         destination: gatewayaddress::Destination::Hostname(NamespacedHostname {
-                            namespace: hn.namespace.as_str().into(),
-                            hostname: hn.hostname.as_str().into(),
+                            namespace: Strng::from(&hn.namespace),
+                            hostname: Strng::from(&hn.hostname),
                         }),
                         hbone_mtls_port: value.hbone_mtls_port as u16,
                         hbone_single_tls_port: if value.hbone_single_tls_port == 0 {
@@ -376,70 +377,69 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
             .collect::<Result<Vec<_>, _>>()?;
 
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
-        Ok((
-            Workload {
-                workload_ips: addresses,
-                waypoint: wp,
-                network_gateway: network_gw,
-                gateway_address: None,
+        let wl = Workload {
+            workload_ips: addresses,
+            waypoint: wp,
+            network_gateway: network_gw,
+            gateway_address: None,
 
-                protocol: Protocol::from(xds::istio::workload::TunnelProtocol::try_from(
-                    resource.tunnel_protocol,
-                )?),
+            protocol: Protocol::from(xds::istio::workload::TunnelProtocol::try_from(
+                resource.tunnel_protocol,
+            )?),
 
-                uid: resource.uid.into(),
-                name: resource.name.into(),
-                namespace: resource.namespace.into(),
-                trust_domain: {
-                    let result = resource.trust_domain;
-                    if result.is_empty() {
-                        "cluster.local".into()
-                    } else {
-                        result.into()
-                    }
-                },
-                service_account: {
-                    let result = resource.service_account;
-                    if result.is_empty() {
-                        "default".into()
-                    } else {
-                        result.into()
-                    }
-                },
-                node: resource.node.into(),
-                hostname: resource.hostname.into(),
-                network: resource.network.into(),
-                workload_name: resource.workload_name.into(),
-                workload_type: workload_type.into(),
-                canonical_name: resource.canonical_name.into(),
-                canonical_revision: resource.canonical_revision.into(),
-
-                status: HealthStatus::from(xds::istio::workload::WorkloadStatus::try_from(
-                    resource.status,
-                )?),
-
-                native_tunnel: resource.native_tunnel,
-                application_tunnel,
-
-                authorization_policies: resource
-                    .authorization_policies
-                    .iter()
-                    .map(strng::new)
-                    .collect(),
-
-                locality: resource.locality.map(Locality::from).unwrap_or_default(),
-
-                cluster_id: {
-                    let result = resource.cluster_id;
-                    if result.is_empty() {
-                        "Kubernetes".into()
-                    } else {
-                        result.into()
-                    }
-                },
+            uid: resource.uid.into(),
+            name: resource.name.into(),
+            namespace: resource.namespace.into(),
+            trust_domain: {
+                let result = resource.trust_domain;
+                if result.is_empty() {
+                    "cluster.local".into()
+                } else {
+                    result.into()
+                }
             },
-            resource.services,
-        ))
+            service_account: {
+                let result = resource.service_account;
+                if result.is_empty() {
+                    "default".into()
+                } else {
+                    result.into()
+                }
+            },
+            node: resource.node.into(),
+            hostname: resource.hostname.into(),
+            network: resource.network.into(),
+            workload_name: resource.workload_name.into(),
+            workload_type: workload_type.into(),
+            canonical_name: resource.canonical_name.into(),
+            canonical_revision: resource.canonical_revision.into(),
+
+            status: HealthStatus::from(xds::istio::workload::WorkloadStatus::try_from(
+                resource.status,
+            )?),
+
+            native_tunnel: resource.native_tunnel,
+            application_tunnel,
+
+            authorization_policies: resource
+                .authorization_policies
+                .iter()
+                .map(strng::new)
+                .collect(),
+
+            locality: resource.locality.map(Locality::from).unwrap_or_default(),
+
+            cluster_id: {
+                let result = resource.cluster_id;
+                if result.is_empty() {
+                    "Kubernetes".into()
+                } else {
+                    result.into()
+                }
+            },
+        };
+        // Return back part we did not use (service) so it can be consumed without cloning
+        Ok((wl, resource.services))
     }
 }
 
@@ -575,7 +575,9 @@ impl<'de> Deserialize<'de> for NetworkAddress {
 
 impl fmt::Display for NetworkAddress {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}", self.network, self.address)
+        f.write_str(&self.network)?;
+        f.write_char('/')?;
+        f.write_str(&self.address.to_string())
     }
 }
 
@@ -590,13 +592,13 @@ pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
 #[derive(Default, Debug)]
 pub struct WorkloadStore {
     /// byAddress maps workload network addresses to workloads
-    pub by_addr: HashMap<NetworkAddress, Arc<Workload>>,
+    pub(super) by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
-    pub by_uid: HashMap<Strng, Arc<Workload>>,
+    by_uid: HashMap<Strng, Arc<Workload>>,
     /// byHostname maps workload hostname to workloads.
-    pub by_hostname: HashMap<Strng, Arc<Workload>>,
+    by_hostname: HashMap<Strng, Arc<Workload>>,
     // Identity->Set of UIDs
-    pub by_identity: HashMap<Identity, HashSet<Strng>>,
+    by_identity: HashMap<Identity, HashSet<Strng>>,
 }
 
 impl WorkloadStore {
