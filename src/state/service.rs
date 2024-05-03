@@ -166,7 +166,7 @@ impl TryFrom<&XdsService> for Service {
         let mut nw_addrs = Vec::new();
         for addr in &s.addresses {
             let network_address = network_addr(
-                &addr.network,
+                strng::new(&addr.network),
                 byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
             );
             nw_addrs.push(network_address);

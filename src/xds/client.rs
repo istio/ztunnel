@@ -833,7 +833,7 @@ mod tests {
         // this is a borrow, Ok not to clone
         let mut matched = false;
         let ip_network_addr = NetworkAddress {
-            network: "".to_string(),
+            network: strng::EMPTY,
             address: ip,
         };
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
@@ -935,7 +935,7 @@ mod tests {
                     // make sure our cache is warm by using our resources
                     state.read()
                     .find_address(&NetworkAddress {
-                        network: "".to_string(),
+                        network: strng::EMPTY,
                         address: std::net::Ipv4Addr::new(1, 2, 3, 4).into(),
                     })
                     .expect("address not in cache");
@@ -1107,7 +1107,7 @@ mod tests {
                 state
                     .read()
                     .find_address(&NetworkAddress {
-                        network: "".to_string(),
+                        network: strng::EMPTY,
                         address: std::net::Ipv4Addr::new(1, 0, 0, 1).into(),
                     })
                     .expect("demander return but resource not in cache");

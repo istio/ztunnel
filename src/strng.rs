@@ -26,6 +26,8 @@ use prometheus_client::encoding::LabelValueEncoder;
 /// for some flexibility.
 pub type Strng = ArcStr;
 
+pub const EMPTY: Strng = literal!("");
+
 pub fn new<A: AsRef<str>>(s: A) -> Strng {
     Strng::from(s.as_ref())
 }

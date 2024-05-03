@@ -312,7 +312,7 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                 xds::istio::workload::gateway_address::Destination::Address(addr) => {
                     GatewayAddress {
                         destination: gatewayaddress::Destination::Address(network_addr(
-                            &addr.network,
+                            strng::new(&addr.network),
                             byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
                         )),
                         hbone_mtls_port: value.hbone_mtls_port as u16,
@@ -518,7 +518,7 @@ impl fmt::Display for NamespacedHostname {
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct NetworkAddress {
-    pub network: String,
+    pub network: Strng,
     pub address: IpAddr,
 }
 
@@ -564,7 +564,7 @@ impl<'de> Deserialize<'de> for NetworkAddress {
                     ));
                 };
                 Ok(NetworkAddress {
-                    network: network.to_string(),
+                    network: network.into(),
                     address: ip_addr,
                 })
             }
@@ -581,9 +581,9 @@ impl fmt::Display for NetworkAddress {
     }
 }
 
-pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
+pub fn network_addr(network: Strng, vip: IpAddr) -> NetworkAddress {
     NetworkAddress {
-        network: network.to_owned(),
+        network,
         address: vip,
     }
 }
@@ -608,7 +608,7 @@ impl WorkloadStore {
 
         for ip in &w.workload_ips {
             self.by_addr
-                .insert(network_addr(&w.network, *ip), w.clone());
+                .insert(network_addr(w.network.clone(), *ip), w.clone());
         }
         if !w.hostname.is_empty() {
             self.by_hostname.insert(w.hostname.clone(), w.clone());
@@ -624,7 +624,8 @@ impl WorkloadStore {
             }
             Some(prev) => {
                 for wip in prev.workload_ips.iter() {
-                    self.by_addr.remove(&network_addr(&prev.network, *wip));
+                    self.by_addr
+                        .remove(&network_addr(prev.network.clone(), *wip));
                 }
                 self.by_hostname.remove(&prev.hostname);
 
@@ -800,7 +801,7 @@ mod tests {
         let vip2 = Ipv4Addr::new(127, 0, 1, 2);
         let vip1 = Ipv4Addr::new(127, 0, 1, 1);
 
-        let nw_addr1 = network_addr("", IpAddr::V4(ip1));
+        let nw_addr1 = network_addr(strng::EMPTY, IpAddr::V4(ip1));
 
         let xds_ip1 = Bytes::copy_from_slice(&ip1.octets());
         let xds_ip2 = Bytes::copy_from_slice(&ip2.octets());
@@ -967,7 +968,7 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_vip(&NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
                 })
                 .unwrap()),
@@ -1038,7 +1039,7 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_vip(&NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
                 })
                 .unwrap()),
@@ -1065,7 +1066,7 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_vip(&NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
                 })
                 .unwrap()),
@@ -1234,13 +1235,11 @@ mod tests {
         .try_into()
         .unwrap();
         for _ in 0..1000 {
-            if let Some(us) =
-                state
-                    .state
-                    .read()
-                    .unwrap()
-                    .find_upstream("", &wl, "127.0.1.1:80".parse().unwrap())
-            {
+            if let Some(us) = state.state.read().unwrap().find_upstream(
+                strng::EMPTY,
+                &wl,
+                "127.0.1.1:80".parse().unwrap(),
+            ) {
                 let n = &us.workload.name; // borrow name instead of cloning
                 found.insert(n.to_string()); // insert an owned copy of the borrowed n
                 wants.remove(&n.to_string()); // remove using the borrow
@@ -1279,12 +1278,12 @@ mod tests {
             .read()
             .unwrap()
             .workloads
-            .find_address(&network_addr("", "127.0.0.1".parse().unwrap()));
+            .find_address(&network_addr(strng::EMPTY, "127.0.0.1".parse().unwrap()));
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.as_ref().unwrap().service_account, "default");
         let us = demand.state.read().unwrap().find_upstream(
-            "",
+            strng::EMPTY,
             wl.as_ref().unwrap(),
             "127.10.0.1:80".parse().unwrap(),
         );
@@ -1298,7 +1297,7 @@ mod tests {
 
         // test that we can have a service in another network than workloads it selects
         let us = demand.state.read().unwrap().find_upstream(
-            "remote",
+            "remote".into(),
             wl.as_ref().unwrap(),
             "127.10.0.2:80".parse().unwrap(),
         );

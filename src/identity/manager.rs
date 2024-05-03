@@ -108,9 +108,7 @@ impl Identity {
                 trust_domain,
                 namespace,
                 service_account,
-            } => strng::format!(
-                "spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"
-            ),
+            } => strng::format!("spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"),
         }
     }
 }

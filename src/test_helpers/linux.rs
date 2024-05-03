@@ -285,7 +285,7 @@ impl<'a> TestServiceBuilder<'a> {
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
         self.s.waypoint = Some(GatewayAddress {
             destination: gatewayaddress::Destination::Address(NetworkAddress {
-                network: "".to_string(),
+                network: strng::EMPTY,
                 address: waypoint,
             }),
             hbone_mtls_port: 15008,
@@ -353,7 +353,7 @@ impl<'a> TestWorkloadBuilder<'a> {
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
         self.w.workload.waypoint = Some(GatewayAddress {
             destination: gatewayaddress::Destination::Address(NetworkAddress {
-                network: "".to_string(),
+                network: strng::EMPTY,
                 address: waypoint,
             }),
             hbone_mtls_port: 15008,
@@ -416,7 +416,7 @@ impl<'a> TestWorkloadBuilder<'a> {
 
             for wip in self.w.workload.workload_ips.iter() {
                 let ep_network_addr = NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: *wip,
                 };
 

@@ -148,7 +148,7 @@ impl InboundPassthrough {
             return;
         }
         let network_addr = NetworkAddress {
-            network: pi.cfg.network.clone(), // inbound request must be on our network
+            network: strng::new(&pi.cfg.network), // inbound request must be on our network
             address: dest_addr.ip(),
         };
         let Some((upstream, upstream_service)) =
@@ -182,7 +182,7 @@ impl InboundPassthrough {
                 // inbound request must be on our network since this is passthrough
                 // rather than HBONE, which can be tunneled across networks through gateways.
                 // by definition, without the gateway our source must be on our network.
-                network: pi.cfg.network.clone(),
+                network: pi.cfg.network.as_str().into(),
                 address: source_addr.ip(),
             };
             pi.state.fetch_workload(&network_addr_srcip).await

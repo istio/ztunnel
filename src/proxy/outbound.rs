@@ -38,7 +38,7 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::strng::Strng;
-use crate::{assertions, proxy, socket};
+use crate::{assertions, proxy, socket, strng};
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -377,7 +377,7 @@ impl OutboundConnection {
         target: SocketAddr,
     ) -> Result<Box<Request>, Error> {
         let downstream_network_addr = NetworkAddress {
-            network: self.pi.cfg.network.clone(),
+            network: strng::new(&self.pi.cfg.network),
             address: downstream,
         };
         let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await {
@@ -397,7 +397,7 @@ impl OutboundConnection {
             .pi
             .state
             .fetch_destination(&Destination::Address(NetworkAddress {
-                network: self.pi.cfg.network.clone(),
+                network: strng::new(&self.pi.cfg.network),
                 address: target.ip(),
             }))
             .await
@@ -416,7 +416,7 @@ impl OutboundConnection {
                 let waypoint_us = self
                     .pi
                     .state
-                    .fetch_upstream(&self.pi.cfg.network, &source_workload, waypoint_vip)
+                    .fetch_upstream(self.pi.cfg.network.clone(), &source_workload, waypoint_vip)
                     .await
                     .ok_or(proxy::Error::UnknownWaypoint(
                         "unable to determine waypoint upstream".to_string(),
@@ -458,7 +458,7 @@ impl OutboundConnection {
         let us = match self
             .pi
             .state
-            .fetch_upstream(&source_workload.network, &source_workload, target)
+            .fetch_upstream(source_workload.network.clone(), &source_workload, target)
             .await
         {
             Some(us) => us,

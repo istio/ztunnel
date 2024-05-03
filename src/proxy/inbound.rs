@@ -51,6 +51,7 @@ use crate::{assertions, proxy, socket, strng, tls};
 
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
+use crate::strng::Strng;
 use crate::tls::TlsError;
 
 pub(super) struct Inbound {
@@ -93,7 +94,7 @@ impl Inbound {
         let acceptor = InboundCertProvider {
             state: self.pi.state.clone(),
             cert_manager: self.pi.cert_manager.clone(),
-            network: self.pi.cfg.network.clone(),
+            network: strng::new(&self.pi.cfg.network),
         };
         let stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
@@ -290,7 +291,7 @@ impl Inbound {
             false => {
                 let src_network_addr = NetworkAddress {
                     // we can assume source network is our network because we did not traverse a gateway
-                    network: rbac_ctx.conn.dst_network.to_string(),
+                    network: rbac_ctx.conn.dst_network.clone(),
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
@@ -417,7 +418,7 @@ impl Inbound {
         hbone_addr: SocketAddr,
     ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Arc<Service>>), Error> {
         let dst = &NetworkAddress {
-            network: conn.dst_network.to_string(),
+            network: conn.dst_network.clone(),
             address: hbone_addr.ip(),
         };
 
@@ -460,11 +461,11 @@ impl Inbound {
         hbone_addr: SocketAddr,
     ) -> Option<(Workload, Vec<Arc<Service>>)> {
         let connection_dst = &NetworkAddress {
-            network: conn.dst_network.to_string(),
+            network: conn.dst_network.clone(),
             address: conn.dst.ip(),
         };
         let hbone_dst = &NetworkAddress {
-            network: conn.dst_network.to_string(),
+            network: conn.dst_network.clone(),
             address: hbone_addr.ip(),
         };
 
@@ -563,7 +564,7 @@ pub(super) enum InboundConnect {
 struct InboundCertProvider {
     cert_manager: Arc<SecretManager>,
     state: DemandProxyState,
-    network: String,
+    network: Strng,
 }
 
 #[async_trait::async_trait]
@@ -708,7 +709,7 @@ mod tests {
             let ep_uid = strng::format!("cluster1//v1/Pod/default/{name}");
             let ep_addr = Some(NetworkAddress {
                 address: ep_ip.parse().unwrap(),
-                network: "".to_string(),
+                network: strng::EMPTY,
             });
             Service {
                 name: name.into(),
@@ -800,7 +801,7 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: s.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
@@ -814,7 +815,7 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: w.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,

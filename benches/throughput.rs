@@ -68,15 +68,15 @@ fn create_test_policies() -> Vec<Authorization> {
     for _ in 0..N_RULES {
         rules.push(vec![vec![RbacMatch {
             namespaces: vec![
-                StringMatch::Prefix("random-prefix-2b123".to_string()),
-                StringMatch::Suffix("random-postix-2b723".to_string()),
-                StringMatch::Exact("random-exac-2bc13".to_string()),
+                StringMatch::Prefix("random-prefix-2b123".into()),
+                StringMatch::Suffix("random-postix-2b723".into()),
+                StringMatch::Exact("random-exac-2bc13".into()),
             ],
             not_namespaces: vec![],
             principals: vec![
-                StringMatch::Prefix("random-prefix-2b123".to_string()),
-                StringMatch::Suffix("random-postix-2b723".to_string()),
-                StringMatch::Exact("random-exac-2bc13".to_string()),
+                StringMatch::Prefix("random-prefix-2b123".into()),
+                StringMatch::Suffix("random-postix-2b723".into()),
+                StringMatch::Exact("random-exac-2bc13".into()),
             ],
             not_principals: vec![],
             source_ips: vec![DUMMY_NETWORK.parse().unwrap()],
@@ -90,10 +90,10 @@ fn create_test_policies() -> Vec<Authorization> {
 
     for i in 0..N_POLICIES {
         policies.push(Authorization {
-            name: format!("policy {i}"),
+            name: strng::format!("policy {i}"),
             action: ztunnel::rbac::RbacAction::Deny,
             scope: ztunnel::rbac::RbacScope::Global,
-            namespace: "default".to_string(),
+            namespace: "default".into(),
             rules: rules.clone(),
         });
     }

@@ -161,7 +161,7 @@ impl ProxyStateUpdateMutator {
         if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
             // Also remove service endpoints for the workload.
             for wip in prev.workload_ips.iter() {
-                let prev_addr = &network_addr(&prev.network, *wip);
+                let prev_addr = &network_addr(prev.network.clone(), *wip);
                 state
                     .services
                     .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, Some(prev_addr)));
@@ -322,7 +322,7 @@ fn insert_service_endpoints(
             services_state.insert_endpoint(Endpoint {
                 workload_uid: workload.uid.clone(),
                 service: namespaced_host.clone(),
-                address: Some(network_addr(&workload.network, *wip)),
+                address: Some(network_addr(workload.network.clone(), *wip)),
                 port: ports.into(),
             })
         }

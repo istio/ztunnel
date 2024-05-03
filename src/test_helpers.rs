@@ -31,6 +31,7 @@ use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
 
+use crate::strng;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
 use std::collections::HashMap;
@@ -151,7 +152,7 @@ pub fn localhost_error_message() -> String {
 pub fn mock_default_service() -> Service {
     let vip1 = NetworkAddress {
         address: IpAddr::V4(Ipv4Addr::new(127, 0, 10, 1)),
-        network: "".to_string(),
+        network: strng::EMPTY,
     };
     let vips = vec![vip1];
     let mut ports = HashMap::new();
@@ -245,7 +246,7 @@ fn test_custom_svc(
     let addr = match endpoint.is_empty() {
         true => None,
         false => Some(NetworkAddress {
-            network: "".to_string(),
+            network: strng::EMPTY,
             address: endpoint.parse()?,
         }),
     };
@@ -254,7 +255,7 @@ fn test_custom_svc(
         namespace: TEST_SERVICE_NAMESPACE.into(),
         hostname: hostname.into(),
         vips: vec![NetworkAddress {
-            network: "".into(),
+            network: strng::EMPTY,
             address: vip.parse()?,
         }],
         ports: HashMap::from([(80u16, echo_port)]),

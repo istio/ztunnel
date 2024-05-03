@@ -236,11 +236,14 @@ impl ProxyState {
 
     pub fn find_upstream(
         &self,
-        network: &str,
+        network: Strng,
         source_workload: &Workload,
         addr: SocketAddr,
     ) -> Option<Upstream> {
-        if let Some(svc) = self.services.get_by_vip(&network_addr(network, addr.ip())) {
+        if let Some(svc) = self
+            .services
+            .get_by_vip(&network_addr(network.clone(), addr.ip()))
+        {
             let Some(target_port) = svc.ports.get(&addr.port()) else {
                 debug!(
                     "found VIP {}, but port {} was unknown",
@@ -379,7 +382,7 @@ impl DemandProxyState {
     }
 
     pub async fn assert_rbac(&self, ctx: &ProxyRbacContext) -> bool {
-        let nw_addr = network_addr(&ctx.conn.dst_network, ctx.conn.dst.ip());
+        let nw_addr = network_addr(ctx.conn.dst_network.clone(), ctx.conn.dst.ip());
         let Some(wl) = self.fetch_workload(&nw_addr).await else {
             debug!("destination workload not found {}", nw_addr);
             return false;
@@ -396,7 +399,7 @@ impl DemandProxyState {
 
         // We can get policies from namespace, global, and workload...
         let ns = state.policies.get_by_namespace(&wl.namespace);
-        let global = state.policies.get_by_namespace(&crate::strng::literal!(""));
+        let global = state.policies.get_by_namespace(&crate::strng::EMPTY);
         let workload = wl.authorization_policies.iter();
 
         // Aggregate all of them based on type
@@ -661,11 +664,12 @@ impl DemandProxyState {
 
     pub async fn fetch_upstream(
         &self,
-        network: &str,
+        network: Strng,
         source_workload: &Workload,
         addr: SocketAddr,
     ) -> Option<Upstream> {
-        self.fetch_address(&network_addr(network, addr.ip())).await;
+        self.fetch_address(&network_addr(network.clone(), addr.ip()))
+            .await;
         self.state
             .read()
             .unwrap()
@@ -693,7 +697,7 @@ impl DemandProxyState {
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
         match self
-            .fetch_upstream(&wp_nw_addr.network, source_workload, wp_socket_addr)
+            .fetch_upstream(wp_nw_addr.network.clone(), source_workload, wp_socket_addr)
             .await
         {
             Some(mut upstream) => {
@@ -864,8 +868,8 @@ mod tests {
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use super::*;
-    use crate::test_helpers;
     use crate::test_helpers::TEST_SERVICE_NAMESPACE;
+    use crate::{strng, test_helpers};
 
     #[tokio::test]
     async fn lookup_address() {
@@ -884,7 +888,7 @@ mod tests {
 
         // Some from Address
         let dst = Destination::Address(NetworkAddress {
-            network: "".to_string(),
+            network: strng::EMPTY,
             address: IpAddr::V4(Ipv4Addr::LOCALHOST),
         });
         test_helpers::assert_eventually(

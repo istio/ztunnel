@@ -50,6 +50,7 @@ use crate::socket::to_canonical;
 use crate::state::workload::address::Address;
 use crate::state::workload::{NetworkAddress, Workload};
 use crate::state::DemandProxyState;
+use crate::strng::Strng;
 
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
 const DEFAULT_TTL_SECONDS: u32 = 30;
@@ -157,7 +158,7 @@ impl Server {
 
 /// A DNS [Resolver] backed by the ztunnel [DemandProxyState].
 struct Store {
-    network: String,
+    network: Strng,
     state: DemandProxyState,
     forwarder: Arc<dyn Forwarder>,
     domain: Name,
@@ -177,7 +178,7 @@ impl Store {
         let svc_domain = append_name(as_name("svc"), &domain);
 
         Self {
-            network,
+            network: network.into(),
             state,
             forwarder,
             domain,
@@ -740,6 +741,7 @@ mod tests {
 
     use super::*;
     use crate::metrics;
+    use crate::strng;
     use crate::test_helpers::dns::{
         a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client,
         send_request, server_request,
@@ -754,8 +756,8 @@ mod tests {
 
     const NS1: &str = "ns1";
     const NS2: &str = "ns2";
-    const NW1: &str = "nw1";
-    const NW2: &str = "nw2";
+    const NW1: Strng = strng::literal!("nw1");
+    const NW2: Strng = strng::literal!("nw2");
 
     #[test]
     fn test_to_kube_fqdns() {
@@ -857,7 +859,7 @@ mod tests {
             let store = Store {
                 domain: as_name("cluster.local"),
                 svc_domain: as_name("svc.cluster.local"),
-                network: NW1.to_string(),
+                network: NW1,
                 state,
                 forwarder,
                 metrics: test_metrics(),
@@ -1186,7 +1188,7 @@ mod tests {
         let store = Store {
             domain: as_name("cluster.local"),
             svc_domain: as_name("svc.cluster.local"),
-            network: NW1.to_string(),
+            network: NW1,
             state,
             forwarder,
             metrics: test_metrics(),
@@ -1274,13 +1276,13 @@ mod tests {
     async fn ipv4_in_6_should_unwrap() {
         initialize_telemetry();
         let fake_ips = vec![ip("2.2.2.2")];
-        let fake_wls = vec![xds_workload("client-fake", NS1, "", NW1, &[], &fake_ips)];
+        let fake_wls = vec![xds_workload("client-fake", NS1, "", &NW1, &[], &fake_ips)];
 
         // Create the DNS store.
         let state = new_proxy_state(&fake_wls, &[], &[]);
         let forwarder = forwarder();
         let store = Store {
-            network: NW1.to_string(),
+            network: NW1,
             state,
             forwarder,
             domain: n("cluster.local"),
@@ -1422,7 +1424,7 @@ mod tests {
                 "headless0",
                 NS1,
                 "headless.pod0.ns1.svc.cluster.local",
-                NW1,
+                &NW1,
                 &[format!("{}/{}", NS1, kube_fqdn("headless", NS1)).as_str()],
                 &[ip("30.30.30.30")],
             ),
@@ -1430,7 +1432,7 @@ mod tests {
                 "headless1",
                 NS1,
                 "headless.pod1.ns1.svc.cluster.local",
-                NW1,
+                &NW1,
                 &[format!("{}/{}", NS1, kube_fqdn("headless", NS1)).as_str()],
                 &[ip("31.31.31.31")],
             ),
@@ -1441,14 +1443,14 @@ mod tests {
 
     fn na<S1: AsRef<str>, S2: AsRef<str>>(network: S1, addr: S2) -> NetworkAddress {
         NetworkAddress {
-            network: network.as_ref().to_string(),
+            network: strng::new(network.as_ref()),
             address: ip(addr),
         }
     }
 
     /// Creates a workload for the local machine that resides in NS1 on NW1.
     fn local_workload() -> XdsWorkload {
-        xds_workload("client", NS1, "", NW1, &[], &local_ips())
+        xds_workload("client", NS1, "", &NW1, &[], &local_ips())
     }
 
     fn local_ips() -> Vec<IpAddr> {
@@ -1487,7 +1489,7 @@ mod tests {
             addresses: vips
                 .iter()
                 .map(|vip| XdsNetworkAddress {
-                    network: vip.network.clone(),
+                    network: vip.network.to_string(),
                     address: addr_bytes(vip.address),
                 })
                 .collect(),

@@ -61,7 +61,7 @@ impl PolicyStore {
         match rbac.scope {
             RbacScope::Global => {
                 self.by_namespace
-                    .entry(strng::literal!(""))
+                    .entry(strng::EMPTY)
                     .or_default()
                     .insert(key.clone());
             }
@@ -81,8 +81,8 @@ impl PolicyStore {
             return;
         };
         if let Some(key) = match rbac.scope {
-            RbacScope::Global => Some(strng::literal!("")),
-            RbacScope::Namespace => Some(rbac.namespace.into()),
+            RbacScope::Global => Some(strng::EMPTY),
+            RbacScope::Namespace => Some(rbac.namespace),
             RbacScope::WorkloadSelector => None,
         } {
             if let Some(pl) = self.by_namespace.get_mut(&key) {

@@ -43,7 +43,7 @@ mod namespaced {
     use ztunnel::test_helpers::app::ParsedMetrics;
     use ztunnel::test_helpers::app::TestApp;
     use ztunnel::test_helpers::helpers::initialize_telemetry;
-    use ztunnel::{identity, telemetry};
+    use ztunnel::{identity, strng, telemetry};
 
     use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
@@ -222,7 +222,7 @@ mod namespaced {
         manager
             .service_builder("service")
             .addresses(vec![NetworkAddress {
-                network: "".to_string(),
+                network: strng::EMPTY,
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
             .ports(HashMap::from([(80u16, 80u16)]))
@@ -311,7 +311,7 @@ mod namespaced {
         manager
             .service_builder("service")
             .addresses(vec![NetworkAddress {
-                network: "".to_string(),
+                network: strng::EMPTY,
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
             .ports(HashMap::from([(80u16, 80u16)]))

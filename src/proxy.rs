@@ -519,7 +519,7 @@ pub fn guess_inbound_service(
         return Some(found);
     }
     let dport = conn.dst.port();
-    let netaddr = network_addr(&dest.network, conn.dst.ip());
+    let netaddr = network_addr(dest.network.clone(), conn.dst.ip());
     let euid = endpoint_uid(&dest.uid, Some(&netaddr));
     upstream_service
         .iter()
