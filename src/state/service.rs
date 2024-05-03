@@ -26,24 +26,25 @@ use crate::state::workload::{
     byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
     WorkloadError,
 };
-use crate::xds;
+use crate::strng::Strng;
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::PortList;
+use crate::{strng, xds};
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Service {
-    pub name: String,
-    pub namespace: String,
-    pub hostname: String,
+    pub name: Strng,
+    pub namespace: Strng,
+    pub hostname: Strng,
     pub vips: Vec<NetworkAddress>,
     pub ports: HashMap<u16, u16>,
 
     /// Maps endpoint UIDs to service [Endpoint]s.
     #[serde(default)]
-    pub endpoints: HashMap<String, Endpoint>,
+    pub endpoints: HashMap<Strng, Endpoint>,
     #[serde(default)]
-    pub subject_alt_names: Vec<String>,
+    pub subject_alt_names: Vec<Strng>,
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub waypoint: Option<GatewayAddress>,
@@ -117,9 +118,9 @@ impl Service {
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
 pub struct ServiceDescription {
-    pub hostname: String,
-    pub name: String,
-    pub namespace: String,
+    pub hostname: Strng,
+    pub name: Strng,
+    pub namespace: Strng,
 }
 
 impl From<&Service> for ServiceDescription {
@@ -136,7 +137,7 @@ impl From<&Service> for ServiceDescription {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Endpoint {
     /// The workload UID for this endpoint.
-    pub workload_uid: String,
+    pub workload_uid: Strng,
 
     /// The service for this endpoint.
     pub service: NamespacedHostname,
@@ -149,12 +150,13 @@ pub struct Endpoint {
     pub port: HashMap<u16, u16>,
 }
 
-pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> String {
-    format!(
-        "{}:{}",
-        workload_uid,
-        address.map(|a| a.to_string()).unwrap_or_default()
-    )
+pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> Strng {
+    let addr = address.map(|a| a.to_string()).unwrap_or_default();
+    let mut res = String::with_capacity(1 + addr.len() + workload_uid.len());
+    res.push_str(workload_uid);
+    res.push(':');
+    res.push_str(&addr);
+    res.into()
 }
 
 impl TryFrom<&XdsService> for Service {
@@ -164,7 +166,7 @@ impl TryFrom<&XdsService> for Service {
         let mut nw_addrs = Vec::new();
         for addr in &s.addresses {
             let network_address = network_addr(
-                &addr.network,
+                strng::new(&addr.network),
                 byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
             );
             nw_addrs.push(network_address);
@@ -190,16 +192,16 @@ impl TryFrom<&XdsService> for Service {
             None
         };
         let svc = Service {
-            name: s.name.to_string(),
-            namespace: s.namespace.to_string(),
-            hostname: s.hostname.to_string(),
+            name: Strng::from(&s.name),
+            namespace: Strng::from(&s.namespace),
+            hostname: Strng::from(&s.hostname),
             vips: nw_addrs,
             ports: (&PortList {
                 ports: s.ports.clone(),
             })
                 .into(),
             endpoints: Default::default(), // Will be populated once inserted into the store.
-            subject_alt_names: s.subject_alt_names.clone(),
+            subject_alt_names: s.subject_alt_names.iter().map(strng::new).collect(),
             waypoint,
             load_balancer: lb,
         };
@@ -212,11 +214,11 @@ impl TryFrom<&XdsService> for Service {
 pub struct ServiceStore {
     /// Maintains a mapping of service key -> (endpoint UID -> workload endpoint)
     /// this is used to handle ordering issues if workloads are received before services.
-    pub(super) staged_services: HashMap<NamespacedHostname, HashMap<String, Endpoint>>,
+    pub(super) staged_services: HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
 
     /// Maintains a mapping of workload UID to service. This is used only to handle removal of
     /// service endpoints when a workload is removed.
-    workload_to_services: HashMap<String, HashSet<NamespacedHostname>>,
+    workload_to_services: HashMap<Strng, HashSet<NamespacedHostname>>,
 
     /// Allows for lookup of services by network address, the service's xds secondary key.
     pub(super) by_vip: HashMap<NetworkAddress, Arc<Service>>,
@@ -225,7 +227,7 @@ pub struct ServiceStore {
     /// of hostname and namespace as the primary key. In most cases, there will be a single
     /// service for a given hostname. However, `ServiceEntry` allows hostnames to be overridden
     /// on a per-namespace basis.
-    by_host: HashMap<String, Vec<Arc<Service>>>,
+    by_host: HashMap<Strng, Vec<Arc<Service>>>,
 }
 
 impl ServiceStore {
@@ -241,7 +243,7 @@ impl ServiceStore {
     /// # Arguments
     ///
     /// * `hostname` - the hostname of the service.
-    pub fn get_by_host(&self, hostname: &String) -> Option<Vec<Service>> {
+    pub fn get_by_host(&self, hostname: &Strng) -> Option<Vec<Service>> {
         self.by_host.get(hostname).map(|services| {
             services
                 .iter()
@@ -313,7 +315,7 @@ impl ServiceStore {
     }
 
     /// Removes entries for the given endpoint address.
-    pub fn remove_endpoint(&mut self, workload_uid: &str, endpoint_uid: &str) {
+    pub fn remove_endpoint(&mut self, workload_uid: &Strng, endpoint_uid: &Strng) {
         let mut services_to_update = HashSet::new();
         if let Some(prev_services) = self.workload_to_services.remove(workload_uid) {
             for svc in prev_services.iter() {
@@ -381,7 +383,7 @@ impl ServiceStore {
         // Map the workload address to the service.
         for (_, ep) in service.endpoints.iter() {
             self.workload_to_services
-                .entry(ep.workload_uid.to_string())
+                .entry(ep.workload_uid.clone())
                 .or_default()
                 .insert(namespaced_hostname.clone());
         }

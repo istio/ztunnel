@@ -14,8 +14,9 @@
 
 use crate::identity::Identity;
 
-use crate::xds;
+use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
+use crate::{strng, xds};
 use bytes::Bytes;
 use serde::de::Visitor;
 use serde::Deserialize;
@@ -25,6 +26,7 @@ use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
+use std::fmt::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::str::FromStr;
@@ -65,17 +67,17 @@ pub enum HealthStatus {
 
 #[derive(Default, Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Locality {
-    pub region: String,
-    pub zone: String,
-    pub subzone: String,
+    pub region: Strng,
+    pub zone: Strng,
+    pub subzone: Strng,
 }
 
 impl From<xds::istio::workload::Locality> for Locality {
     fn from(value: xds::istio::workload::Locality) -> Self {
         Locality {
-            region: value.region,
-            zone: value.zone,
-            subzone: value.subzone,
+            region: value.region.into(),
+            zone: value.zone.into(),
+            subzone: value.subzone.into(),
         }
     }
 }
@@ -162,31 +164,31 @@ pub struct Workload {
     pub protocol: Protocol,
 
     #[serde(default, skip_serializing_if = "is_default")]
-    pub uid: String,
+    pub uid: Strng,
     #[serde(default)]
-    pub name: String,
-    pub namespace: String,
+    pub name: Strng,
+    pub namespace: Strng,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub trust_domain: String,
+    pub trust_domain: Strng,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub service_account: String,
+    pub service_account: Strng,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub network: String,
+    pub network: Strng,
 
     #[serde(default, skip_serializing_if = "is_default")]
-    pub workload_name: String,
+    pub workload_name: Strng,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub workload_type: String,
+    pub workload_type: Strng,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub canonical_name: String,
+    pub canonical_name: Strng,
     #[serde(default, skip_serializing_if = "is_default")]
-    pub canonical_revision: String,
+    pub canonical_revision: Strng,
 
     #[serde(default, skip_serializing_if = "is_default")]
-    pub hostname: String,
+    pub hostname: Strng,
 
     #[serde(default, skip_serializing_if = "is_default")]
-    pub node: String,
+    pub node: Strng,
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub native_tunnel: bool,
@@ -194,13 +196,13 @@ pub struct Workload {
     pub application_tunnel: Option<ApplicationTunnel>,
 
     #[serde(default, skip_serializing_if = "is_default")]
-    pub authorization_policies: Vec<String>,
+    pub authorization_policies: Vec<Strng>,
 
     #[serde(default)]
     pub status: HealthStatus,
 
     #[serde(default)]
-    pub cluster_id: String,
+    pub cluster_id: Strng,
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub locality: Locality,
@@ -213,7 +215,7 @@ pub fn is_default<T: Default + PartialEq>(t: &T) -> bool {
 impl Workload {
     pub fn identity(&self) -> Identity {
         Identity::Spiffe {
-            trust_domain: self.trust_domain.to_string(),
+            trust_domain: self.trust_domain.clone(),
             namespace: self.namespace.clone(),
             service_account: self.service_account.clone(),
         }
@@ -239,7 +241,7 @@ impl fmt::Display for Workload {
             self.name,
             self.uid,
             self.gateway_address
-                .map(|x| format!("{x}"))
+                .map(|x| x.to_string())
                 .unwrap_or_else(|| "None".into()),
             self.protocol
         )
@@ -310,7 +312,7 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                 xds::istio::workload::gateway_address::Destination::Address(addr) => {
                     GatewayAddress {
                         destination: gatewayaddress::Destination::Address(network_addr(
-                            &addr.network,
+                            strng::new(&addr.network),
                             byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
                         )),
                         hbone_mtls_port: value.hbone_mtls_port as u16,
@@ -324,8 +326,8 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                 xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
                     GatewayAddress {
                         destination: gatewayaddress::Destination::Hostname(NamespacedHostname {
-                            namespace: hn.namespace.clone(),
-                            hostname: hn.hostname.clone(),
+                            namespace: Strng::from(&hn.namespace),
+                            hostname: Strng::from(&hn.hostname),
                         }),
                         hbone_mtls_port: value.hbone_mtls_port as u16,
                         hbone_single_tls_port: if value.hbone_single_tls_port == 0 {
@@ -342,11 +344,17 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
     }
 }
 
-impl TryFrom<&XdsWorkload> for Workload {
+impl TryFrom<XdsWorkload> for Workload {
     type Error = WorkloadError;
-    fn try_from(resource: &XdsWorkload) -> Result<Self, Self::Error> {
-        let resource: XdsWorkload = resource.to_owned();
+    fn try_from(resource: XdsWorkload) -> Result<Self, Self::Error> {
+        let (w, _): (Workload, HashMap<String, PortList>) = resource.try_into()?;
+        Ok(w)
+    }
+}
 
+impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
+    type Error = WorkloadError;
+    fn try_from(resource: XdsWorkload) -> Result<Self, Self::Error> {
         let wp = match &resource.waypoint {
             Some(w) => Some(GatewayAddress::try_from(w)?),
             None => None,
@@ -369,7 +377,7 @@ impl TryFrom<&XdsWorkload> for Workload {
             .collect::<Result<Vec<_>, _>>()?;
 
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
-        Ok(Workload {
+        let wl = Workload {
             workload_ips: addresses,
             waypoint: wp,
             network_gateway: network_gw,
@@ -379,15 +387,15 @@ impl TryFrom<&XdsWorkload> for Workload {
                 resource.tunnel_protocol,
             )?),
 
-            uid: resource.uid,
-            name: resource.name,
-            namespace: resource.namespace,
+            uid: resource.uid.into(),
+            name: resource.name.into(),
+            namespace: resource.namespace.into(),
             trust_domain: {
                 let result = resource.trust_domain;
                 if result.is_empty() {
                     "cluster.local".into()
                 } else {
-                    result
+                    result.into()
                 }
             },
             service_account: {
@@ -395,16 +403,16 @@ impl TryFrom<&XdsWorkload> for Workload {
                 if result.is_empty() {
                     "default".into()
                 } else {
-                    result
+                    result.into()
                 }
             },
-            node: resource.node,
-            hostname: resource.hostname,
-            network: resource.network,
-            workload_name: resource.workload_name,
-            workload_type,
-            canonical_name: resource.canonical_name,
-            canonical_revision: resource.canonical_revision,
+            node: resource.node.into(),
+            hostname: resource.hostname.into(),
+            network: resource.network.into(),
+            workload_name: resource.workload_name.into(),
+            workload_type: workload_type.into(),
+            canonical_name: resource.canonical_name.into(),
+            canonical_revision: resource.canonical_revision.into(),
 
             status: HealthStatus::from(xds::istio::workload::WorkloadStatus::try_from(
                 resource.status,
@@ -413,7 +421,11 @@ impl TryFrom<&XdsWorkload> for Workload {
             native_tunnel: resource.native_tunnel,
             application_tunnel,
 
-            authorization_policies: resource.authorization_policies,
+            authorization_policies: resource
+                .authorization_policies
+                .iter()
+                .map(strng::new)
+                .collect(),
 
             locality: resource.locality.map(Locality::from).unwrap_or_default(),
 
@@ -422,10 +434,12 @@ impl TryFrom<&XdsWorkload> for Workload {
                 if result.is_empty() {
                     "Kubernetes".into()
                 } else {
-                    result
+                    result.into()
                 }
             },
-        })
+        };
+        // Return back part we did not use (service) so it can be consumed without cloning
+        Ok((wl, resource.services))
     }
 }
 
@@ -440,8 +454,8 @@ pub enum WaypointError {
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct NamespacedHostname {
-    pub namespace: String,
-    pub hostname: String,
+    pub namespace: Strng,
+    pub hostname: Strng,
 }
 
 impl FromStr for NamespacedHostname {
@@ -452,8 +466,8 @@ impl FromStr for NamespacedHostname {
             return Err(WorkloadError::NamespacedHostnameParse(value.to_string()));
         };
         Ok(Self {
-            namespace: namespace.to_string(),
-            hostname: hostname.to_string(),
+            namespace: namespace.into(),
+            hostname: hostname.into(),
         })
     }
 }
@@ -504,7 +518,7 @@ impl fmt::Display for NamespacedHostname {
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct NetworkAddress {
-    pub network: String,
+    pub network: Strng,
     pub address: IpAddr,
 }
 
@@ -550,7 +564,7 @@ impl<'de> Deserialize<'de> for NetworkAddress {
                     ));
                 };
                 Ok(NetworkAddress {
-                    network: network.to_string(),
+                    network: network.into(),
                     address: ip_addr,
                 })
             }
@@ -561,13 +575,15 @@ impl<'de> Deserialize<'de> for NetworkAddress {
 
 impl fmt::Display for NetworkAddress {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}", self.network, self.address)
+        f.write_str(&self.network)?;
+        f.write_char('/')?;
+        f.write_str(&self.address.to_string())
     }
 }
 
-pub fn network_addr(network: &str, vip: IpAddr) -> NetworkAddress {
+pub fn network_addr(network: Strng, vip: IpAddr) -> NetworkAddress {
     NetworkAddress {
-        network: network.to_owned(),
+        network,
         address: vip,
     }
 }
@@ -578,22 +594,21 @@ pub struct WorkloadStore {
     /// byAddress maps workload network addresses to workloads
     pub(super) by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
-    by_uid: HashMap<String, Arc<Workload>>,
+    by_uid: HashMap<Strng, Arc<Workload>>,
     /// byHostname maps workload hostname to workloads.
-    by_hostname: HashMap<String, Arc<Workload>>,
+    by_hostname: HashMap<Strng, Arc<Workload>>,
     // Identity->Set of UIDs
-    by_identity: HashMap<Identity, HashSet<String>>,
+    by_identity: HashMap<Identity, HashSet<Strng>>,
 }
 
 impl WorkloadStore {
-    pub fn insert(&mut self, w: Workload) {
+    pub fn insert(&mut self, w: Arc<Workload>) {
         // First, remove the entry entirely to make sure things are cleaned up properly.
-        self.remove(w.uid.as_str());
+        self.remove(&w.uid);
 
-        let w = Arc::new(w);
         for ip in &w.workload_ips {
             self.by_addr
-                .insert(network_addr(&w.network, *ip), w.clone());
+                .insert(network_addr(w.network.clone(), *ip), w.clone());
         }
         if !w.hostname.is_empty() {
             self.by_hostname.insert(w.hostname.clone(), w.clone());
@@ -601,7 +616,7 @@ impl WorkloadStore {
         self.by_uid.insert(w.uid.clone(), w.clone());
     }
 
-    pub fn remove(&mut self, uid: &str) -> Option<Workload> {
+    pub fn remove(&mut self, uid: &Strng) -> Option<Workload> {
         match self.by_uid.remove(uid) {
             None => {
                 trace!("tried to remove workload keyed by {} but it was not found; presumably it was a service", uid);
@@ -609,9 +624,10 @@ impl WorkloadStore {
             }
             Some(prev) => {
                 for wip in prev.workload_ips.iter() {
-                    self.by_addr.remove(&network_addr(&prev.network, *wip));
+                    self.by_addr
+                        .remove(&network_addr(prev.network.clone(), *wip));
                 }
-                self.by_hostname.remove(prev.hostname.as_str());
+                self.by_hostname.remove(&prev.hostname);
 
                 let id = prev.identity();
                 if let Some(set) = self.by_identity.get_mut(&id) {
@@ -636,12 +652,12 @@ impl WorkloadStore {
     }
 
     /// Finds the workload by hostname.
-    pub fn find_hostname<T: AsRef<str>>(&self, hostname: T) -> Option<Arc<Workload>> {
-        self.by_hostname.get(hostname.as_ref()).cloned()
+    pub fn find_hostname(&self, hostname: &Strng) -> Option<Arc<Workload>> {
+        self.by_hostname.get(hostname).cloned()
     }
 
     /// Finds the workload by uid.
-    pub fn find_uid(&self, uid: &str) -> Option<Workload> {
+    pub fn find_uid(&self, uid: &Strng) -> Option<Workload> {
         self.by_uid.get(uid).map(|wl| wl.deref().clone())
     }
 
@@ -785,7 +801,7 @@ mod tests {
         let vip2 = Ipv4Addr::new(127, 0, 1, 2);
         let vip1 = Ipv4Addr::new(127, 0, 1, 1);
 
-        let nw_addr1 = network_addr("", IpAddr::V4(ip1));
+        let nw_addr1 = network_addr(strng::EMPTY, IpAddr::V4(ip1));
 
         let xds_ip1 = Bytes::copy_from_slice(&ip1.octets());
         let xds_ip2 = Bytes::copy_from_slice(&ip2.octets());
@@ -819,9 +835,9 @@ mod tests {
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
-                uid: uid1.to_owned(),
+                uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
-                name: "some name".to_string(),
+                name: "some name".into(),
                 ..test_helpers::test_default_workload()
             })
         );
@@ -829,29 +845,29 @@ mod tests {
         assert_eq!(state.read().unwrap().services.num_services(), 0);
         assert_eq!(state.read().unwrap().services.num_staged_services(), 0);
 
-        updater.remove(&mut state.write().unwrap(), &"/invalid".to_string());
+        updater.remove(&mut state.write().unwrap(), &"/invalid".into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
-                uid: uid1.to_owned(),
+                uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
-                name: "some name".to_string(),
+                name: "some name".into(),
                 ..test_helpers::test_default_workload()
             })
         );
 
-        updater.remove(&mut state.write().unwrap(), &uid2);
+        updater.remove(&mut state.write().unwrap(), &uid2.as_str().into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             Some(Workload {
-                uid: uid1.to_owned(),
+                uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
-                name: "some name".to_string(),
+                name: "some name".into(),
                 ..test_helpers::test_default_workload()
             })
         );
 
-        updater.remove(&mut state.write().unwrap(), &uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
             None
@@ -866,7 +882,7 @@ mod tests {
                 XdsWorkload {
                     uid: uid1.to_owned(),
                     addresses: vec![xds_ip1.clone()],
-                    name: "some name".to_string(),
+                    name: "some name".into(),
                     services: service1.clone(),
                     ..Default::default()
                 },
@@ -943,8 +959,8 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_namespaced_host(&NamespacedHostname {
-                    namespace: "ns".to_string(),
-                    hostname: "svc1.ns.svc.cluster.local".to_string(),
+                    namespace: "ns".into(),
+                    hostname: "svc1.ns.svc.cluster.local".into(),
                 })
                 .unwrap()),
             (state
@@ -952,7 +968,7 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_vip(&NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
                 })
                 .unwrap()),
@@ -1014,8 +1030,8 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_namespaced_host(&NamespacedHostname {
-                    namespace: "ns".to_string(),
-                    hostname: "svc1.ns.svc.cluster.local".to_string()
+                    namespace: "ns".into(),
+                    hostname: "svc1.ns.svc.cluster.local".into()
                 })
                 .unwrap()),
             (state
@@ -1023,14 +1039,14 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_vip(&NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
                 })
                 .unwrap()),
         );
 
         assert_vips(&demand, vec!["some name", "some name2"]);
-        updater.remove(&mut state.write().unwrap(), &uid2);
+        updater.remove(&mut state.write().unwrap(), &uid2.as_str().into());
 
         // we need to ensure both copies of the service stored are the same.
         // this is important because we mutate the service endpoints in place
@@ -1041,8 +1057,8 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_namespaced_host(&NamespacedHostname {
-                    namespace: "ns".to_string(),
-                    hostname: "svc1.ns.svc.cluster.local".to_string()
+                    namespace: "ns".into(),
+                    hostname: "svc1.ns.svc.cluster.local".into()
                 })
                 .unwrap()),
             (state
@@ -1050,14 +1066,14 @@ mod tests {
                 .unwrap()
                 .services
                 .get_by_vip(&NetworkAddress {
-                    network: "".to_string(),
+                    network: strng::EMPTY,
                     address: IpAddr::V4(vip1),
                 })
                 .unwrap()),
         );
 
         assert_vips(&demand, vec!["some name"]);
-        updater.remove(&mut state.write().unwrap(), &uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());
         assert_vips(&demand, vec![]);
 
         // Add 2 workload with VIP
@@ -1120,7 +1136,7 @@ mod tests {
         // Remove the VIP entirely
         updater.remove(
             &mut state.write().unwrap(),
-            &"ns/svc1.ns.svc.cluster.local".to_string(),
+            &"ns/svc1.ns.svc.cluster.local".into(),
         );
         assert_eq!(state.read().unwrap().services.num_vips(), 0);
         assert_eq!((state.read().unwrap().services.num_services()), 0);
@@ -1202,7 +1218,7 @@ mod tests {
             .unwrap();
         assert_eq!((state.read().unwrap().services.num_staged_services()), 1); // VIP should be staged again
 
-        updater.remove(&mut state.write().unwrap(), &uid1);
+        updater.remove(&mut state.write().unwrap(), &uid1.into());
         assert_eq!((state.read().unwrap().services.num_staged_services()), 0); // should remove the VIP if no longer needed
     }
 
@@ -1212,23 +1228,21 @@ mod tests {
         let mut found: HashSet<String> = HashSet::new();
         // VIP has randomness. We will try to fetch the VIP 1k times and assert the we got the expected results
         // at least once, and no unexpected results
-        let wl: Workload = (&XdsWorkload {
-            name: "some name".to_string(),
+        let wl: Workload = (XdsWorkload {
+            name: "some name".into(),
             ..Default::default()
         })
-            .try_into()
-            .unwrap();
+        .try_into()
+        .unwrap();
         for _ in 0..1000 {
-            if let Some(us) =
-                state
-                    .state
-                    .read()
-                    .unwrap()
-                    .find_upstream("", &wl, "127.0.1.1:80".parse().unwrap())
-            {
+            if let Some(us) = state.state.read().unwrap().find_upstream(
+                strng::EMPTY,
+                &wl,
+                "127.0.1.1:80".parse().unwrap(),
+            ) {
                 let n = &us.workload.name; // borrow name instead of cloning
-                found.insert(n.to_owned()); // insert an owned copy of the borrowed n
-                wants.remove(n); // remove using the borrow
+                found.insert(n.to_string()); // insert an owned copy of the borrowed n
+                wants.remove(&n.to_string()); // remove using the borrow
             }
         }
         if !wants.is_empty() {
@@ -1264,12 +1278,12 @@ mod tests {
             .read()
             .unwrap()
             .workloads
-            .find_address(&network_addr("", "127.0.0.1".parse().unwrap()));
+            .find_address(&network_addr(strng::EMPTY, "127.0.0.1".parse().unwrap()));
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.as_ref().unwrap().service_account, "default");
         let us = demand.state.read().unwrap().find_upstream(
-            "",
+            strng::EMPTY,
             wl.as_ref().unwrap(),
             "127.10.0.1:80".parse().unwrap(),
         );
@@ -1283,7 +1297,7 @@ mod tests {
 
         // test that we can have a service in another network than workloads it selects
         let us = demand.state.read().unwrap().find_upstream(
-            "remote",
+            "remote".into(),
             wl.as_ref().unwrap(),
             "127.10.0.2:80".parse().unwrap(),
         );

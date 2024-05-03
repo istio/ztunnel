@@ -27,11 +27,11 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn run_workload(data: &[u8]) -> anyhow::Result<()> {
-    Workload::try_from(&XdsWorkload::decode(data)?)?;
+    Workload::try_from(XdsWorkload::decode(data)?)?;
     Ok(())
 }
 
 fn run_rbac(data: &[u8]) -> anyhow::Result<()> {
-    Authorization::try_from(&XdsAuthorization::decode(data)?)?;
+    Authorization::try_from(XdsAuthorization::decode(data)?)?;
     Ok(())
 }

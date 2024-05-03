@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use itertools::Itertools;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
@@ -23,17 +22,19 @@ use prost::{DecodeError, EncodeError};
 use prost_types::value::Kind;
 use prost_types::{Struct, Value};
 use serde_json;
+use split_iter::Splittable;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::metrics::IncrementRecorder;
+use crate::strng::Strng;
 use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
 use crate::xds::service::discovery::v3::*;
-use crate::{identity, tls};
+use crate::{identity, strng, tls};
 
 use super::Error;
 
@@ -50,8 +51,8 @@ const ISTIO_METAJSON_PREFIX: &str = "ISTIO_METAJSON_";
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub struct ResourceKey {
-    pub name: String,
-    pub type_url: String,
+    pub name: Strng,
+    pub type_url: Strng,
 }
 
 impl Display for ResourceKey {
@@ -62,12 +63,12 @@ impl Display for ResourceKey {
 
 #[derive(Debug)]
 pub struct RejectedConfig {
-    name: String,
+    name: Strng,
     reason: anyhow::Error,
 }
 
 impl RejectedConfig {
-    pub fn new(name: String, reason: anyhow::Error) -> Self {
+    pub fn new(name: Strng, reason: anyhow::Error) -> Self {
         Self { name, reason }
     }
 }
@@ -81,11 +82,10 @@ impl Display for RejectedConfig {
 /// handle_single_resource is a helper to process a set of updates with a closure that processes items one-by-one.
 /// It handles aggregating errors as NACKS.
 pub fn handle_single_resource<T: prost::Message, F: FnMut(XdsUpdate<T>) -> anyhow::Result<()>>(
-    updates: Vec<XdsUpdate<T>>,
+    updates: impl Iterator<Item = XdsUpdate<T>>,
     mut handle_one: F,
 ) -> Result<(), Vec<RejectedConfig>> {
     let rejects: Vec<RejectedConfig> = updates
-        .into_iter()
         .filter_map(|res| {
             let name = res.name();
             if let Err(e) = handle_one(res) {
@@ -108,7 +108,10 @@ pub trait Handler<T: prost::Message>: Send + Sync + 'static {
     fn no_on_demand(&self) -> bool {
         false
     }
-    fn handle(&self, res: Vec<XdsUpdate<T>>) -> Result<(), Vec<RejectedConfig>>;
+    fn handle(
+        &self,
+        res: Box<&mut dyn Iterator<Item = XdsUpdate<T>>>,
+    ) -> Result<(), Vec<RejectedConfig>>;
 }
 
 // ResponseHandler is responsible for handling a discovery response.
@@ -133,43 +136,47 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
         state: &mut State,
         res: DeltaDiscoveryResponse,
     ) -> Result<(), Vec<RejectedConfig>> {
-        let type_url = res.type_url.clone();
+        let type_url = strng::new(res.type_url);
         let removes = &res.removed_resources;
 
         // Keep track of any failures but keep going
-        let (updates, decode_failures): (Vec<_>, Vec<_>) = res
+        let (decode_failures, updates) = res
             .resources
             .iter()
             .map(|raw| {
                 decode_proto::<T>(raw).map_err(|err| RejectedConfig {
-                    name: raw.name.clone(),
+                    name: raw.name.as_str().into(),
                     reason: err.into(),
                 })
             })
-            .map_ok(XdsUpdate::Update)
-            .chain(
-                removes
-                    .iter()
-                    .cloned()
-                    .map(XdsUpdate::Remove)
-                    .map(Result::Ok),
-            )
-            .partition_result();
+            .split(|i| i.is_ok());
+
+        let mut updates = updates
+            // We already filtered to ok
+            .map(|r| r.expect("must be ok"))
+            .map(XdsUpdate::Update)
+            .chain(removes.iter().cloned().map(|s| XdsUpdate::Remove(s.into())));
 
         // First, call handlers that update the proxy state.
         // other wise on-demand notifications might observe a cache without their resource
+        let updates: Box<&mut dyn Iterator<Item = XdsUpdate<T>>> = Box::new(&mut updates);
         let result = self.h.handle(updates);
+
+        // Collecting after handle() is important, as the split() will cache the side we use last.
+        // Updates >>> Errors (hopefully), so we want this one to do the allocations.
+        let decode_failures: Vec<_> = decode_failures
+            .map(|r| r.expect_err("must be err"))
+            .collect();
 
         // after we update the proxy cache, we can update our xds cache. it's important that we do this after
         // as we make on demand notifications here, so the proxy cache must be updated first.
-
         for name in res.removed_resources {
             let k = ResourceKey {
-                name,
-                type_url: res.type_url.clone(),
+                name: name.into(),
+                type_url: type_url.clone(),
             };
             debug!("received delete resource {k}");
-            if let Some(rm) = state.known_resources.get_mut(&res.type_url) {
+            if let Some(rm) = state.known_resources.get_mut(&k.type_url) {
                 rm.remove(&k.name);
             }
             state.notify_on_demand(&k);
@@ -177,7 +184,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
 
         for r in res.resources {
             let key = ResourceKey {
-                name: r.name,
+                name: r.name.into(),
                 type_url: type_url.clone(),
             };
             state.notify_on_demand(&key);
@@ -202,14 +209,14 @@ pub struct Config {
     tls_builder: Box<dyn tls::ClientCertProvider>,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
-    handlers: HashMap<String, Box<dyn RawHandler>>,
+    handlers: HashMap<Strng, Box<dyn RawHandler>>,
     initial_requests: Vec<DeltaDiscoveryRequest>,
     on_demand: bool,
 }
 
 pub struct State {
     /// Stores all known workload resources. Map from type_url to name
-    known_resources: HashMap<String, HashSet<String>>,
+    known_resources: HashMap<Strng, HashSet<Strng>>,
 
     /// pending stores a list of all resources that are pending and XDS push
     pending: HashMap<ResourceKey, oneshot::Sender<()>>,
@@ -227,7 +234,7 @@ impl State {
             }
         }
     }
-    fn add_resource(&mut self, type_url: String, name: String) {
+    fn add_resource(&mut self, type_url: Strng, name: Strng) {
         self.known_resources
             .entry(type_url)
             .or_default()
@@ -254,28 +261,27 @@ impl Config {
         }
     }
 
-    pub fn with_watched_handler<F>(self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
+    pub fn with_watched_handler<F>(self, type_url: Strng, f: impl Handler<F>) -> Config
     where
         F: 'static + prost::Message + Default,
     {
-        let type_url = type_url.into();
         let no_on_demand = f.no_on_demand();
         self.with_handler(type_url.clone(), f)
             .watch(type_url, no_on_demand)
     }
 
-    fn with_handler<F>(mut self, type_url: impl Into<String>, f: impl Handler<F>) -> Config
+    fn with_handler<F>(mut self, type_url: Strng, f: impl Handler<F>) -> Config
     where
         F: 'static + prost::Message + Default,
     {
         let h = HandlerWrapper { h: Box::new(f) };
-        self.handlers.insert(type_url.into(), Box::new(h));
+        self.handlers.insert(type_url, Box::new(h));
         self
     }
 
-    fn watch(mut self, type_url: impl Into<String>, no_on_demand: bool) -> Config {
+    fn watch(mut self, type_url: Strng, no_on_demand: bool) -> Config {
         self.initial_requests
-            .push(self.construct_initial_request(&type_url.into(), no_on_demand));
+            .push(self.construct_initial_request(type_url, no_on_demand));
         self
     }
 
@@ -360,7 +366,7 @@ impl Config {
     }
     fn construct_initial_request(
         &self,
-        request_type: &str,
+        request_type: Strng,
         no_on_demand: bool,
     ) -> DeltaDiscoveryRequest {
         let node = self.node();
@@ -373,7 +379,7 @@ impl Config {
             (vec![], vec![])
         };
         DeltaDiscoveryRequest {
-            type_url: request_type.to_owned(),
+            type_url: request_type.to_string(),
             node: Some(node.clone()),
             resource_names_subscribe: sub,
             resource_names_unsubscribe: unsub,
@@ -447,7 +453,7 @@ impl Display for XdsSignal {
 
 impl Demander {
     /// Demand requests a given workload by name
-    pub async fn demand(&self, type_url: String, name: String) -> Demanded {
+    pub async fn demand(&self, type_url: Strng, name: Strng) -> Demanded {
         let (tx, rx) = oneshot::channel::<()>();
         self.demand
             .send((tx, ResourceKey { name, type_url }))
@@ -587,10 +593,10 @@ impl AdsClient {
                 req.initial_resource_versions = self
                     .state
                     .known_resources
-                    .get(req.type_url.as_str())
+                    .get(&strng::new(&req.type_url))
                     .map(|hs| {
                         hs.iter()
-                            .map(|n| (n.to_owned(), "".to_string())) // Proto expects Name -> Version. We don't care about version
+                            .map(|n| (n.to_string(), "".to_string())) // Proto expects Name -> Version. We don't care about version
                             .collect()
                     })
                     .unwrap_or_default();
@@ -619,6 +625,7 @@ impl AdsClient {
             tls_grpc_channel,
             self.config.auth.clone(),
         )
+        .max_decoding_message_size(200 * 1024 * 1024)
         .delta_aggregated_resources(tonic::Request::new(outbound))
         .await;
 
@@ -667,7 +674,7 @@ impl AdsClient {
             "received response"
         );
         let handler_response: Result<(), Vec<RejectedConfig>> =
-            match self.config.handlers.get(&type_url) {
+            match self.config.handlers.get(&strng::new(&type_url)) {
                 Some(h) => h.handle(&mut self.state, response),
                 None => {
                     error!(%type_url, "unknown type");
@@ -722,8 +729,8 @@ impl AdsClient {
         self.state.pending.insert(demand_event, tx);
         self.state.add_resource(type_url.clone(), name.clone());
         send.send(DeltaDiscoveryRequest {
-            type_url,
-            resource_names_subscribe: vec![name],
+            type_url: type_url.to_string(),
+            resource_names_subscribe: vec![name.to_string()],
             ..Default::default()
         })
         .await
@@ -734,21 +741,21 @@ impl AdsClient {
 
 #[derive(Clone, Debug)]
 pub struct XdsResource<T: prost::Message> {
-    pub name: String,
+    pub name: Strng,
     pub resource: T,
 }
 
 #[derive(Debug)]
 pub enum XdsUpdate<T: prost::Message> {
     Update(XdsResource<T>),
-    Remove(String),
+    Remove(Strng),
 }
 
 impl<T: prost::Message> XdsUpdate<T> {
-    pub fn name(&self) -> String {
+    pub fn name(&self) -> Strng {
         match self {
             XdsUpdate::Update(ref r) => r.name.clone(),
-            XdsUpdate::Remove(n) => n.to_string(),
+            XdsUpdate::Remove(n) => n.clone(),
         }
     }
 }
@@ -756,7 +763,7 @@ impl<T: prost::Message> XdsUpdate<T> {
 fn decode_proto<T: prost::Message + Default>(
     resource: &ProtoResource,
 ) -> Result<XdsResource<T>, AdsError> {
-    let name = resource.name.clone();
+    let name = resource.name.as_str().into();
     resource
         .resource
         .as_ref()
@@ -817,7 +824,7 @@ mod tests {
         let start_time = SystemTime::now();
         let converted = match expected_address {
             Some(a) => match a.r#type {
-                Some(XdsType::Workload(w)) => Some(Workload::try_from(&w).unwrap()),
+                Some(XdsType::Workload(w)) => Some(Workload::try_from(w).unwrap()),
                 Some(XdsType::Service(_s)) => None,
                 _ => None,
             },
@@ -826,7 +833,7 @@ mod tests {
         // this is a borrow, Ok not to clone
         let mut matched = false;
         let ip_network_addr = NetworkAddress {
-            network: "".to_string(),
+            network: strng::EMPTY,
             address: ip,
         };
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
@@ -928,7 +935,7 @@ mod tests {
                     // make sure our cache is warm by using our resources
                     state.read()
                     .find_address(&NetworkAddress {
-                        network: "".to_string(),
+                        network: strng::EMPTY,
                         address: std::net::Ipv4Addr::new(1, 2, 3, 4).into(),
                     })
                     .expect("address not in cache");
@@ -936,7 +943,7 @@ mod tests {
                         dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 80),
                         src_identity: None,
                         src: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 80),
-                        dst_network: "".to_string(),
+                        dst_network: "".into(),
                     };
                     let rbac_ctx = crate::state::ProxyRbacContext {
                         conn: conn.clone(),
@@ -1054,9 +1061,7 @@ mod tests {
                 info!("workload manager: {}", e);
             }
         });
-        let result = demander
-            .demand(ADDRESS_TYPE.to_string(), "foo0".to_string())
-            .await;
+        let result = demander.demand(ADDRESS_TYPE, "foo0".into()).await;
 
         let mut conn = conn_receiver.recv().await.unwrap();
 
@@ -1102,7 +1107,7 @@ mod tests {
                 state
                     .read()
                     .find_address(&NetworkAddress {
-                        network: "".to_string(),
+                        network: strng::EMPTY,
                         address: std::net::Ipv4Addr::new(1, 0, 0, 1).into(),
                     })
                     .expect("demander return but resource not in cache");

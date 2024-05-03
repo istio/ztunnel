@@ -206,9 +206,9 @@ impl HboneTestServer {
     pub async fn run(self) {
         let certs = tls::mock::generate_test_certs(
             &identity::Identity::Spiffe {
-                trust_domain: "cluster.local".to_string(),
-                namespace: "default".to_string(),
-                service_account: self.name,
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: self.name.into(),
             }
             .into(),
             Duration::from_secs(0),
