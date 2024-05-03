@@ -436,15 +436,15 @@ impl ConnectionResult {
             tracing::Level::DEBUG,
 
             src.addr = %src.0,
-            src.workload = src.1,
-            src.namespace = tl.source_workload_namespace.as_ref(),
+            src.workload = src.1.as_deref().map(display),
+            src.namespace = tl.source_workload_namespace.display(),
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             dst.addr = %dst.0,
-            dst.hbone_addr = hbone_target.map(tracing::field::display),
-            dst.service = tl.destination_service.as_ref(),
-            dst.workload = dst.1,
-            dst.namespace = tl.destination_workload_namespace.as_ref(),
+            dst.hbone_addr = hbone_target.map(display),
+            dst.service = tl.destination_service.as_deref().map(display),,
+            dst.workload = dst.1.as_deref().map(display),
+            dst.namespace = tl.destination_workload_namespace.display(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             direction = if tl.reporter == Reporter::source {
@@ -515,20 +515,19 @@ impl ConnectionResult {
         let dur = format!("{}ms", self.start.elapsed().as_millis());
 
         // We use our own macro to allow setting the level dynamically
-        /*
         access_log!(
             res,
 
             src.addr = %self.src.0,
-            src.workload = %self.src.1,
-            src.namespace = %tl.source_workload_namespace,
+            src.workload = self.src.1.as_deref().map(display),
+            src.namespace = tl.source_workload_namespace.display(),
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             dst.addr = %self.dst.0,
-            dst.hbone_addr = self.hbone_target.map(tracing::field::display),
-            dst.service = tl.destination_service.as_ref(),
-            dst.workload = self.dst.1,
-            dst.namespace = tl.destination_workload_namespace.as_ref(),
+            dst.hbone_addr = self.hbone_target.map(display),
+            dst.service = tl.destination_service.display(),
+            dst.workload = self.dst.1.as_deref().map(display),
+            dst.namespace = tl.destination_workload_namespace.display(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             direction = if tl.reporter == Reporter::source {
@@ -543,7 +542,5 @@ impl ConnectionResult {
             bytes_recv = if tl.reporter == Reporter::source {bytes.1} else {bytes.0},
             duration = dur,
         );
-        *
-         */
     }
 }

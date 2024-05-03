@@ -18,6 +18,7 @@ use std::mem;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::registry::Registry;
 use tracing::error;
+use tracing::field::{display, DisplayValue};
 
 use crate::identity::Identity;
 
@@ -102,6 +103,12 @@ where
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 // DefaultedUnknown is a wrapper around an Option that encodes as "unknown" when missing, rather than ""
 pub struct DefaultedUnknown<T>(Option<T>);
+
+impl DefaultedUnknown<RichStrng> {
+    pub fn display(&self) -> Option<DisplayValue<&str>> {
+        self.as_ref().map(|rs| display(rs.as_str()))
+    }
+}
 
 impl<T> DefaultedUnknown<T> {
     pub fn inner(self) -> Option<T> {
