@@ -27,11 +27,12 @@ use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
-use crate::tls;
+use crate::{strng, tls};
 
 use super::CaClient;
 use super::Error::{self, Spiffe};
 
+use crate::strng::Strng;
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use keyed_priority_queue::KeyedPriorityQueue;
 
@@ -40,28 +41,11 @@ const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_s
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub enum Identity {
     Spiffe {
-        trust_domain: String,
-        namespace: String,
-        service_account: String,
+        trust_domain: Strng,
+        namespace: Strng,
+        service_account: Strng,
     },
 }
-
-// struct PrioritizedFetch {
-//     identity: Identity,
-//     priority: Priority
-// }
-//
-// impl Ord for PrioritizedFetch {
-//     fn cmp(&self, other: &Self) -> Ordering {
-//         self.cmp(other)
-//     }
-// }
-//
-// impl PartialOrd for PrioritizedFetch {
-//     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-//         Some(self.cmp(other))
-//     }
-// }
 
 impl EncodeLabelValue for Identity {
     fn encode(&self, writer: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
@@ -95,9 +79,9 @@ impl FromStr for Identity {
             return Err(Spiffe(s.to_string()));
         }
         Ok(Identity::Spiffe {
-            trust_domain: split[0].to_string(),
-            namespace: split[2].to_string(),
-            service_account: split[4].to_string(),
+            trust_domain: split[0].into(),
+            namespace: split[2].into(),
+            service_account: split[4].into(),
         })
     }
 }
@@ -117,17 +101,28 @@ impl fmt::Display for Identity {
     }
 }
 
-// TODO we shouldn't have a "default identity" outside of tests
-// #[cfg(test)]
+impl Identity {
+    pub fn to_strng(self: &Identity) -> Strng {
+        match self {
+            Identity::Spiffe {
+                trust_domain,
+                namespace,
+                service_account,
+            } => strng::format!("spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
 impl Default for Identity {
     fn default() -> Self {
         const TRUST_DOMAIN: &str = "cluster.local";
         const SERVICE_ACCOUNT: &str = "ztunnel";
         const NAMESPACE: &str = "istio-system";
         Identity::Spiffe {
-            trust_domain: TRUST_DOMAIN.to_string(),
-            namespace: NAMESPACE.to_string(),
-            service_account: SERVICE_ACCOUNT.to_string(),
+            trust_domain: TRUST_DOMAIN.into(),
+            namespace: NAMESPACE.into(),
+            service_account: SERVICE_ACCOUNT.into(),
         }
     }
 }
@@ -676,15 +671,16 @@ mod tests {
 
     use crate::identity::caclient::mock::CaClient as MockCaClient;
     use crate::identity::{self, *};
+    use crate::strng;
 
     use super::{mock, *};
 
     async fn stress_many_ids(sm: Arc<SecretManager>, iterations: u32) {
         for i in 0..iterations {
             let id = identity::Identity::Spiffe {
-                trust_domain: "cluster.local".to_string(),
-                namespace: "istio-system".to_string(),
-                service_account: format!("ztunnel{i}"),
+                trust_domain: "cluster.local".into(),
+                namespace: "istio-system".into(),
+                service_account: strng::format!("ztunnel{i}"),
             };
             sm.fetch_certificate(&id)
                 .await
@@ -851,17 +847,17 @@ mod tests {
 
     fn identity(name: &str) -> Identity {
         Identity::Spiffe {
-            trust_domain: "test".to_string(),
-            namespace: "test".to_string(),
-            service_account: name.to_string(),
+            trust_domain: "test".into(),
+            namespace: "test".into(),
+            service_account: name.into(),
         }
     }
 
     fn identity_n(name: &str, n: u8) -> Identity {
         Identity::Spiffe {
-            trust_domain: "test".to_string(),
-            namespace: "test".to_string(),
-            service_account: format!("{name}{n}"),
+            trust_domain: "test".into(),
+            namespace: "test".into(),
+            service_account: strng::format!("{name}{n}"),
         }
     }
 
@@ -1101,33 +1097,33 @@ mod tests {
         assert_eq!(
             Identity::from_str("spiffe://cluster.local/ns/namespace/sa/service-account").ok(),
             Some(Identity::Spiffe {
-                trust_domain: "cluster.local".to_string(),
-                namespace: "namespace".to_string(),
-                service_account: "service-account".to_string(),
+                trust_domain: "cluster.local".into(),
+                namespace: "namespace".into(),
+                service_account: "service-account".into(),
             })
         );
         assert_eq!(
             Identity::from_str("spiffe://td/ns/ns/sa/sa").ok(),
             Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "ns".to_string(),
-                service_account: "sa".to_string(),
+                trust_domain: "td".into(),
+                namespace: "ns".into(),
+                service_account: "sa".into(),
             })
         );
         assert_eq!(
             Identity::from_str("spiffe://td.with.dots/ns/ns.with.dots/sa/sa.with.dots").ok(),
             Some(Identity::Spiffe {
-                trust_domain: "td.with.dots".to_string(),
-                namespace: "ns.with.dots".to_string(),
-                service_account: "sa.with.dots".to_string(),
+                trust_domain: "td.with.dots".into(),
+                namespace: "ns.with.dots".into(),
+                service_account: "sa.with.dots".into(),
             })
         );
         assert_eq!(
             Identity::from_str("spiffe://td/ns//sa/").ok(),
             Some(Identity::Spiffe {
-                trust_domain: "td".to_string(),
-                namespace: "".to_string(),
-                service_account: "".to_string()
+                trust_domain: "td".into(),
+                namespace: "".into(),
+                service_account: "".into()
             })
         );
         assert_matches!(Identity::from_str("td/ns/ns/sa/sa"), Err(_));

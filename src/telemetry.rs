@@ -14,6 +14,7 @@
 
 use std::env;
 use std::fmt::Debug;
+use std::str::FromStr;
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
@@ -26,7 +27,7 @@ use tracing_subscriber::fmt::format::Writer;
 
 use tracing_subscriber::fmt::{format, FmtContext, FormatEvent, FormatFields, FormattedFields};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{filter, filter::EnvFilter, prelude::*, reload, Layer, Registry};
+use tracing_subscriber::{filter, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
@@ -57,7 +58,7 @@ fn fmt_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
     } else {
         plain_fmt()
     };
-    let filter = default_env_filter();
+    let filter = default_filter();
     let (layer, reload) = reload::Layer::new(format.with_filter(filter));
     LOG_HANDLE
         .set(reload)
@@ -65,18 +66,18 @@ fn fmt_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
     Box::new(layer)
 }
 
-fn default_env_filter() -> EnvFilter {
+fn default_filter() -> filter::Targets {
     // Read from env var, but prefix with setting DNS logs to warn as they are noisy; they can be explicitly overriden
-    let var: String = env::var(EnvFilter::DEFAULT_ENV)
+    let var: String = env::var("RUST_LOG")
         .map_err(|_| ())
         .map(|v| "hickory_server::server::server_future=off,".to_string() + v.as_str())
         .unwrap_or("hickory_server::server::server_future=off,info".to_string());
-    EnvFilter::builder().with_regex(false).parse(var).unwrap()
+    filter::Targets::from_str(&var).expect("static filter should build")
 }
 
 // a handle to get and set the log level
 type BoxLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
-type FilteredLayer = filter::Filtered<BoxLayer, EnvFilter, Registry>;
+type FilteredLayer = filter::Filtered<BoxLayer, filter::Targets, Registry>;
 type LogHandle = reload::Handle<FilteredLayer, Registry>;
 
 /// set_level dynamically updates the logging level to *include* level. If `reset` is true, it will
@@ -84,10 +85,14 @@ type LogHandle = reload::Handle<FilteredLayer, Registry>;
 pub fn set_level(reset: bool, level: &str) -> Result<(), Error> {
     if let Some(handle) = LOG_HANDLE.get() {
         // new_directive will be current_directive + level
-        //it can be duplicate, but the envfilter's parse() will properly handle it
+        //it can be duplicate, but the Target's parse() will properly handle it
         let new_directive = if let Ok(current) = handle.with_current(|f| f.filter().to_string()) {
             if reset {
-                format!("{},{}", default_env_filter(), level)
+                if level.is_empty() {
+                    default_filter().to_string()
+                } else {
+                    format!("{},{}", default_filter(), level)
+                }
             } else {
                 format!("{current},{level}")
             }
@@ -95,8 +100,8 @@ pub fn set_level(reset: bool, level: &str) -> Result<(), Error> {
             level.to_string()
         };
 
-        //create the new EnvFilter based on the new directives
-        let new_filter = EnvFilter::builder().parse(new_directive)?;
+        //create the new Targets based on the new directives
+        let new_filter = filter::Targets::from_str(&new_directive)?;
         info!("new log filter is {new_filter}");
 
         //set the new filter

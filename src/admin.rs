@@ -31,13 +31,14 @@ use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{net::SocketAddr, time::Duration};
 
 use tokio::time;
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter;
 
 pub trait AdminHandler: Sync + Send {
     fn path(&self) -> &'static str;
@@ -377,7 +378,7 @@ fn validate_log_level(level: &str) -> anyhow::Result<()> {
         match clause {
             "off" | "error" | "warn" | "info" | "debug" | "trace" => continue,
             s if s.contains('=') => {
-                EnvFilter::builder().parse(s)?;
+                filter::Targets::from_str(s)?;
             }
             s => anyhow::bail!("level {s} is invalid"),
         }
@@ -386,6 +387,9 @@ fn validate_log_level(level: &str) -> anyhow::Result<()> {
 }
 
 fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
+    if !reset && level.is_empty() {
+        return list_loggers();
+    }
     if !level.is_empty() {
         if let Err(_e) = validate_log_level(level) {
             // Invalid level provided
@@ -453,6 +457,7 @@ mod tests {
     use crate::config::construct_config;
     use crate::config::ProxyConfig;
     use crate::identity;
+    use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
     use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
@@ -515,9 +520,9 @@ mod tests {
         for i in 0..2 {
             manager
                 .fetch_certificate(&identity::Identity::Spiffe {
-                    trust_domain: "trust_domain".to_string(),
-                    namespace: "namespace".to_string(),
-                    service_account: format!("sa-{i}"),
+                    trust_domain: "trust_domain".into(),
+                    namespace: "namespace".into(),
+                    service_account: strng::format!("sa-{i}"),
                 })
                 .await
                 .unwrap();
@@ -786,6 +791,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_change_log_level() {
         helpers::initialize_telemetry();
+
+        // no changes
+        let resp = change_log_level(false, "");
+        let resp_str = get_response_str(resp).await;
+        assert_eq!(
+            resp_str,
+            "current log level is hickory_server::server::server_future=off,info\n"
+        );
 
         let resp = change_log_level(true, "");
         let resp_str = get_response_str(resp).await;

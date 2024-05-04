@@ -27,6 +27,7 @@ use hyper::http::uri::InvalidUri;
 use hyper::Uri;
 
 use crate::identity;
+use crate::strng::Strng;
 #[cfg(any(test, feature = "testing"))]
 use {crate::test_helpers::MpscAckReceiver, crate::xds::LocalConfig, tokio::sync::Mutex};
 
@@ -155,7 +156,7 @@ pub struct Config {
     pub dns_proxy_addr: SocketAddr,
 
     /// The network of the node this ztunnel is running on.
-    pub network: String,
+    pub network: Strng,
     /// The name of the node this ztunnel is running as.
     pub local_node: Option<String>,
     /// The proxy mode of ztunnel, Shared or Dedicated, default to Shared.

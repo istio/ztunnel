@@ -30,6 +30,7 @@ use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorde
 
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
+use crate::strng::{RichStrng, Strng};
 
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
@@ -116,12 +117,12 @@ pub enum SecurityPolicy {
 
 #[derive(Clone, Debug, Default)]
 pub struct DerivedWorkload {
-    pub workload_name: Option<String>,
-    pub app: Option<String>,
-    pub revision: Option<String>,
-    pub namespace: Option<String>,
+    pub workload_name: Option<Strng>,
+    pub app: Option<Strng>,
+    pub revision: Option<Strng>,
+    pub namespace: Option<Strng>,
     pub identity: Option<Identity>,
-    pub cluster_id: Option<String>,
+    pub cluster_id: Option<Strng>,
 }
 
 #[derive(Clone)]
@@ -208,28 +209,27 @@ impl From<ConnectionOpen> for CommonTrafficLabels {
 pub struct CommonTrafficLabels {
     reporter: Reporter,
 
-    source_workload: DefaultedUnknown<String>,
-    source_canonical_service: DefaultedUnknown<String>,
-    source_canonical_revision: DefaultedUnknown<String>,
-    source_workload_namespace: DefaultedUnknown<String>,
+    source_workload: DefaultedUnknown<RichStrng>,
+    source_canonical_service: DefaultedUnknown<RichStrng>,
+    source_canonical_revision: DefaultedUnknown<RichStrng>,
+    source_workload_namespace: DefaultedUnknown<RichStrng>,
     source_principal: DefaultedUnknown<Identity>,
-    source_app: DefaultedUnknown<String>,
-    source_version: DefaultedUnknown<String>,
-    source_cluster: DefaultedUnknown<String>,
+    source_app: DefaultedUnknown<RichStrng>,
+    source_version: DefaultedUnknown<RichStrng>,
+    source_cluster: DefaultedUnknown<RichStrng>,
 
-    // TODO: never set
-    destination_service: DefaultedUnknown<String>,
-    destination_service_namespace: DefaultedUnknown<String>,
-    destination_service_name: DefaultedUnknown<String>,
+    destination_service: DefaultedUnknown<RichStrng>,
+    destination_service_namespace: DefaultedUnknown<RichStrng>,
+    destination_service_name: DefaultedUnknown<RichStrng>,
 
-    destination_workload: DefaultedUnknown<String>,
-    destination_canonical_service: DefaultedUnknown<String>,
-    destination_canonical_revision: DefaultedUnknown<String>,
-    destination_workload_namespace: DefaultedUnknown<String>,
+    destination_workload: DefaultedUnknown<RichStrng>,
+    destination_canonical_service: DefaultedUnknown<RichStrng>,
+    destination_canonical_revision: DefaultedUnknown<RichStrng>,
+    destination_workload_namespace: DefaultedUnknown<RichStrng>,
     destination_principal: DefaultedUnknown<Identity>,
-    destination_app: DefaultedUnknown<String>,
-    destination_version: DefaultedUnknown<String>,
-    destination_cluster: DefaultedUnknown<String>,
+    destination_app: DefaultedUnknown<RichStrng>,
+    destination_version: DefaultedUnknown<RichStrng>,
+    destination_cluster: DefaultedUnknown<RichStrng>,
 
     request_protocol: RequestProtocol,
     response_flags: ResponseFlags,
@@ -239,17 +239,17 @@ pub struct CommonTrafficLabels {
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct OnDemandDnsLabels {
     // on-demand DNS client information is just nice-to-have
-    source_workload: DefaultedUnknown<String>,
-    source_canonical_service: DefaultedUnknown<String>,
-    source_canonical_revision: DefaultedUnknown<String>,
-    source_workload_namespace: DefaultedUnknown<String>,
+    source_workload: DefaultedUnknown<RichStrng>,
+    source_canonical_service: DefaultedUnknown<RichStrng>,
+    source_canonical_revision: DefaultedUnknown<RichStrng>,
+    source_workload_namespace: DefaultedUnknown<RichStrng>,
     source_principal: DefaultedUnknown<Identity>,
-    source_app: DefaultedUnknown<String>,
-    source_version: DefaultedUnknown<String>,
-    source_cluster: DefaultedUnknown<String>,
+    source_app: DefaultedUnknown<RichStrng>,
+    source_version: DefaultedUnknown<RichStrng>,
+    source_cluster: DefaultedUnknown<RichStrng>,
 
     // on-demand DNS is resolved per hostname, so this is the most interesting part
-    hostname: DefaultedUnknown<String>,
+    hostname: DefaultedUnknown<RichStrng>,
 }
 
 impl OnDemandDnsLabels {
@@ -329,9 +329,9 @@ impl Metrics {
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
 pub struct ConnectionResult {
     // Src address and name
-    src: (SocketAddr, Option<String>),
+    src: (SocketAddr, Option<RichStrng>),
     // Dst address and name
-    dst: (SocketAddr, Option<String>),
+    dst: (SocketAddr, Option<RichStrng>),
     hbone_target: Option<SocketAddr>,
     start: Instant,
 
@@ -418,10 +418,10 @@ impl ConnectionResult {
         metrics: Arc<Metrics>,
     ) -> Self {
         // for src and dest, try to get pod name but fall back to "canonical service"
-        let mut src = (src, conn.source.as_ref().map(|wl| wl.name.clone()));
+        let mut src = (src, conn.source.as_ref().map(|wl| wl.name.clone().into()));
         let mut dst = (
             dst,
-            conn.destination.as_ref().map(|wl| wl.name.clone()), // TODO: canonical
+            conn.destination.as_ref().map(|wl| wl.name.clone().into()),
         );
         let tl = CommonTrafficLabels::from(conn);
         metrics.connection_opens.get_or_create(&tl).inc();
@@ -436,14 +436,15 @@ impl ConnectionResult {
             tracing::Level::DEBUG,
 
             src.addr = %src.0,
-            src.workload = src.1,
-            src.namespace = tl.source_workload_namespace.as_ref(),
+            src.workload = src.1.as_deref().map(display),
+            src.namespace = tl.source_workload_namespace.display(),
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             dst.addr = %dst.0,
-            dst.hbone_addr = hbone_target.map(|r| r.to_string()),
-            dst.workload = dst.1,
-            dst.namespace = tl.destination_canonical_service.as_ref(),
+            dst.hbone_addr = hbone_target.map(display),
+            dst.service = tl.destination_service.display(),
+            dst.workload = dst.1.as_deref().map(display),
+            dst.namespace = tl.destination_workload_namespace.display(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             direction = if tl.reporter == Reporter::source {
@@ -512,20 +513,21 @@ impl ConnectionResult {
             self.sent.load(Ordering::SeqCst),
         );
         let dur = format!("{}ms", self.start.elapsed().as_millis());
+
         // We use our own macro to allow setting the level dynamically
         access_log!(
             res,
 
             src.addr = %self.src.0,
-            src.workload = self.src.1,
-            src.namespace = tl.source_workload_namespace.as_ref(),
+            src.workload = self.src.1.as_deref().map(display),
+            src.namespace = tl.source_workload_namespace.display(),
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             dst.addr = %self.dst.0,
-            dst.hbone_addr = self.hbone_target.map(|r| r.to_string()),
-            dst.service = tl.destination_service.as_ref(),
-            dst.workload = self.dst.1,
-            dst.namespace = tl.destination_canonical_service.as_ref(),
+            dst.hbone_addr = self.hbone_target.map(display),
+            dst.service = tl.destination_service.display(),
+            dst.workload = self.dst.1.as_deref().map(display),
+            dst.namespace = tl.destination_workload_namespace.display(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
 
             direction = if tl.reporter == Reporter::source {

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use crate::rbac::{Authorization, RbacScope};
+use crate::strng;
+use crate::strng::Strng;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::watch;
 
@@ -20,10 +22,10 @@ use tokio::sync::watch;
 #[derive(Default, Debug)]
 pub struct PolicyStore {
     /// policies maintains a mapping of ns/name to policy.
-    pub(super) by_key: HashMap<String, Authorization>,
+    pub(super) by_key: HashMap<Strng, Authorization>,
 
     /// policies_by_namespace maintains a mapping of namespace (or "" for global) to policy names
-    by_namespace: HashMap<String, HashSet<String>>,
+    by_namespace: HashMap<Strng, HashSet<Strng>>,
 
     notifier: PolicyStoreNotify,
 }
@@ -41,13 +43,13 @@ impl Default for PolicyStoreNotify {
 }
 
 impl PolicyStore {
-    pub fn get<T: AsRef<str>>(&self, key: T) -> Option<&Authorization> {
-        self.by_key.get(key.as_ref())
+    pub fn get(&self, key: &Strng) -> Option<&Authorization> {
+        self.by_key.get(key)
     }
 
-    pub fn get_by_namespace<T: AsRef<str>>(&self, namespace: T) -> Vec<String> {
+    pub fn get_by_namespace(&self, namespace: &Strng) -> Vec<Strng> {
         self.by_namespace
-            .get(namespace.as_ref())
+            .get(namespace)
             .into_iter()
             .flatten()
             .cloned()
@@ -55,17 +57,17 @@ impl PolicyStore {
     }
 
     pub fn insert(&mut self, rbac: Authorization) {
-        let key = rbac.to_key();
+        let key: Strng = rbac.to_key();
         match rbac.scope {
             RbacScope::Global => {
                 self.by_namespace
-                    .entry("".to_string())
+                    .entry(strng::EMPTY)
                     .or_default()
                     .insert(key.clone());
             }
             RbacScope::Namespace => {
                 self.by_namespace
-                    .entry(rbac.namespace.clone())
+                    .entry(strng::new(&rbac.namespace))
                     .or_default()
                     .insert(key.clone());
             }
@@ -74,12 +76,12 @@ impl PolicyStore {
         self.by_key.insert(key, rbac);
     }
 
-    pub fn remove(&mut self, name: String) {
+    pub fn remove(&mut self, name: Strng) {
         let Some(rbac) = self.by_key.remove(&name) else {
             return;
         };
         if let Some(key) = match rbac.scope {
-            RbacScope::Global => Some("".to_string()),
+            RbacScope::Global => Some(strng::EMPTY),
             RbacScope::Namespace => Some(rbac.namespace),
             RbacScope::WorkloadSelector => None,
         } {

@@ -43,7 +43,7 @@ mod namespaced {
     use ztunnel::test_helpers::app::ParsedMetrics;
     use ztunnel::test_helpers::app::TestApp;
     use ztunnel::test_helpers::helpers::initialize_telemetry;
-    use ztunnel::{identity, telemetry};
+    use ztunnel::{identity, strng, telemetry};
 
     use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
@@ -184,6 +184,7 @@ mod namespaced {
             ("target", "access"),
             ("src.workload", "client"),
             ("dst.workload", "waypoint"),
+            ("dst.namespace", "default"),
             ("dst.hbone_addr", &hbone_addr),
             ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),
@@ -221,7 +222,7 @@ mod namespaced {
         manager
             .service_builder("service")
             .addresses(vec![NetworkAddress {
-                network: "".to_string(),
+                network: strng::EMPTY,
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
             .ports(HashMap::from([(80u16, 80u16)]))
@@ -310,7 +311,7 @@ mod namespaced {
         manager
             .service_builder("service")
             .addresses(vec![NetworkAddress {
-                network: "".to_string(),
+                network: strng::EMPTY,
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
             .ports(HashMap::from([(80u16, 80u16)]))
@@ -452,13 +453,13 @@ mod namespaced {
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         manager
             .add_policy(Authorization {
-                name: "deny_bypass".to_string(),
-                namespace: "default".to_string(),
+                name: "deny_bypass".into(),
+                namespace: "default".into(),
                 scope: ztunnel::rbac::RbacScope::Namespace,
                 action: ztunnel::rbac::RbacAction::Allow,
                 rules: vec![vec![vec![RbacMatch {
                     principals: vec![StringMatch::Exact(
-                        "spiffe://cluster.local/ns/default/sa/waypoint".to_string(),
+                        "spiffe://cluster.local/ns/default/sa/waypoint".into(),
                     )],
                     ..Default::default()
                 }]]],
@@ -670,9 +671,9 @@ mod namespaced {
     async fn trust_domain_mismatch_rejected() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(InPod);
         let id = identity::Identity::Spiffe {
-            trust_domain: "clusterset.local".to_string(), // change to mismatched trustdomain
-            service_account: "my-app".to_string(),
-            namespace: "default".to_string(),
+            trust_domain: "clusterset.local".into(), // change to mismatched trustdomain
+            service_account: "my-app".into(),
+            namespace: "default".into(),
         };
 
         let _ = manager.deploy_ztunnel(DEFAULT_NODE).await?;

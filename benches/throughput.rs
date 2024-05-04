@@ -39,7 +39,7 @@ use ztunnel::test_helpers::TEST_WORKLOAD_SOURCE;
 use ztunnel::test_helpers::TEST_WORKLOAD_TCP;
 use ztunnel::test_helpers::{helpers, tcp};
 use ztunnel::xds::LocalWorkload;
-use ztunnel::{app, identity, metrics, proxy, test_helpers};
+use ztunnel::{app, identity, metrics, proxy, strng, test_helpers};
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -68,15 +68,15 @@ fn create_test_policies() -> Vec<Authorization> {
     for _ in 0..N_RULES {
         rules.push(vec![vec![RbacMatch {
             namespaces: vec![
-                StringMatch::Prefix("random-prefix-2b123".to_string()),
-                StringMatch::Suffix("random-postix-2b723".to_string()),
-                StringMatch::Exact("random-exac-2bc13".to_string()),
+                StringMatch::Prefix("random-prefix-2b123".into()),
+                StringMatch::Suffix("random-postix-2b723".into()),
+                StringMatch::Exact("random-exac-2bc13".into()),
             ],
             not_namespaces: vec![],
             principals: vec![
-                StringMatch::Prefix("random-prefix-2b123".to_string()),
-                StringMatch::Suffix("random-postix-2b723".to_string()),
-                StringMatch::Exact("random-exac-2bc13".to_string()),
+                StringMatch::Prefix("random-prefix-2b123".into()),
+                StringMatch::Suffix("random-postix-2b723".into()),
+                StringMatch::Exact("random-exac-2bc13".into()),
             ],
             not_principals: vec![],
             source_ips: vec![DUMMY_NETWORK.parse().unwrap()],
@@ -90,10 +90,10 @@ fn create_test_policies() -> Vec<Authorization> {
 
     for i in 0..N_POLICIES {
         policies.push(Authorization {
-            name: format!("policy {i}"),
+            name: strng::format!("policy {i}"),
             action: ztunnel::rbac::RbacAction::Deny,
             scope: ztunnel::rbac::RbacScope::Global,
-            namespace: "default".to_string(),
+            namespace: "default".into(),
             rules: rules.clone(),
         });
     }
@@ -412,10 +412,10 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
             workload: Workload {
                 workload_ips: vec![hbone_connection_ip(i)],
                 protocol: Protocol::HBONE,
-                uid: format!("cluster1//v1/Pod/default/local-source{}", i),
-                name: format!("workload-{}", i),
-                namespace: format!("namespace-{}", i),
-                service_account: format!("service-account-{}", i),
+                uid: strng::format!("cluster1//v1/Pod/default/local-source{}", i),
+                name: strng::format!("workload-{}", i),
+                namespace: strng::format!("namespace-{}", i),
+                service_account: strng::format!("service-account-{}", i),
                 ..test_helpers::test_default_workload()
             },
             services: Default::default(),
