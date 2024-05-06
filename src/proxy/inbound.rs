@@ -768,7 +768,7 @@ mod tests {
             state.services.insert(svc);
         }
         for wl in workloads {
-            state.workloads.insert(Arc::new(wl));
+            state.workloads.insert(Arc::new(wl), true);
         }
 
         Ok(DemandProxyState::new(

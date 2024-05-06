@@ -20,6 +20,7 @@ mod namespaced {
     use std::collections::HashMap;
     use std::fs;
     use std::fs::File;
+
     use std::net::{IpAddr, SocketAddr};
 
     use std::path::PathBuf;
@@ -710,6 +711,78 @@ mod namespaced {
             })?
             .join()
             .unwrap()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prefetch_forget_certs() -> anyhow::Result<()> {
+        // TODO: this test doesn't really need namespacing, but the direct test doesn't allow dynamic config changes.
+        let mut manager = setup_netns_test!(InPod);
+        let id1 = identity::Identity::Spiffe {
+            trust_domain: "cluster.local".into(),
+            service_account: "sa1".into(),
+            namespace: "default".into(),
+        };
+        let id1s = id1.to_string();
+
+        let ta = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        let check = |want: Vec<String>, help: &str| {
+            let cm = ta.cert_manager.clone();
+            let help = help.to_string();
+            async move {
+                // Cert manager is async, so we need to wait
+                let res = check_eventually(
+                    Duration::from_secs(2),
+                    || cm.collect_certs(|a, _b| a.to_string()),
+                    want,
+                )
+                .await;
+                assert!(res.is_ok(), "{}: got {:?}", help, res.err().unwrap());
+            }
+        };
+        check(vec![], "initially empty").await;
+        manager
+            .workload_builder("id1-a-remote-node", REMOTE_NODE)
+            .identity(id1.clone())
+            .register()
+            .await?;
+        check(vec![], "we should not prefetch remote nodes").await;
+        manager
+            .workload_builder("id1-a-same-node", DEFAULT_NODE)
+            .identity(id1.clone())
+            .register()
+            .await?;
+        check(vec![id1s.clone()], "we should prefetch our nodes").await;
+        manager
+            .workload_builder("id1-b-same-node", DEFAULT_NODE)
+            .identity(id1.clone())
+            .register()
+            .await?;
+        check(
+            vec![id1s.clone()],
+            "multiple of same identity shouldn't do anything",
+        )
+        .await;
+        manager.delete_workload("id1-a-remote-node").await?;
+        check(
+            vec![id1s.clone()],
+            "removing remote node shouldn't impact anything",
+        )
+        .await;
+        manager.delete_workload("id1-b-same-node").await?;
+        check(
+            vec![id1s.clone()],
+            "removing local node shouldn't impact anything if I still have some running",
+        )
+        .await;
+        manager.delete_workload("id1-a-same-node").await?;
+        // TODO: this should be vec![], but our testing setup doesn't exercise the real codepath
+        check(
+            vec![id1s.clone()],
+            "removing final workload should clear things out",
+        )
+        .await;
         Ok(())
     }
 
