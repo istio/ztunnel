@@ -16,8 +16,8 @@
 // * https://github.com/cloudflare/pingora/blob/main/pingora-core/src/protocols/http/v2/client.rs
 // * https://github.com/hyperium/hyper/blob/master/src/proto/h2/client.rs
 
-use crate::config;
 use crate::proxy::Error;
+use crate::{config, copy};
 
 use bytes::Buf;
 use bytes::Bytes;
@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
@@ -59,7 +59,7 @@ pub struct H2StreamWriteHalf {
     active_count: Arc<AtomicU16>,
 }
 
-impl crate::socket::BufferedSplitter for H2Stream {
+impl crate::copy::BufferedSplitter for H2Stream {
     type R = H2StreamReadHalf;
     type W = H2StreamWriteHalf;
     fn split_into_buffered_reader(self) -> (H2StreamReadHalf, H2StreamWriteHalf) {
@@ -111,7 +111,7 @@ impl Drop for H2StreamWriteHalf {
     }
 }
 
-impl AsyncBufRead for H2StreamReadHalf {
+impl copy::ResizeBufRead for H2StreamReadHalf {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
         const EOF: Poll<std::io::Result<&[u8]>> = Poll::Ready(Ok(&[]));
         let this = self.get_mut();
@@ -150,15 +150,9 @@ impl AsyncBufRead for H2StreamReadHalf {
     fn consume(mut self: Pin<&mut Self>, amt: usize) {
         self.as_mut().buf.advance(amt)
     }
-}
 
-impl AsyncRead for H2StreamReadHalf {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        _read_buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        panic!("H2StreamReadHalf should never be read directly; use poll_fill_buf");
+    fn resize(self: Pin<&mut Self>) {
+        // NOP, we don't need to resize as we are abstracting the h2 buffer
     }
 }
 
