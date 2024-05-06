@@ -38,7 +38,7 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::strng::Strng;
-use crate::{assertions, proxy, socket, strng};
+use crate::{assertions, copy, proxy, socket, strng};
 
 pub struct Outbound {
     pi: ProxyInputs,
@@ -279,7 +279,7 @@ impl OutboundConnection {
 
         let upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
 
-        socket::copy_bidirectional(stream, upgraded, connection_stats).await
+        copy::copy_bidirectional(stream, upgraded, connection_stats).await
     }
 
     async fn build_hbone_request(
@@ -353,7 +353,7 @@ impl OutboundConnection {
             super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref()).await?;
 
         // Proxying data between downstream and upstream
-        socket::copy_bidirectional(stream, &mut outbound, connection_stats).await
+        copy::copy_bidirectional(stream, &mut outbound, connection_stats).await
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {

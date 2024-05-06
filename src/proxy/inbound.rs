@@ -47,7 +47,7 @@ use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
-use crate::{assertions, proxy, socket, strng, tls};
+use crate::{assertions, copy, proxy, strng, tls};
 
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -372,7 +372,7 @@ impl Inbound {
                             hyper::upgrade::on(req)
                                 .map_err(Error::NoUpgrade)
                                 .and_then(|upgraded| async move {
-                                    socket::copy_bidirectional(
+                                    copy::copy_bidirectional(
                                         &mut ::hyper_util::rt::TokioIo::new(upgraded),
                                         &mut stream,
                                         &result_tracker,
@@ -388,7 +388,7 @@ impl Inbound {
                                     super::write_proxy_protocol(&mut stream, (src, dst), src_id)
                                         .instrument(trace_span!("proxy protocol"))
                                         .await?;
-                                    socket::copy_bidirectional(
+                                    copy::copy_bidirectional(
                                         &mut ::hyper_util::rt::TokioIo::new(upgraded),
                                         &mut stream,
                                         &result_tracker,
