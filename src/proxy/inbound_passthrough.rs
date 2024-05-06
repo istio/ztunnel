@@ -28,7 +28,7 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
 use crate::state::workload::NetworkAddress;
-use crate::{assertions, rbac, strng};
+use crate::{assertions, copy, rbac, strng};
 use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
@@ -237,7 +237,7 @@ impl InboundPassthrough {
                     .map_err(Error::ConnectionFailed)?;
 
             trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
-            socket::copy_bidirectional(&mut inbound_stream, &mut outbound, &result_tracker).await
+            copy::copy_bidirectional(&mut inbound_stream, &mut outbound, &result_tracker).await
         };
 
         let res = conn_guard.handle_connection(send).await;
