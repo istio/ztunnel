@@ -164,6 +164,8 @@ impl field::Visit for Visitor<'_> {
 
     fn record_debug(&mut self, field: &field::Field, val: &dyn std::fmt::Debug) {
         self.res = match field.name() {
+            // Skip fields that are actually log metadata that have already been handled
+            name if name.starts_with("log.") => Ok(()),
             // For the message, write out the message and a tab to separate the future fields
             "message" => write!(self.writer, "{:?}\t", val),
             // For the rest, k=v.
