@@ -199,6 +199,12 @@ impl WorkloadManager {
         Ok(())
     }
 
+    pub async fn delete_workload(&mut self, name: &str) -> anyhow::Result<()> {
+        self.workloads.retain(|w| w.workload.name != name);
+        self.refresh_config().await?;
+        Ok(())
+    }
+
     /// workload_builder allows creating a new workload. It will run in its own network namespace.
     pub fn workload_builder(&mut self, name: &str, node: &str) -> TestWorkloadBuilder {
         TestWorkloadBuilder::new(name, self)

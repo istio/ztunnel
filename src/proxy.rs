@@ -620,7 +620,7 @@ mod tests {
         let w = mock_default_gateway_workload();
         let s = mock_default_gateway_service();
         let mut state = state::ProxyState::default();
-        state.workloads.insert(Arc::new(w));
+        state.workloads.insert(Arc::new(w), true);
         state.services.insert(s);
         let state = state::DemandProxyState::new(
             Arc::new(RwLock::new(state)),
