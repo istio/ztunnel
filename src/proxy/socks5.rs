@@ -60,13 +60,13 @@ impl Socks5 {
             "listener established",
         );
 
-        let inpod = pi.cfg.inpod_enabled;
+        let mode = pi.cfg.proxy_mode;
         Ok(Socks5 {
             pi,
             listener,
             drain,
             // Do not need to spoof with inpod mode for outbound
-            enable_orig_src: transparent && !inpod,
+            enable_orig_src: transparent && mode != config::ProxyMode::Shared,
         })
     }
 

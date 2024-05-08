@@ -44,7 +44,7 @@ mod namespaced {
 
     use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::setup_netns_test;
-    use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
+    use ztunnel::test_helpers::linux::TestMode::InPod;
     use ztunnel::test_helpers::linux::WorkloadManager;
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
@@ -61,8 +61,7 @@ mod namespaced {
             setup_netns_test!(InPod),
             Captured(DEFAULT_NODE),
             Captured(DEFAULT_NODE),
-        )
-        .await
+        ).await
     }
 
     #[tokio::test]
@@ -81,39 +80,6 @@ mod namespaced {
     async fn cross_node_captured_inpod() -> anyhow::Result<()> {
         simple_client_server_test(
             setup_netns_test!(InPod),
-            Captured(DEFAULT_NODE),
-            Captured(REMOTE_NODE),
-        )
-        .await
-    }
-
-    // Intentionally, we do not have a 'local_captured_sharednode'
-    // This is not currently supported since https://github.com/istio/ztunnel/commit/12d154cceb1d20eb1f11ae43c2310e66e93c7120
-
-    #[tokio::test]
-    async fn server_uncaptured_sharednode() -> anyhow::Result<()> {
-        simple_client_server_test(
-            setup_netns_test!(SharedNode),
-            Captured(DEFAULT_NODE),
-            Uncaptured,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn client_uncaptured_sharednode() -> anyhow::Result<()> {
-        simple_client_server_test(
-            setup_netns_test!(SharedNode),
-            Captured(DEFAULT_NODE),
-            Uncaptured,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn cross_node_captured_sharednode() -> anyhow::Result<()> {
-        simple_client_server_test(
-            setup_netns_test!(SharedNode),
             Captured(DEFAULT_NODE),
             Captured(REMOTE_NODE),
         )
@@ -793,31 +759,6 @@ mod namespaced {
                 (ourself, 15000, Request),
                 (ourself, 15020, Request),
                 (ourself, 15021, Request),
-            ],
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn malicious_calls_sharednode() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(SharedNode);
-        let _ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-        let client = manager
-            .workload_builder("client", DEFAULT_NODE)
-            .register()
-            .await?;
-
-        let zt = manager.resolve("ztunnel-node")?;
-        malicious_calls_test(
-            client,
-            vec![
-                (zt, 15001, Request),    // Outbound: should be blocked due to recursive call
-                (zt, 15006, Request),    // Inbound: should be blocked due to recursive call
-                (zt, 15008, Request),    // HBONE: expected TLS, reject
-                (zt, 15080, Connection), // Socks5: only localhost
-                (zt, 15000, Connection), // Admin: only localhost
-                (zt, 15020, Http),       // Stats: accept connection and returns a HTTP error
-                (zt, 15021, Http),       // Readiness: accept connection and returns a HTTP error
             ],
         )
         .await

@@ -134,8 +134,8 @@ pub async fn build_with_cert(
     )
     .map_err(|e| anyhow::anyhow!("failed to start proxy factory {:?}", e))?;
 
-    if config.inpod_enabled {
-        tracing::info!("in-pod mode enabled");
+    if config.proxy_mode == config::ProxyMode::Shared {
+        tracing::info!("shared proxy mode - in-pod mode enabled");
         let run_future = init_inpod_proxy_mgr(
             &mut registry,
             &mut admin_server,

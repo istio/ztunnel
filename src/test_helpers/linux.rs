@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::ConfigSource;
+use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{gatewayaddress, Workload};
@@ -80,7 +80,6 @@ impl Drop for WorkloadManager {
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
 pub enum TestMode {
     InPod,
-    SharedNode,
 }
 
 impl WorkloadManager {
@@ -125,7 +124,11 @@ impl WorkloadManager {
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
-        let inpod_enabled = ztunnel_server.is_some();
+        let proxy_mode = if ztunnel_server.is_some() {
+            ProxyMode::Shared
+        } else {
+            ProxyMode::Dedicated
+        };
         let (mut tx_cfg, rx_cfg) = mpsc_ack(1);
         tx_cfg.send(initial_config).await?;
         let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
@@ -137,18 +140,13 @@ impl WorkloadManager {
             local_node: Some(node.to_string()),
             local_ip: Some(ns.ip()),
             inpod_uds,
-            inpod_enabled,
+            proxy_mode,
             ..config::parse_config().unwrap()
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
         ns.run_ready(move |ready| async move {
-            if !inpod_enabled {
-                // not needed in inpod mode. In in pod mode we run `ztunnel-redirect-inpod.sh`
-                // inside the pod's netns
-                helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
-            }
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
             let shutdown = app.shutdown.trigger();

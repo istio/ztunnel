@@ -127,12 +127,12 @@ impl InboundPassthrough {
         let dest_addr = socket::orig_dst_addr_or_default(&inbound_stream);
         // Check if it is an illegal call to ourself, which could trampoline to illegal addresses or
         // lead to infinite loops
-        let illegal_call = if pi.cfg.inpod_enabled {
+        let illegal_call = if pi.cfg.proxy_mode == ProxyMode::Shared {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
             pi.cfg.illegal_ports.contains(&dest_addr.port())
         } else {
             // User sent a request to the ztunnel directly. This isn't allowed
-            pi.cfg.proxy_mode == ProxyMode::Shared && Some(dest_addr.ip()) == pi.cfg.local_ip
+            Some(dest_addr.ip()) == pi.cfg.local_ip
         };
         if illegal_call {
             metrics::log_early_deny(

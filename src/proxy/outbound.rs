@@ -60,13 +60,13 @@ impl Outbound {
             transparent,
             "listener established",
         );
-        let inpod = pi.cfg.inpod_enabled;
+        let mode = pi.cfg.proxy_mode;
         Ok(Outbound {
             pi,
             listener,
             drain,
             // Do not need to spoof with inpod mode for outbound
-            enable_orig_src: transparent && !inpod,
+            enable_orig_src: transparent && mode != ProxyMode::Shared,
         })
     }
 
@@ -167,7 +167,6 @@ impl OutboundConnection {
         // For in-pod, this isn't an issue and is useful: this allows things like prometheus scraping ztunnel.
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(dest_addr.ip()) == self.pi.cfg.local_ip
-            && !self.pi.cfg.inpod_enabled
         {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
             return;
@@ -268,7 +267,7 @@ impl OutboundConnection {
     ) -> Result<(), Error> {
         // Create a TCP connection to upstream
         // We do not need spoofing for inbound
-        let local = if self.enable_orig_src && !self.pi.cfg.inpod_enabled {
+        let local = if self.enable_orig_src && self.pi.cfg.proxy_mode != ProxyMode::Shared {
             super::get_original_src_from_stream(&stream)
         } else {
             None
