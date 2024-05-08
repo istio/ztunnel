@@ -2,7 +2,7 @@
 name = "ztunnel"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.78"
 
 [features]
 default = ["tls-ring"]
