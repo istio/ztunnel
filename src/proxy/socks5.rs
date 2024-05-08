@@ -30,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
+use crate::config;
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent};
 use crate::socket;
@@ -57,13 +58,13 @@ impl Socks5 {
             "listener established",
         );
 
-        let inpod = pi.cfg.inpod_enabled;
+        let mode = pi.cfg.proxy_mode;
         Ok(Socks5 {
             pi,
             listener,
             drain,
             // Do not need to spoof with inpod mode for outbound
-            enable_orig_src: transparent && !inpod,
+            enable_orig_src: transparent && mode != config::ProxyMode::Shared,
         })
     }
 
@@ -73,7 +74,6 @@ impl Socks5 {
 
     pub async fn run(self) {
         let inner_drain = self.drain.clone();
-        let inpod = self.pi.cfg.inpod_enabled;
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -97,8 +97,9 @@ impl Socks5 {
                             enable_orig_src: self.enable_orig_src,
                             hbone_port: self.pi.cfg.inbound_addr.port(),
                         };
+                        let shared = self.pi.cfg.proxy_mode == config::ProxyMode::Shared;
                         tokio::spawn(async move {
-                            if let Err(err) = handle(oc, stream, stream_drain, inpod).await {
+                            if let Err(err) = handle(oc, stream, stream_drain, shared).await {
                                 log::error!("handshake error: {}", err);
                             }
                         });
@@ -131,7 +132,7 @@ async fn handle(
     mut oc: OutboundConnection,
     mut stream: TcpStream,
     out_drain: Watch,
-    is_inpod: bool,
+    proxy_mode_shared: bool,
 ) -> Result<(), anyhow::Error> {
     let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
@@ -237,12 +238,13 @@ async fn handle(
     ];
     stream.write_all(&buf).await?;
 
-    debug!("accepted connection from {remote_addr} to {host}");
-    // For inpod, we want this `spawn` to guaranteed-terminate when we drain - the workload is gone.
-    // For non-inpod (shared instance for all workloads), let the spawned task run until the proxy process
+    info!("accepted connection from {remote_addr} to {host}");
+    // For inpod shared (multitenant) proxy, we want this `spawn` to guaranteed-terminate when we drain
+    // - the workload is gone.
+    // For dedicated (non shared, singletenant) let the spawned task run until the proxy process
     // itself is killed, or the connection terminates normally.
     tokio::spawn(async move {
-        let drain = match is_inpod {
+        let drain = match proxy_mode_shared {
             true => Some(out_drain),
             false => None,
         };
