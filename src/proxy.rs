@@ -25,7 +25,7 @@ use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
-use tracing::{error, trace, warn, Instrument};
+use tracing::{debug, trace, warn, Instrument};
 
 use inbound::Inbound;
 pub use metrics::*;
@@ -334,11 +334,12 @@ pub async fn write_proxy_protocol<T>(
     src_id: Option<Identity>,
 ) -> io::Result<()>
 where
-    T: Into<ppp::v2::Addresses>,
+    T: Into<ppp::v2::Addresses> + std::fmt::Debug,
 {
     use ppp::v2::{Builder, Command, Protocol, Version};
     use tokio::io::AsyncWriteExt;
 
+    debug!("writing proxy protocol addresses: {:?}", addresses);
     let mut builder =
         Builder::with_addresses(Version::Two | Command::Proxy, Protocol::Stream, addresses);
 

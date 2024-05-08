@@ -341,7 +341,7 @@ impl Inbound {
         let request_type = match inbound_protocol {
             AppProtocol::PROXY => Proxy(
                 req,
-                (rbac_ctx.conn.src, rbac_ctx.conn.dst),
+                (rbac_ctx.conn.src, hbone_addr),
                 rbac_ctx.conn.src_identity.clone(),
             ),
             _ => Hbone(req),
