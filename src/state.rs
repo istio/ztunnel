@@ -127,6 +127,11 @@ pub struct ProxyRbacContext {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dest_workload_info: Option<Arc<WorkloadInfo>>,
 }
+impl ProxyRbacContext {
+    pub fn into_conn(self) -> rbac::Connection {
+        self.conn
+    }
+}
 
 impl fmt::Display for ProxyRbacContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

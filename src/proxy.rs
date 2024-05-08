@@ -44,7 +44,7 @@ use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
 pub mod connection_manager;
-pub mod h2_client;
+mod h2;
 mod inbound;
 mod inbound_passthrough;
 #[allow(non_camel_case_types)]
@@ -257,23 +257,14 @@ pub enum Error {
     #[error("{0}")]
     Generic(Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("http handshake failed: {0}")]
-    HttpHandshake(#[source] hyper::Error),
-
     #[error("http2 handshake failed: {0}")]
-    Http2Handshake(#[source] h2::Error),
-
-    #[error("http failed: {0}")]
-    Http(#[from] hyper::Error),
+    Http2Handshake(#[source] ::h2::Error),
 
     #[error("h2 failed: {0}")]
-    H2(#[from] h2::Error),
-
-    #[error("no upgrade available: {0}")]
-    NoUpgrade(hyper::Error),
+    H2(#[from] ::h2::Error),
 
     #[error("http status: {0}")]
-    HttpStatus(hyper::StatusCode),
+    HttpStatus(http::StatusCode),
 
     #[error("expected method CONNECT, got {0}")]
     NonConnectMethod(String),
@@ -324,6 +315,9 @@ pub enum Error {
 
     #[error("bug: connection seen twice")]
     DoubleConnection,
+
+    #[error("connection failed to drain within the timeout")]
+    DrainTimeOut,
 }
 
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
