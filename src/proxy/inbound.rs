@@ -52,22 +52,24 @@ use crate::tls::TlsError;
 pub(super) struct Inbound {
     listener: socket::Listener,
     drain: Watch,
-    pi: ProxyInputs,
+    pi: Arc<ProxyInputs>,
+    enable_orig_src: bool,
 }
 
 impl Inbound {
-    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        if pi.cfg.enable_original_source.is_none() {
-            let mut cfg = (*pi.cfg).clone();
-            cfg.enable_original_source = Some(transparent);
-            pi.cfg = Arc::new(cfg);
-        }
+        let enable_orig_src = if pi.cfg.enable_original_source.is_none() {
+            transparent
+        } else {
+            pi.cfg.enable_original_source.unwrap()
+        };
+
         info!(
             address=%listener.local_addr(),
             component="inbound",
@@ -78,6 +80,7 @@ impl Inbound {
             listener,
             drain,
             pi,
+            enable_orig_src,
         })
     }
 
@@ -85,7 +88,7 @@ impl Inbound {
         self.listener.local_addr()
     }
 
-    pub(super) async fn run(self, illegal_ports: Arc<HashSet<u16>>) {
+    pub(super) async fn run(self) {
         let acceptor = InboundCertProvider {
             state: self.pi.state.clone(),
             cert_manager: self.pi.cert_manager.clone(),
@@ -99,17 +102,14 @@ impl Inbound {
 
         let (sub_drain_signal, sub_drain) = drain::channel();
 
-        let pi = Arc::new(self.pi);
         while let Some(tls) = stream.next().await {
-            let pi = pi.clone();
+            let pi = self.pi.clone();
             let (raw_socket, ssl) = tls.get_ref();
             let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
             let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
             let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
-            let connection_manager = pi.connection_manager.clone();
             let drain = sub_drain.clone();
             let network = pi.cfg.network.clone();
-            let illegal_ports = illegal_ports.clone();
             let serve_client = async move {
                 let conn = Connection {
                     src_identity,
@@ -118,16 +118,13 @@ impl Inbound {
                     dst,
                 };
                 debug!(%conn, "accepted connection");
-                let enable_original_source = pi.cfg.enable_original_source;
                 let cfg = pi.cfg.clone();
                 let request_handler = move |req| {
                     Self::serve_connect(
                         pi.clone(),
                         conn.clone(),
-                        enable_original_source.unwrap_or_default(),
+                        self.enable_orig_src,
                         req,
-                        illegal_ports.clone(),
-                        connection_manager.clone(),
                     )
                 };
                 let serve = Box::pin(h2::server::serve_connection(
@@ -166,8 +163,6 @@ impl Inbound {
         conn: Connection,
         enable_original_source: bool,
         req: H2Request,
-        illegal_ports: Arc<HashSet<u16>>,
-        connection_manager: ConnectionManager,
     ) -> Result<(), Error> {
         if req.method() != Method::CONNECT {
             metrics::log_early_deny(
@@ -202,7 +197,7 @@ impl Inbound {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
             // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
             // sends to 15008.
-            illegal_ports.contains(&hbone_addr.port())
+            pi.cfg.illegal_ports.contains(&hbone_addr.port())
         } else {
             false // TODO: do we need any check here?
         };
@@ -278,7 +273,8 @@ impl Inbound {
             pi.metrics.clone(),
         ));
 
-        let conn_guard = match connection_manager
+        let conn_guard = match pi
+            .connection_manager
             .assert_rbac(&pi.state, &rbac_ctx, for_host)
             .await
         {

@@ -29,13 +29,13 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent};
 use crate::socket;
 
 pub(super) struct Socks5 {
-    pi: ProxyInputs,
+    pi: Arc<ProxyInputs>,
     listener: socket::Listener,
     drain: Watch,
 }
 
 impl Socks5 {
-    pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Socks5, Error> {
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Socks5, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.socks5_addr.unwrap())
@@ -61,7 +61,6 @@ impl Socks5 {
     pub async fn run(self) {
         let inner_drain = self.drain.clone();
         let inpod = self.pi.cfg.inpod_enabled;
-        let pi = Arc::new(self.pi);
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -70,17 +69,18 @@ impl Socks5 {
                 // TODO creating a new HBONE pool for SOCKS5 here may not be ideal,
                 // but ProxyInfo is overloaded and only `outbound` should ever use the pool.
                 let pool = crate::proxy::pool::WorkloadHBONEPool::new(
-                    pi.cfg.clone(),
-                    pi.socket_factory.clone(),
-                    pi.cert_manager.clone(),
+                    self.pi.cfg.clone(),
+                    self.pi.socket_factory.clone(),
+                    self.pi.cert_manager.clone(),
                 );
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
                         let oc = OutboundConnection {
-                            pi: pi.clone(),
+                            pi: self.pi.clone(),
                             id: TraceParent::new(),
                             pool,
+                            enable_orig_src: self.pi.cfg.enable_original_source.unwrap_or_default(),
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream, stream_drain, inpod).await {

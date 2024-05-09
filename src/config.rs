@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -154,7 +154,9 @@ pub struct Config {
     pub outbound_addr: SocketAddr,
     /// The socket address for the DNS proxy. Only applies if `dns_proxy` is true.
     pub dns_proxy_addr: SocketAddr,
-
+    /// Populated with the internal ports of all the proxy handlers defined above.
+    /// illegal_ports are internal ports that clients are not authorized to send to
+    pub illegal_ports: HashSet<u16>,
     /// The network of the node this ztunnel is running on.
     pub network: Strng,
     /// The name of the node this ztunnel is running as.
@@ -334,6 +336,22 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         None
     };
 
+    let inbound_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
+    let inbound_plaintext_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006);
+    let outbound_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001);
+
+    let mut illegal_ports = HashSet::from([
+        // HBONE doesn't have redirection, so we cannot have loops, but this would allow multiple layers of HBONE.
+        // This might be desirable in the future, but for now just ban it.
+        inbound_addr.port(),
+        inbound_plaintext_addr.port(),
+        outbound_addr.port(),
+    ]);
+
+    if let Some(addr) = socks5_addr {
+        illegal_ports.insert(addr.port());
+    }
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         dns_proxy: pc
@@ -373,10 +391,12 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ),
 
         socks5_addr,
-        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
-        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
-        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
+        inbound_addr,
+        inbound_plaintext_addr,
+        outbound_addr,
         dns_proxy_addr,
+
+        illegal_ports,
 
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,

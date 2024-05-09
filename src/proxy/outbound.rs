@@ -41,24 +41,25 @@ use crate::strng::Strng;
 use crate::{assertions, copy, proxy, socket, strng};
 
 pub struct Outbound {
-    pi: ProxyInputs,
+    pi: Arc<ProxyInputs>,
     drain: Watch,
     listener: socket::Listener,
+    enable_orig_src: bool,
 }
 
 impl Outbound {
-    pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
-        let listener = pi
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Outbound, Error> {
+        let listener: TcpListener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        if pi.cfg.enable_original_source.is_none() {
-            let mut cfg = (*pi.cfg).clone();
-            cfg.enable_original_source = Some(transparent);
-            pi.cfg = Arc::new(cfg);
-        }
+        let enable_orig_src = if pi.cfg.enable_original_source.is_none() {
+            transparent
+        } else {
+            pi.cfg.enable_original_source.unwrap()
+        };
 
         info!(
             address=%listener.local_addr(),
@@ -70,6 +71,7 @@ impl Outbound {
             pi,
             listener,
             drain,
+            enable_orig_src,
         })
     }
 
@@ -84,12 +86,10 @@ impl Outbound {
         //
         // So use a drain to nuke tasks that might be stuck sending.
         let (sub_drain_signal, sub_drain) = drain::channel();
-        let pi = Arc::new(self.pi);
-
         let pool = proxy::pool::WorkloadHBONEPool::new(
-            pi.cfg.clone(),
-            pi.socket_factory.clone(),
-            pi.cert_manager.clone(),
+            self.pi.cfg.clone(),
+            self.pi.socket_factory.clone(),
+            self.pi.cert_manager.clone(),
         );
         let accept = async move {
             loop {
@@ -100,9 +100,10 @@ impl Outbound {
                 match socket {
                     Ok((stream, _remote)) => {
                         let mut oc = OutboundConnection {
-                            pi: pi.clone(),
+                            pi: self.pi.clone(),
                             id: TraceParent::new(),
                             pool: pool.clone(),
+                            enable_orig_src: self.enable_orig_src,
                         };
                         stream.set_nodelay(true).unwrap();
                         let span = info_span!("outbound", id=%oc.id);
@@ -151,6 +152,7 @@ pub(super) struct OutboundConnection {
     pub(super) pi: Arc<ProxyInputs>,
     pub(super) id: TraceParent,
     pub(super) pool: proxy::pool::WorkloadHBONEPool,
+    pub(super) enable_orig_src: bool,
 }
 
 impl OutboundConnection {
@@ -346,7 +348,7 @@ impl OutboundConnection {
             req.destination, req.gateway, req.request_type
         );
         // Create a TCP connection to upstream
-        let local = if self.pi.cfg.enable_original_source.unwrap_or_default() {
+        let local = if self.enable_orig_src {
             super::get_original_src_from_stream(stream)
         } else {
             None
@@ -539,7 +541,7 @@ impl OutboundConnection {
 
         // only change the port if we're sending HBONE
         let gw_addr = match us.workload.protocol {
-            Protocol::HBONE => SocketAddr::from((workload_ip, self.pi.hbone_port)),
+            Protocol::HBONE => SocketAddr::from((workload_ip, self.pi.cfg.inbound_addr.port())),
             Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
         };
 
@@ -653,7 +655,6 @@ mod tests {
             pi: Arc::new(ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
                 state,
-                hbone_port: 15008,
                 cfg: cfg.clone(),
                 metrics: test_proxy_metrics(),
                 socket_factory: sock_fact.clone(),
@@ -661,7 +662,8 @@ mod tests {
                 connection_manager: ConnectionManager::default(),
             }),
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(cfg, sock_fact, cert_mgr.clone()),
+            pool: pool::WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr.clone()),
+            enable_orig_src: cfg.enable_original_source.unwrap_or_default(),
         };
 
         let req = outbound
