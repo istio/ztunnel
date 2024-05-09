@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::proxy::{error, Error};
+use crate::proxy::Error;
 
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 
 use std::sync::Arc;
 use std::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.

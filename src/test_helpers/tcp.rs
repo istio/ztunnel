@@ -14,9 +14,11 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::Full;
+use ppp::v2::Addresses;
+use ppp::{HeaderResult, PartialResult};
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv6Addr};
+use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use std::{cmp, io};
 
@@ -41,6 +43,8 @@ pub enum Mode {
     // Forward acts as a TCP proxy.
     // Currently, this hard-codes an assumption the backend is in ReadDoubleWrite mode
     Forward(SocketAddr),
+    // Forward traffic based on proxy protocol headers
+    ForwardProxyProtocol,
 }
 
 /// run_client reads and/or writes data as fast as possible
@@ -61,7 +65,7 @@ pub async fn run_client(
                 transferred += written;
                 r.read_exact(&mut buf[..written]).await?;
             }
-            Mode::ReadDoubleWrite | Mode::Forward(_) => {
+            Mode::ReadDoubleWrite | Mode::Forward(_) | Mode::ForwardProxyProtocol => {
                 let written = w.write(&buf[..length]).await?;
                 transferred += written;
                 r.read_exact(&mut buf[..written * 2]).await?;
@@ -173,6 +177,42 @@ where
         }
         Mode::Forward(addr) => {
             let mut outbound = TcpStream::connect(addr).await.expect("tcp ready");
+
+            let res = tokio::io::copy_bidirectional(rw, &mut outbound).await;
+            error!("done with {res:?}");
+        }
+        Mode::ForwardProxyProtocol => {
+            let mut buffer = [0; 512];
+            let mut read = 0;
+            let header = loop {
+                let n = match rw.read(&mut buffer[read..]).await {
+                    Ok(n) => n,
+                    _ => 0,
+                };
+                read += n;
+                let header = HeaderResult::parse(&buffer[..read]);
+                if n == 0 || header.is_complete() || read >= 512 {
+                    break header;
+                }
+                error!("Incomplete header. Read {} bytes so far.", read);
+            };
+            let HeaderResult::V2(Ok(header)) = header else {
+                panic!("did not parse proxy protocol");
+            };
+            let Addresses::IPv4(addresses) = header.addresses else {
+                panic!("no ipv4 addresses in proxy protocol");
+            };
+            let addr = SocketAddrV4::new(addresses.destination_address, addresses.destination_port);
+            let mut outbound = TcpStream::connect(addr).await.expect("tcp ready");
+
+            // sometimes we read more than the PROXY header
+            // echo here since they're consumed before copy_bidirectional
+            if read > header.len() {
+                let extra_bytes = buffer[header.len()..read].to_owned();
+                if let Err(e) = outbound.write_all(&extra_bytes).await {
+                    error!("failed writing bytes: {}", e);
+                };
+            }
 
             let res = tokio::io::copy_bidirectional(rw, &mut outbound).await;
             error!("done with {res:?}");

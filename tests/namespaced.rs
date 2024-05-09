@@ -305,6 +305,42 @@ mod namespaced {
     }
 
     #[tokio::test]
+    async fn sandwich_waypoint_proxy_protocol() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+
+        let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        let waypoint = manager
+            .workload_builder("waypoint", DEFAULT_NODE)
+            .mutate_workload(|w| {
+                w.application_tunnel = Some(ApplicationTunnel {
+                    protocol: Protocol::PROXY,
+                    port: Some(PROXY_PROTOCOL_PORT),
+                });
+            })
+            .register()
+            .await?;
+        let waypoint_ip = waypoint.ip();
+
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .waypoint(waypoint_ip)
+            .register()
+            .await?;
+        run_tcp_proxy_protocol_server(waypoint)?;
+        run_tcp_server(server)?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+
+        let _server_ip = manager.resolver().resolve("server")?;
+        run_tcp_client(client, manager.resolver(), "server")?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn service_loadbalancing() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(InPod);
         let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
@@ -852,6 +888,7 @@ mod namespaced {
     const TEST_VIP: &str = "10.10.0.1";
 
     const SERVER_PORT: u16 = 8080;
+    const PROXY_PROTOCOL_PORT: u16 = 15088;
 
     const DEFAULT_NODE: &str = "node";
     const REMOTE_NODE: &str = "remote-node";
@@ -1109,6 +1146,19 @@ mod namespaced {
     fn run_tcp_proxy_server(server: Namespace, target: SocketAddr) -> anyhow::Result<()> {
         server.run_ready(move |ready| async move {
             let echo = tcp::TestServer::new(tcp::Mode::Forward(target), SERVER_PORT).await;
+            info!("Running echo server at {}", echo.address());
+            ready.set_ready();
+            echo.run().await;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// run_tcp_proxy_server deploys a simple tcp proxying in the provided namespace
+    fn run_tcp_proxy_protocol_server(server: Namespace) -> anyhow::Result<()> {
+        server.run_ready(move |ready| async move {
+            let echo =
+                tcp::TestServer::new(tcp::Mode::ForwardProxyProtocol, PROXY_PROTOCOL_PORT).await;
             info!("Running echo server at {}", echo.address());
             ready.set_ready();
             echo.run().await;
