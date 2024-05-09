@@ -185,25 +185,34 @@ where
             let mut buffer = [0; 512];
             let mut read = 0;
             let header = loop {
-                read += rw.read(&mut buffer[read..]).await.unwrap();
+                let n = match rw.read(&mut buffer[read..]).await {
+                    Ok(n) => n,
+                    _ => 0,
+                };
+                read += n;
                 let header = HeaderResult::parse(&buffer[..read]);
-                if header.is_complete() {
+                if n == 0 || header.is_complete() || read >= 512 {
                     break header;
                 }
-                info!("Incomplete header. Read {} bytes so far.", read);
+                error!("Incomplete header. Read {} bytes so far.", read);
             };
             let HeaderResult::V2(Ok(header)) = header else {
-                // TODO panic?
-                error!("did not parse proxy protocol");
-                return;
+                panic!("did not parse proxy protocol");
             };
             let Addresses::IPv4(addresses) = header.addresses else {
-                // TODO panic?
-                error!("no ipv4 addresses in proxy protocol");
-                return;
+                panic!("no ipv4 addresses in proxy protocol");
             };
             let addr = SocketAddrV4::new(addresses.destination_address, addresses.destination_port);
             let mut outbound = TcpStream::connect(addr).await.expect("tcp ready");
+
+            // sometimes we read more than the PROXY header
+            // echo here since they're consumed before copy_bidirectional
+            if read > header.len() {
+                let extra_bytes = buffer[header.len()..read].to_owned();
+                if let Err(e) = outbound.write_all(&extra_bytes).await {
+                    error!("failed writing bytes: {}", e);
+                };
+            }
 
             let res = tokio::io::copy_bidirectional(rw, &mut outbound).await;
             error!("done with {res:?}");
