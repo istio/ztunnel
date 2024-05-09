@@ -72,6 +72,8 @@ ip netns exec pod1 ./scripts/ztunnel-redirect-inpod.sh
 
 To get traffic to work you may need to adjust the IPs in localhost.yaml and start processes in the pod netns.
 
+You can also do `make build FEATURES="--features testing` and use `./out/rust/debug/ztunnel` instead of `cargo run ...`
+
 ### In-pod mode with istiod on kind setup
 
 Run ztunnel on from your terminal. With istiod and workloads running in KinD. This works on Linux only.
