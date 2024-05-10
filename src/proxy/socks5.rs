@@ -58,7 +58,21 @@ impl Socks5 {
         self.listener.local_addr()
     }
 
+    // TODO hbone_port is ALWAYS (by necessity) fixed in read-only config -
+    // except in (some) contrived integ test cases (direct), where we bind to random non-well-known ports,
+    // and cannot rely on a well-known port - which is why this exists.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn run(self, hbone_port: u16) {
+        self.inner_run(hbone_port).await
+    }
+
+    #[cfg(not(any(test, feature = "testing")))]
     pub async fn run(self) {
+        let hbone_port = self.pi.cfg.inbound_addr.port();
+        self.inner_run(hbone_port).await
+    }
+
+    async fn inner_run(self, hbone_port: u16) {
         let inner_drain = self.drain.clone();
         let inpod = self.pi.cfg.inpod_enabled;
         let accept = async move {
@@ -81,6 +95,7 @@ impl Socks5 {
                             id: TraceParent::new(),
                             pool,
                             enable_orig_src: self.pi.cfg.enable_original_source.unwrap_or_default(),
+                            hbone_port,
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream, stream_drain, inpod).await {

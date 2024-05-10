@@ -79,7 +79,21 @@ impl Outbound {
         self.listener.local_addr()
     }
 
+    // TODO hbone_port is ALWAYS (by necessity) fixed in read-only config -
+    // except in (some) contrived integ test cases (direct), where we bind to random non-well-known ports,
+    // and cannot rely on a well-known port - which is why this exists.
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) async fn run(self, hbone_port: u16) {
+        self.inner_run(hbone_port).await
+    }
+
+    #[cfg(not(any(test, feature = "testing")))]
     pub(super) async fn run(self) {
+        let hbone_port = self.pi.cfg.inbound_addr.port();
+        self.inner_run(hbone_port).await
+    }
+
+    async fn inner_run(self, hbone_port: u16) {
         // Since we are spawning autonomous tasks to handle outbound connections for a single workload,
         // we can have situations where the workload is deleted, but a task is still "stuck"
         // waiting for a server response stream on a HTTP/2 connection or whatnot.
@@ -104,6 +118,7 @@ impl Outbound {
                             id: TraceParent::new(),
                             pool: pool.clone(),
                             enable_orig_src: self.enable_orig_src,
+                            hbone_port,
                         };
                         stream.set_nodelay(true).unwrap();
                         let span = info_span!("outbound", id=%oc.id);
@@ -153,6 +168,8 @@ pub(super) struct OutboundConnection {
     pub(super) id: TraceParent,
     pub(super) pool: proxy::pool::WorkloadHBONEPool,
     pub(super) enable_orig_src: bool,
+    pub(super) hbone_port: u16,
+
 }
 
 impl OutboundConnection {
@@ -541,7 +558,7 @@ impl OutboundConnection {
 
         // only change the port if we're sending HBONE
         let gw_addr = match us.workload.protocol {
-            Protocol::HBONE => SocketAddr::from((workload_ip, self.pi.cfg.inbound_addr.port())),
+            Protocol::HBONE => SocketAddr::from((workload_ip, self.hbone_port)),
             Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
         };
 
@@ -664,6 +681,7 @@ mod tests {
             id: TraceParent::new(),
             pool: pool::WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr.clone()),
             enable_orig_src: cfg.enable_original_source.unwrap_or_default(),
+            hbone_port: cfg.inbound_addr.port(),
         };
 
         let req = outbound
