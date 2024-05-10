@@ -30,6 +30,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::istio::zds::{WorkloadRequest, WorkloadResponse, ZdsHello};
 
+use once_cell::sync::Lazy;
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
 
@@ -44,17 +45,21 @@ pub struct Fixture {
     pub drain_tx: drain::Signal,
     pub drain_rx: drain::Watch,
 }
+// Ensure that the `tracing` stack is only initialised once using `once_cell`
+static UNSHARE: Lazy<()> = Lazy::new(|| {
+    unshare(CloneFlags::CLONE_NEWNET).unwrap();
+    let lo_set = std::process::Command::new("ip")
+        .args(["link", "set", "lo", "up"])
+        .status()
+        .unwrap()
+        .success();
+    assert!(lo_set);
+});
 
 impl Default for Fixture {
     fn default() -> Fixture {
         crate::test_helpers::helpers::initialize_telemetry();
-        unshare(CloneFlags::CLONE_NEWNET).unwrap();
-        let lo_set = std::process::Command::new("ip")
-            .args(["link", "set", "lo", "up"])
-            .status()
-            .unwrap()
-            .success();
-        assert!(lo_set);
+        Lazy::force(&UNSHARE);
         let mut registry = Registry::default();
 
         let cfg = crate::config::Config {

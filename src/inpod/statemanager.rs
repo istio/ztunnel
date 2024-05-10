@@ -342,7 +342,9 @@ mod tests {
     use super::*;
     use crate::inpod::test_helpers::{self, create_proxy_confilct, new_netns, uid};
     use crate::inpod::WorkloadData;
+
     use std::sync::Arc;
+    use std::time::Duration;
 
     struct Fixture {
         state: WorkloadProxyManagerState,
@@ -431,6 +433,10 @@ mod tests {
         assert!(state.have_pending());
 
         std::mem::drop(sock);
+        // Unfortunate but necessary. When we close a socket in listener, the port is not synchronously freed.
+        // This can lead to our retry failing due to a conflict. There doesn't seem to be a great way to reliably detect this.
+        // Sleeping 10ms, however, is quite small and seems very reliable.
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         state.retry_pending().await;
         assert!(!state.have_pending());
