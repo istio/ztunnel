@@ -13,8 +13,8 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::{h2_client, Error, SocketFactory};
-
+use super::h2;
+use super::{Error, SocketFactory};
 use std::time::Duration;
 
 use std::collections::hash_map::DefaultHasher;
@@ -41,7 +41,8 @@ use flurry;
 
 use pingora_pool;
 
-use crate::proxy::h2_client::{H2ConnectClient, H2Stream};
+use crate::proxy::h2::client::H2ConnectClient;
+use crate::proxy::h2::H2Stream;
 
 // A relatively nonstandard HTTP/2 connection pool designed to allow multiplexing proxied workload connections
 // over a (smaller) number of HTTP/2 mTLS tunnels.
@@ -98,7 +99,7 @@ impl ConnSpawner {
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
         let sender =
-            h2_client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
+            h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
                 .await?;
         let client = ConnClient {
             sender,

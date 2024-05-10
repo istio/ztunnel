@@ -100,7 +100,7 @@ impl WorkloadManagerAdminHandler {
                 key.count += 1;
                 key.state = State::Up;
                 key.connections = cm;
-                key.info = workload_info.clone();
+                key.info.clone_from(workload_info);
             }
             None => {
                 state.insert(

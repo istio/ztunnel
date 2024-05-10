@@ -17,29 +17,23 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use bytes::Bytes;
 use drain::Watch;
 use futures::stream::StreamExt;
-use futures_util::{FutureExt, TryFutureExt};
-use http_body_util::Empty;
 
-use hyper::body::Incoming;
-use hyper::service::service_fn;
-use hyper::{header, Method, Request, Response, StatusCode};
+use http::{Method, Response, StatusCode};
 
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::timeout;
 
-use tracing::{debug, error, info, instrument, trace_span, Instrument};
+use tracing::{debug, info, instrument, trace_span, Instrument};
 
 use super::connection_manager::ConnectionManager;
 use super::Error;
 use crate::baggage::parse_baggage_header;
 use crate::identity::{Identity, SecretManager};
 
-use crate::proxy::inbound::InboundConnect::{Hbone, Proxy};
+use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 use crate::rbac::Connection;
@@ -49,6 +43,7 @@ use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{assertions, copy, proxy, strng, tls};
 
+use crate::proxy::h2;
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::strng::Strng;
@@ -112,7 +107,6 @@ impl Inbound {
             let drain = sub_drain.clone();
             let network = pi.cfg.network.clone();
             let illegal_ports = illegal_ports.clone();
-            let drain_deadline = pi.cfg.self_termination_deadline;
             let serve_client = async move {
                 let conn = Connection {
                     src_identity,
@@ -122,70 +116,26 @@ impl Inbound {
                 };
                 debug!(%conn, "accepted connection");
                 let enable_original_source = pi.cfg.enable_original_source;
-                let serve = Box::pin(
-                    crate::hyper_util::http2_server()
-                        .initial_stream_window_size(pi.cfg.window_size)
-                        .initial_connection_window_size(pi.cfg.connection_window_size)
-                        // well behaved clients should close connections.
-                        // not all clients are well-behaved. This will prune
-                        // connections when the client is not responding, to keep
-                        // us from holding many stale conns from deceased clients
-                        .keep_alive_interval(Some(Duration::from_secs(10)))
-                        .max_frame_size(pi.cfg.frame_size)
-                        // 64KB max; default is 16MB driven from Golang's defaults
-                        // Since we know we are going to recieve a bounded set of headers, more is overkill.
-                        .max_header_list_size(65536)
-                        .serve_connection(
-                            hyper_util::rt::TokioIo::new(tls),
-                            service_fn(move |req| {
-                                Self::serve_connect(
-                                    pi.clone(),
-                                    conn.clone(),
-                                    enable_original_source.unwrap_or_default(),
-                                    req,
-                                    illegal_ports.clone(),
-                                    connection_manager.clone(),
-                                )
-                                .map(|status| {
-                                    let resp: Response<Empty<Bytes>> = Response::builder()
-                                        .status(status)
-                                        .body(Empty::new())
-                                        .expect("builder with known status code should not fail");
-                                    Ok::<_, hyper::Error>(resp)
-                                })
-                            }),
-                        ),
-                );
-                // Wait for drain to signal or connection serving to complete
-                match futures_util::future::select(Box::pin(drain.signaled()), serve).await {
-                    // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
-                    futures_util::future::Either::Left((_shutdown, mut server)) => {
-                        debug!("inbound serve got drain {:?}", server);
-                        let drain = std::pin::Pin::as_mut(&mut server);
-                        drain.graceful_shutdown();
-                        // There are scenarios where the http2 server never resolves after
-                        // `graceful_shutdown`, which will hang the whole task.
-                        //
-                        // This seems to be a hyper bug, but either way, it's safer to have a deadline.
-                        let timeout_res = timeout(drain_deadline, server).await;
-                        let res = match timeout_res {
-                            Ok(res) => res,
-                            Err(e) => {
-                                error!("inbound serve drain err: {e}");
-                                Ok(())
-                            }
-                        };
-                        debug!("inbound serve drain done");
-                        res
-                    }
-                    // Serving finished, just return the result.
-                    futures_util::future::Either::Right((server, _shutdown)) => {
-                        debug!("inbound serve done {:?}", server);
-                        server
-                    }
-                }
+                let cfg = pi.cfg.clone();
+                let request_handler = move |req| {
+                    Self::serve_connect(
+                        pi.clone(),
+                        conn.clone(),
+                        enable_original_source.unwrap_or_default(),
+                        req,
+                        illegal_ports.clone(),
+                        connection_manager.clone(),
+                    )
+                };
+                let serve = Box::pin(h2::server::serve_connection(
+                    cfg,
+                    tls,
+                    drain,
+                    request_handler,
+                ));
+                serve.await
             };
-            assertions::size_between_ref(1500, 2500, &serve_client);
+            assertions::size_between_ref(1000, 1500, &serve_client);
             tokio::task::spawn(serve_client);
         }
         info!("draining connections");
@@ -194,7 +144,7 @@ impl Inbound {
         info!("all inbound connections drained");
     }
 
-    fn extract_traceparent(req: &Request<Incoming>) -> TraceParent {
+    fn extract_traceparent(req: &H2Request) -> TraceParent {
         req.headers()
             .get(TRACEPARENT_HEADER)
             .and_then(|b| b.to_str().ok())
@@ -212,10 +162,10 @@ impl Inbound {
         pi: Arc<ProxyInputs>,
         conn: Connection,
         enable_original_source: bool,
-        req: Request<Incoming>,
+        req: H2Request,
         illegal_ports: Arc<HashSet<u16>>,
         connection_manager: ConnectionManager,
-    ) -> StatusCode {
+    ) -> Result<(), Error> {
         if req.method() != Method::CONNECT {
             metrics::log_early_deny(
                 conn.src,
@@ -223,7 +173,7 @@ impl Inbound {
                 Reporter::destination,
                 Error::NonConnectMethod(req.method().to_string()),
             );
-            return StatusCode::NOT_FOUND;
+            return req.send_error(build_response(StatusCode::NOT_FOUND));
         }
         let start = Instant::now();
         let Ok(hbone_addr) = req.uri().to_string().as_str().parse::<SocketAddr>() else {
@@ -233,7 +183,7 @@ impl Inbound {
                 Reporter::destination,
                 Error::ConnectAddress(req.uri().to_string()),
             );
-            return StatusCode::BAD_REQUEST;
+            return req.send_error(build_response(StatusCode::BAD_REQUEST));
         };
 
         // Determine the next hop.
@@ -242,7 +192,7 @@ impl Inbound {
                 Ok(res) => res,
                 Err(e) => {
                     metrics::log_early_deny(conn.src, conn.dst, Reporter::destination, e);
-                    return StatusCode::BAD_REQUEST;
+                    return req.send_error(build_response(StatusCode::BAD_REQUEST));
                 }
             };
         let illegal_call = if pi.cfg.inpod_enabled {
@@ -260,7 +210,7 @@ impl Inbound {
                 Reporter::destination,
                 Error::SelfCall,
             );
-            return StatusCode::BAD_REQUEST;
+            return req.send_error(build_response(StatusCode::BAD_REQUEST));
         }
         // Connection has 15008, swap with the real port
         let conn = Connection {
@@ -334,17 +284,8 @@ impl Inbound {
                 Arc::into_inner(result_tracker)
                     .expect("arc is not shared yet")
                     .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
-                return StatusCode::UNAUTHORIZED;
+                return req.send_error(build_response(StatusCode::UNAUTHORIZED));
             }
-        };
-
-        let request_type = match inbound_protocol {
-            AppProtocol::PROXY => Proxy(
-                req,
-                (rbac_ctx.conn.src, hbone_addr),
-                rbac_ctx.conn.src_identity.clone(),
-            ),
-            _ => Hbone(req),
         };
 
         let orig_src = enable_original_source.then_some(source_ip);
@@ -357,59 +298,32 @@ impl Inbound {
         let mut stream = match stream {
             Err(err) => {
                 result_tracker.record(Err(err));
-                return StatusCode::SERVICE_UNAVAILABLE;
+                return req.send_error(build_response(StatusCode::SERVICE_UNAVAILABLE));
             }
             Ok(stream) => stream,
         };
+
         debug!("connected to: {upstream_addr}");
 
-        tokio::task::spawn(
-            (async move {
-                let send = async {
-                    let result_tracker = result_tracker.clone();
-                    match request_type {
-                        Hbone(req) => {
-                            hyper::upgrade::on(req)
-                                .map_err(Error::NoUpgrade)
-                                .and_then(|upgraded| async move {
-                                    copy::copy_bidirectional(
-                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
-                                        &mut stream,
-                                        &result_tracker,
-                                    )
-                                    .instrument(trace_span!("hbone server"))
-                                    .await
-                                })
-                                .await
-                        }
-                        Proxy(req, (src, dst), src_id) => {
-                            Box::pin(hyper::upgrade::on(req).map_err(Error::NoUpgrade).and_then(
-                                |upgraded| async move {
-                                    super::write_proxy_protocol(&mut stream, (src, dst), src_id)
-                                        .instrument(trace_span!("proxy protocol"))
-                                        .await?;
-                                    copy::copy_bidirectional(
-                                        &mut ::hyper_util::rt::TokioIo::new(upgraded),
-                                        &mut stream,
-                                        &result_tracker,
-                                    )
-                                    .instrument(trace_span!("hbone server"))
-                                    .await
-                                },
-                            ))
-                            .await
-                        }
-                    }
-                };
-                let res = conn_guard.handle_connection(send).await;
-                result_tracker.record(res);
-            })
-            .in_current_span(),
-        );
-        // Send back our 200. We do this regardless of if our spawned task copies the data;
-        // we need to respond with headers immediately once connection is established for the
-        // stream of bytes to begin.
-        StatusCode::OK
+        let h2_stream = req.send_response(build_response(StatusCode::OK)).await?;
+
+        let send = async {
+            let result_tracker = result_tracker.clone();
+            if inbound_protocol == AppProtocol::PROXY {
+                let Connection {
+                    src, src_identity, ..
+                } = rbac_ctx.conn;
+                super::write_proxy_protocol(&mut stream, (src, hbone_addr), src_identity)
+                    .instrument(trace_span!("proxy protocol"))
+                    .await?;
+            }
+            copy::copy_bidirectional(h2_stream, stream, &result_tracker)
+                .instrument(trace_span!("hbone server"))
+                .await
+        };
+        let res = conn_guard.handle_connection(send).await;
+        result_tracker.record(res);
+        Ok(())
     }
 
     async fn find_inbound_upstream(
@@ -549,17 +463,6 @@ impl<'a, T: Display> Display for OptionDisplay<'a, T> {
     }
 }
 
-pub(super) enum InboundConnect {
-    /// Hbone is a standard HBONE request coming from the network.
-    Hbone(Request<Incoming>),
-    // PROXY adds source and dest headers and source identity before forwarding bytes.
-    Proxy(
-        Request<Incoming>,
-        (SocketAddr, SocketAddr),
-        Option<Identity>,
-    ),
-}
-
 #[derive(Clone)]
 struct InboundCertProvider {
     cert_manager: Arc<SecretManager>,
@@ -592,12 +495,19 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
     }
 }
 
-pub fn parse_forwarded_host<T>(req: &Request<T>) -> Option<String> {
+pub fn parse_forwarded_host(req: &H2Request) -> Option<String> {
     req.headers()
-        .get(header::FORWARDED)
+        .get(http::header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
         .and_then(|rh| http_types::proxies::Forwarded::parse(rh).ok())
         .and_then(|ph| ph.host().map(|s| s.to_string()))
+}
+
+fn build_response(status: StatusCode) -> Response<()> {
+    Response::builder()
+        .status(status)
+        .body(())
+        .expect("builder with known status code should not fail")
 }
 
 #[cfg(test)]
