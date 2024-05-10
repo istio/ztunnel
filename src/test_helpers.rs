@@ -83,7 +83,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     xds_root_cert: Option<RootCert>,
     xds_config: Option<ConfigSource>,
 ) -> config::Config {
-    config::Config {
+    let mut cfg = config::Config {
         xds_address: xds_addr,
         fake_ca: true,
         dns_proxy: true,
@@ -110,7 +110,11 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         dns_proxy_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         ..config::parse_config().unwrap()
-    }
+    };
+    // Do not let tests use system defaults!
+    cfg.dns_resolver_opts = Default::default();
+    cfg.dns_resolver_cfg = ResolverConfig::new();
+    cfg
 }
 
 pub fn test_config_with_port(port: u16) -> config::Config {
@@ -209,7 +213,7 @@ fn test_custom_workload(
     hostname_only: bool,
 ) -> anyhow::Result<LocalWorkload> {
     let host = match hostname_only {
-        true => format!("example.{}.nip.io.", ip_str),
+        true => format!("example.{}.internal.", ip_str),
         false => "".to_string(),
     };
     let wips = match hostname_only {
