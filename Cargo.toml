@@ -146,3 +146,7 @@ ctor = "0.2"
 [patch.crates-io]
 # TODO h2 0.4.5 (https://github.com/istio/ztunnel/issues/1000)
 h2 = { git = "https://github.com/hyperium/h2", rev = "be129832df989bf28940da3618827e190ae64ef2" }
+
+[lints.clippy]
+# This rule makes code more confusing
+assigning_clones = "allow"

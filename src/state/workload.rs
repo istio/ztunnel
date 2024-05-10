@@ -669,7 +669,7 @@ impl WorkloadStore {
     }
 
     pub fn has_identity(&self, identity: &Identity) -> bool {
-        self.by_identity.get(identity).is_some()
+        self.by_identity.contains_key(identity)
     }
 }
 
