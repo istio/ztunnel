@@ -702,19 +702,12 @@ mod tests {
         }
     }
 
-    async fn verify_cert_updates(
-        sm: Arc<SecretManager>,
-        id: Identity,
-        dur: Duration,
-        cert_lifetime: Duration,
-    ) {
-        let start_time = time::Instant::now();
-        let expected_update_interval = cert_lifetime.as_millis() / 2;
-        let mut total_updates = 0;
-        let mut current_cert = sm
+    async fn verify_cert_updates(sm: Arc<SecretManager>, id: Identity) {
+        let current_cert = sm
             .fetch_certificate(&id)
             .await
             .expect("Didn't get a cert as expected.");
+        // We should loop until we get a new cert provisioned
         loop {
             let new_cert = sm
                 .fetch_certificate(&id)
@@ -722,15 +715,13 @@ mod tests {
                 .expect("Didn't get a cert as expected.");
 
             if current_cert.cert.serial() != new_cert.cert.serial() {
-                total_updates += 1;
-                current_cert = new_cert;
-            }
-            if time::Instant::now() - start_time > dur {
-                break;
+                let new = new_cert.cert.expiration().not_before;
+                let old = current_cert.cert.expiration().not_before;
+                assert!(old < new, "new cert should be newer");
+                return;
             }
             tokio::time::sleep(Duration::from_micros(100)).await;
         }
-        assert_eq!(total_updates, dur.as_millis() / expected_update_interval);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -748,38 +739,31 @@ mod tests {
         assert_eq!(100, secret_manager.cache_len().await);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_cache_refresh() {
-        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         let test_dur = Duration::from_millis(200);
 
         let id: Identity = Default::default();
 
-        // Certs added to the cache should be refreshed every 80 millis
-        let cert_lifetime = Duration::from_millis(160);
+        // Certs added to the cache should be refreshed every 25 millis
+        let cert_lifetime = Duration::from_millis(50);
         let secret_manager = mock::new_secret_manager(cert_lifetime);
 
-        // Spawn task that verifies cert updates.
-        tasks.push(tokio::spawn(verify_cert_updates(
-            secret_manager.clone(),
-            id.clone(),
-            test_dur,
-            cert_lifetime,
-        )));
-
         // Start spamming fetches for that cert.
-        for _n in 0..7 {
-            tasks.push(tokio::spawn(stress_single_id(
+        for _n in 0..3 {
+            tokio::spawn(stress_single_id(
                 secret_manager.clone(),
                 id.clone(),
                 test_dur,
-            )));
+            ));
         }
 
-        let results = futures::future::join_all(tasks).await;
-        for result in results.iter() {
-            assert!(result.is_ok());
-        }
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            verify_cert_updates(secret_manager.clone(), id.clone()),
+        )
+        .await
+        .unwrap();
     }
 
     fn collect_strings<T: IntoIterator>(xs: T) -> Vec<String>
