@@ -19,21 +19,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use hickory_proto::rr::Name;
+use hickory_resolver::config::{NameServerConfig, Protocol};
+use hickory_server::authority::LookupError;
 use http_body_util::Empty;
 use hyper::{Method, Request};
+use prometheus_client::registry::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::timeout;
 
-use ztunnel::config;
+use ztunnel::dns::resolver::Answer;
+use ztunnel::dns::{Forwarder, Metrics};
 use ztunnel::identity::mock::new_secret_manager;
+use ztunnel::state::workload::Workload;
 use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
 use ztunnel::test_helpers::assert_eventually;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::*;
+use ztunnel::{config, metrics};
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
@@ -177,7 +184,7 @@ async fn test_quit_lifecycle() {
 }
 
 async fn run_request_test(target: &str, node: &str) {
-    run_requests_test(target, node, 1, None).await
+    run_requests_test(target, node, 1, None, false).await
 }
 
 async fn run_requests_test(
@@ -185,14 +192,36 @@ async fn run_requests_test(
     node: &str,
     num_queries: u8,
     metrics_assertions: Option<fn(metrics: ParsedMetrics)>,
+    dns: bool,
 ) {
     initialize_telemetry();
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
-    let cfg = config::Config {
-        local_node: (!node.is_empty()).then(|| node.to_string()),
-        ..test_config_with_port(echo_addr.port())
+    let mut dns_drain: Option<drain::Signal> = None;
+    let cfg = if dns {
+        let (drain, dns) = run_dns().await.unwrap();
+        dns_drain = Some(drain);
+        let dns_addr = dns.udp_address();
+        tokio::spawn(dns.run());
+        let mut cfg = config::Config {
+            local_node: (!node.is_empty()).then(|| node.to_string()),
+            ..test_config_with_port(echo_addr.port())
+        };
+        let ns = NameServerConfig {
+            socket_addr: dns_addr,
+            protocol: Protocol::Udp,
+            tls_dns_name: None,
+            trust_negative_responses: false,
+            bind_addr: None,
+        };
+        cfg.dns_resolver_cfg.add_name_server(ns);
+        cfg
+    } else {
+        config::Config {
+            local_node: (!node.is_empty()).then(|| node.to_string()),
+            ..test_config_with_port(echo_addr.port())
+        }
     };
     tokio::spawn(echo.run());
     testapp::with_app(cfg, |app| async move {
@@ -210,6 +239,70 @@ async fn run_requests_test(
         }
     })
     .await;
+    drop(dns_drain);
+}
+
+struct FakeForwarder {}
+#[async_trait::async_trait]
+impl Forwarder for FakeForwarder {
+    fn search_domains(&self, _client: &Workload) -> Vec<Name> {
+        vec![]
+    }
+
+    async fn forward(
+        &self,
+        _client: Option<&Workload>,
+        _request: &hickory_server::server::Request,
+    ) -> Result<Answer, LookupError> {
+        panic!("should never forward");
+    }
+}
+
+// run_dns sets up a test DNS server. We happen to have a DNS server implementation, so we abuse that here.
+pub async fn run_dns() -> anyhow::Result<(drain::Signal, ztunnel::dns::Server)> {
+    use ztunnel::xds::istio::workload::Workload as XdsWorkload;
+    fn test_metrics() -> Arc<Metrics> {
+        let mut registry = Registry::default();
+        let istio_registry = metrics::sub_registry(&mut registry);
+        Arc::new(Metrics::new(istio_registry))
+    }
+    let (signal, drain) = drain::channel();
+    let factory = ztunnel::proxy::DefaultSocketFactory {};
+
+    let ip = std::net::Ipv4Addr::new(127, 0, 0, 1).octets();
+    let ip = ip.to_vec();
+    let ip2 = std::net::Ipv4Addr::new(127, 0, 0, 4).octets();
+    let ip2 = ip2.to_vec();
+    let workloads = vec![
+        // Set up local so our clients match source
+        XdsWorkload {
+            uid: "1".into(),
+            addresses: vec![ip.into()],
+            ..Default::default()
+        },
+        // Add things we need to resolve. TODO: find a way to make this dynamic.
+        XdsWorkload {
+            uid: "2".into(),
+            hostname: "example.127.0.0.4.internal".into(),
+            addresses: vec![ip2.into()],
+            ..Default::default()
+        },
+    ];
+
+    let state = new_proxy_state(&workloads, &[], &[]);
+    let srv = ztunnel::dns::Server::new(
+        "example.com".to_string(),
+        "127.0.0.1:0".parse()?,
+        "",
+        state,
+        Arc::new(FakeForwarder {}),
+        test_metrics(),
+        drain,
+        &factory,
+    )
+    .await?;
+
+    Ok((signal, srv))
 }
 
 #[tokio::test]
@@ -264,6 +357,7 @@ async fn test_on_demand_dns_request() {
         "",
         2,
         Some(on_demand_dns_assertions),
+        true,
     )
     .await;
 }
