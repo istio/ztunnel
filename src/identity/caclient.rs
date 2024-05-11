@@ -136,6 +136,7 @@ pub mod mock {
     #[derive(Default)]
     struct ClientState {
         fetches: Vec<Identity>,
+        error: bool,
         gen: tls::mock::CertGenerator,
     }
 
@@ -217,6 +218,9 @@ pub mod mock {
             let not_after = not_before + self.cfg.cert_lifetime;
 
             let mut state = self.state.write().await;
+            if state.error {
+                return Err(Error::Spiffe("injected test error".into()));
+            }
             let certs = state
                 .gen
                 .new_certs(&id.to_owned().into(), not_before, not_after);
@@ -225,21 +229,8 @@ pub mod mock {
         }
 
         pub async fn set_error(&mut self, error: bool) {
-            if error {
-                let mut state = self.state.write().await;
-                state.fetches.push(Identity::Spiffe {
-                    trust_domain: "error".into(),
-                    namespace: "error".into(),
-                    service_account: "error".into(),
-                });
-            } else {
-                let mut state = self.state.write().await;
-                state.fetches.push(Identity::Spiffe {
-                    trust_domain: "success".into(),
-                    namespace: "success".into(),
-                    service_account: "success".into(),
-                });
-            }
+            let mut state = self.state.write().await;
+            state.error = error;
         }
     }
 

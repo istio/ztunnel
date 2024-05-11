@@ -329,6 +329,7 @@ impl Worker {
 
                 // Handle fetch results.
                 Some((id, res)) = fetches.next() => {
+                    tracing::trace!(%id, "fetch complete");
                     match processing.remove(&id) {
                         Some(Fetch::Processing) => (),
                         Some(Fetch::Forgetting) => continue 'main,
@@ -349,10 +350,13 @@ impl Worker {
                             //
                             // randomized interval =
                             //     retry_interval * (random value in range [1 - randomization_factor, 1 + randomization_factor])
-                            let refresh_at = Instant::now() + cert_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            let retry = cert_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            tracing::debug!(%id, "certificate fetch failed ({err}), retrying in {retry:?}");
+                            let refresh_at = Instant::now() + retry;
                             (CertState::Unavailable(err), refresh_at)
                         },
                         Ok(certs) => {
+                             tracing::debug!(%id, "certificate fetch succeeded");
                             // Reset the backoff on success.
                             // [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
                             cert_backoff.reset();
@@ -1073,23 +1077,17 @@ mod tests {
         test.tear_down().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_backoff_resets_on_successful_fetch_after_failure() {
         let mut test = setup(1);
         let id = identity("test");
         let sm = test.secret_manager.clone();
-        let fetch = tokio::spawn(async move { sm.fetch_certificate(&id).await });
-        tokio::time::sleep(SEC).await;
-        // The first fetch will fail, but the backoff should reset after the second fetch.
         test.caclient.set_error(true).await;
-        tokio::time::sleep(SEC).await;
-        // The second fetch should fail.
-        test.caclient.set_error(true).await;
-        tokio::time::sleep(SEC).await;
-        // The third fetch should succeed.
+        assert!(sm.fetch_certificate(&id).await.is_err());
         test.caclient.set_error(false).await;
-        assert_matches!(fetch.await.unwrap(), Ok(_));
-        test.tear_down().await;
+        assert!(sm.fetch_certificate(&id).await.is_err());
+        tokio::time::sleep(SEC * 3).await;
+        assert!(sm.fetch_certificate(&id).await.is_ok());
     }
 
     #[test]
