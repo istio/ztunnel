@@ -194,7 +194,9 @@ impl Proxy {
         #[cfg(any(test, feature = "testing"))]
         {
             let hbone_port = self.inbound.address().port();
-            tasks.push(tokio::spawn(self.outbound.run(hbone_port).in_current_span()));
+            tasks.push(tokio::spawn(
+                self.outbound.run(hbone_port).in_current_span(),
+            ));
             tasks.push(tokio::spawn(self.inbound.run().in_current_span()));
             if let Some(socks5) = self.socks5 {
                 tasks.push(tokio::spawn(socks5.run(hbone_port).in_current_span()));

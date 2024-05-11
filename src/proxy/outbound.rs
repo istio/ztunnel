@@ -169,7 +169,6 @@ pub(super) struct OutboundConnection {
     pub(super) pool: proxy::pool::WorkloadHBONEPool,
     pub(super) enable_orig_src: bool,
     pub(super) hbone_port: u16,
-
 }
 
 impl OutboundConnection {

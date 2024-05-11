@@ -120,12 +120,7 @@ impl Inbound {
                 debug!(%conn, "accepted connection");
                 let cfg = pi.cfg.clone();
                 let request_handler = move |req| {
-                    Self::serve_connect(
-                        pi.clone(),
-                        conn.clone(),
-                        self.enable_orig_src,
-                        req,
-                    )
+                    Self::serve_connect(pi.clone(), conn.clone(), self.enable_orig_src, req)
                 };
                 let serve = Box::pin(h2::server::serve_connection(
                     cfg,
