@@ -895,6 +895,7 @@ mod tests {
     async fn lookup() {
         initialize_telemetry();
 
+        #[derive(Clone)]
         struct Case {
             name: &'static str,
             host: &'static str,
@@ -1152,29 +1153,37 @@ mod tests {
         let udp_addr = proxy.udp_address();
         tokio::spawn(proxy.run());
 
-        let mut tcp_client = new_tcp_client(tcp_addr).await;
-        let mut udp_client = new_udp_client(udp_addr).await;
+        let tcp_client = new_tcp_client(tcp_addr).await;
+        let udp_client = new_udp_client(udp_addr).await;
 
         // Lookup the server from the client.
+        let mut tasks = vec![];
         for c in cases {
-            for (protocol, client) in [("tcp", &mut tcp_client), ("udp", &mut udp_client)] {
-                let name = format!("[{protocol}] {}", c.name);
-                let resp = send_request(client, n(c.host), c.query_type).await;
-                assert_eq!(c.expect_authoritative, resp.authoritative(), "{}", name);
-                assert_eq!(c.expect_code, resp.response_code(), "{}", name);
+            for (protocol, mut client) in [("tcp", tcp_client.clone()), ("udp", udp_client.clone())]
+            {
+                let c = c.clone();
+                tasks.push(tokio::task::spawn(async move {
+                    let name = format!("[{protocol}] {}", c.name);
+                    let resp = send_request(&mut client, n(c.host), c.query_type).await;
+                    assert_eq!(c.expect_authoritative, resp.authoritative(), "{}", name);
+                    assert_eq!(c.expect_code, resp.response_code(), "{}", name);
 
-                if c.expect_code == ResponseCode::NoError {
-                    let mut actual = resp.answers().to_vec();
+                    if c.expect_code == ResponseCode::NoError {
+                        let mut actual = resp.answers().to_vec();
 
-                    // The IP records in an authoritative response will be randomly sorted to
-                    // accommodate DNS-based load balancing. If the response is authoritative,
-                    // sort the IP records so that we can directly compare them to the expected.
-                    if c.expect_authoritative {
-                        sort_records(&mut actual);
+                        // The IP records in an authoritative response will be randomly sorted to
+                        // accommodate DNS-based load balancing. If the response is authoritative,
+                        // sort the IP records so that we can directly compare them to the expected.
+                        if c.expect_authoritative {
+                            sort_records(&mut actual);
+                        }
+                        assert_eq!(c.expect_records, actual, "{}", name);
                     }
-                    assert_eq!(c.expect_records, actual, "{}", name);
-                }
+                }));
             }
+        }
+        for t in tasks {
+            t.await.unwrap();
         }
     }
 
