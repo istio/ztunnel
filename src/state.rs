@@ -45,6 +45,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
 
+use self::workload::ApplicationTunnel;
+
 pub mod policy;
 pub mod service;
 pub mod workload;
@@ -249,14 +251,6 @@ impl ProxyState {
             .services
             .get_by_vip(&network_addr(network.clone(), addr.ip()))
         {
-            let Some(target_port) = svc.ports.get(&addr.port()) else {
-                debug!(
-                    "found VIP {}, but port {} was unknown",
-                    addr.ip(),
-                    addr.port()
-                );
-                return None;
-            };
             // Randomly pick an upstream
             // TODO: do this more efficiently, and not just randomly
             let Some(ep) = self.load_balance(source_workload, &svc) else {
@@ -267,11 +261,29 @@ impl ProxyState {
                 debug!("failed to fetch workload for {}", ep.workload_uid);
                 return None;
             };
+
+            let target_port = svc.ports.get(&addr.port());
             // If endpoint overrides the target port, use that instead
-            let target_port = ep.port.get(&addr.port()).unwrap_or(target_port);
+            let target_port = ep.port.get(&addr.port()).or(target_port);
+            let target_port = match (target_port, &wl.application_tunnel) {
+                // service or endpoint specified a target port, use it
+                (Some(tp), _) => tp.to_owned(),
+                // when using app tunnel, don't require the port to be found on the service
+                (_, Some(ApplicationTunnel { port: Some(_), .. })) => addr.port(),
+                // otherwise, error
+                _ => {
+                    debug!(
+                        "found VIP {}, but port {} was unknown",
+                        addr.ip(),
+                        addr.port()
+                    );
+                    return None;
+                }
+            };
+
             let us = Upstream {
                 workload: wl,
-                port: *target_port,
+                port: target_port,
                 sans: svc.subject_alt_names.clone(),
                 destination_service: Some(ServiceDescription::from(svc.as_ref())),
             };
