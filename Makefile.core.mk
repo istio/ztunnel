@@ -11,6 +11,10 @@ test:
 build:
 	cargo build $(FEATURES)
 
+# Build the inpodserver example
+inpodserver:
+	cargo build --example inpodserver
+
 # Test that all important features build
 check-features:
 	cargo check --no-default-features -F tls-boring
