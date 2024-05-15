@@ -81,11 +81,11 @@ impl H2ConnectClient {
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             buf: Default::default(),
-            dropped: dropped1,
+            _dropped: dropped1,
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {
             send_stream: send,
-            dropped: dropped2,
+            _dropped: dropped2,
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok(h2)

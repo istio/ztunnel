@@ -18,7 +18,7 @@ use futures_util::FutureExt;
 use http::request::Parts;
 use http::Response;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -61,11 +61,11 @@ impl H2Request {
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
             buf: Default::default(),
-            dropped: None, // We do not need to track on the server
+            _dropped: None, // We do not need to track on the server
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {
             send_stream: send,
-            dropped: None, // We do not need to track on the server
+            _dropped: None, // We do not need to track on the server
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok(h2)

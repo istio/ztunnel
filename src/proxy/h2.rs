@@ -78,12 +78,12 @@ pub struct H2Stream {
 pub struct H2StreamReadHalf {
     recv_stream: h2::RecvStream,
     buf: Bytes,
-    dropped: Option<DropCounter>,
+    _dropped: Option<DropCounter>,
 }
 
 pub struct H2StreamWriteHalf {
     send_stream: h2::SendStream<SendBuf>,
-    dropped: Option<DropCounter>,
+    _dropped: Option<DropCounter>,
 }
 
 struct DropCounter {
@@ -133,10 +133,7 @@ impl Drop for DropCounter {
         if Arc::into_inner(half_dropped).is_none() {
             // other half already dropped
             let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
-            trace!(
-                "dropping H2Stream, has {} active streams left",
-                left - 1
-            );
+            trace!("dropping H2Stream, has {} active streams left", left - 1);
         } else {
             trace!("dropping H2Stream, other half remains");
         }
