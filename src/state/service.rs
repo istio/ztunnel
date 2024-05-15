@@ -227,7 +227,7 @@ pub struct ServiceStore {
     /// of hostname and namespace as the primary key. In most cases, there will be a single
     /// service for a given hostname. However, `ServiceEntry` allows hostnames to be overridden
     /// on a per-namespace basis.
-    by_host: HashMap<Strng, Vec<Arc<Service>>>,
+    pub(super) by_host: HashMap<Strng, Vec<Arc<Service>>>,
 }
 
 impl ServiceStore {
