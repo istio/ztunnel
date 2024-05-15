@@ -349,8 +349,10 @@ impl Store {
                     .filter(|service| {
                         // Domain will be like `.svc.cluster.local.` (trailing .), so ignore the last character.
                         let domain = self.svc_domain.to_utf8();
-                        !service.vips.is_empty()
-                            || service.hostname.ends_with(&domain[..domain.len() - 1])
+                        let domain = domain
+                            .strip_suffix('.')
+                            .expect("the svc domain must have a trailing '.'");
+                        !service.vips.is_empty() || service.hostname.ends_with(domain)
                     })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
