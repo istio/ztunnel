@@ -71,21 +71,41 @@ async fn do_ping_pong(
 
 // H2Stream represents an active HTTP2 stream. Consumers can only Read/Write
 pub struct H2Stream {
-    pub read: H2StreamReadHalf,
-    pub write: H2StreamWriteHalf,
+    read: H2StreamReadHalf,
+    write: H2StreamWriteHalf,
 }
 
 pub struct H2StreamReadHalf {
-    pub recv_stream: h2::RecvStream,
-    pub buf: Bytes,
-    pub half_dropped: Arc<()>,
-    pub active_count: Arc<AtomicU16>,
+    recv_stream: h2::RecvStream,
+    buf: Bytes,
+    dropped: Option<DropCounter>,
 }
 
 pub struct H2StreamWriteHalf {
-    pub send_stream: h2::SendStream<SendBuf>,
-    pub half_dropped: Arc<()>,
-    pub active_count: Arc<AtomicU16>,
+    send_stream: h2::SendStream<SendBuf>,
+    dropped: Option<DropCounter>,
+}
+
+struct DropCounter {
+    // Whether the other end of this shared counter has already dropped.
+    // We only decrement if they have, so we do not double count
+    half_dropped: Arc<()>,
+    active_count: Arc<AtomicU16>,
+}
+
+impl DropCounter {
+    pub fn new(active_count: Arc<AtomicU16>) -> (Option<DropCounter>, Option<DropCounter>) {
+        let half_dropped = Arc::new(());
+        let d1 = DropCounter {
+            half_dropped: half_dropped.clone(),
+            active_count: active_count.clone(),
+        };
+        let d2 = DropCounter {
+            half_dropped,
+            active_count,
+        };
+        (Some(d1), Some(d2))
+    }
 }
 
 impl crate::copy::BufferedSplitter for H2Stream {
@@ -106,7 +126,7 @@ impl H2StreamWriteHalf {
     }
 }
 
-impl Drop for H2StreamReadHalf {
+impl Drop for DropCounter {
     fn drop(&mut self) {
         let mut half_dropped = Arc::new(());
         std::mem::swap(&mut self.half_dropped, &mut half_dropped);
@@ -114,28 +134,11 @@ impl Drop for H2StreamReadHalf {
             // other half already dropped
             let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
             trace!(
-                "dropping H2StreamReadHalf, has {} active streams left",
+                "dropping H2Stream, has {} active streams left",
                 left - 1
             );
         } else {
-            trace!("dropping H2StreamReadHalf, write half remains");
-        }
-    }
-}
-
-impl Drop for H2StreamWriteHalf {
-    fn drop(&mut self) {
-        let mut half_dropped = Arc::new(());
-        std::mem::swap(&mut self.half_dropped, &mut half_dropped);
-        if Arc::into_inner(half_dropped).is_none() {
-            // other half already dropped
-            let left = self.active_count.fetch_sub(1, Ordering::SeqCst);
-            trace!(
-                "dropping H2StreamWriteHalf, has {} active streams left",
-                left - 1
-            );
-        } else {
-            trace!("dropping H2StreamWriteHalf, read half remains");
+            trace!("dropping H2Stream, other half remains");
         }
     }
 }
