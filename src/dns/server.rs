@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::str::FromStr;
@@ -33,7 +34,7 @@ use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use tracing::{info, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::proxy::SocketFactory;
 
@@ -333,34 +334,45 @@ impl Store {
                 let search_name_str = search_name.to_string().into();
                 search_name.set_fqdn(true);
 
-                // First, lookup the host as a service.
-                if let Some(services) = state.services.get_by_host(&search_name_str) {
-                    // We found a match. We always return `Some` result, even if there
-                    // are zero records returned.
-
+                let service = state
+                    .services
+                    .get_by_host(&search_name_str)
+                    .iter()
+                    .flatten()
+                    // Remove things without a VIP, unless they are Kubernetes headless services.
+                    // This will trigger us to forward upstream.
+                    // TODO: we should have a reliable way to distinguish these. In sidecars, we use
+                    // `svc.Attributes.ServiceRegistry`, but we don't pass anything similar over WDS.
+                    // For now, checking the domain is good enough.
+                    // This does mean a `.svc.cluster.local` ServiceEntry will use these semantics, but
+                    // its better than *ALL* ServiceEntry doing this
+                    .filter(|service| {
+                        // Domain will be like `.svc.cluster.local.` (trailing .), so ignore the last character.
+                        let domain = self.svc_domain.to_utf8();
+                        let domain = domain
+                            .strip_suffix('.')
+                            .expect("the svc domain must have a trailing '.'");
+                        !service.vips.is_empty() || service.hostname.ends_with(domain)
+                    })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
-                    let service = services
-                        .iter()
-                        .find_or_first(|service| service.namespace == client.namespace)
-                        .cloned()
-                        // Should never be empty, since we delete the Vec when it's empty.
-                        .unwrap();
+                    .find_or_first(|service| service.namespace == client.namespace)
+                    .cloned();
 
+                // First, lookup the host as a service.
+                if let Some(service) = service {
                     return Some(ServerMatch {
                         server: Address::Service(Arc::new(service)),
                         name: search_name,
                         alias,
                     });
-                } else {
+                } else if let Some(wl) = state.workloads.find_hostname(&search_name_str) {
                     // Didn't find a service, try a workload.
-                    if let Some(wl) = state.workloads.find_hostname(&search_name_str) {
-                        return Some(ServerMatch {
-                            server: Address::Workload(wl),
-                            name: search_name,
-                            alias,
-                        });
-                    }
+                    return Some(ServerMatch {
+                        server: Address::Workload(wl),
+                        name: search_name,
+                        alias,
+                    });
                 }
             }
         }
@@ -476,6 +488,15 @@ impl Store {
 
 #[async_trait::async_trait]
 impl Resolver for Store {
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            src=%request.src(),
+            query=%request.query().query_type(),
+            name=%request.query().name(),
+        ),
+    )]
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
         // Find the client workload.
         let client = match self.find_client(to_canonical(request.src())) {
@@ -486,7 +507,7 @@ impl Resolver for Store {
                     request,
                     source: None,
                 });
-
+                debug!("unknown source");
                 return Err(LookupError::ResponseCode(ResponseCode::ServFail));
             }
             Some(client) => client,
@@ -495,12 +516,14 @@ impl Resolver for Store {
         // Make sure the request is for IP records. Anything else, we forward.
         let record_type = request.query().query_type();
         if !is_record_type_supported(record_type) {
+            debug!("unknown record type");
             return self.forward(Some(&client), request).await;
         }
 
         // Find the service for the requested host.
         let requested_name = Name::from(request.query().name().clone());
         let Some(service_match) = self.find_server(&client, &requested_name) else {
+            trace!("unknown host, forwarding");
             // Unknown host. Forward to the upstream resolver.
             return self.forward(Some(&client), request).await;
         };
@@ -518,6 +541,7 @@ impl Resolver for Store {
         let is_authoritative = true;
 
         if addresses.is_empty() {
+            debug!(alias=%service_match.alias, name=%service_match.name, "no records");
             // Lookup succeeded, but no records were returned. This is not NXDOMAIN, since we
             // found the host. Just return an empty set of records.
             return Ok(Answer::new(Vec::default(), is_authoritative));
@@ -529,6 +553,7 @@ impl Resolver for Store {
         // Assume that we'll just use the requested name as the record name.
         let mut ip_record_name = requested_name.clone();
 
+        debug!(alias=%service_match.alias, name=%service_match.name, "success");
         // If the service was found by stripping off one of the search domains, create a
         // CNAME record to map to the appropriate canonical name.
         if let Some(stripped) = service_match.alias.stripped {
@@ -573,6 +598,12 @@ struct Alias {
     /// If `Some`, indicates that this alias was generated from the requested host that
     /// was stripped of
     stripped: Option<Stripped>,
+}
+
+impl Display for Alias {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name.to_utf8())
+    }
 }
 
 /// Created for an alias generated by stripping a search domain from the requested host.
@@ -858,7 +889,7 @@ mod tests {
             let forwarder = forwarder();
             let store = Store {
                 domain: as_name("cluster.local"),
-                svc_domain: as_name("svc.cluster.local"),
+                svc_domain: as_name("svc.cluster.local."),
                 network: NW1,
                 state,
                 forwarder,
@@ -1129,6 +1160,20 @@ mod tests {
                     a(n("headless.pod0.ns1."), ipv4("30.30.30.30"))],
                 ..Default::default()
             },
+            Case {
+                name: "failure: headless external without IPs",
+                host: "headless-no-endpoints.example.com",
+                expect_authoritative: false, // forwarded.
+                expect_code: ResponseCode::NXDomain,
+                ..Default::default()
+            },
+            Case {
+                name: "failure: headless external",
+                host: "headless.example.com",
+                expect_authoritative: false, // forwarded.
+                expect_code: ResponseCode::NXDomain,
+                ..Default::default()
+            },
         ];
 
         // Create and start the proxy.
@@ -1196,7 +1241,7 @@ mod tests {
         let forwarder = forwarder();
         let store = Store {
             domain: as_name("cluster.local"),
-            svc_domain: as_name("svc.cluster.local"),
+            svc_domain: as_name("svc.cluster.local."),
             network: NW1,
             state,
             forwarder,
@@ -1295,7 +1340,7 @@ mod tests {
             state,
             forwarder,
             domain: n("cluster.local"),
-            svc_domain: n("svc.cluster.local"),
+            svc_domain: n("svc.cluster.local."),
             metrics: test_metrics(),
         };
 
@@ -1422,7 +1467,10 @@ mod tests {
                 &[na(NW1, "21.21.21.21"), na(NW2, "22.22.22.22")],
             ),
             // Headless services.
+            // TODO: test and support subdomain format (https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#pod-s-hostname-and-subdomain-fields)
             xds_service("headless", NS1, &[]),
+            xds_external_service("headless.example.com", &[]),
+            xds_external_service("headless-no-endpoints.example.com", &[]),
         ];
 
         let workloads = vec![
@@ -1444,6 +1492,14 @@ mod tests {
                 &NW1,
                 &[format!("{}/{}", NS1, kube_fqdn("headless", NS1)).as_str()],
                 &[ip("31.31.31.31")],
+            ),
+            xds_workload(
+                "headless-external",
+                NS1,
+                "",
+                &NW1,
+                &[format!("{}/{}", NS1, "headless.example.com").as_str()],
+                &[ip("32.32.32.32")],
             ),
         ];
 

@@ -159,6 +159,7 @@ pub struct ProxyState {
 struct ProxyStateSerialization<'a> {
     workloads: &'a HashMap<NetworkAddress, Arc<Workload>>,
     services: &'a HashMap<NetworkAddress, Arc<Service>>,
+    services_by_hostname: &'a HashMap<Strng, Vec<Arc<Service>>>,
     staged_services: &'a HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
     policies: &'a HashMap<Strng, Authorization>,
 }
@@ -171,6 +172,7 @@ impl serde::Serialize for ProxyState {
         let serializable = ProxyStateSerialization {
             workloads: &self.workloads.by_addr,
             services: &self.services.by_vip,
+            services_by_hostname: &self.services.by_host,
             staged_services: &self.services.staged_services,
             policies: &self.policies.by_key,
         };
