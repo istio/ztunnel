@@ -59,7 +59,7 @@ pub trait SocketFactory {
 
     fn new_tcp_v6(&self) -> std::io::Result<TcpSocket>;
 
-    fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<TcpListener>;
+    fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<socket::Listener>;
 
     fn udp_bind(&self, addr: SocketAddr) -> std::io::Result<tokio::net::UdpSocket>;
 }
@@ -69,17 +69,23 @@ pub struct DefaultSocketFactory;
 
 impl SocketFactory for DefaultSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<TcpSocket> {
-        TcpSocket::new_v4()
+        TcpSocket::new_v4().and_then(|s| {
+            s.set_nodelay(true)?;
+            Ok(s)
+        })
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<TcpSocket> {
-        TcpSocket::new_v6()
+        TcpSocket::new_v6().and_then(|s| {
+            s.set_nodelay(true)?;
+            Ok(s)
+        })
     }
 
-    fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<TcpListener> {
+    fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<socket::Listener> {
         let std_sock = std::net::TcpListener::bind(addr)?;
         std_sock.set_nonblocking(true)?;
-        TcpListener::from_std(std_sock)
+        TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
 
     fn udp_bind(&self, addr: SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
@@ -411,12 +417,12 @@ impl TryFrom<&str> for TraceParent {
 
 pub(super) fn maybe_set_transparent(
     pi: &ProxyInputs,
-    listener: &TcpListener,
+    listener: &socket::Listener,
 ) -> Result<bool, Error> {
     Ok(match pi.cfg.enable_original_source {
         Some(true) => {
             // Explicitly enabled. Return error if we cannot set it.
-            socket::set_transparent(listener)?;
+            listener.set_transparent()?;
             true
         }
         Some(false) => {
@@ -425,7 +431,7 @@ pub(super) fn maybe_set_transparent(
         }
         None => {
             // Best effort
-            socket::set_transparent(listener).is_ok()
+            listener.set_transparent().is_ok()
         }
     })
 }

@@ -95,7 +95,6 @@ impl ConnSpawner {
         let connector = cert.outbound_connector(key.dst_id.clone())?;
         let tcp_stream =
             super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
-        tcp_stream.set_nodelay(true)?;
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
         let sender =

@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config;
+use crate::{config, socket};
 use std::sync::Arc;
+use tokio::net::TcpSocket;
 
 use super::netns::InpodNetns;
 
@@ -79,17 +80,27 @@ impl InPodSocketFactory {
 
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(tokio::net::TcpSocket::new_v4)
+        self.configure(|| {
+            TcpSocket::new_v4().and_then(|s| {
+                s.set_nodelay(true)?;
+                Ok(s)
+            })
+        })
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(tokio::net::TcpSocket::new_v6)
+        self.configure(|| {
+            TcpSocket::new_v6().and_then(|s| {
+                s.set_nodelay(true)?;
+                Ok(s)
+            })
+        })
     }
 
-    fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
         let std_sock = self.configure(|| std::net::TcpListener::bind(addr))?;
         std_sock.set_nonblocking(true)?;
-        tokio::net::TcpListener::from_std(std_sock)
+        tokio::net::TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
 
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
@@ -119,7 +130,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
         self.sf.new_tcp_v6()
     }
 
-    fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
         let sock = self.sf.configure(|| match addr {
             std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
             std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
@@ -130,7 +141,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
         }
 
         sock.bind(addr)?;
-        sock.listen(128)
+        sock.listen(128).map(socket::Listener::new)
     }
 
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
@@ -210,7 +221,7 @@ mod test {
 
         let sock_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         {
-            let s = sf.tcp_bind(sock_addr).unwrap();
+            let s = sf.tcp_bind(sock_addr).unwrap().inner();
 
             // make sure mark nad port re-use are set
             let sock_ref = socket2::SockRef::from(&s);
@@ -257,7 +268,7 @@ mod test {
 
         let sock_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         {
-            let s = sf.tcp_bind(sock_addr).unwrap();
+            let s = sf.tcp_bind(sock_addr).unwrap().inner();
 
             // make sure mark nad port re-use are set
             let sock_ref = socket2::SockRef::from(&s);
