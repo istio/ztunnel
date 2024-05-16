@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::proxy::ConnectionResult;
+use crate::proxy::Error::{BackendDisconnected, ClientDisconnected};
 use pin_project_lite::pin_project;
 use std::cmp;
 use std::future::Future;
@@ -75,24 +76,38 @@ where
     let (mut rd, mut wd) = downstream.split_into_buffered_reader();
     let (mut ru, mut wu) = upstream.split_into_buffered_reader();
 
-    let (mut sent, mut received): (u64, u64) = (0, 0);
-
     let downstream_to_upstream = async {
         let res = copy_buf(&mut rd, &mut wu, stats, false).await;
         trace!(?res, "send");
-        sent = res?;
-        wu.shutdown().await
+        wu.shutdown().await?;
+        res
     };
 
     let upstream_to_downstream = async {
         let res = copy_buf(&mut ru, &mut wd, stats, true).await;
-        trace!(?res, "recieve");
-        received = res?;
-        wd.shutdown().await
+        trace!(?res, "receive");
+        wd.shutdown().await?;
+        res
     };
 
-    tokio::try_join!(downstream_to_upstream, upstream_to_downstream)?;
+    // join!() them rather than try_join!() so that we keep complete either end once one side is complete.
+    let (sent, received) = tokio::join!(downstream_to_upstream, upstream_to_downstream);
 
+    // Convert some error messages to easier to understand
+    let sent = sent.map_err(|e| {
+        if e.kind() == io::ErrorKind::NotConnected {
+            BackendDisconnected
+        } else {
+            e.into()
+        }
+    })?;
+    let received = received.map_err(|e| {
+        if e.kind() == io::ErrorKind::NotConnected {
+            ClientDisconnected
+        } else {
+            e.into()
+        }
+    })?;
     trace!(sent, received, "copy complete");
     Ok(())
 }
