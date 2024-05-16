@@ -242,6 +242,12 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 
+    #[error("destination disconnected before all data was written")]
+    BackendDisconnected,
+
+    #[error("client disconnected before all data was written")]
+    ClientDisconnected,
+
     #[error("connection failed: {0}")]
     ConnectionFailed(io::Error),
 
