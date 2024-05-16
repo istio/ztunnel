@@ -22,7 +22,7 @@ use drain::Watch;
 
 use hyper::header::FORWARDED;
 
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
@@ -43,12 +43,12 @@ use crate::{assertions, copy, proxy, socket, strng};
 pub struct Outbound {
     pi: ProxyInputs,
     drain: Watch,
-    listener: TcpListener,
+    listener: socket::Listener,
 }
 
 impl Outbound {
     pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Outbound, Error> {
-        let listener: TcpListener = pi
+        let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
@@ -61,7 +61,7 @@ impl Outbound {
         }
 
         info!(
-            address=%listener.local_addr().expect("local_addr available"),
+            address=%listener.local_addr(),
             component="outbound",
             transparent,
             "listener established",
@@ -74,7 +74,7 @@ impl Outbound {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().expect("local_addr available")
+        self.listener.local_addr()
     }
 
     pub(super) async fn run(self) {
@@ -104,6 +104,7 @@ impl Outbound {
                             id: TraceParent::new(),
                             pool: pool.clone(),
                         };
+                        stream.set_nodelay(true).unwrap();
                         let span = info_span!("outbound", id=%oc.id);
                         let serve_outbound_connection = (async move {
                             debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn START");

@@ -106,9 +106,9 @@ impl Server {
             .tcp_bind(addr)
             .map_err(|e| Error::Bind(addr, e))?;
         // Save the bound address.
-        let tcp_addr = tcp_listener.local_addr().unwrap();
+        let tcp_addr = tcp_listener.local_addr();
         server.register_listener(
-            tcp_listener,
+            tcp_listener.inner(),
             Duration::from_secs(DEFAULT_TCP_REQUEST_TIMEOUT),
         );
 
