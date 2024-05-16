@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tracing::{error, info};
 
 use crate::proxy::outbound::OutboundConnection;
@@ -30,19 +30,19 @@ use crate::socket;
 
 pub(super) struct Socks5 {
     pi: ProxyInputs,
-    listener: TcpListener,
+    listener: socket::Listener,
     drain: Watch,
 }
 
 impl Socks5 {
     pub(super) async fn new(pi: ProxyInputs, drain: Watch) -> Result<Socks5, Error> {
-        let listener: TcpListener = pi
+        let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.socks5_addr.unwrap())
             .map_err(|e| Error::Bind(pi.cfg.socks5_addr.unwrap(), e))?;
 
         info!(
-            address=%listener.local_addr().expect("local_addr available"),
+            address=%listener.local_addr(),
             component="socks5",
             "listener established",
         );
@@ -55,7 +55,7 @@ impl Socks5 {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().expect("local_addr available")
+        self.listener.local_addr()
     }
 
     pub async fn run(self) {

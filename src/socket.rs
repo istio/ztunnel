@@ -17,8 +17,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use tokio::io;
 
-use tokio::net::TcpListener;
 use tokio::net::TcpSocket;
+use tokio::net::{TcpListener, TcpStream};
 
 #[cfg(target_os = "linux")]
 use {
@@ -26,11 +26,6 @@ use {
     std::io::ErrorKind,
     tracing::warn,
 };
-
-#[cfg(target_os = "linux")]
-pub fn set_transparent(l: &TcpListener) -> io::Result<()> {
-    SockRef::from(l).set_ip_transparent(true)
-}
 
 #[cfg(target_os = "linux")]
 pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
@@ -110,14 +105,6 @@ pub fn set_freebind_and_transparent(_: &TcpSocket) -> io::Result<()> {
     ))
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn set_transparent(_: &TcpListener) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        "IP_TRANSPARENT not supported on this operating system",
-    ))
-}
-
 #[cfg(target_os = "linux")]
 pub fn set_mark<S: std::os::unix::io::AsFd>(socket: &S, mark: u32) -> io::Result<()> {
     let socket = SockRef::from(socket);
@@ -163,5 +150,42 @@ mod linux {
 
     pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
         sock.original_dst_ipv6()
+    }
+}
+
+/// Listener is a wrapper For TCPListener with sane defaults. Notably, setting NODELAY
+pub struct Listener(TcpListener);
+
+impl Listener {
+    pub fn new(l: TcpListener) -> Self {
+        Self(l)
+    }
+    pub fn local_addr(&self) -> SocketAddr {
+        self.0.local_addr().expect("local_addr is available")
+    }
+    pub fn inner(self) -> TcpListener {
+        self.0
+    }
+    pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        let (stream, remote) = self.0.accept().await?;
+        stream.set_nodelay(true)?;
+        Ok((stream, remote))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Listener {
+    pub fn set_transparent(&self) -> io::Result<()> {
+        SockRef::from(&self.0).set_ip_transparent(true)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Listener {
+    pub fn set_transparent(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "IP_TRANSPARENT not supported on this operating system",
+        ))
     }
 }

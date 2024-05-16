@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use drain::Watch;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 use tracing::{error, info, trace, Instrument};
 
@@ -32,7 +32,7 @@ use crate::{assertions, copy, rbac, strng};
 use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
-    listener: TcpListener,
+    listener: socket::Listener,
     pi: ProxyInputs,
     drain: Watch,
 }
@@ -42,7 +42,7 @@ impl InboundPassthrough {
         mut pi: ProxyInputs,
         drain: Watch,
     ) -> Result<InboundPassthrough, Error> {
-        let listener: TcpListener = pi
+        let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_plaintext_addr)
             .map_err(|e| Error::Bind(pi.cfg.inbound_plaintext_addr, e))?;
@@ -56,7 +56,7 @@ impl InboundPassthrough {
         }
 
         info!(
-            address=%listener.local_addr().expect("local_addr available"),
+            address=%listener.local_addr(),
             component="inbound plaintext",
             transparent,
             "listener established",
@@ -69,7 +69,7 @@ impl InboundPassthrough {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().expect("local_addr available")
+        self.listener.local_addr()
     }
 
     pub(super) async fn run(self, illegal_ports: Arc<HashSet<u16>>) {

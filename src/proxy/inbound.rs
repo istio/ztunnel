@@ -24,7 +24,7 @@ use futures::stream::StreamExt;
 
 use http::{Method, Response, StatusCode};
 
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
 
@@ -41,7 +41,7 @@ use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
-use crate::{assertions, copy, proxy, strng, tls};
+use crate::{assertions, copy, proxy, socket, strng, tls};
 
 use crate::proxy::h2;
 use crate::state::workload::{self, NetworkAddress, Workload};
@@ -50,14 +50,14 @@ use crate::strng::Strng;
 use crate::tls::TlsError;
 
 pub(super) struct Inbound {
-    listener: TcpListener,
+    listener: socket::Listener,
     drain: Watch,
     pi: ProxyInputs,
 }
 
 impl Inbound {
     pub(super) async fn new(mut pi: ProxyInputs, drain: Watch) -> Result<Inbound, Error> {
-        let listener: TcpListener = pi
+        let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
@@ -69,7 +69,7 @@ impl Inbound {
             pi.cfg = Arc::new(cfg);
         }
         info!(
-            address=%listener.local_addr().expect("local_addr available"),
+            address=%listener.local_addr(),
             component="inbound",
             transparent,
             "listener established",
@@ -82,7 +82,7 @@ impl Inbound {
     }
 
     pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr().expect("local_addr available")
+        self.listener.local_addr()
     }
 
     pub(super) async fn run(self, illegal_ports: Arc<HashSet<u16>>) {
@@ -91,7 +91,10 @@ impl Inbound {
             cert_manager: self.pi.cert_manager.clone(),
             network: strng::new(&self.pi.cfg.network),
         };
-        let stream = crate::hyper_util::tls_server(acceptor, self.listener);
+
+        // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
+        // Although, that is *after* the TLS handshake; in theory we may get some benefits to setting it earlier.
+        let stream = crate::hyper_util::tls_server(acceptor, self.listener.inner());
         let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
 
         let (sub_drain_signal, sub_drain) = drain::channel();
@@ -289,12 +292,8 @@ impl Inbound {
         };
 
         let orig_src = enable_original_source.then_some(source_ip);
-        let stream = super::freebind_connect(orig_src, upstream_addr, pi.socket_factory.as_ref())
-            .await
-            .and_then(|s| {
-                s.set_nodelay(true)?;
-                Ok(s)
-            });
+        let stream =
+            super::freebind_connect(orig_src, upstream_addr, pi.socket_factory.as_ref()).await;
         let mut stream = match stream {
             Err(err) => {
                 result_tracker.record(Err(err));
