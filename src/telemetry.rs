@@ -12,51 +12,69 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
+use itertools::Itertools;
 use std::fmt::Debug;
 use std::str::FromStr;
 use std::time::Instant;
+use std::{env, fmt, io};
 
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
+use serde::ser::SerializeMap;
+use serde::Serializer;
 
 use thiserror::Error;
 use tracing::{error, field, info, warn, Event, Subscriber};
+use tracing_appender::non_blocking::NonBlocking;
+use tracing_core::field::Visit;
+use tracing_core::span::Record;
+use tracing_core::Field;
+use tracing_log::NormalizeEvent;
 
-use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::format::{JsonVisitor, Writer};
 
-use tracing_subscriber::fmt::{format, FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter, prelude::*, reload, Layer, Registry};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
 
-pub fn setup_logging() {
+pub fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
     Lazy::force(&APPLICATION_START_TIME);
-    tracing_subscriber::registry().with(fmt_layer()).init();
+    let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .lossy(false)
+        .buffered_lines_limit(128_000)
+        .finish(std::io::stdout());
+    tracing_subscriber::registry()
+        .with(fmt_layer(non_blocking))
+        .init();
+    _guard
 }
 
-fn json_fmt() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
-    let format = tracing_subscriber::fmt::format().json().flatten_event(true);
+fn json_fmt(writer: NonBlocking) -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
     let format = tracing_subscriber::fmt::layer()
-        .event_format(format)
-        .fmt_fields(format::JsonFields::default());
+        .with_writer(writer)
+        .event_format(IstioJsonFormat())
+        .fmt_fields(IstioJsonFormat());
     Box::new(format)
 }
 
-fn plain_fmt() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
+fn plain_fmt(writer: NonBlocking) -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
     let format = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
         .event_format(IstioFormat())
         .fmt_fields(IstioFormat());
     Box::new(format)
 }
 
-fn fmt_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
+fn fmt_layer(writer: NonBlocking) -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
     let format = if env::var("LOG_FORMAT").unwrap_or("plain".to_string()) == "json" {
-        json_fmt()
+        json_fmt(writer)
     } else {
-        plain_fmt()
+        plain_fmt(writer)
     };
     let filter = default_filter();
     let (layer, reload) = reload::Layer::new(format.with_filter(filter));
@@ -131,6 +149,9 @@ pub enum Error {
     #[error("logging is not initialized")]
     Uninitialized,
 }
+
+// IstioFormat encodes logs in the "standard" Istio JSON formatting used in the rest of the code
+struct IstioJsonFormat();
 
 // IstioFormat encodes logs in the "standard" Istio formatting used in the rest of the code
 struct IstioFormat();
@@ -241,11 +262,160 @@ where
     }
 }
 
+struct JsonVisitory<S: SerializeMap> {
+    serializer: S,
+    state: Result<(), S::Error>,
+}
+
+impl<S: SerializeMap> JsonVisitory<S> {
+    pub(crate) fn done(self) -> Result<S, S::Error> {
+        let JsonVisitory { serializer, state } = self;
+        state?;
+        Ok(serializer)
+    }
+}
+
+impl<S: SerializeMap> Visit for JsonVisitory<S> {
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        // If previous fields serialized successfully, continue serializing,
+        // otherwise, short-circuit and do nothing.
+        if self.state.is_ok() {
+            self.state = self.serializer.serialize_entry(field.name(), &value)
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if self.state.is_ok() {
+            self.state = self
+                .serializer
+                .serialize_entry(field.name(), &format_args!("{:?}", value))
+        }
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if self.state.is_ok() {
+            self.state = self.serializer.serialize_entry(field.name(), &value)
+        }
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        if self.state.is_ok() {
+            self.state = self.serializer.serialize_entry(field.name(), &value)
+        }
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        if self.state.is_ok() {
+            self.state = self.serializer.serialize_entry(field.name(), &value)
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if self.state.is_ok() {
+            self.state = self.serializer.serialize_entry(field.name(), &value)
+        }
+    }
+}
+pub struct WriteAdaptor<'a> {
+    fmt_write: &'a mut dyn fmt::Write,
+}
+impl<'a> WriteAdaptor<'a> {
+    pub fn new(fmt_write: &'a mut dyn fmt::Write) -> Self {
+        Self { fmt_write }
+    }
+}
+impl<'a> io::Write for WriteAdaptor<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let s =
+            std::str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        self.fmt_write
+            .write_str(s)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        Ok(s.as_bytes().len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+impl<S, N> FormatEvent<S, N> for IstioJsonFormat
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        let meta = event.normalized_metadata();
+        let meta = meta.as_ref().unwrap_or_else(|| event.metadata());
+        let mut write = || {
+            let mut timestamp = String::with_capacity(28);
+            let mut w = Writer::new(&mut timestamp);
+            SystemTime.format_time(&mut w)?;
+            let mut sx = serde_json::Serializer::new(WriteAdaptor::new(&mut writer));
+            let mut serializer = sx.serialize_map(event.fields().try_len().ok())?;
+            serializer.serialize_entry("level", &meta.level().as_str().to_ascii_lowercase())?;
+            serializer.serialize_entry("time", &timestamp)?;
+            serializer.serialize_entry("scope", meta.target())?;
+            let mut v = JsonVisitory {
+                serializer,
+                state: Ok(()),
+            };
+            event.record(&mut v);
+
+            let mut serializer = v.done()?;
+            if let Some(scope) = ctx.event_scope() {
+                for span in scope.from_root() {
+                    let ext = span.extensions();
+                    if let Some(fields) = &ext.get::<FormattedFields<N>>() {
+                        let json = serde_json::from_str::<serde_json::Value>(fields)?;
+                        serializer.serialize_entry(span.metadata().name(), &json)?;
+                    }
+                }
+            };
+            SerializeMap::end(serializer)?;
+            Ok::<(), anyhow::Error>(())
+        };
+        write().map_err(|_| fmt::Error)?;
+        writeln!(writer)
+    }
+}
+
+// Copied from tracing_subscriber json
+impl<'a> FormatFields<'a> for IstioJsonFormat {
+    /// Format the provided `fields` to the provided `writer`, returning a result.
+    fn format_fields<R: RecordFields>(&self, mut writer: Writer<'_>, fields: R) -> fmt::Result {
+        use tracing_subscriber::field::VisitOutput;
+        let mut v = JsonVisitor::new(&mut writer);
+        fields.record(&mut v);
+        v.finish()
+    }
+
+    fn add_fields(
+        &self,
+        _current: &'a mut FormattedFields<Self>,
+        _fields: &Record<'_>,
+    ) -> fmt::Result {
+        // We could implement this but tracing doesn't give us an easy or efficient way to do so.
+        // for not just disallow it.
+        debug_assert!(false, "add_fields is inefficient and should not be used");
+        Ok(())
+    }
+}
+
 /// Mod testing gives access to a test logger, which stores logs in memory for querying.
 /// Inspired by https://github.com/dbrgn/tracing-test
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use crate::telemetry::{fmt_layer, APPLICATION_START_TIME};
+    use crate::telemetry::{fmt_layer, IstioJsonFormat, APPLICATION_START_TIME};
     use itertools::Itertools;
     use once_cell::sync::Lazy;
     use serde_json::Value;
@@ -254,7 +424,7 @@ pub mod testing {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use tracing_subscriber::fmt;
-    use tracing_subscriber::fmt::format;
+
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -345,12 +515,16 @@ pub mod testing {
     pub fn setup_test_logging() {
         Lazy::force(&APPLICATION_START_TIME);
         let mock_writer = MockWriter::new(global_buf());
+        let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .lossy(false)
+            .buffered_lines_limit(10)
+            .finish(std::io::stdout());
         let layer: fmt::Layer<_, _, _, _> = fmt::layer()
-            .event_format(tracing_subscriber::fmt::format().json().flatten_event(true))
-            .fmt_fields(format::JsonFields::default())
+            .event_format(IstioJsonFormat())
+            .fmt_fields(IstioJsonFormat())
             .with_writer(mock_writer);
         tracing_subscriber::registry()
-            .with(fmt_layer())
+            .with(fmt_layer(non_blocking))
             .with(layer)
             .init();
     }
