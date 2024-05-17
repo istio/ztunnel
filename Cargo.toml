@@ -100,7 +100,7 @@ backoff = "0.4.0"
 pin-project-lite = "0.2"
 pingora-pool = "0.1.0"
 flurry = "0.5.0"
-h2 = "0.4"
+h2 = "0.4.5"
 http = "1.1"
 split-iter = "0.1"
 arcstr = { version = "1.1", features = ["serde"] }
@@ -142,7 +142,3 @@ test-case = "3.3"
 oid-registry = "0.7"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 ctor = "0.2"
-
-[patch.crates-io]
-# TODO h2 0.4.5 (https://github.com/istio/ztunnel/issues/1000)
-h2 = { git = "https://github.com/hyperium/h2", rev = "be129832df989bf28940da3618827e190ae64ef2" }
