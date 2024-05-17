@@ -29,7 +29,7 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 fn main() -> anyhow::Result<()> {
-    telemetry::setup_logging();
+    let _log_flush = telemetry::setup_logging();
     let config = Arc::new(config::parse_config()?);
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
