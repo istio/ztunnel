@@ -49,22 +49,28 @@ impl Resolver for Forwarder {
 #[cfg(any(unix, target_os = "windows"))]
 mod tests {
     use crate::dns::resolver::Resolver;
-    use crate::test_helpers::dns::{a_request, n, socket_addr, system_forwarder};
+    use crate::test_helpers::dns::{a_request, ip, n, run_dns, socket_addr};
     use crate::test_helpers::helpers::initialize_telemetry;
     use hickory_proto::op::ResponseCode;
     use hickory_proto::rr::RecordType;
     use hickory_resolver::error::ResolveErrorKind;
     use hickory_server::server::Protocol;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn found() {
         initialize_telemetry();
 
-        let f = system_forwarder();
+        let f = run_dns(HashMap::from([(
+            n("test.example.com."),
+            vec![ip("1.1.1.1")],
+        )]))
+        .await
+        .unwrap();
 
         // Lookup a host.
         let req = a_request(
-            n("www.google.com"),
+            n("test.example.com"),
             socket_addr("1.1.1.1:80"),
             Protocol::Udp,
         );
@@ -72,7 +78,7 @@ mod tests {
         assert!(!answer.is_authoritative());
 
         let record = answer.record_iter().next().unwrap();
-        assert_eq!(n("www.google.com."), *record.name());
+        assert_eq!(n("test.example.com."), *record.name());
         assert_eq!(RecordType::A, record.record_type());
     }
 
@@ -80,7 +86,7 @@ mod tests {
     async fn not_found() {
         initialize_telemetry();
 
-        let f = system_forwarder();
+        let f = run_dns(HashMap::new()).await.unwrap();
 
         // Lookup a host.
         let req = a_request(

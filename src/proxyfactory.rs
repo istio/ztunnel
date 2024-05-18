@@ -117,6 +117,7 @@ impl ProxyFactory {
                     self.dns_metrics.clone().unwrap(),
                     drain,
                     socket_factory.as_ref(),
+                    false,
                 )
                 .await?,
             );
