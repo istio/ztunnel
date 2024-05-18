@@ -262,23 +262,23 @@ impl ProxyState {
                 return None;
             };
 
-            let target_port = svc.ports.get(&addr.port());
-            // If endpoint overrides the target port, use that instead
-            let target_port = ep.port.get(&addr.port()).or(target_port);
-            let target_port = match (target_port, &wl.application_tunnel) {
-                // service or endpoint specified a target port, use it
-                (Some(tp), _) => tp.to_owned(),
-                // when using app tunnel, don't require the port to be found on the service
-                (_, Some(ApplicationTunnel { port: Some(_), .. })) => addr.port(),
-                // otherwise, error
-                _ => {
-                    debug!(
-                        "found VIP {}, but port {} was unknown",
-                        addr.ip(),
-                        addr.port()
-                    );
-                    return None;
-                }
+            let target_port = if let Some(&port) = ep.port.get(&addr.port()) {
+                // prefer endpoint port mapping
+                port
+            } else if let Some(&port) = svc.ports.get(&addr.port()) {
+                // otherwise, see if the service has this port
+                port
+            } else if let Some(ApplicationTunnel { port: Some(_), .. }) = &wl.application_tunnel {
+                // when using app tunnel, we don't require the port to be found on the service
+                addr.port()
+            } else {
+                // no app tunnel or port mapping, error
+                debug!(
+                    "found VIP {}, but port {} was unknown",
+                    addr.ip(),
+                    addr.port()
+                );
+                return None;
             };
 
             let us = Upstream {
