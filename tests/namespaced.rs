@@ -310,8 +310,25 @@ mod namespaced {
 
         let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
+        // waypoint referenced via vip
+        let waypoint_ip = TEST_VIP.parse::<IpAddr>()?;
+        // service with no ports (workload app tunnel makes this work)
+        manager
+            .service_builder("waypoint")
+            .addresses(vec![NetworkAddress {
+                network: strng::EMPTY,
+                address: waypoint_ip,
+            }])
+            .register()
+            .await?;
+
         let waypoint = manager
             .workload_builder("waypoint", DEFAULT_NODE)
+            .service(
+                "default/waypoint.default.svc.cluster.local",
+                PROXY_PROTOCOL_PORT,
+                PROXY_PROTOCOL_PORT,
+            )
             .mutate_workload(|w| {
                 w.application_tunnel = Some(ApplicationTunnel {
                     protocol: Protocol::PROXY,
@@ -320,7 +337,6 @@ mod namespaced {
             })
             .register()
             .await?;
-        let waypoint_ip = waypoint.ip();
 
         let server = manager
             .workload_builder("server", DEFAULT_NODE)
