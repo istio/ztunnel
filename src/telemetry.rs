@@ -517,8 +517,10 @@ pub mod testing {
         let mock_writer = MockWriter::new(global_buf());
         let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
             .lossy(false)
-            .buffered_lines_limit(10)
+            .buffered_lines_limit(1)
             .finish(std::io::stdout());
+        // Ensure we do not close until the program ends
+        Box::leak(Box::new(_guard));
         let layer: fmt::Layer<_, _, _, _> = fmt::layer()
             .event_format(IstioJsonFormat())
             .fmt_fields(IstioJsonFormat())
