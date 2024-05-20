@@ -86,15 +86,18 @@ impl Server {
         metrics: Arc<Metrics>,
         drain: Watch,
         socket_factory: &(dyn SocketFactory + Send + Sync),
+        allow_unknown_source: bool,
     ) -> Result<Self, Error> {
         // Create the DNS server, backed by ztunnel data structures.
-        let handler = dns::handler::Handler::new(Arc::new(Store::new(
+        let mut store = Store::new(
             domain,
             network.as_ref().to_string(),
             state,
             forwarder,
             metrics,
-        )));
+        );
+        store.allow_unknown_source = allow_unknown_source;
+        let handler = dns::handler::Handler::new(Arc::new(store));
         let mut server = ServerFuture::new(handler);
         info!(
             address=%addr,
@@ -165,6 +168,7 @@ struct Store {
     domain: Name,
     svc_domain: Name,
     metrics: Arc<Metrics>,
+    allow_unknown_source: bool,
 }
 
 impl Store {
@@ -185,6 +189,7 @@ impl Store {
             domain,
             svc_domain,
             metrics,
+            allow_unknown_source: false,
         }
     }
 
@@ -508,6 +513,10 @@ impl Resolver for Store {
                     source: None,
                 });
                 debug!("unknown source");
+                #[cfg(any(test, feature = "testing"))]
+                if self.allow_unknown_source {
+                    return self.forward(None, request).await;
+                }
                 return Err(LookupError::ResponseCode(ResponseCode::ServFail));
             }
             Some(client) => client,
@@ -774,7 +783,7 @@ mod tests {
     use crate::metrics;
     use crate::strng;
     use crate::test_helpers::dns::{
-        a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client,
+        a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client, run_dns,
         send_request, server_request,
     };
     use crate::test_helpers::helpers::initialize_telemetry;
@@ -894,6 +903,7 @@ mod tests {
                 state,
                 forwarder,
                 metrics: test_metrics(),
+                allow_unknown_source: false,
             };
 
             let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
@@ -1191,6 +1201,7 @@ mod tests {
             test_metrics(),
             drain,
             &factory,
+            false,
         )
         .await
         .unwrap();
@@ -1246,6 +1257,7 @@ mod tests {
             state,
             forwarder,
             metrics: test_metrics(),
+            allow_unknown_source: false,
         };
 
         let bad_client_ip = ip("5.5.5.5");
@@ -1263,8 +1275,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_forwarder() {
+    async fn forward_to_server() {
         initialize_telemetry();
+        // Other test use fake forwarder; here we forward to a real server (which we run locally)
 
         struct Case {
             name: &'static str,
@@ -1275,7 +1288,7 @@ mod tests {
         let cases = [
             Case {
                 name: "success: www.google.com",
-                host: "www.google.com.",
+                host: "test.example.com.",
                 expect_code: ResponseCode::NoError,
             },
             Case {
@@ -1288,7 +1301,14 @@ mod tests {
         // Create and start the server.
         let domain = "cluster.local".to_string();
         let state = state();
-        let forwarder = Arc::new(SystemForwarder::new().unwrap());
+        let forwarder = Arc::new(
+            run_dns(HashMap::from([(
+                n("test.example.com."),
+                vec![ip("1.1.1.1")],
+            )]))
+            .await
+            .unwrap(),
+        );
         let (_signal, drain) = drain::channel();
         let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
@@ -1300,6 +1320,7 @@ mod tests {
             test_metrics(),
             drain,
             &factory,
+            false,
         )
         .await
         .unwrap();
@@ -1342,6 +1363,7 @@ mod tests {
             domain: n("cluster.local"),
             svc_domain: n("svc.cluster.local."),
             metrics: test_metrics(),
+            allow_unknown_source: false,
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1353,27 +1375,48 @@ mod tests {
             }
         }
     }
-    // #[tokio::test]
-    // async fn large_response() {
-    //     // Create and start the proxy with an an empty state. The forwarder is configured to
-    //     // return a large response.
-    //     let addr = new_socket_addr().await;
-    //     let state = new_proxy_state(&[local_workload()], &[], &[]).state;
-    //     let forwarder = Arc::new(FakeForwarder {
-    //         search_domains: vec![],
-    //         ips: HashMap::from([(n("large.com."), new_large_response())]),
-    //     });
-    //     let proxy = DnsProxy::new(addr, NW1, state, forwarder).await.unwrap();
-    //     tokio::spawn(proxy.run());
-    //
-    //     let mut tcp_client = new_tcp_client(addr).await;
-    //
-    //     let resp = send_with_max_size(&mut tcp_client, n("large.com."), RecordType::A, 20).await;
-    //     //resp.answers()[0].
-    //     //let resp = send_request(&mut tcp_client, n("large.com."), RecordType::A).await;
-    //     //assert!(resp.truncated());
-    //     println!("{:?}", resp);
-    // }
+    #[tokio::test]
+    async fn large_response() {
+        initialize_telemetry();
+        // Create and start the proxy with an an empty state. The forwarder is configured to
+        // return a large response.
+        let state = new_proxy_state(&[], &[], &[]);
+        let forwarder = Arc::new(FakeForwarder {
+            search_domains: vec![],
+            ips: HashMap::from([(n("large.com."), new_large_response())]),
+        });
+        let domain = "cluster.local".to_string();
+        let (_signal, drain) = drain::channel();
+        let factory = crate::proxy::DefaultSocketFactory;
+        let server = Server::new(
+            domain,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            NW1,
+            state,
+            forwarder,
+            test_metrics(),
+            drain,
+            &factory,
+            true,
+        )
+        .await
+        .unwrap();
+        let tcp_addr = server.tcp_address();
+        let udp_addr = server.udp_address();
+        tokio::spawn(server.run());
+
+        let mut tcp_client = new_tcp_client(tcp_addr).await;
+        let mut udp_client = new_udp_client(udp_addr).await;
+
+        let resp = send_request(&mut tcp_client, n("large.com."), RecordType::A).await;
+        assert!(!resp.truncated(), "TCP should not truncate");
+        assert_eq!(256, resp.answers().len());
+
+        let resp = send_request(&mut udp_client, n("large.com."), RecordType::A).await;
+        // UDP is truncated
+        assert!(resp.truncated());
+        assert_eq!(75, resp.answers().len(), "expected UDP to be truncated");
+    }
 
     /// Sort the IP records so that we can directly compare them to the expected. The resulting
     /// list will contain CNAME first, followed by A, and then by AAAA. Within each record type,
@@ -1401,13 +1444,13 @@ mod tests {
         });
     }
 
-    // fn new_large_response() -> Vec<Record> {
-    //     let mut out = Vec::new();
-    //     for i in 0..64 {
-    //         out.push(a(n("aaaaaaaaaaaa.aaaaaa."), ipv4(format!("240.0.0.{i}"))));
-    //     }
-    //     out
-    // }
+    fn new_large_response() -> Vec<IpAddr> {
+        let mut out = Vec::new();
+        for i in 0..256 {
+            out.push(ip(format!("240.0.0.{i}")));
+        }
+        out
+    }
 
     fn req(host: Name, client_ip: IpAddr, query_type: RecordType) -> Request {
         let socket_addr = match client_ip {

@@ -213,7 +213,7 @@ fn test_custom_workload(
     hostname_only: bool,
 ) -> anyhow::Result<LocalWorkload> {
     let host = match hostname_only {
-        true => format!("example.{}.internal.", ip_str),
+        true => format!("{}.reflect.internal.", ip_str),
         false => "".to_string(),
     };
     let wips = match hostname_only {
