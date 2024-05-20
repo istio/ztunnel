@@ -1410,13 +1410,11 @@ mod tests {
 
         let resp = send_request(&mut tcp_client, n("large.com."), RecordType::A).await;
         assert!(!resp.truncated(), "TCP should not truncate");
-        assert_eq!(244, resp.answers().len());
+        assert_eq!(256, resp.answers().len());
 
         let resp = send_request(&mut udp_client, n("large.com."), RecordType::A).await;
-        //resp.answers()[0].
-        //let resp = send_request(&mut tcp_client, n("large.com."), RecordType::A).await;
+        // UDP is truncated
         assert!(resp.truncated());
-        // Not sure we can rely on the truncation being exactly 75, but for now assert
         assert_eq!(75, resp.answers().len(), "expected UDP to be truncated");
     }
 
@@ -1448,7 +1446,7 @@ mod tests {
 
     fn new_large_response() -> Vec<IpAddr> {
         let mut out = Vec::new();
-        for i in 0..244 {
+        for i in 0..256 {
             out.push(ip(format!("240.0.0.{i}")));
         }
         out

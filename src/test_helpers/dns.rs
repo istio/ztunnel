@@ -216,7 +216,7 @@ pub struct TestDnsServer {
 }
 
 impl TestDnsServer {
-    /// resolver_config gets a config that can be used passed to Ztunnel to make this the resolver
+    /// resolver_config gets a config that can be passed to Ztunnel to make this the resolver
     pub fn resolver_config(&self) -> ResolverConfig {
         internal_resolver_config(self.tcp, self.udp)
     }
@@ -251,7 +251,6 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
     let (signal, drain) = drain::channel();
     let factory = crate::proxy::DefaultSocketFactory {};
 
-    //HashMap::from([(n("www.bing.com."), vec![ip("1.1.1.1")])]),}
     let state = new_proxy_state(&[], &[], &[]);
     let forwarder = Arc::new(FakeForwarder {
         // Use the standard search domains for Kubernetes.
