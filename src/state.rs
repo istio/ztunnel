@@ -34,6 +34,7 @@ use futures_util::FutureExt;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioAsyncResolver;
+use itertools::Itertools;
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
 use serde::Serializer;
@@ -159,11 +160,10 @@ pub struct ProxyState {
 #[derive(serde::Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ProxyStateSerialization<'a> {
-    workloads: &'a HashMap<NetworkAddress, Arc<Workload>>,
-    services: &'a HashMap<NetworkAddress, Arc<Service>>,
-    services_by_hostname: &'a HashMap<Strng, Vec<Arc<Service>>>,
+    workloads: Vec<Arc<Workload>>,
+    services: Vec<Arc<Service>>,
+    policies: Vec<Authorization>,
     staged_services: &'a HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
-    policies: &'a HashMap<Strng, Authorization>,
 }
 
 impl serde::Serialize for ProxyState {
@@ -171,12 +171,37 @@ impl serde::Serialize for ProxyState {
     where
         S: Serializer,
     {
+        // Services all have hostname, so use that as the key
+        let services: Vec<_> = self
+            .services
+            .by_host
+            .iter()
+            .sorted_by_key(|k| k.0)
+            .flat_map(|k| k.1)
+            .cloned()
+            .collect();
+        // Workloads all have a UID, so use that as the key
+        let workloads: Vec<_> = self
+            .workloads
+            .by_uid
+            .iter()
+            .sorted_by_key(|k| k.0)
+            .map(|k| k.1)
+            .cloned()
+            .collect();
+        let policies: Vec<_> = self
+            .policies
+            .by_key
+            .iter()
+            .sorted_by_key(|k| k.0)
+            .map(|k| k.1)
+            .cloned()
+            .collect();
         let serializable = ProxyStateSerialization {
-            workloads: &self.workloads.by_addr,
-            services: &self.services.by_vip,
-            services_by_hostname: &self.services.by_host,
+            workloads,
+            services,
+            policies,
             staged_services: &self.services.staged_services,
-            policies: &self.policies.by_key,
         };
         serializable.serialize(serializer)
     }
