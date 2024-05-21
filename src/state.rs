@@ -226,7 +226,7 @@ impl ProxyState {
     /// Find either a workload or a service by address.
     pub fn find_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // 1. handle workload ip, if workload not found fallback to service.
-        match self.workloads.find_address_arc(network_addr) {
+        match self.workloads.find_address(network_addr) {
             None => {
                 // 2. handle service
                 if let Some(svc) = self.services.get_by_vip(network_addr) {
@@ -297,7 +297,7 @@ impl ProxyState {
         }
         if let Some(wl) = self
             .workloads
-            .find_address_arc(&network_addr(network, addr.ip()))
+            .find_address(&network_addr(network, addr.ip()))
         {
             return Some((wl, addr.port(), None));
         }
@@ -474,8 +474,8 @@ impl DemandProxyState {
         false
     }
 
-    // this should only be called once per request (for the workload itself and potentially its waypoint)
-    pub async fn pick_workload_destination(
+    //
+    async fn pick_workload_destination(
         &self,
         dst_workload: &Workload,
         src_workload: &Workload,
@@ -483,8 +483,7 @@ impl DemandProxyState {
     ) -> Result<IpAddr, Error> {
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
         // if/when we support that, this function may need to move to get access to the necessary metadata.
-        // Randomly pick an IP
-        // TODO: do this more efficiently, and not just randomly
+        // Randomly pick an IP. Note this is a workload, not a service, so this should only have up to 2 IPs (dual stack).
         if let Some(ip) = dst_workload.workload_ips.choose(&mut rand::thread_rng()) {
             return Ok(*ip);
         }
@@ -496,11 +495,12 @@ impl DemandProxyState {
             return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
         }
         let ip =
-            Box::pin(self.load_balance_for_hostname(dst_workload, src_workload, metrics)).await?;
+            Box::pin(self.resolve_workload_address_with_dns(dst_workload, src_workload, metrics))
+                .await?;
         Ok(ip)
     }
 
-    async fn load_balance_for_hostname(
+    async fn resolve_workload_address_with_dns(
         &self,
         workload: &Workload,
         src_workload: &Workload,
@@ -636,7 +636,7 @@ impl DemandProxyState {
         debug!(%addr, "fetch workload and service");
         let fetch = |addr: &NetworkAddress| {
             let state = self.state.read().unwrap();
-            state.workloads.find_address_arc(addr).map(|wl| {
+            state.workloads.find_address(addr).map(|wl| {
                 let svc = state.services.get_by_workload(&wl);
                 (wl, svc)
             })
@@ -652,7 +652,7 @@ impl DemandProxyState {
     }
 
     // only support workload
-    pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Workload> {
+    pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload");
         if let Some(wl) = self.state.read().unwrap().workloads.find_address(addr) {
@@ -663,20 +663,6 @@ impl DemandProxyState {
         }
         self.fetch_on_demand(addr.to_string().into()).await;
         self.state.read().unwrap().workloads.find_address(addr)
-    }
-
-    // only support workload
-    pub async fn fetch_workload_arc(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
-        // Wait for it on-demand, *if* needed
-        debug!(%addr, "fetch workload");
-        if let Some(wl) = self.state.read().unwrap().workloads.find_address_arc(addr) {
-            return Some(wl);
-        }
-        if !self.supports_on_demand() {
-            return None;
-        }
-        self.fetch_on_demand(addr.to_string().into()).await;
-        self.state.read().unwrap().workloads.find_address_arc(addr)
     }
 
     // only support workload
@@ -728,7 +714,7 @@ impl DemandProxyState {
         wl: &Workload,
         source_workload: &Workload,
         metrics: Arc<proxy::Metrics>,
-    ) -> Result<Option<Upstream>, proxy::Error> {
+    ) -> Result<Option<Upstream>, Error> {
         let Some(gw_address) = &wl.waypoint else {
             return Ok(None);
         };
@@ -766,7 +752,7 @@ impl DemandProxyState {
 
     /// Looks for the given address to find either a workload or service by IP. If not found
     /// locally, attempts to fetch on-demand.
-    pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
+    async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
         if let Some(address) = self.state.read().unwrap().find_address(network_addr) {
@@ -782,7 +768,7 @@ impl DemandProxyState {
 
     /// Looks for the given hostname to find either a workload or service by IP. If not found
     /// locally, attempts to fetch on-demand.
-    pub async fn fetch_hostname(&self, hostname: &NamespacedHostname) -> Option<Address> {
+    async fn fetch_hostname(&self, hostname: &NamespacedHostname) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%hostname, "fetch hostname");
         if let Some(address) = self.state.read().unwrap().find_hostname(hostname) {

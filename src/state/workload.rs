@@ -648,13 +648,8 @@ impl WorkloadStore {
         }
     }
 
-    /// Finds the workload by address.
-    pub fn find_address(&self, addr: &NetworkAddress) -> Option<Workload> {
-        self.by_addr.get(addr).map(|wl| wl.deref().clone())
-    }
-
-    /// Finds the workload by address, as an arc. TODO: make find_address and other functions directly return an Arc too
-    pub fn find_address_arc(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
+    /// Finds the workload by address, as an arc.
+    pub fn find_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
         self.by_addr.get(addr).cloned()
     }
 
@@ -841,12 +836,12 @@ mod tests {
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 1);
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
-            Some(Workload {
+            Some(Arc::new(Workload {
                 uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
                 name: "some name".into(),
                 ..test_helpers::test_default_workload()
-            })
+            }))
         );
         assert_eq!(state.read().unwrap().services.num_vips(), 0);
         assert_eq!(state.read().unwrap().services.num_services(), 0);
@@ -855,23 +850,23 @@ mod tests {
         updater.remove(&mut state.write().unwrap(), &"/invalid".into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
-            Some(Workload {
+            Some(Arc::new(Workload {
                 uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
                 name: "some name".into(),
                 ..test_helpers::test_default_workload()
-            })
+            }))
         );
 
         updater.remove(&mut state.write().unwrap(), &uid2.as_str().into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
-            Some(Workload {
+            Some(Arc::new(Workload {
                 uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
                 name: "some name".into(),
                 ..test_helpers::test_default_workload()
-            })
+            }))
         );
 
         updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());

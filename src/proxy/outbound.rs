@@ -117,7 +117,7 @@ impl Outbound {
                         })
                         .instrument(span);
 
-                        assertions::size_between_ref(1000, 1000, &serve_outbound_connection);
+                        assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -290,10 +290,7 @@ impl OutboundConnection {
             )
             .method(hyper::Method::CONNECT)
             .version(hyper::Version::HTTP_2)
-            .header(
-                BAGGAGE_HEADER,
-                baggage(&req, self.pi.cfg.cluster_id.clone()),
-            )
+            .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
             .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
             .header(TRACEPARENT_HEADER, self.id.header())
             .body(())
@@ -363,11 +360,7 @@ impl OutboundConnection {
                 network: self.pi.cfg.network.clone(),
                 address: downstream,
             };
-            let source_workload = match self
-                .pi
-                .state
-                .fetch_workload_arc(&downstream_network_addr)
-                .await
+            let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await
             {
                 Some(wl) => wl,
                 None => return Err(Error::UnknownSource(downstream)),

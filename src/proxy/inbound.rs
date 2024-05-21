@@ -232,7 +232,7 @@ impl Inbound {
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
-                pi.state.fetch_workload_arc(&src_network_addr).await
+                pi.state.fetch_workload(&src_network_addr).await
             }
         };
 
@@ -378,7 +378,7 @@ impl Inbound {
             let hbone_target = state.find_address(hbone_dst);
 
             // We can only sandwich a Workload waypoint
-            let conn_wl = state.workloads.find_address_arc(connection_dst);
+            let conn_wl = state.workloads.find_address(connection_dst);
 
             // on-demand fetch then retry
             let (Some(hbone_target), Some(conn_wl)) = (hbone_target, conn_wl) else {
