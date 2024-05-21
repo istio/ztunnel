@@ -232,7 +232,7 @@ impl Inbound {
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
-                pi.state.fetch_workload(&src_network_addr).await
+                pi.state.fetch_workload_arc(&src_network_addr).await
             }
         };
 
@@ -314,7 +314,7 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Arc<Service>>), Error> {
+    ) -> Result<(SocketAddr, AppProtocol, Arc<Workload>, Vec<Arc<Service>>), Error> {
         let dst = &NetworkAddress {
             network: conn.dst_network.clone(),
             address: hbone_addr.ip(),
@@ -357,7 +357,7 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Option<(Workload, Vec<Arc<Service>>)> {
+    ) -> Option<(Arc<Workload>, Vec<Arc<Service>>)> {
         let connection_dst = &NetworkAddress {
             network: conn.dst_network.clone(),
             address: conn.dst.ip(),
@@ -369,7 +369,8 @@ impl Inbound {
 
         // Outer option tells us whether or not we can retry
         // Some(None) means we have enough information to decide this isn't sandwich
-        let lookup = || -> Option<Option<(Workload, Vec<Arc<Service>>)>> {
+        #[allow(clippy::type_complexity)]
+        let lookup = || -> Option<Option<(Arc<Workload>, Vec<Arc<Service>>)>> {
             let state = state.read();
 
             // TODO Allow HBONE address to be a hostname. We have to respect rules about
@@ -377,7 +378,7 @@ impl Inbound {
             let hbone_target = state.find_address(hbone_dst);
 
             // We can only sandwich a Workload waypoint
-            let conn_wl = state.workloads.find_address(connection_dst);
+            let conn_wl = state.workloads.find_address_arc(connection_dst);
 
             // on-demand fetch then retry
             let (Some(hbone_target), Some(conn_wl)) = (hbone_target, conn_wl) else {
@@ -415,8 +416,7 @@ impl Inbound {
                         return Some(None);
                     }
                     let svc = state.services.get_by_workload(&wl);
-                    // TODO: use Arc more pervasive and remove this clone.
-                    Some((Arc::unwrap_or_clone(wl), svc))
+                    Some((wl, svc))
                 }
             })
         };

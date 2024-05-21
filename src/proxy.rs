@@ -581,12 +581,12 @@ where
     };
 
     match state.fetch_destination(&gateway_address.destination).await {
-        Some(Address::Workload(wl)) => return predicate(&wl),
+        Some(Address::Workload(wl)) => return predicate(wl.as_ref()),
         Some(Address::Service(svc)) => {
             for (_ep_uid, ep) in svc.endpoints.iter() {
                 // fetch workloads by workload UID since we may not have an IP for an endpoint (e.g., endpoint is just a hostname)
                 let wl = state.fetch_workload_by_uid(&ep.workload_uid).await;
-                if wl.as_ref().is_some_and(&predicate) {
+                if wl.as_ref().is_some_and(|wl| predicate(wl.as_ref())) {
                     return true;
                 }
             }

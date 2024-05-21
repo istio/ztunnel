@@ -664,8 +664,8 @@ impl WorkloadStore {
     }
 
     /// Finds the workload by uid.
-    pub fn find_uid(&self, uid: &Strng) -> Option<Workload> {
-        self.by_uid.get(uid).map(|wl| wl.deref().clone())
+    pub fn find_uid(&self, uid: &Strng) -> Option<Arc<Workload>> {
+        self.by_uid.get(uid).cloned()
     }
 
     pub fn has_identity(&self, identity: &Identity) -> bool {
@@ -1242,12 +1242,12 @@ mod tests {
         .try_into()
         .unwrap();
         for _ in 0..1000 {
-            if let Some(us) = state.state.read().unwrap().find_upstream(
+            if let Some((workload, _, _)) = state.state.read().unwrap().find_upstream(
                 strng::EMPTY,
                 &wl,
                 "127.0.1.1:80".parse().unwrap(),
             ) {
-                let n = &us.workload.name; // borrow name instead of cloning
+                let n = &workload.name; // borrow name instead of cloning
                 found.insert(n.to_string()); // insert an owned copy of the borrowed n
                 wants.remove(&n.to_string()); // remove using the borrow
             }
@@ -1289,27 +1289,35 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.as_ref().unwrap().service_account, "default");
-        let us = demand.state.read().unwrap().find_upstream(
-            strng::EMPTY,
-            wl.as_ref().unwrap(),
-            "127.10.0.1:80".parse().unwrap(),
-        );
+        let (_, port, svc) = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream(
+                strng::EMPTY,
+                wl.as_ref().unwrap(),
+                "127.10.0.1:80".parse().unwrap(),
+            )
+            .expect("should get");
         // Make sure we get a valid VIP
-        assert!(us.is_some());
-        assert_eq!(us.clone().unwrap().port, 8080);
+        assert_eq!(port, 8080);
         assert_eq!(
-            us.unwrap().sans,
+            svc.unwrap().subject_alt_names,
             vec!["spiffe://cluster.local/ns/default/sa/local".to_string()]
         );
 
         // test that we can have a service in another network than workloads it selects
-        let us = demand.state.read().unwrap().find_upstream(
-            "remote".into(),
-            wl.as_ref().unwrap(),
-            "127.10.0.2:80".parse().unwrap(),
-        );
+        let (_, port, _) = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream(
+                "remote".into(),
+                wl.as_ref().unwrap(),
+                "127.10.0.2:80".parse().unwrap(),
+            )
+            .expect("should get");
         // Make sure we get a valid VIP
-        assert!(us.is_some());
-        assert_eq!(us.unwrap().port, 8080);
+        assert_eq!(port, 8080);
     }
 }

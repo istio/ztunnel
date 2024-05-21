@@ -218,36 +218,29 @@ impl OutboundConnection {
                 return;
             }
         };
-        debug!(
-            "request from {} to {} via {} type {:#?}",
-            req.source.name, dest_addr, req.gateway, req.request_type
-        );
-        if block_passthrough && req.destination_workload.is_none() {
+        if block_passthrough && req.actual_destination_workload.is_none() {
             // This is mostly used by socks5. For typical outbound calls, we need to allow calls to arbitrary
             // domains. But for socks5
             metrics::log_early_deny(
                 source_addr,
                 dest_addr,
                 Reporter::source,
-                Error::UnknownDestination(req.destination.ip()),
+                Error::UnknownDestination(dest_addr.ip()),
             );
             return;
         }
         // TODO: should we use the original address or the actual address? Both seems nice!
-        let _conn_guard =
-            self.pi
-                .connection_manager
-                .track_outbound(source_addr, dest_addr, req.gateway);
+        let _conn_guard = self.pi.connection_manager.track_outbound(
+            source_addr,
+            dest_addr,
+            req.actual_destination,
+        );
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = if req.protocol == Protocol::HBONE {
-            Some(req.destination)
-        } else {
-            None
-        };
+        let hbone_target = req.hbone_target_destination;
         let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
-            req.gateway,
+            req.actual_destination,
             hbone_target,
             start,
             Self::conn_metrics_from_request(&req),
@@ -256,7 +249,7 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
+                self.proxy_to_hbone(source_stream, source_addr, req, &result_tracker)
                     .await
             }
             Protocol::TCP => {
@@ -271,64 +264,47 @@ impl OutboundConnection {
         &mut self,
         stream: TcpStream,
         remote_addr: SocketAddr,
-        req: &Request,
+        req: Box<Request>,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        debug!(
-            "proxy to {} using HBONE via {} type {:#?}",
-            req.destination, req.gateway, req.request_type
-        );
-
-        let upgraded = Box::pin(self.build_hbone_request(remote_addr, &req)).await?;
-
+        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
         copy::copy_bidirectional(stream, upgraded, connection_stats).await
     }
 
-    async fn build_hbone_request(
+    async fn send_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
-        req: &&Request,
+        req: Box<OutboundRequest::HBONE>,
     ) -> Result<H2Stream, Error> {
-        let mut allowed_sans: Vec<Identity> = Vec::new();
-        for san in req.upstream_sans.iter() {
-            match Identity::from_str(san) {
-                Ok(ident) => allowed_sans.push(ident.clone()),
-                Err(err) => {
-                    warn!("error parsing SAN {}: {}", san, err)
-                }
-            }
-        }
-
-        allowed_sans.push(
-            req.expected_identity
-                .clone()
-                .expect("HBONE request must have expected identity"),
-        );
-        let dst_identity = allowed_sans;
-
-        let pool_key = Box::new(pool::WorkloadKey {
-            src_id: req.source.identity(),
-            dst_id: dst_identity.clone(),
-            src: remote_addr.ip(),
-            dst: req.gateway,
-        });
-
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
-        if let Some(svc) = &req.destination_service {
+        if let Some(svc) = &req.intended_destination_service {
             f.set_host(svc.hostname.as_str());
         }
 
         let request = http::Request::builder()
-            .uri(&req.destination.to_string())
+            .uri(
+                &req.hbone_target_destination
+                    .expect("HBONE must have target")
+                    .to_string(),
+            )
             .method(hyper::Method::CONNECT)
             .version(hyper::Version::HTTP_2)
-            .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
+            .header(
+                BAGGAGE_HEADER,
+                baggage(&req, self.pi.cfg.cluster_id.clone()),
+            )
             .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
             .header(TRACEPARENT_HEADER, self.id.header())
             .body(())
             .expect("builder with known status code should not fail");
 
+        let pool_key = Box::new(pool::WorkloadKey {
+            src_id: req.source.identity(),
+            dst_id: req.upstream_sans,
+            src: remote_addr.ip(),
+            dst: req.actual_destination,
+        });
         let upgraded = Box::pin(self.pool.send_request_pooled(&pool_key, request))
             .instrument(trace_span!("outbound connect"))
             .await?;
@@ -341,18 +317,18 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        debug!(
-            "Proxying to {} using TCP via {} type {:?}",
-            req.destination, req.gateway, req.request_type
-        );
         // Create a TCP connection to upstream
         let local = if self.enable_orig_src {
             super::get_original_src_from_stream(stream)
         } else {
             None
         };
-        let mut outbound =
-            super::freebind_connect(local, req.gateway, self.pi.socket_factory.as_ref()).await?;
+        let mut outbound = super::freebind_connect(
+            local,
+            req.actual_destination,
+            self.pi.socket_factory.as_ref(),
+        )
+        .await?;
 
         // Proxying data between downstream and upstream
         copy::copy_bidirectional(stream, &mut outbound, connection_stats).await
@@ -363,13 +339,13 @@ impl OutboundConnection {
             reporter: Reporter::source,
             derived_source: None,
             source: Some(req.source.clone()),
-            destination: req.destination_workload.clone(),
+            destination: req.actual_destination_workload.clone(),
             connection_security_policy: if req.protocol == Protocol::HBONE {
                 metrics::SecurityPolicy::mutual_tls
             } else {
                 metrics::SecurityPolicy::unknown
             },
-            destination_service: req.destination_service.clone(),
+            destination_service: req.intended_destination_service.clone(),
         }
     }
 
@@ -378,24 +354,34 @@ impl OutboundConnection {
         downstream: IpAddr,
         target: SocketAddr,
     ) -> Result<Box<Request>, Error> {
-        let downstream_network_addr = NetworkAddress {
-            network: strng::new(&self.pi.cfg.network),
-            address: downstream,
-        };
-        let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await {
-            Some(wl) => wl,
-            None => return Err(Error::UnknownSource(downstream)),
-        };
-        if let Some(ref wl_info) = self.pi.proxy_workload_info {
-            // make sure that the workload we fetched matches the workload info we got over ZDS.
-            if !wl_info.matches(&source_workload) {
-                return Err(Error::MismatchedSource(downstream, wl_info.clone()));
+        // First find the source workload of this traffic. If we don't know where the request is from
+        // we will reject it.
+        let source_workload = {
+            let downstream_network_addr = NetworkAddress {
+                network: self.pi.cfg.network.clone(),
+                address: downstream,
+            };
+            let source_workload = match self
+                .pi
+                .state
+                .fetch_workload_arc(&downstream_network_addr)
+                .await
+            {
+                Some(wl) => wl,
+                None => return Err(Error::UnknownSource(downstream)),
+            };
+            if let Some(ref wl_info) = self.pi.proxy_workload_info {
+                // make sure that the workload we fetched matches the workload info we got over ZDS.
+                if !wl_info.matches(&source_workload) {
+                    return Err(Error::MismatchedSource(downstream, wl_info.clone()));
+                }
             }
-        }
+            source_workload
+        };
 
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether or not this is svc addressed
-        let svc_addressed = if let Some(Address::Service(s)) = self
+        let svc_addressed = if let Some(Address::Service(target_service)) = self
             .pi
             .state
             .fetch_destination(&Destination::Address(NetworkAddress {
@@ -405,7 +391,7 @@ impl OutboundConnection {
             .await
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally
-            if let Some(wp) = s.waypoint.clone() {
+            if let Some(wp) = target_service.waypoint.clone() {
                 let waypoint_vip = match wp.destination {
                     Destination::Address(a) => a.address,
                     Destination::Hostname(_) => {
@@ -418,35 +404,28 @@ impl OutboundConnection {
                 let waypoint_us = self
                     .pi
                     .state
-                    .fetch_upstream(self.pi.cfg.network.clone(), &source_workload, waypoint_vip)
-                    .await
+                    .fetch_upstream(
+                        self.pi.cfg.network.clone(),
+                        &source_workload,
+                        waypoint_vip,
+                        self.pi.metrics.clone(),
+                    )
+                    .await?
                     .ok_or(proxy::Error::UnknownWaypoint(
                         "unable to determine waypoint upstream".to_string(),
                     ))?;
 
-                let waypoint_workload = waypoint_us.workload;
-                let waypoint_ip = self
-                    .pi
-                    .state
-                    .pick_workload_destination(
-                        &waypoint_workload,
-                        &source_workload,
-                        self.pi.metrics.clone(),
-                    )
-                    .await?; // if we can't load balance just return the error
-
-                let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
-                let id = waypoint_workload.identity();
+                let upstream_sans = waypoint_us.workload_and_services_san();
+                let waypoint_socket_address =
+                    SocketAddr::new(waypoint_us.selected_workload_ip, waypoint_us.port);
                 return Ok(Box::new(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
-                    destination: target,
-                    destination_workload: Some(waypoint_workload),
-                    destination_service: Some(ServiceDescription::from(&*s)),
-                    expected_identity: Some(id),
-                    gateway: waypoint_socket_address,
-                    request_type: RequestType::ToServerWaypoint,
-                    upstream_sans: waypoint_us.sans,
+                    hbone_target_destination: Some(target),
+                    actual_destination_workload: Some(waypoint_us.workload),
+                    intended_destination_service: Some(ServiceDescription::from(&*target_service)),
+                    actual_destination: waypoint_socket_address,
+                    upstream_sans,
                 }));
             }
             // this was service addressed but we did not find a waypoint
@@ -460,8 +439,13 @@ impl OutboundConnection {
         let us = match self
             .pi
             .state
-            .fetch_upstream(source_workload.network.clone(), &source_workload, target)
-            .await
+            .fetch_upstream(
+                source_workload.network.clone(),
+                &source_workload,
+                target,
+                self.pi.metrics.clone(),
+            )
+            .await?
         {
             Some(us) => us,
             None => {
@@ -469,28 +453,22 @@ impl OutboundConnection {
                 return Ok(Box::new(Request {
                     protocol: Protocol::TCP,
                     source: source_workload,
-                    destination: target,
-                    destination_workload: None,
-                    destination_service: None,
-                    expected_identity: None,
-                    gateway: target,
-                    request_type: RequestType::Passthrough,
+                    hbone_target_destination: None,
+                    actual_destination_workload: None,
+                    intended_destination_service: None,
+                    actual_destination: target,
                     upstream_sans: vec![],
                 }));
             }
         };
 
-        let workload_ip = self
-            .pi
-            .state
-            .pick_workload_destination(&us.workload, &source_workload, self.pi.metrics.clone())
-            .await?;
+        let workload_ip = us.selected_workload_ip;
 
         let from_waypoint = proxy::check_from_waypoint(
             &self.pi.state,
             &us.workload,
             Some(&source_workload.identity()),
-            &downstream_network_addr.address,
+            &downstream,
         )
         .await;
 
@@ -498,67 +476,74 @@ impl OutboundConnection {
         // Don't traverse waypoint if traffic was addressed to a service which did not have a waypoint
         if !from_waypoint && !svc_addressed {
             // For case upstream server has enabled waypoint
-            match self
+            let waypoint = self
                 .pi
                 .state
-                .fetch_waypoint(&us.workload, &source_workload, workload_ip)
-                .await
-            {
-                Ok(None) => {} // workload doesn't have a waypoint; this is fine
-                Ok(Some(waypoint_us)) => {
-                    let waypoint_workload = waypoint_us.workload;
-                    let waypoint_ip = self
-                        .pi
-                        .state
-                        .pick_workload_destination(
-                            &waypoint_workload,
-                            &source_workload,
-                            self.pi.metrics.clone(),
-                        )
-                        .await?;
-                    let waypoint_socket_address = SocketAddr::new(waypoint_ip, waypoint_us.port);
-                    let id = waypoint_workload.identity();
-                    return Ok(Box::new(Request {
-                        // Always use HBONE here
-                        protocol: Protocol::HBONE,
-                        source: source_workload,
-                        // Use the original VIP, not translated
-                        destination: target,
-                        destination_workload: Some(waypoint_workload),
-                        destination_service: us.destination_service.clone(),
-                        expected_identity: Some(id),
-                        gateway: waypoint_socket_address,
-                        request_type: RequestType::ToServerWaypoint,
-                        upstream_sans: us.sans,
-                    }));
-                }
-                // we expected the workload to have a waypoint, but could not find one
-                Err(e) => return Err(Error::UnknownWaypoint(e.to_string())),
+                .fetch_waypoint(&us.workload, &source_workload, self.pi.metrics.clone())
+                .await?;
+            if let Some(waypoint) = waypoint {
+                let actual_destination = waypoint.workload_socket_addr();
+                let upstream_sans = waypoint.workload_and_services_san();
+                return Ok(Box::new(Request {
+                    // Always use HBONE here
+                    protocol: Protocol::HBONE,
+                    source: source_workload,
+                    // Use the original VIP, not translated
+                    hbone_target_destination: Some(target),
+                    actual_destination_workload: Some(waypoint.workload),
+                    intended_destination_service: us.destination_service.clone(),
+                    actual_destination,
+                    upstream_sans,
+                }));
             }
+            // Workload doesn't have a waypoint; send directly
         }
 
         // only change the port if we're sending HBONE
         let gw_addr = match us.workload.protocol {
             Protocol::HBONE => SocketAddr::from((workload_ip, self.hbone_port)),
-            Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
+            Protocol::TCP => us.workload_socket_addr(),
+        };
+        let hbone_target_destination = match us.workload.protocol {
+            Protocol::HBONE => Some(us.workload_socket_addr()),
+            Protocol::TCP => None,
         };
 
         // For case no waypoint for both side and direct to remote node proxy
+        let id = us.workload.identity();
         Ok(Box::new(Request {
             protocol: us.workload.protocol,
             source: source_workload,
-            destination: SocketAddr::from((workload_ip, us.port)),
-            destination_workload: Some(us.workload.clone()),
-            destination_service: us.destination_service.clone(),
-            expected_identity: Some(us.workload.identity()),
-            gateway: gw_addr,
-            request_type: RequestType::Direct,
-            upstream_sans: us.sans,
+            hbone_target_destination,
+            actual_destination_workload: Some(us.workload.clone()),
+            intended_destination_service: us.destination_service.clone(),
+            actual_destination: gw_addr,
+            upstream_sans: workload_and_services_san(us.service_sans, id),
         }))
     }
 }
 
-fn baggage(r: &Request, cluster: String) -> String {
+/// workload_and_services_san is a helper to merge service SAN with a distinct workload identity.
+/// We use all the services sans and the workload identity. These are an "OR" logically.
+/// Note: service SANs are uncommon; the typical case is we are only using workload SAN
+fn workload_and_services_san(
+    service_sans: Vec<Strng>,
+    workload_identity: Identity,
+) -> Vec<Identity> {
+    service_sans
+        .into_iter()
+        .flat_map(|san| match Identity::from_str(&san) {
+            Ok(id) => Some(id),
+            Err(err) => {
+                warn!("ignoring invalid SAN {}: {}", san, err);
+                None
+            }
+        })
+        .chain(std::iter::once(workload_identity))
+        .collect()
+}
+
+fn baggage(r: &OutboundRequest::HBONE, cluster: String) -> String {
     format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version}",
             namespace = r.source.namespace,
             workload_type = r.source.workload_type,
@@ -568,32 +553,34 @@ fn baggage(r: &Request, cluster: String) -> String {
     )
 }
 
-#[derive(Debug)]
-struct Request {
-    protocol: Protocol,
-    source: Workload,
-    destination: SocketAddr,
-    // The intended destination workload. This is always the original intended target, even in the case
-    // of other proxies along the path.
-    destination_workload: Option<Workload>,
-    destination_service: Option<ServiceDescription>,
-    // The identity we will assert for the next hop; this may not be the same as destination_workload
-    // in the case of proxies along the path.
-    expected_identity: Option<Identity>,
-    gateway: SocketAddr,
-    request_type: RequestType,
+enum OutboundRequest {
+    TCP {
+        source: Arc<Workload>,
+        destination: SocketAddr,
+        destination_service: Option<ServiceDescription>,
+    },
+    HBONE {
+        // Source workload sending the request
+        source: Arc<Workload>,
+        // The actual destination workload we are targeting. When proxying through a waypoint, this is the waypoint,
+        // not the original.
+        // May be unset in case of passthrough.
+        actual_destination_workload: Option<Arc<Workload>>,
+        // The intended destination service for the request. When proxying through a waypoint, this is *not* the waypoint
+        // service, but rather the original intended service.
+        // May be unset in case of non-service traffic
+        intended_destination_service: Option<ServiceDescription>,
+        // The address we should actually request to. This is the "next hop" address; could be a waypoint, network gateway,
+        // etc.
+        // When using HBONE, the `hbone_target_destination` is the inner :authority and `actual_destination` is the TCP destination.
+        actual_destination: SocketAddr,
+        // If using HBONE, the inner (:authority) of the HBONE request.
+        hbone_target_destination: SocketAddr,
 
-    upstream_sans: Vec<Strng>,
-}
-
-#[derive(PartialEq, Debug)]
-enum RequestType {
-    /// ToServerWaypoint refers to requests targeting a server waypoint proxy
-    ToServerWaypoint,
-    /// Direct requests are made directly to a intended backend pod
-    Direct,
-    /// Passthrough refers to requests with an unknown target
-    Passthrough,
+        // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
+        // in the case of proxies along the path.
+        upstream_sans: Vec<Identity>,
+    }
 }
 
 #[cfg(test)]
@@ -674,9 +661,11 @@ mod tests {
                 expect,
                 Some(ExpectedRequest {
                     protocol: r.protocol,
-                    destination: &r.destination.to_string(),
-                    gateway: &r.gateway.to_string(),
-                    request_type: r.request_type,
+                    hbone_destination: &r
+                        .hbone_target_destination
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                    destination: &r.actual_destination.to_string(),
                 })
             );
         } else {
@@ -696,9 +685,8 @@ mod tests {
             }),
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
+                hbone_destination: "",
                 destination: "1.2.3.4:80",
-                gateway: "1.2.3.4:80",
-                request_type: RequestType::Passthrough,
             }),
         )
         .await;
@@ -720,9 +708,8 @@ mod tests {
             }),
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
+                hbone_destination: "",
                 destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:80",
-                request_type: RequestType::Direct,
             }),
         )
         .await;
@@ -744,9 +731,8 @@ mod tests {
             }),
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:15008",
-                request_type: RequestType::Direct,
+                hbone_destination: "127.0.0.2:80",
+                destination: "127.0.0.2:15008",
             }),
         )
         .await;
@@ -768,9 +754,8 @@ mod tests {
             }),
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
+                hbone_destination: "",
                 destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:80",
-                request_type: RequestType::Direct,
             }),
         )
         .await;
@@ -792,9 +777,8 @@ mod tests {
             }),
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.2:15008",
-                request_type: RequestType::Direct,
+                hbone_destination: "127.0.0.2:80",
+                destination: "127.0.0.2:15008",
             }),
         )
         .await;
@@ -838,9 +822,8 @@ mod tests {
             // Even though source has a waypoint, we don't use it
             Some(ExpectedRequest {
                 protocol: Protocol::TCP,
+                hbone_destination: "",
                 destination: "127.0.0.1:80",
-                gateway: "127.0.0.1:80",
-                request_type: RequestType::Direct,
             }),
         )
         .await;
@@ -868,9 +851,8 @@ mod tests {
             // Should use the waypoint
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                destination: "127.0.0.2:80",
-                gateway: "127.0.0.10:15008",
-                request_type: RequestType::ToServerWaypoint,
+                hbone_destination: "127.0.0.2:80",
+                destination: "127.0.0.10:15008",
             }),
         )
         .await;
@@ -905,9 +887,8 @@ mod tests {
             // Should use the waypoint
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                destination: "127.0.0.3:80",
-                gateway: "127.0.0.10:15008",
-                request_type: RequestType::ToServerWaypoint,
+                hbone_destination: "127.0.0.3:80",
+                destination: "127.0.0.10:15008",
             }),
         )
         .await;
@@ -916,8 +897,7 @@ mod tests {
     #[derive(PartialEq, Debug)]
     struct ExpectedRequest<'a> {
         protocol: Protocol,
+        hbone_destination: &'a str,
         destination: &'a str,
-        gateway: &'a str,
-        request_type: RequestType,
     }
 }

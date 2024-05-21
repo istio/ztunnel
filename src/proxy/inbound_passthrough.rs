@@ -173,7 +173,7 @@ impl InboundPassthrough {
                 network: pi.cfg.network.as_str().into(),
                 address: source_addr.ip(),
             };
-            pi.state.fetch_workload(&network_addr_srcip).await
+            pi.state.fetch_workload_arc(&network_addr_srcip).await
         };
         let derived_source = metrics::DerivedWorkload {
             identity: rbac_ctx.conn.src_identity.clone(),

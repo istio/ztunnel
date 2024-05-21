@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::identity::SecretManager;
+use crate::identity::{Identity, SecretManager};
 use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
@@ -21,7 +21,7 @@ use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerScopes, Serv
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
-    NetworkAddress, Protocol, WaypointError, Workload, WorkloadStore,
+    NetworkAddress, WaypointError, Workload, WorkloadStore,
 };
 use crate::strng::Strng;
 use crate::tls;
@@ -42,6 +42,7 @@ use std::convert::Into;
 use std::default::Default;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
 
@@ -51,29 +52,38 @@ pub mod policy;
 pub mod service;
 pub mod workload;
 
-#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Upstream {
-    pub workload: Workload,
+    /// Workload is the workload we are connecting to
+    pub workload: Arc<Workload>,
+    /// selected_workload_ip defines the IP address we should actually use to connect to this workload
+    /// This handles multiple IPs (dual stack) or Hostname destinations (DNS resolution)
+    pub selected_workload_ip: IpAddr,
+    /// Port is the port we should connect to
     pub port: u16,
-    pub sans: Vec<Strng>,
+    /// Service SANs defines SANs defined at the service level *only*. A complete view of things requires
+    /// looking at workload.identity() as well.
+    pub service_sans: Vec<Strng>,
+    /// If this was from a service, the service info.
     pub destination_service: Option<ServiceDescription>,
 }
 
-impl fmt::Display for Upstream {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Upstream{{{} with uid {}:{} via {} ({:?}) sans:{:?}}}",
-            self.workload.name,
-            self.workload.uid,
-            self.port,
-            self.workload
-                .gateway_address
-                .map(|x| format!("{x}"))
-                .unwrap_or_else(|| "None".into()),
-            self.workload.protocol,
-            self.sans,
-        )
+impl Upstream {
+    pub fn workload_socket_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.selected_workload_ip, self.port)
+    }
+    pub fn workload_and_services_san(&self) -> Vec<Identity> {
+        self.service_sans
+            .iter()
+            .flat_map(|san| match Identity::from_str(san) {
+                Ok(id) => Some(id),
+                Err(err) => {
+                    warn!("ignoring invalid SAN {}: {}", san, err);
+                    None
+                }
+            })
+            .chain(std::iter::once(self.workload.identity()))
+            .collect()
     }
 }
 
@@ -243,12 +253,12 @@ impl ProxyState {
         }
     }
 
-    pub fn find_upstream(
+    fn find_upstream(
         &self,
         network: Strng,
         source_workload: &Workload,
         addr: SocketAddr,
-    ) -> Option<Upstream> {
+    ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
         if let Some(svc) = self
             .services
             .get_by_vip(&network_addr(network.clone(), addr.ip()))
@@ -283,25 +293,13 @@ impl ProxyState {
                 return None;
             };
 
-            let us = Upstream {
-                workload: wl,
-                port: target_port,
-                sans: svc.subject_alt_names.clone(),
-                destination_service: Some(ServiceDescription::from(svc.as_ref())),
-            };
-            return Some(us);
+            return Some((wl, target_port, Some(svc)));
         }
         if let Some(wl) = self
             .workloads
-            .find_address(&network_addr(network, addr.ip()))
+            .find_address_arc(&network_addr(network, addr.ip()))
         {
-            let us = Upstream {
-                workload: wl,
-                port: addr.port(),
-                sans: Vec::new(),
-                destination_service: None,
-            };
-            return Some(us);
+            return Some((wl, addr.port(), None));
         }
         None
     }
@@ -633,12 +631,12 @@ impl DemandProxyState {
     pub async fn fetch_workload_services(
         &self,
         addr: &NetworkAddress,
-    ) -> Option<(Workload, Vec<Arc<Service>>)> {
+    ) -> Option<(Arc<Workload>, Vec<Arc<Service>>)> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload and service");
         let fetch = |addr: &NetworkAddress| {
             let state = self.state.read().unwrap();
-            state.workloads.find_address(addr).map(|wl| {
+            state.workloads.find_address_arc(addr).map(|wl| {
                 let svc = state.services.get_by_workload(&wl);
                 (wl, svc)
             })
@@ -668,7 +666,21 @@ impl DemandProxyState {
     }
 
     // only support workload
-    pub async fn fetch_workload_by_uid(&self, uid: &Strng) -> Option<Workload> {
+    pub async fn fetch_workload_arc(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
+        // Wait for it on-demand, *if* needed
+        debug!(%addr, "fetch workload");
+        if let Some(wl) = self.state.read().unwrap().workloads.find_address_arc(addr) {
+            return Some(wl);
+        }
+        if !self.supports_on_demand() {
+            return None;
+        }
+        self.fetch_on_demand(addr.to_string().into()).await;
+        self.state.read().unwrap().workloads.find_address_arc(addr)
+    }
+
+    // only support workload
+    pub async fn fetch_workload_by_uid(&self, uid: &Strng) -> Option<Arc<Workload>> {
         // Wait for it on-demand, *if* needed
         debug!(%uid, "fetch workload");
         if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
@@ -686,21 +698,37 @@ impl DemandProxyState {
         network: Strng,
         source_workload: &Workload,
         addr: SocketAddr,
-    ) -> Option<Upstream> {
+        metrics: Arc<proxy::Metrics>,
+    ) -> Result<Option<Upstream>, Error> {
         self.fetch_address(&network_addr(network.clone(), addr.ip()))
             .await;
-        self.state
-            .read()
-            .unwrap()
-            .find_upstream(network, source_workload, addr)
+        let Some((wl, port, svc)) =
+            self.state
+                .read()
+                .unwrap()
+                .find_upstream(network, source_workload, addr)
+        else {
+            return Ok(None);
+        };
+        let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
+        let selected_workload_ip = self
+            .pick_workload_destination(&wl, source_workload, metrics)
+            .await?; // if we can't load balance just return the error
+        Ok(Some(Upstream {
+            workload: wl,
+            selected_workload_ip,
+            port,
+            service_sans: svc.map(|s| s.subject_alt_names.clone()).unwrap_or_default(),
+            destination_service: svc_desc,
+        }))
     }
 
     pub async fn fetch_waypoint(
         &self,
         wl: &Workload,
         source_workload: &Workload,
-        workload_ip: IpAddr,
-    ) -> Result<Option<Upstream>, WaypointError> {
+        metrics: Arc<proxy::Metrics>,
+    ) -> Result<Option<Upstream>, proxy::Error> {
         let Some(gw_address) = &wl.waypoint else {
             return Ok(None);
         };
@@ -709,31 +737,22 @@ impl DemandProxyState {
         let wp_nw_addr = match &gw_address.destination {
             Destination::Address(ip) => ip,
             Destination::Hostname(_) => {
-                return Err(WaypointError::UnsupportedFeature(
+                return Err(Error::UnsupportedFeature(
                     "hostname lookup not supported yet".to_string(),
                 ));
             }
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
-        match self
-            .fetch_upstream(wp_nw_addr.network.clone(), source_workload, wp_socket_addr)
-            .await
-        {
-            Some(mut upstream) => {
-                debug!(%wl.name, "found waypoint upstream");
-                match set_gateway_address(&mut upstream, workload_ip, gw_address.hbone_mtls_port) {
-                    Ok(_) => Ok(Some(upstream)),
-                    Err(e) => {
-                        debug!(%wl.name, "failed to set gateway address for upstream: {}", e);
-                        Err(WaypointError::FindWaypointError(wl.name.to_string()))
-                    }
-                }
-            }
-            None => {
-                debug!(%wl.name, "waypoint upstream not found");
-                Err(WaypointError::FindWaypointError(wl.name.to_string()))
-            }
-        }
+        let waypoint = self
+            .fetch_upstream(
+                wp_nw_addr.network.clone(),
+                source_workload,
+                wp_socket_addr,
+                metrics,
+            )
+            .await?
+            .ok_or_else(|| Err(Error::UnknownWaypoint(wl.name.to_string())))?;
+        Ok(Some(waypoint))
     }
 
     /// Looks for either a workload or service by the destination. If not found locally,
@@ -794,26 +813,6 @@ impl DemandProxyState {
             debug!(%key, "on demand ready");
         }
     }
-}
-
-pub fn set_gateway_address(
-    us: &mut Upstream,
-    workload_ip: IpAddr,
-    hbone_port: u16,
-) -> anyhow::Result<()> {
-    if us.workload.gateway_address.is_none() {
-        us.workload.gateway_address = Some(match us.workload.protocol {
-            Protocol::HBONE => {
-                let ip = us
-                    .workload
-                    .waypoint_svc_ip_address()?
-                    .unwrap_or(workload_ip);
-                SocketAddr::from((ip, hbone_port))
-            }
-            Protocol::TCP => SocketAddr::from((workload_ip, us.port)),
-        });
-    }
-    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -1045,10 +1044,10 @@ mod tests {
         state.workloads.insert(wl.clone().into(), true);
         state.services.insert(svc);
 
-        let us = state
+        let (_, port, _) = state
             .find_upstream("".into(), &wl, "10.0.0.1:80".parse().unwrap())
             .expect("upstream to be found");
-        assert_eq!(us.port, tc.expected_port());
+        assert_eq!(port, tc.expected_port());
     }
 
     #[tokio::test]
