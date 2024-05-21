@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,7 +23,7 @@ use tokio::net::TcpStream;
 use tracing::{error, info, trace, Instrument};
 
 use crate::config::ProxyMode;
-use crate::proxy::connection_manager::ConnectionManager;
+
 use crate::proxy::metrics::Reporter;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};

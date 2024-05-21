@@ -185,32 +185,34 @@ impl Proxy {
         let mut tasks = vec![
             tokio::spawn(self.inbound_passthrough.run().in_current_span()),
             tokio::spawn(self.policy_watcher.run().in_current_span()),
+            tokio::spawn(self.inbound.run().in_current_span()),
+            tokio::spawn(self.outbound.run().in_current_span()),
         ];
 
-        // TODO hbone_port is ALWAYS (by necessity) fixed in read-only config -
-        // except in (some) contrived integ test cases (direct), where we bind to random non-well-known ports,
-        // and cannot rely on a well-known port - which is why this exists, so we can ignore
-        // the config object and sidechannel the non-fixed runtime-bound port.
-        #[cfg(any(test, feature = "testing"))]
-        {
-            let hbone_port = self.inbound.address().port();
-            tasks.push(tokio::spawn(
-                self.outbound.run(hbone_port).in_current_span(),
-            ));
-            tasks.push(tokio::spawn(self.inbound.run().in_current_span()));
-            if let Some(socks5) = self.socks5 {
-                tasks.push(tokio::spawn(socks5.run(hbone_port).in_current_span()));
-            };
-        }
+        // // TODO hbone_port is ALWAYS (by necessity) fixed in read-only config -
+        // // except in (some) contrived integ test cases (direct), where we bind to random non-well-known ports,
+        // // and cannot rely on a well-known port - which is why this exists, so we can ignore
+        // // the config object and sidechannel the non-fixed runtime-bound port.
+        // #[cfg(any(test, feature = "testing"))]
+        // {
+        //     let hbone_port = self.inbound.address().port();
+        //     tasks.push(tokio::spawn(
+        //         self.outbound.run(hbone_port).in_current_span(),
+        //     ));
+        //     tasks.push(tokio::spawn(self.inbound.run().in_current_span()));
+        //     if let Some(socks5) = self.socks5 {
+        //         tasks.push(tokio::spawn(socks5.run(hbone_port).in_current_span()));
+        //     };
+        // }
 
-        #[cfg(not(any(test, feature = "testing")))]
-        {
-            tasks.push(tokio::spawn(self.inbound.run().in_current_span()));
-            tasks.push(tokio::spawn(self.outbound.run().in_current_span()));
+        // #[cfg(not(any(test, feature = "testing")))]
+        // {
+            // tasks.push(tokio::spawn(self.inbound.run().in_current_span()));
+            // tasks.push(tokio::spawn(self.outbound.run().in_current_span()));
             if let Some(socks5) = self.socks5 {
                 tasks.push(tokio::spawn(socks5.run().in_current_span()));
             };
-        }
+        // }
 
         futures::future::join_all(tasks).await;
     }

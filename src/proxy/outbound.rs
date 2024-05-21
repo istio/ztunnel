@@ -49,7 +49,7 @@ pub struct Outbound {
 
 impl Outbound {
     pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Outbound, Error> {
-        let listener: TcpListener = pi
+        let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
@@ -79,15 +79,6 @@ impl Outbound {
         self.listener.local_addr()
     }
 
-    // TODO hbone_port is ALWAYS (by necessity) fixed in read-only config -
-    // except in (some) contrived integ test cases (direct), where we bind to random non-well-known ports,
-    // and cannot rely on a well-known port - which is why this exists.
-    #[cfg(any(test, feature = "testing"))]
-    pub(super) async fn run(self, hbone_port: u16) {
-        self.inner_run(hbone_port).await
-    }
-
-    #[cfg(not(any(test, feature = "testing")))]
     pub(super) async fn run(self) {
         let hbone_port = self.pi.cfg.inbound_addr.port();
         self.inner_run(hbone_port).await

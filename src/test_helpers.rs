@@ -31,6 +31,8 @@ use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
 
+use std::sync::atomic::{Ordering, AtomicU16};
+
 use crate::strng;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
@@ -60,6 +62,8 @@ pub mod linux;
 #[cfg(target_os = "linux")]
 pub mod netns;
 
+static TEST_HBONE_PORT: AtomicU16 = AtomicU16::new(16000);
+
 pub fn can_run_privilged_test() -> bool {
     let is_root = unsafe { libc::getuid() } == 0;
     if !is_root && std::env::var("CI").is_ok() {
@@ -83,6 +87,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     xds_root_cert: Option<RootCert>,
     xds_config: Option<ConfigSource>,
 ) -> config::Config {
+    let hbone_port = TEST_HBONE_PORT.fetch_add(1, Ordering::SeqCst);
     let mut cfg = config::Config {
         xds_address: xds_addr,
         fake_ca: true,
@@ -101,7 +106,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         // Switch all addressed to localhost (so we don't make a bunch of ports expose on public internet when someone runs a test),
         // and port 0 (to avoid port conflicts)
         // inbound_addr cannot do localhost since we abuse that its listening on all of 127.0.0.0/8 range.
-        inbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        inbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), hbone_port),
         socks5_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
         admin_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         readiness_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),

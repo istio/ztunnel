@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
@@ -28,7 +28,7 @@ use tokio::net::TcpStream;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
 
-use super::connection_manager::ConnectionManager;
+
 use super::Error;
 use crate::baggage::parse_baggage_header;
 use crate::identity::{Identity, SecretManager};
