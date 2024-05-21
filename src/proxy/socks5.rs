@@ -59,11 +59,6 @@ impl Socks5 {
     }
 
     pub async fn run(self) {
-        let hbone_port = self.pi.cfg.inbound_addr.port();
-        self.inner_run(hbone_port).await
-    }
-
-    async fn inner_run(self, hbone_port: u16) {
         let inner_drain = self.drain.clone();
         let inpod = self.pi.cfg.inpod_enabled;
         let accept = async move {
@@ -86,7 +81,7 @@ impl Socks5 {
                             id: TraceParent::new(),
                             pool,
                             enable_orig_src: self.pi.cfg.enable_original_source.unwrap_or_default(),
-                            hbone_port,
+                            hbone_port: self.pi.cfg.inbound_addr.port(),
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream, stream_drain, inpod).await {

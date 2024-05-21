@@ -76,11 +76,6 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
-        let hbone_port = self.pi.cfg.inbound_addr.port();
-        self.inner_run(hbone_port).await
-    }
-
-    async fn inner_run(self, hbone_port: u16) {
         // Since we are spawning autonomous tasks to handle outbound connections for a single workload,
         // we can have situations where the workload is deleted, but a task is still "stuck"
         // waiting for a server response stream on a HTTP/2 connection or whatnot.
@@ -105,7 +100,7 @@ impl Outbound {
                             id: TraceParent::new(),
                             pool: pool.clone(),
                             enable_orig_src: self.enable_orig_src,
-                            hbone_port,
+                            hbone_port: self.pi.cfg.inbound_addr.port(),
                         };
                         stream.set_nodelay(true).unwrap();
                         let span = info_span!("outbound", id=%oc.id);
