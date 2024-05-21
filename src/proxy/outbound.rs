@@ -174,7 +174,6 @@ impl OutboundConnection {
         stream: TcpStream,
         remote_addr: SocketAddr,
         orig_dst_addr: SocketAddr,
-        block_passthrough: bool,
         out_drain: Option<Watch>,
     ) {
         match out_drain {
@@ -183,11 +182,11 @@ impl OutboundConnection {
                         _ = drain.signaled() => {
                             info!("drain signaled");
                         }
-                        res = self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough) => res
+                        res = self.proxy_to(stream, remote_addr, orig_dst_addr) => res
                 }
             }
             None => {
-                self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough)
+                self.proxy_to(stream, remote_addr, orig_dst_addr)
                     .await;
             }
         }
@@ -198,7 +197,6 @@ impl OutboundConnection {
         mut source_stream: TcpStream,
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
-        block_passthrough: bool,
     ) {
         let start = Instant::now();
 
@@ -218,42 +216,31 @@ impl OutboundConnection {
                 return;
             }
         };
-        if block_passthrough && req.actual_destination_workload.is_none() {
-            // This is mostly used by socks5. For typical outbound calls, we need to allow calls to arbitrary
-            // domains. But for socks5
-            metrics::log_early_deny(
-                source_addr,
-                dest_addr,
-                Reporter::source,
-                Error::UnknownDestination(dest_addr.ip()),
-            );
-            return;
-        }
         // TODO: should we use the original address or the actual address? Both seems nice!
         let _conn_guard = self.pi.connection_manager.track_outbound(
             source_addr,
             dest_addr,
-            req.actual_destination,
+            req.actual_destination(),
         );
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = req.hbone_target_destination;
         let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
-            req.actual_destination,
-            hbone_target,
+            req.actual_destination(),
+            req.hbone_target(),
             start,
             Self::conn_metrics_from_request(&req),
             metrics,
         ));
 
+
         let res = match req {
-            Protocol::HBONE => {
+            req@OutboundRequest::HBONE{ .. } => {
                 self.proxy_to_hbone(source_stream, source_addr, req, &result_tracker)
                     .await
             }
-            Protocol::TCP => {
-                self.proxy_to_tcp(&mut source_stream, &req, &result_tracker)
+            req@OutboundRequest::TCP{ .. } => {
+                self.proxy_to_tcp(&mut source_stream, req, &result_tracker)
                     .await
             }
         };
@@ -264,7 +251,7 @@ impl OutboundConnection {
         &mut self,
         stream: TcpStream,
         remote_addr: SocketAddr,
-        req: Box<OutboundRequest::HBONE>,
+        req: OutboundRequest::HBONE,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
@@ -274,7 +261,7 @@ impl OutboundConnection {
     async fn send_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
-        req: Box<OutboundRequest::HBONE>,
+        req: OutboundRequest::HBONE,
     ) -> Result<H2Stream, Error> {
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
@@ -314,7 +301,7 @@ impl OutboundConnection {
     async fn proxy_to_tcp(
         &mut self,
         stream: &mut TcpStream,
-        req: &Request,
+        req: Box<OutboundRequest::TCP>,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         // Create a TCP connection to upstream
@@ -325,7 +312,7 @@ impl OutboundConnection {
         };
         let mut outbound = super::freebind_connect(
             local,
-            req.actual_destination,
+            req.destination,
             self.pi.socket_factory.as_ref(),
         )
         .await?;
@@ -334,18 +321,18 @@ impl OutboundConnection {
         copy::copy_bidirectional(stream, &mut outbound, connection_stats).await
     }
 
-    fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
+    fn conn_metrics_from_request(req: &OutboundRequest) -> ConnectionOpen {
         ConnectionOpen {
             reporter: Reporter::source,
             derived_source: None,
-            source: Some(req.source.clone()),
-            destination: req.actual_destination_workload.clone(),
-            connection_security_policy: if req.protocol == Protocol::HBONE {
+            source: Some(req.source()),
+            destination: req.actual_destination_workload(),
+            connection_security_policy: if req.protocol() == Protocol::HBONE {
                 metrics::SecurityPolicy::mutual_tls
             } else {
                 metrics::SecurityPolicy::unknown
             },
-            destination_service: req.intended_destination_service.clone(),
+            destination_service: req.intended_destination_service(),
         }
     }
 
@@ -353,7 +340,7 @@ impl OutboundConnection {
         &self,
         downstream: IpAddr,
         target: SocketAddr,
-    ) -> Result<Box<OutboundRequest>, Error> {
+    ) -> Result<OutboundRequest, Error> {
         // First find the source workload of this traffic. If we don't know where the request is from
         // we will reject it.
         let source_workload = {
@@ -418,7 +405,7 @@ impl OutboundConnection {
                 let upstream_sans = waypoint_us.workload_and_services_san();
                 let waypoint_socket_address =
                     SocketAddr::new(waypoint_us.selected_workload_ip, waypoint_us.port);
-                return Ok(Box::new(Request {
+                return Ok(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     hbone_target_destination: Some(target),
@@ -426,7 +413,7 @@ impl OutboundConnection {
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination: waypoint_socket_address,
                     upstream_sans,
-                }));
+                });
             }
             // this was service addressed but we did not find a waypoint
             true
@@ -450,7 +437,7 @@ impl OutboundConnection {
             Some(us) => us,
             None => {
                 // For case no upstream found, passthrough it
-                return Ok(Box::new(Request {
+                return Ok(Request {
                     protocol: Protocol::TCP,
                     source: source_workload,
                     hbone_target_destination: None,
@@ -458,7 +445,7 @@ impl OutboundConnection {
                     intended_destination_service: None,
                     actual_destination: target,
                     upstream_sans: vec![],
-                }));
+                });
             }
         };
 
@@ -484,7 +471,7 @@ impl OutboundConnection {
             if let Some(waypoint) = waypoint {
                 let actual_destination = waypoint.workload_socket_addr();
                 let upstream_sans = waypoint.workload_and_services_san();
-                return Ok(Box::new(Request {
+                return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
                     source: source_workload,
@@ -494,7 +481,7 @@ impl OutboundConnection {
                     intended_destination_service: us.destination_service.clone(),
                     actual_destination,
                     upstream_sans,
-                }));
+                });
             }
             // Workload doesn't have a waypoint; send directly
         }
@@ -511,7 +498,7 @@ impl OutboundConnection {
 
         // For case no waypoint for both side and direct to remote node proxy
         let id = us.workload.identity();
-        Ok(Box::new(Request {
+        Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
             hbone_target_destination,
@@ -519,7 +506,7 @@ impl OutboundConnection {
             intended_destination_service: us.destination_service.clone(),
             actual_destination: gw_addr,
             upstream_sans: workload_and_services_san(us.service_sans, id),
-        }))
+        })
     }
 }
 
@@ -589,6 +576,36 @@ impl OutboundRequest {
         match self {
             OutboundRequest::TCP { destination, .. } => *destination,
             OutboundRequest::HBONE { actual_destination, .. } => *actual_destination
+        }
+    }
+    pub fn source(&self) -> Arc<Workload> {
+        match self {
+            OutboundRequest::TCP { source, .. } => source.clone(),
+            OutboundRequest::HBONE { source, .. } => source.clone()
+        }
+    }
+    pub fn actual_destination_workload(&self) -> Option<Arc<Workload>> {
+        match self {
+            OutboundRequest::TCP { destination_workload, .. } => destination_workload.clone(),
+            OutboundRequest::HBONE { actual_destination_workload, .. } => actual_destination_workload.clone()
+        }
+    }
+    pub fn intended_destination_service(&self) -> Option<ServiceDescription> {
+        match self {
+            OutboundRequest::TCP { destination_service, .. } => destination_service.clone(),
+            OutboundRequest::HBONE { intended_destination_service, .. } => intended_destination_service.clone()
+        }
+    }
+    pub fn protocol(&self) -> Protocol {
+        match self {
+            OutboundRequest::TCP { .. } => Protocol::TCP,
+            OutboundRequest::HBONE { , .. } => Protocol::HBONE
+        }
+    }
+    pub fn hbone_target(&self) -> Option<SocketAddr> {
+        match self {
+            OutboundRequest::HBONE { hbone_target_destination, .. } => Some(*hbone_target_destination),
+            _ => None,
         }
     }
 }
