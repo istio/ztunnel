@@ -189,6 +189,9 @@ pub struct Config {
 
     /// If true, then use builtin fake CA with self-signed certificates.
     pub fake_ca: bool,
+    // If true, then force config to use the linux-assigned listener address:port instead
+    // of the well-known config addr:port socketaddress. Used by `direct` tests.
+    pub fake_self_inbound: bool,
     #[serde(skip_serializing)]
     pub auth: identity::AuthSource,
     // How long ztunnel should wait for in-flight requesthandlers to finish processing
@@ -440,6 +443,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inpod_uds: parse_default(INPOD_UDS, PathBuf::from("/var/run/ztunnel/ztunnel.sock"))?,
         inpod_port_reuse: parse_default(INPOD_PORT_REUSE, true)?,
         inpod_mark: parse_default(INPOD_MARK, DEFAULT_INPOD_MARK)?,
+        fake_self_inbound: false,
     })
 }
 

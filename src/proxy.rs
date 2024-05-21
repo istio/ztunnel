@@ -158,9 +158,21 @@ impl Proxy {
         );
         Self::from_inputs(pi, drain).await
     }
-    pub(super) async fn from_inputs(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Self, Error> {
+    pub(super) async fn from_inputs(mut pi: Arc<ProxyInputs>, drain: Watch) -> Result<Self, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
+
+        // This exists for `direct` integ tests, no other reason
+        if pi.cfg.fake_self_inbound {
+            println!("TEST FAKE: overriding inbound address for test");
+            let mut old_cfg = (*pi.cfg).clone();
+            old_cfg.inbound_addr = inbound.address();
+            let mut new_pi = (*pi).clone();
+            new_pi.cfg = Arc::new(old_cfg);
+            std::mem::swap(&mut pi, &mut Arc::new(new_pi));
+            println!("TEST FAKE: new address is {:?}", pi.cfg.inbound_addr);
+        }
+
         let inbound_passthrough = InboundPassthrough::new(pi.clone(), drain.clone()).await?;
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
         let socks5 = if pi.cfg.socks5_addr.is_some() {
@@ -188,6 +200,7 @@ impl Proxy {
             tokio::spawn(self.inbound.run().in_current_span()),
             tokio::spawn(self.outbound.run().in_current_span()),
         ];
+
         if let Some(socks5) = self.socks5 {
             tasks.push(tokio::spawn(socks5.run().in_current_span()));
         };
