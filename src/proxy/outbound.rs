@@ -247,7 +247,7 @@ impl OutboundConnection {
             metrics,
         ));
 
-        let res = match req.protocol {
+        let res = match req {
             Protocol::HBONE => {
                 self.proxy_to_hbone(source_stream, source_addr, req, &result_tracker)
                     .await
@@ -264,7 +264,7 @@ impl OutboundConnection {
         &mut self,
         stream: TcpStream,
         remote_addr: SocketAddr,
-        req: Box<Request>,
+        req: Box<OutboundRequest::HBONE>,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
@@ -353,7 +353,7 @@ impl OutboundConnection {
         &self,
         downstream: IpAddr,
         target: SocketAddr,
-    ) -> Result<Box<Request>, Error> {
+    ) -> Result<Box<OutboundRequest>, Error> {
         // First find the source workload of this traffic. If we don't know where the request is from
         // we will reject it.
         let source_workload = {
@@ -556,6 +556,7 @@ fn baggage(r: &OutboundRequest::HBONE, cluster: String) -> String {
 enum OutboundRequest {
     TCP {
         source: Arc<Workload>,
+        destination_workload: Option<Arc<Workload>>,
         destination: SocketAddr,
         destination_service: Option<ServiceDescription>,
     },
@@ -580,6 +581,15 @@ enum OutboundRequest {
         // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
         // in the case of proxies along the path.
         upstream_sans: Vec<Identity>,
+    }
+}
+
+impl OutboundRequest {
+    pub fn actual_destination(&self) -> SocketAddr {
+        match self {
+            OutboundRequest::TCP { destination, .. } => *destination,
+            OutboundRequest::HBONE { actual_destination, .. } => *actual_destination
+        }
     }
 }
 
