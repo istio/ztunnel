@@ -117,7 +117,7 @@ impl Outbound {
                         })
                         .instrument(span);
 
-                        assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                        assertions::size_between_ref(1000, 1000, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);
                     }
                     Err(e) => {
@@ -212,7 +212,7 @@ impl OutboundConnection {
             return;
         }
         let req = match Box::pin(self.build_request(source_addr.ip(), dest_addr)).await {
-            Ok(req) => req,
+            Ok(req) => Box::new(req),
             Err(err) => {
                 metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
                 return;
@@ -249,7 +249,7 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, req, &result_tracker)
+                self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
                     .await
             }
             Protocol::TCP => {
@@ -264,7 +264,7 @@ impl OutboundConnection {
         &mut self,
         stream: TcpStream,
         remote_addr: SocketAddr,
-        req: Request,
+        req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
@@ -274,7 +274,7 @@ impl OutboundConnection {
     async fn send_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
-        req: Request,
+        req: &Request,
     ) -> Result<H2Stream, Error> {
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
@@ -301,7 +301,9 @@ impl OutboundConnection {
 
         let pool_key = Box::new(pool::WorkloadKey {
             src_id: req.source.identity(),
-            dst_id: req.upstream_sans,
+            // Clone here shouldn't be needed ideally, we could just take ownership of Request.
+            // But that
+            dst_id: req.upstream_sans.clone(),
             src: remote_addr.ip(),
             dst: req.actual_destination,
         });
