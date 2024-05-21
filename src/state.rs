@@ -751,7 +751,7 @@ impl DemandProxyState {
                 metrics,
             )
             .await?
-            .ok_or_else(|| Error::UnknownWaypoint(wl.name.to_string()))?;
+            .ok_or_else(|| Err(Error::UnknownWaypoint(wl.name.to_string())))?;
         Ok(Some(waypoint))
     }
 
