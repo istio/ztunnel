@@ -264,7 +264,7 @@ impl OutboundConnection {
         &mut self,
         stream: TcpStream,
         remote_addr: SocketAddr,
-        req: Box<Request>,
+        req: Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
@@ -274,7 +274,7 @@ impl OutboundConnection {
     async fn send_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
-        req: Box<OutboundRequest::HBONE>,
+        req: Request,
     ) -> Result<H2Stream, Error> {
         let mut f = http_types::proxies::Forwarded::new();
         f.add_for(remote_addr.to_string());
@@ -353,7 +353,7 @@ impl OutboundConnection {
         &self,
         downstream: IpAddr,
         target: SocketAddr,
-    ) -> Result<Box<Request>, Error> {
+    ) -> Result<Request, Error> {
         // First find the source workload of this traffic. If we don't know where the request is from
         // we will reject it.
         let source_workload = {
@@ -418,7 +418,7 @@ impl OutboundConnection {
                 let upstream_sans = waypoint_us.workload_and_services_san();
                 let waypoint_socket_address =
                     SocketAddr::new(waypoint_us.selected_workload_ip, waypoint_us.port);
-                return Ok(Box::new(Request {
+                return Ok(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     hbone_target_destination: Some(target),
@@ -426,7 +426,7 @@ impl OutboundConnection {
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination: waypoint_socket_address,
                     upstream_sans,
-                }));
+                });
             }
             // this was service addressed but we did not find a waypoint
             true
@@ -450,7 +450,7 @@ impl OutboundConnection {
             Some(us) => us,
             None => {
                 // For case no upstream found, passthrough it
-                return Ok(Box::new(Request {
+                return Ok(Request {
                     protocol: Protocol::TCP,
                     source: source_workload,
                     hbone_target_destination: None,
@@ -458,7 +458,7 @@ impl OutboundConnection {
                     intended_destination_service: None,
                     actual_destination: target,
                     upstream_sans: vec![],
-                }));
+                });
             }
         };
 
@@ -484,7 +484,7 @@ impl OutboundConnection {
             if let Some(waypoint) = waypoint {
                 let actual_destination = waypoint.workload_socket_addr();
                 let upstream_sans = waypoint.workload_and_services_san();
-                return Ok(Box::new(Request {
+                return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
                     source: source_workload,
@@ -494,7 +494,7 @@ impl OutboundConnection {
                     intended_destination_service: us.destination_service.clone(),
                     actual_destination,
                     upstream_sans,
-                }));
+                });
             }
             // Workload doesn't have a waypoint; send directly
         }
@@ -511,7 +511,7 @@ impl OutboundConnection {
 
         // For case no waypoint for both side and direct to remote node proxy
         let id = us.workload.identity();
-        Ok(Box::new(Request {
+        Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
             hbone_target_destination,
@@ -519,7 +519,7 @@ impl OutboundConnection {
             intended_destination_service: us.destination_service.clone(),
             actual_destination: gw_addr,
             upstream_sans: workload_and_services_san(us.service_sans, id),
-        }))
+        })
     }
 }
 
@@ -543,7 +543,7 @@ fn workload_and_services_san(
         .collect()
 }
 
-fn baggage(r: &OutboundRequest::HBONE, cluster: String) -> String {
+fn baggage(r: &Request, cluster: String) -> String {
     format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version}",
             namespace = r.source.namespace,
             workload_type = r.source.workload_type,
@@ -553,34 +553,28 @@ fn baggage(r: &OutboundRequest::HBONE, cluster: String) -> String {
     )
 }
 
-enum OutboundRequest {
-    TCP {
-        source: Arc<Workload>,
-        destination: SocketAddr,
-        destination_service: Option<ServiceDescription>,
-    },
-    HBONE {
-        // Source workload sending the request
-        source: Arc<Workload>,
-        // The actual destination workload we are targeting. When proxying through a waypoint, this is the waypoint,
-        // not the original.
-        // May be unset in case of passthrough.
-        actual_destination_workload: Option<Arc<Workload>>,
-        // The intended destination service for the request. When proxying through a waypoint, this is *not* the waypoint
-        // service, but rather the original intended service.
-        // May be unset in case of non-service traffic
-        intended_destination_service: Option<ServiceDescription>,
-        // The address we should actually request to. This is the "next hop" address; could be a waypoint, network gateway,
-        // etc.
-        // When using HBONE, the `hbone_target_destination` is the inner :authority and `actual_destination` is the TCP destination.
-        actual_destination: SocketAddr,
-        // If using HBONE, the inner (:authority) of the HBONE request.
-        hbone_target_destination: SocketAddr,
+struct Request {
+    protocol: Protocol,
+    // Source workload sending the request
+    source: Arc<Workload>,
+    // The actual destination workload we are targeting. When proxying through a waypoint, this is the waypoint,
+    // not the original.
+    // May be unset in case of passthrough.
+    actual_destination_workload: Option<Arc<Workload>>,
+    // The intended destination service for the request. When proxying through a waypoint, this is *not* the waypoint
+    // service, but rather the original intended service.
+    // May be unset in case of non-service traffic
+    intended_destination_service: Option<ServiceDescription>,
+    // The address we should actually request to. This is the "next hop" address; could be a waypoint, network gateway,
+    // etc.
+    // When using HBONE, the `hbone_target_destination` is the inner :authority and `actual_destination` is the TCP destination.
+    actual_destination: SocketAddr,
+    // If using HBONE, the inner (:authority) of the HBONE request.
+    hbone_target_destination: Option<SocketAddr>,
 
-        // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
-        // in the case of proxies along the path.
-        upstream_sans: Vec<Identity>,
-    }
+    // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
+    // in the case of proxies along the path.
+    upstream_sans: Vec<Identity>,
 }
 
 #[cfg(test)]

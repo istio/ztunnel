@@ -21,7 +21,7 @@ use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerScopes, Serv
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
-    NetworkAddress, WaypointError, Workload, WorkloadStore,
+    NetworkAddress, Workload, WorkloadStore,
 };
 use crate::strng::Strng;
 use crate::tls;
@@ -751,7 +751,7 @@ impl DemandProxyState {
                 metrics,
             )
             .await?
-            .ok_or_else(|| Err(Error::UnknownWaypoint(wl.name.to_string())))?;
+            .ok_or_else(|| Error::UnknownWaypoint(wl.name.to_string()))?;
         Ok(Some(waypoint))
     }
 
