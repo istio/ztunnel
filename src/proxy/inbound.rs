@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
@@ -27,7 +26,6 @@ use http::{Method, Response, StatusCode};
 use tokio::net::TcpStream;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
-
 
 use super::Error;
 use crate::baggage::parse_baggage_header;
@@ -64,11 +62,7 @@ impl Inbound {
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        let enable_orig_src = if pi.cfg.enable_original_source.is_none() {
-            transparent
-        } else {
-            pi.cfg.enable_original_source.unwrap()
-        };
+        let enable_orig_src = pi.cfg.enable_original_source.unwrap_or(transparent);
 
         info!(
             address=%listener.local_addr(),

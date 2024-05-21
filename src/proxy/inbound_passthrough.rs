@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -50,11 +49,7 @@ impl InboundPassthrough {
 
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        let enable_orig_src = if pi.cfg.enable_original_source.is_none() {
-            transparent
-        } else {
-            pi.cfg.enable_original_source.unwrap()
-        };
+        let enable_orig_src = pi.cfg.enable_original_source.unwrap_or(transparent);
 
         info!(
             address=%listener.local_addr(),

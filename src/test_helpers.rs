@@ -31,7 +31,7 @@ use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
 
-use std::sync::atomic::{Ordering, AtomicU16};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use crate::strng;
 use http_body_util::{BodyExt, Full};
