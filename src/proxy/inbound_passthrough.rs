@@ -49,7 +49,10 @@ impl InboundPassthrough {
 
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        let enable_orig_src = pi.cfg.enable_original_source.unwrap_or(transparent);
+        let enable_orig_src = pi
+            .cfg
+            .explicitly_configure_original_source
+            .unwrap_or(transparent);
 
         info!(
             address=%listener.local_addr(),

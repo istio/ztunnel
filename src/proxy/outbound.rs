@@ -55,7 +55,10 @@ impl Outbound {
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        let enable_orig_src = pi.cfg.enable_original_source.unwrap_or(transparent);
+        let enable_orig_src = pi
+            .cfg
+            .explicitly_configure_original_source
+            .unwrap_or(transparent);
 
         info!(
             address=%listener.local_addr(),
@@ -84,6 +87,7 @@ impl Outbound {
         let (sub_drain_signal, sub_drain) = drain::channel();
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
+            self.enable_orig_src,
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );
@@ -649,6 +653,7 @@ mod tests {
 
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let original_src = false; // for testing, not needed
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {
                 cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
@@ -660,8 +665,13 @@ mod tests {
                 connection_manager: ConnectionManager::default(),
             }),
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr.clone()),
-            enable_orig_src: cfg.enable_original_source.unwrap_or_default(),
+            pool: pool::WorkloadHBONEPool::new(
+                cfg.clone(),
+                original_src,
+                sock_fact,
+                cert_mgr.clone(),
+            ),
+            enable_orig_src: cfg.explicitly_configure_original_source.unwrap_or_default(),
             hbone_port: cfg.inbound_addr.port(),
         };
 
