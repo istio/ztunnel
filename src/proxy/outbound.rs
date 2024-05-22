@@ -107,7 +107,7 @@ impl Outbound {
                         stream.set_nodelay(true).unwrap();
                         let span = info_span!("outbound", id=%oc.id);
                         let serve_outbound_connection = (async move {
-                            debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn START");
+                            debug!(dur=?start_outbound_instant.elapsed(), "outbound spawn START");
                             // Since this task is spawned, make sure we are guaranteed to terminate
                             tokio::select! {
                                 _ = outbound_drain.signaled() => {
@@ -115,8 +115,9 @@ impl Outbound {
                                 }
                                 _ = oc.proxy(stream) => {}
                             }
-                            debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "outbound spawn DONE");
-                        }).instrument(span);
+                            debug!(dur=?start_outbound_instant.elapsed(), "outbound spawn DONE");
+                        })
+                        .instrument(span);
 
                         assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
                         tokio::spawn(serve_outbound_connection);

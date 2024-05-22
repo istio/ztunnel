@@ -104,6 +104,8 @@ h2 = "0.4"
 http = "1.1"
 split-iter = "0.1"
 arcstr = { version = "1.1", features = ["serde"] }
+tracing-core = "0.1.32"
+tracing-appender = "0.2.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"

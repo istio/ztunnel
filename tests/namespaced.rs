@@ -182,7 +182,7 @@ mod namespaced {
         let hbone_addr = format!("{server_ip}:8080");
         let dst_addr = format!("{waypoint_ip}:15008");
         let want = HashMap::from([
-            ("target", "access"),
+            ("scope", "access"),
             ("src.workload", "client"),
             ("dst.workload", "waypoint"),
             ("dst.namespace", "default"),
@@ -246,7 +246,7 @@ mod namespaced {
         let hbone_addr = format!("{TEST_VIP}:80");
         let dst_addr = format!("{waypoint_ip}:15008");
         let want = HashMap::from([
-            ("target", "access"),
+            ("scope", "access"),
             ("src.workload", "client"),
             ("dst.workload", "waypoint"),
             ("dst.hbone_addr", &hbone_addr),
@@ -550,7 +550,7 @@ mod namespaced {
             .join()
             .unwrap()?;
         telemetry::testing::assert_contains(HashMap::from([
-            ("target", "access"),
+            ("scope", "access"),
             ("error", "connection closed due to policy rejection"),
         ]));
         Ok(())
@@ -611,7 +611,7 @@ mod namespaced {
             .join()
             .unwrap()?;
         let e = format!("ip mismatch: {} != {}", srv.ip(), clt.ip());
-        telemetry::testing::assert_contains(HashMap::from([("target", "access"), ("error", &e)]));
+        telemetry::testing::assert_contains(HashMap::from([("scope", "access"), ("error", &e)]));
         Ok(())
     }
 
@@ -958,7 +958,7 @@ mod namespaced {
         if let Some(ref zt) = server_ztunnel {
             let _remote_metrics = verify_metrics(zt, &metrics, &destination_labels()).await;
             let mut want = HashMap::from([
-                ("target", "access"),
+                ("scope", "access"),
                 ("src.workload", "client"),
                 ("dst.workload", "server"),
                 ("bytes_sent", "22"),
@@ -981,7 +981,7 @@ mod namespaced {
         if let Some(zt) = client_ztunnel {
             let _remote_metrics = verify_metrics(&zt, &metrics, &source_labels()).await;
             let mut want = HashMap::from([
-                ("target", "access"),
+                ("scope", "access"),
                 ("src.workload", "client"),
                 ("dst.workload", "server"),
                 ("bytes_sent", "11"),
