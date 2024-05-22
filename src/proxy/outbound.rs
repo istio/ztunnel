@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::net::{IpAddr, SocketAddr};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use std::time::Instant;
@@ -24,7 +23,7 @@ use hyper::header::FORWARDED;
 
 use tokio::net::TcpStream;
 
-use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace, trace_span, Instrument};
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
@@ -37,7 +36,6 @@ use crate::proxy::h2::H2Stream;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
-use crate::strng::Strng;
 use crate::{assertions, copy, proxy, socket, strng};
 
 pub struct Outbound {
