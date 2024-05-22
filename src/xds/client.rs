@@ -696,12 +696,22 @@ impl AdsClient {
             _ => (XdsSignal::Ack, None),
         };
 
-        debug!(
-            type_url=type_url,
-            nonce,
-            "type"=?response_type,
-            "sending response",
-        );
+        match response_type {
+            XdsSignal::Nack => error!(
+                type_url=type_url,
+                nonce,
+                "type"=?response_type,
+                error=error,
+                "sending response",
+            ),
+            _ => debug!(
+                type_url=type_url,
+                nonce,
+                "type"=?response_type,
+                "sending response",
+            ),
+        };
+
         send.send(DeltaDiscoveryRequest {
             type_url,              // this is owned, OK to move
             response_nonce: nonce, // this is owned, OK to move
