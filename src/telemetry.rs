@@ -222,9 +222,6 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> std::fmt::Result {
-        use tracing_log::NormalizeEvent;
-        use tracing_subscriber::fmt::time::FormatTime;
-        use tracing_subscriber::fmt::time::SystemTime;
         let normalized_meta = event.normalized_metadata();
         SystemTime.format_time(&mut writer)?;
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());

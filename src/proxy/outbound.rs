@@ -15,7 +15,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use drain::Watch;
 
@@ -456,9 +456,17 @@ impl OutboundConnection {
             network: self.pi.cfg.network.clone(),
             address: downstream,
         };
-        let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await {
+
+        let source_workload = match self
+            .pi
+            .state
+            .wait_for_workload(&downstream_network_addr, Duration::from_millis(100))
+            .await
+        {
             Some(wl) => wl,
-            None => return Err(Error::UnknownSource(downstream)),
+            None => {
+                return Err(Error::UnknownSource(downstream));
+            }
         };
         if let Some(ref wl_info) = self.pi.proxy_workload_info {
             // make sure that the workload we fetched matches the workload info we got over ZDS.

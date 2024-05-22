@@ -44,6 +44,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::time::Duration;
 use tracing::{debug, error, trace, warn};
 
 use self::workload::ApplicationTunnel;
@@ -670,6 +671,44 @@ impl DemandProxyState {
         }
         self.fetch_on_demand(addr.to_string().into()).await;
         fetch(addr)
+    }
+
+    // same as fetch_workload, but if the caller knows the workload is enroute already,
+    // will retry on cache miss for a configured amount of time - returning the workload
+    // when we get it, or nothing if the timeout is exceeded, whichever happens first
+    pub async fn wait_for_workload(
+        &self,
+        addr: &NetworkAddress,
+        deadline: Duration,
+    ) -> Option<Arc<Workload>> {
+        debug!(%addr, "wait for workload");
+
+        // Take a watch listener *before* checking state (so we don't miss anything)
+        let mut wl_sub = self.state.read().unwrap().workloads.new_subscriber();
+
+        match self.fetch_workload(addr).await {
+            Some(wl) => Some(wl),
+            None => {
+                // We didn't find the workload we expected, so
+                // loop until the subscriber wakes us on new workload,
+                // or we hit the deadline timeout and give up
+                let timeout = tokio::time::sleep(deadline);
+                let subscriber = wl_sub.changed();
+                tokio::pin!(timeout);
+                tokio::pin!(subscriber);
+                loop {
+                    tokio::select! {
+                        _ = &mut timeout => break None,
+                        _ = &mut subscriber => {
+                            match self.fetch_workload(addr).await {
+                                Some(found) => break Some(found),
+                                None => continue,
+                            }
+                        }
+                    };
+                }
+            }
+        }
     }
 
     // only support workload
