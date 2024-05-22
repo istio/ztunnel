@@ -34,7 +34,7 @@ use hickory_resolver::config::*;
 use crate::strng;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt::Debug;
 use std::future::Future;
@@ -83,6 +83,16 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
     xds_root_cert: Option<RootCert>,
     xds_config: Option<ConfigSource>,
 ) -> config::Config {
+    // We use an incrementing atomic here because
+    // 1. We aren't running inside a unique per-test netns like some tests (slow)
+    // 2. We don't want to risk test flakes from two listeners using the same port
+    // 3. But we still need to construct a static config with a fixed "hbone" port,
+    // as several of the listeners need to know what the "hbone" port is during construction, and
+    // outside of tests, we will *always* use a fixed port by design.
+    //
+    // In theory if some other process on the box is using this port range (remote odds),
+    // these tests could still flake outside of CI. But this is way faster than creating per-test
+    // netnses.
     let mut cfg = config::Config {
         xds_address: xds_addr,
         fake_ca: true,
@@ -109,6 +119,8 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         dns_proxy_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        illegal_ports: HashSet::new(), // for "direct" tests, since the ports are latebound, we can't test illegal ports
+        fake_self_inbound: true, // for "direct" tests, since the ports are latebound, we have to do this. Yes, this is test concerns leaking into prod code
         ..config::parse_config().unwrap()
     };
     // Do not let tests use system defaults!

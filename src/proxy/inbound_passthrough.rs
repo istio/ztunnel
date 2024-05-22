@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,7 +22,7 @@ use tokio::net::TcpStream;
 use tracing::{error, info, trace, Instrument};
 
 use crate::config::ProxyMode;
-use crate::proxy::connection_manager::ConnectionManager;
+
 use crate::proxy::metrics::Reporter;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
@@ -33,13 +32,14 @@ use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
     listener: socket::Listener,
-    pi: ProxyInputs,
+    pi: Arc<ProxyInputs>,
     drain: Watch,
+    enable_orig_src: bool,
 }
 
 impl InboundPassthrough {
     pub(super) async fn new(
-        mut pi: ProxyInputs,
+        pi: Arc<ProxyInputs>,
         drain: Watch,
     ) -> Result<InboundPassthrough, Error> {
         let listener = pi
@@ -49,11 +49,7 @@ impl InboundPassthrough {
 
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
         // Override with our explicitly configured setting
-        if pi.cfg.enable_original_source.is_none() {
-            let mut cfg = (*pi.cfg).clone();
-            cfg.enable_original_source = Some(transparent);
-            pi.cfg = Arc::new(cfg);
-        }
+        let enable_orig_src = pi.cfg.enable_original_source.unwrap_or(transparent);
 
         info!(
             address=%listener.local_addr(),
@@ -65,22 +61,16 @@ impl InboundPassthrough {
             listener,
             pi,
             drain,
+            enable_orig_src,
         })
     }
 
-    pub(super) fn address(&self) -> SocketAddr {
-        self.listener.local_addr()
-    }
-
-    pub(super) async fn run(self, illegal_ports: Arc<HashSet<u16>>) {
+    pub(super) async fn run(self) {
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 let pi = self.pi.clone();
-                let illegal_ports = illegal_ports.clone();
-
-                let connection_manager = self.pi.connection_manager.clone();
                 match socket {
                     Ok((stream, remote)) => {
                         let serve_client = async move {
@@ -88,15 +78,14 @@ impl InboundPassthrough {
                                 pi, // pi cloned above; OK to move
                                 socket::to_canonical(remote),
                                 stream,
-                                illegal_ports,
-                                connection_manager,
+                                self.enable_orig_src,
                             )
                             .await
                         }
                         .in_current_span();
 
                         // This is pretty large right now. Fortunately with pooling this is less problematic than outbound.
-                        assertions::size_between_ref(3000, 5000, &serve_client);
+                        assertions::size_between_ref(2400, 5000, &serve_client);
                         tokio::spawn(serve_client);
                     }
                     Err(e) => {
@@ -121,11 +110,10 @@ impl InboundPassthrough {
     }
 
     async fn proxy_inbound_plaintext(
-        pi: ProxyInputs,
+        pi: Arc<ProxyInputs>,
         source_addr: SocketAddr,
         mut inbound_stream: TcpStream,
-        illegal_ports: Arc<HashSet<u16>>,
-        connection_manager: ConnectionManager,
+        enable_orig_src: bool,
     ) {
         let start = Instant::now();
         let dest_addr = socket::orig_dst_addr_or_default(&inbound_stream);
@@ -133,7 +121,7 @@ impl InboundPassthrough {
         // lead to infinite loops
         let illegal_call = if pi.cfg.inpod_enabled {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
-            illegal_ports.contains(&dest_addr.port())
+            pi.cfg.illegal_ports.contains(&dest_addr.port())
         } else {
             // User sent a request to the ztunnel directly. This isn't allowed
             pi.cfg.proxy_mode == ProxyMode::Shared && Some(dest_addr.ip()) == pi.cfg.local_ip
@@ -205,10 +193,11 @@ impl InboundPassthrough {
                 connection_security_policy: metrics::SecurityPolicy::unknown,
                 destination_service: ds,
             },
-            pi.metrics,
+            pi.metrics.clone(),
         ));
 
-        let conn_guard = match connection_manager
+        let conn_guard = match pi
+            .connection_manager
             .assert_rbac(&pi.state, &rbac_ctx, None)
             .await
         {
@@ -221,7 +210,7 @@ impl InboundPassthrough {
             }
         };
 
-        let orig_src = if pi.cfg.enable_original_source.unwrap_or_default() {
+        let orig_src = if enable_orig_src {
             Some(source_addr.ip())
         } else {
             None

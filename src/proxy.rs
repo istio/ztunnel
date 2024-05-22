@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -101,7 +100,6 @@ pub struct Proxy {
     outbound: Outbound,
     socks5: Option<Socks5>,
     policy_watcher: PolicyWatcher,
-    illegal_ports: Arc<HashSet<u16>>,
 }
 
 #[derive(Clone)]
@@ -109,7 +107,6 @@ pub(super) struct ProxyInputs {
     cfg: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
     connection_manager: ConnectionManager,
-    hbone_port: u16,
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
@@ -126,17 +123,16 @@ impl ProxyInputs {
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         proxy_workload_info: Option<WorkloadInfo>,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             cfg,
             state,
             cert_manager,
             metrics,
             connection_manager,
-            hbone_port: 0,
             socket_factory,
             proxy_workload_info: proxy_workload_info.map(Arc::new),
-        }
+        })
     }
 }
 
@@ -151,40 +147,45 @@ impl Proxy {
         let metrics = Arc::new(metrics);
         let socket_factory = Arc::new(DefaultSocketFactory);
 
-        let pi = ProxyInputs {
+        let pi = ProxyInputs::new(
             cfg,
-            state,
             cert_manager,
-            connection_manager: ConnectionManager::default(),
+            ConnectionManager::default(),
+            state,
             metrics,
-            hbone_port: 0,
             socket_factory,
-            proxy_workload_info: None,
-        };
+            None,
+        );
         Self::from_inputs(pi, drain).await
     }
-    pub(super) async fn from_inputs(mut pi: ProxyInputs, drain: Watch) -> Result<Self, Error> {
-        // illegal_ports are internal ports that clients are not authorized to send to
-        let mut illegal_ports: HashSet<u16> = HashSet::new();
+
+    #[allow(unused_mut)]
+    pub(super) async fn from_inputs(mut pi: Arc<ProxyInputs>, drain: Watch) -> Result<Self, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
-        pi.hbone_port = inbound.address().port();
-        //  HBONE doesn't have redirection, so we cannot have loops, but this would allow multiple layers of HBONE.
-        // This might be desirable in the future, but for now just ban it.
-        illegal_ports.insert(inbound.address().port());
+
+        // This exists for `direct` integ tests, no other reason
+        #[cfg(any(test, feature = "testing"))]
+        if pi.cfg.fake_self_inbound {
+            warn!("TEST FAKE - overriding inbound address for test");
+            let mut old_cfg = (*pi.cfg).clone();
+            old_cfg.inbound_addr = inbound.address();
+            let mut new_pi = (*pi).clone();
+            new_pi.cfg = Arc::new(old_cfg);
+            std::mem::swap(&mut pi, &mut Arc::new(new_pi));
+            warn!("TEST FAKE: new address is {:?}", pi.cfg.inbound_addr);
+        }
 
         let inbound_passthrough = InboundPassthrough::new(pi.clone(), drain.clone()).await?;
-        illegal_ports.insert(inbound_passthrough.address().port());
         let outbound = Outbound::new(pi.clone(), drain.clone()).await?;
-        illegal_ports.insert(outbound.address().port());
         let socks5 = if pi.cfg.socks5_addr.is_some() {
             let socks5 = Socks5::new(pi.clone(), drain.clone()).await?;
-            illegal_ports.insert(socks5.address().port());
             Some(socks5)
         } else {
             None
         };
-        let policy_watcher = PolicyWatcher::new(pi.state, drain, pi.connection_manager);
+        let policy_watcher =
+            PolicyWatcher::new(pi.state.clone(), drain, pi.connection_manager.clone());
 
         Ok(Proxy {
             inbound,
@@ -192,28 +193,20 @@ impl Proxy {
             outbound,
             socks5,
             policy_watcher,
-            illegal_ports: Arc::new(illegal_ports),
         })
     }
 
     pub async fn run(self) {
         let mut tasks = vec![
-            tokio::spawn(
-                self.inbound_passthrough
-                    .run(self.illegal_ports.clone())
-                    .in_current_span(),
-            ),
-            tokio::spawn(
-                self.inbound
-                    .run(self.illegal_ports.clone())
-                    .in_current_span(),
-            ),
-            tokio::spawn(self.outbound.run().in_current_span()),
+            tokio::spawn(self.inbound_passthrough.run().in_current_span()),
             tokio::spawn(self.policy_watcher.run().in_current_span()),
+            tokio::spawn(self.inbound.run().in_current_span()),
+            tokio::spawn(self.outbound.run().in_current_span()),
         ];
+
         if let Some(socks5) = self.socks5 {
             tasks.push(tokio::spawn(socks5.run().in_current_span()));
-        }
+        };
 
         futures::future::join_all(tasks).await;
     }
