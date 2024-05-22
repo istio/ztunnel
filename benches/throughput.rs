@@ -365,7 +365,7 @@ pub fn metrics(c: &mut Criterion) {
         b.iter(|| {
             let co = proxy::ConnectionOpen {
                 reporter: Default::default(),
-                source: Some(test_helpers::test_default_workload()),
+                source: Some(Arc::new(test_helpers::test_default_workload())),
                 derived_source: None,
                 destination: None,
                 destination_service: None,

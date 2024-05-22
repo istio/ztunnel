@@ -324,6 +324,7 @@ impl PolicyWatcher {
 mod tests {
     use drain::Watch;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use prometheus_client::registry::Registry;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
@@ -548,11 +549,14 @@ mod tests {
     async fn test_policy_watcher_lifecycle() {
         // preamble: setup an environment
         let state = Arc::new(RwLock::new(ProxyState::default()));
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let dstate = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
         let connection_manager = ConnectionManager::default();
         let (tx, stop) = drain::channel();
