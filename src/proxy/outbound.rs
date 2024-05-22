@@ -23,7 +23,7 @@ use hyper::header::FORWARDED;
 
 use tokio::net::TcpStream;
 
-use tracing::{debug, error, info, info_span, trace, trace_span, Instrument};
+use tracing::{debug, error, info, info_span, trace_span, Instrument};
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
@@ -358,7 +358,7 @@ impl OutboundConnection {
             {
                 let upstream_sans = waypoint.workload_and_services_san();
                 let actual_destination = waypoint.workload_socket_addr();
-                trace!("built request to service waypoint proxy");
+                debug!("built request to service waypoint proxy");
                 return Ok(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
@@ -380,7 +380,7 @@ impl OutboundConnection {
             .fetch_upstream(source_workload.network.clone(), &source_workload, target)
             .await?
         else {
-            trace!("built request as passthrough; no upstream found");
+            debug!("built request as passthrough; no upstream found");
             return Ok(Request {
                 protocol: Protocol::TCP,
                 source: source_workload,
@@ -411,7 +411,7 @@ impl OutboundConnection {
             if let Some(waypoint) = waypoint {
                 let actual_destination = waypoint.workload_socket_addr();
                 let upstream_sans = waypoint.workload_and_services_san();
-                trace!("built request to workload waypoint proxy");
+                debug!("built request to workload waypoint proxy");
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
@@ -439,7 +439,7 @@ impl OutboundConnection {
 
         // For case no waypoint for both side and direct to remote node proxy
         let upstream_sans = us.workload_and_services_san();
-        trace!("built request to workload");
+        debug!("built request to workload");
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,

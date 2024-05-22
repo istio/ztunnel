@@ -84,8 +84,7 @@ impl InboundPassthrough {
                         }
                         .in_current_span();
 
-                        // This is pretty large right now. Fortunately with pooling this is less problematic than outbound.
-                        assertions::size_between_ref(2400, 5000, &serve_client);
+                        assertions::size_between_ref(1500, 2500, &serve_client);
                         tokio::spawn(serve_client);
                     }
                     Err(e) => {
