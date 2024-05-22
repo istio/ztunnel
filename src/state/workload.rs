@@ -648,13 +648,8 @@ impl WorkloadStore {
         }
     }
 
-    /// Finds the workload by address.
-    pub fn find_address(&self, addr: &NetworkAddress) -> Option<Workload> {
-        self.by_addr.get(addr).map(|wl| wl.deref().clone())
-    }
-
-    /// Finds the workload by address, as an arc. TODO: make find_address and other functions directly return an Arc too
-    pub fn find_address_arc(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
+    /// Finds the workload by address, as an arc.
+    pub fn find_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
         self.by_addr.get(addr).cloned()
     }
 
@@ -664,8 +659,8 @@ impl WorkloadStore {
     }
 
     /// Finds the workload by uid.
-    pub fn find_uid(&self, uid: &Strng) -> Option<Workload> {
-        self.by_uid.get(uid).map(|wl| wl.deref().clone())
+    pub fn find_uid(&self, uid: &Strng) -> Option<Arc<Workload>> {
+        self.by_uid.get(uid).cloned()
     }
 
     pub fn has_identity(&self, identity: &Identity) -> bool {
@@ -706,6 +701,7 @@ mod tests {
     use crate::{cert_fetcher, test_helpers};
     use bytes::Bytes;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use prometheus_client::registry::Registry;
     use std::collections::HashSet;
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -794,11 +790,15 @@ mod tests {
     fn workload_information() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let demand = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
         let updater = ProxyStateUpdateMutator::new_no_fetch();
 
@@ -841,12 +841,12 @@ mod tests {
         assert_eq!(state.read().unwrap().workloads.by_uid.len(), 1);
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
-            Some(Workload {
+            Some(Arc::new(Workload {
                 uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
                 name: "some name".into(),
                 ..test_helpers::test_default_workload()
-            })
+            }))
         );
         assert_eq!(state.read().unwrap().services.num_vips(), 0);
         assert_eq!(state.read().unwrap().services.num_services(), 0);
@@ -855,23 +855,23 @@ mod tests {
         updater.remove(&mut state.write().unwrap(), &"/invalid".into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
-            Some(Workload {
+            Some(Arc::new(Workload {
                 uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
                 name: "some name".into(),
                 ..test_helpers::test_default_workload()
-            })
+            }))
         );
 
         updater.remove(&mut state.write().unwrap(), &uid2.as_str().into());
         assert_eq!(
             state.read().unwrap().workloads.find_address(&nw_addr1),
-            Some(Workload {
+            Some(Arc::new(Workload {
                 uid: uid1.as_str().into(),
                 workload_ips: vec![nw_addr1.address],
                 name: "some name".into(),
                 ..test_helpers::test_default_workload()
-            })
+            }))
         );
 
         updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());
@@ -1153,11 +1153,14 @@ mod tests {
     fn staged_services_cleanup() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let demand = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
         let updater = ProxyStateUpdateMutator::new_no_fetch();
         assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
@@ -1242,12 +1245,12 @@ mod tests {
         .try_into()
         .unwrap();
         for _ in 0..1000 {
-            if let Some(us) = state.state.read().unwrap().find_upstream(
+            if let Some((workload, _, _)) = state.state.read().unwrap().find_upstream(
                 strng::EMPTY,
                 &wl,
                 "127.0.1.1:80".parse().unwrap(),
             ) {
-                let n = &us.workload.name; // borrow name instead of cloning
+                let n = &workload.name; // borrow name instead of cloning
                 found.insert(n.to_string()); // insert an owned copy of the borrowed n
                 wants.remove(&n.to_string()); // remove using the borrow
             }
@@ -1268,11 +1271,15 @@ mod tests {
                 .join("localhost.yaml"),
         );
         let state = Arc::new(RwLock::new(ProxyState::default()));
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let demand = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
         let local_client = LocalClient {
             cfg,
@@ -1289,27 +1296,35 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.as_ref().unwrap().service_account, "default");
-        let us = demand.state.read().unwrap().find_upstream(
-            strng::EMPTY,
-            wl.as_ref().unwrap(),
-            "127.10.0.1:80".parse().unwrap(),
-        );
+        let (_, port, svc) = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream(
+                strng::EMPTY,
+                wl.as_ref().unwrap(),
+                "127.10.0.1:80".parse().unwrap(),
+            )
+            .expect("should get");
         // Make sure we get a valid VIP
-        assert!(us.is_some());
-        assert_eq!(us.clone().unwrap().port, 8080);
+        assert_eq!(port, 8080);
         assert_eq!(
-            us.unwrap().sans,
+            svc.unwrap().subject_alt_names,
             vec!["spiffe://cluster.local/ns/default/sa/local".to_string()]
         );
 
         // test that we can have a service in another network than workloads it selects
-        let us = demand.state.read().unwrap().find_upstream(
-            "remote".into(),
-            wl.as_ref().unwrap(),
-            "127.10.0.2:80".parse().unwrap(),
-        );
+        let (_, port, _) = demand
+            .state
+            .read()
+            .unwrap()
+            .find_upstream(
+                "remote".into(),
+                wl.as_ref().unwrap(),
+                "127.10.0.2:80".parse().unwrap(),
+            )
+            .expect("should get");
         // Make sure we get a valid VIP
-        assert!(us.is_some());
-        assert_eq!(us.unwrap().port, 8080);
+        assert_eq!(port, 8080);
     }
 }

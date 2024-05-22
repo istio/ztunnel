@@ -218,7 +218,7 @@ async fn handle(
             true => Some(out_drain),
             false => None,
         };
-        oc.proxy_to_cancellable(stream, remote_addr, host, true, drain)
+        oc.proxy_to_cancellable(stream, remote_addr, host, drain)
             .await;
     });
     Ok(())

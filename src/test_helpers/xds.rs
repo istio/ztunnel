@@ -109,12 +109,14 @@ impl AdsServer {
         );
         cfg.xds_on_demand = xds_on_demand;
 
+        let proxy_metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
         let dstate = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            proxy_metrics,
         );
         let store_updater = ProxyStateUpdater::new_no_fetch(state);
         let tls_client_fetcher = Box::new(tls::ControlPlaneAuthentication::RootCert(

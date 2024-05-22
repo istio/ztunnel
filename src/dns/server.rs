@@ -194,7 +194,7 @@ impl Store {
     }
 
     /// Find the workload for the client address.
-    fn find_client(&self, client_addr: SocketAddr) -> Option<Workload> {
+    fn find_client(&self, client_addr: SocketAddr) -> Option<Arc<Workload>> {
         let state = self.state.read();
         state.workloads.find_address(&NetworkAddress {
             network: self.network.clone(),

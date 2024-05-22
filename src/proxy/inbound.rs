@@ -314,7 +314,7 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Result<(SocketAddr, AppProtocol, Workload, Vec<Arc<Service>>), Error> {
+    ) -> Result<(SocketAddr, AppProtocol, Arc<Workload>, Vec<Arc<Service>>), Error> {
         let dst = &NetworkAddress {
             network: conn.dst_network.clone(),
             address: hbone_addr.ip(),
@@ -357,7 +357,7 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         hbone_addr: SocketAddr,
-    ) -> Option<(Workload, Vec<Arc<Service>>)> {
+    ) -> Option<(Arc<Workload>, Vec<Arc<Service>>)> {
         let connection_dst = &NetworkAddress {
             network: conn.dst_network.clone(),
             address: conn.dst.ip(),
@@ -369,7 +369,8 @@ impl Inbound {
 
         // Outer option tells us whether or not we can retry
         // Some(None) means we have enough information to decide this isn't sandwich
-        let lookup = || -> Option<Option<(Workload, Vec<Arc<Service>>)>> {
+        #[allow(clippy::type_complexity)]
+        let lookup = || -> Option<Option<(Arc<Workload>, Vec<Arc<Service>>)>> {
             let state = state.read();
 
             // TODO Allow HBONE address to be a hostname. We have to respect rules about
@@ -415,8 +416,7 @@ impl Inbound {
                         return Some(None);
                     }
                     let svc = state.services.get_by_workload(&wl);
-                    // TODO: use Arc more pervasive and remove this clone.
-                    Some((Arc::unwrap_or_clone(wl), svc))
+                    Some((wl, svc))
                 }
             })
         };
@@ -520,6 +520,7 @@ mod tests {
     };
 
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use prometheus_client::registry::Registry;
     use test_case::test_case;
 
     const CLIENT_POD_IP: &str = "10.0.0.1";
@@ -665,11 +666,14 @@ mod tests {
             state.workloads.insert(Arc::new(wl), true);
         }
 
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         Ok(DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         ))
     }
 

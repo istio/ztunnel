@@ -32,7 +32,7 @@ pub struct ProxyFactory {
     config: Arc<config::Config>,
     state: DemandProxyState,
     cert_manager: Arc<SecretManager>,
-    proxy_metrics: Option<Arc<Metrics>>,
+    proxy_metrics: Arc<Metrics>,
     dns_metrics: Option<Arc<dns::Metrics>>,
     drain: Watch,
 }
@@ -42,19 +42,10 @@ impl ProxyFactory {
         config: Arc<config::Config>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
-        proxy_metrics: Option<Metrics>,
+        proxy_metrics: Arc<Metrics>,
         dns_metrics: Option<dns::Metrics>,
         drain: Watch,
     ) -> std::io::Result<Self> {
-        let proxy_metrics = match proxy_metrics {
-            Some(metrics) => Some(Arc::new(metrics)),
-            None => {
-                if config.proxy {
-                    error!("proxy configured but no metrics provided")
-                }
-                None
-            }
-        };
         let dns_metrics = match dns_metrics {
             Some(metrics) => Some(Arc::new(metrics)),
             None => {
@@ -97,7 +88,7 @@ impl ProxyFactory {
                 self.cert_manager.clone(),
                 cm.clone(),
                 self.state.clone(),
-                self.proxy_metrics.clone().unwrap(),
+                self.proxy_metrics.clone(),
                 socket_factory.clone(),
                 proxy_workload_info,
             );

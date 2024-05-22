@@ -849,7 +849,7 @@ mod tests {
         while start_time.elapsed().unwrap() < TEST_TIMEOUT && !matched {
             sleep(POLL_RATE).await;
             let wl = source.fetch_workload(&ip_network_addr).await;
-            matched = wl == converted; // Option<Workload> is Ok to compare without needing to unwrap
+            matched = wl.as_deref() == converted.as_ref(); // Option<Workload> is Ok to compare without needing to unwrap
         }
     }
 
