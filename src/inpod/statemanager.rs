@@ -121,7 +121,6 @@ impl WorkloadProxyManagerState {
                     name: w.name,
                     namespace: w.namespace,
                     service_account: w.service_account,
-                    trust_domain: w.trust_domain,
                 });
                 self.add_workload(&poddata.workload_uid, info, netns)
                     .await

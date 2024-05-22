@@ -96,7 +96,6 @@ impl Upstream {
 pub struct WorkloadInfo {
     pub name: String,
     pub namespace: String,
-    pub trust_domain: String,
     pub service_account: String,
 }
 
@@ -104,23 +103,17 @@ impl fmt::Display for WorkloadInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}.{}.{} ({})",
-            self.service_account, self.namespace, self.trust_domain, self.name
+            "{}.{} ({})",
+            self.service_account, self.namespace, self.name
         )
     }
 }
 
 impl WorkloadInfo {
-    pub fn new(
-        name: String,
-        namespace: String,
-        trust_domain: String,
-        service_account: String,
-    ) -> Self {
+    pub fn new(name: String, namespace: String, service_account: String) -> Self {
         Self {
             name,
             namespace,
-            trust_domain,
             service_account,
         }
     }
@@ -128,7 +121,6 @@ impl WorkloadInfo {
     pub fn matches(&self, w: &Workload) -> bool {
         self.name == w.name
             && self.namespace == w.namespace
-            && self.trust_domain == w.trust_domain
             && self.service_account == w.service_account
     }
 }
@@ -1113,7 +1105,6 @@ mod tests {
         let wi = WorkloadInfo {
             name: "test".into(),
             namespace: "default".into(),
-            trust_domain: "cluster.local".into(),
             service_account: "defaultacct".into(),
         };
 
@@ -1150,12 +1141,6 @@ mod tests {
         {
             let mut wi = wi.clone();
             wi.service_account = "not-test".into();
-            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
-            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
-        }
-        {
-            let mut wi = wi.clone();
-            wi.trust_domain = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
             assert!(!mock_proxy_state.assert_rbac(&ctx).await);
         }
