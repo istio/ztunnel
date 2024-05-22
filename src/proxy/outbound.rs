@@ -34,9 +34,8 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEP
 
 use crate::proxy::h2::H2Stream;
 use crate::state::service::ServiceDescription;
-use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
-use crate::{assertions, copy, proxy, socket, strng};
+use crate::{assertions, copy, proxy, socket};
 
 pub struct Outbound {
     pi: Arc<ProxyInputs>,
@@ -346,10 +345,10 @@ impl OutboundConnection {
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether this is svc addressed
         let svc_addressed = if let Some(Address::Service(target_service)) = state
-            .fetch_destination(&Destination::Address(NetworkAddress {
-                network: strng::new(&self.pi.cfg.network),
+            .fetch_address(&NetworkAddress {
+                network: self.pi.cfg.network.clone(),
                 address: target.ip(),
-            }))
+            })
             .await
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally

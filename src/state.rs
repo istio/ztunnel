@@ -772,7 +772,7 @@ impl DemandProxyState {
 
     /// Looks for the given address to find either a workload or service by IP. If not found
     /// locally, attempts to fetch on-demand.
-    async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
+    pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
         if let Some(address) = self.state.read().unwrap().find_address(network_addr) {
