@@ -20,14 +20,13 @@ use crate::state::policy::PolicyStore;
 use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerScopes, ServiceStore};
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
-    address::Address, gatewayaddress::Destination, network_addr, NamespacedHostname,
-    NetworkAddress, Workload, WorkloadStore,
+    address::Address, gatewayaddress::Destination, network_addr, GatewayAddress,
+    NamespacedHostname, NetworkAddress, Workload, WorkloadStore,
 };
 use crate::strng::Strng;
 use crate::tls;
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
-use crate::xds::metrics::Metrics;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, xds};
 use futures_util::FutureExt;
@@ -373,6 +372,9 @@ pub struct DemandProxyState {
     demand: Option<Demander>,
 
     #[serde(skip_serializing)]
+    metrics: Arc<proxy::Metrics>,
+
+    #[serde(skip_serializing)]
     dns_resolver_cfg: ResolverConfig,
 
     #[serde(skip_serializing)]
@@ -385,12 +387,14 @@ impl DemandProxyState {
         demand: Option<Demander>,
         dns_resolver_cfg: ResolverConfig,
         dns_resolver_opts: ResolverOpts,
+        metrics: Arc<proxy::Metrics>,
     ) -> Self {
         Self {
             state,
             demand,
             dns_resolver_cfg,
             dns_resolver_opts,
+            metrics,
         }
     }
 
@@ -474,12 +478,11 @@ impl DemandProxyState {
         false
     }
 
-    //
-    async fn pick_workload_destination(
+    // Select a workload IP, with DNS resolution if needed
+    async fn pick_workload_destination_or_resolve(
         &self,
         dst_workload: &Workload,
         src_workload: &Workload,
-        metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
         // if/when we support that, this function may need to move to get access to the necessary metadata.
@@ -494,28 +497,29 @@ impl DemandProxyState {
             );
             return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
         }
-        let ip =
-            Box::pin(self.resolve_workload_address_with_dns(dst_workload, src_workload, metrics))
-                .await?;
+        let ip = Box::pin(self.resolve_workload_address(dst_workload, src_workload)).await?;
         Ok(ip)
     }
 
-    async fn resolve_workload_address_with_dns(
+    async fn resolve_workload_address(
         &self,
         workload: &Workload,
         src_workload: &Workload,
-        metrics: Arc<proxy::Metrics>,
     ) -> Result<IpAddr, Error> {
         let labels = OnDemandDnsLabels::new()
             .with_destination(workload)
             .with_source(src_workload);
         let workload_uid = workload.uid.to_owned();
         let hostname = workload.hostname.to_owned();
-        metrics.as_ref().on_demand_dns.get_or_create(&labels).inc();
+        self.metrics
+            .as_ref()
+            .on_demand_dns
+            .get_or_create(&labels)
+            .inc();
         let rdns = match self.get_ips_for_hostname(&workload.hostname) {
             Some(r) => r,
             None => {
-                metrics
+                self.metrics
                     .as_ref()
                     .on_demand_dns_cache_misses
                     .get_or_create(&labels)
@@ -684,7 +688,6 @@ impl DemandProxyState {
         network: Strng,
         source_workload: &Workload,
         addr: SocketAddr,
-        metrics: Arc<proxy::Metrics>,
     ) -> Result<Option<Upstream>, Error> {
         self.fetch_address(&network_addr(network.clone(), addr.ip()))
             .await;
@@ -698,7 +701,7 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let selected_workload_ip = self
-            .pick_workload_destination(&wl, source_workload, metrics)
+            .pick_workload_destination_or_resolve(&wl, source_workload)
             .await?; // if we can't load balance just return the error
         Ok(Some(Upstream {
             workload: wl,
@@ -709,17 +712,11 @@ impl DemandProxyState {
         }))
     }
 
-    pub async fn fetch_waypoint(
+    async fn fetch_waypoint(
         &self,
-        wl: &Workload,
+        gw_address: &GatewayAddress,
         source_workload: &Workload,
-        metrics: Arc<proxy::Metrics>,
-    ) -> Result<Option<Upstream>, Error> {
-        let Some(gw_address) = &wl.waypoint else {
-            return Ok(None);
-        };
-        // Even in this case, we are picking a single upstream pod and deciding if it has a remote proxy.
-        // Typically this is all or nothing, but if not we should probably send to remote proxy if *any* upstream has one.
+    ) -> Result<Upstream, Error> {
         let wp_nw_addr = match &gw_address.destination {
             Destination::Address(ip) => ip,
             Destination::Hostname(_) => {
@@ -729,16 +726,39 @@ impl DemandProxyState {
             }
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
-        let waypoint = self
-            .fetch_upstream(
-                wp_nw_addr.network.clone(),
-                source_workload,
-                wp_socket_addr,
-                metrics,
-            )
+        self.fetch_upstream(wp_nw_addr.network.clone(), source_workload, wp_socket_addr)
             .await?
-            .ok_or_else(|| Error::UnknownWaypoint(wl.name.to_string()))?;
-        Ok(Some(waypoint))
+            .ok_or_else(|| {
+                Error::UnknownWaypoint(format!("waypoint {} not found", wp_nw_addr.address))
+            })
+    }
+
+    pub async fn fetch_service_waypoint(
+        &self,
+        service: &Service,
+        source_workload: &Workload,
+    ) -> Result<Option<Upstream>, Error> {
+        let Some(gw_address) = &service.waypoint else {
+            // no waypoint
+            return Ok(None);
+        };
+        self.fetch_waypoint(gw_address, source_workload)
+            .await
+            .map(Some)
+    }
+
+    pub async fn fetch_workload_waypoint(
+        &self,
+        wl: &Workload,
+        source_workload: &Workload,
+    ) -> Result<Option<Upstream>, Error> {
+        let Some(gw_address) = &wl.waypoint else {
+            // no waypoint
+            return Ok(None);
+        };
+        self.fetch_waypoint(gw_address, source_workload)
+            .await
+            .map(Some)
     }
 
     /// Looks for either a workload or service by the destination. If not found locally,
@@ -813,7 +833,8 @@ pub struct ProxyStateManager {
 impl ProxyStateManager {
     pub async fn new(
         config: Arc<config::Config>,
-        metrics: Metrics,
+        xds_metrics: xds::Metrics,
+        proxy_metrics: Arc<proxy::Metrics>,
         awaiting_ready: tokio::sync::watch::Sender<()>,
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<ProxyStateManager> {
@@ -828,7 +849,7 @@ impl ProxyStateManager {
                 xds::Config::new(config.clone(), tls_client_fetcher)
                     .with_watched_handler::<XdsAddress>(xds::ADDRESS_TYPE, updater.clone())
                     .with_watched_handler::<XdsAuthorization>(xds::AUTHORIZATION_TYPE, updater)
-                    .build(metrics, awaiting_ready),
+                    .build(xds_metrics, awaiting_ready),
             )
         } else {
             None
@@ -847,6 +868,7 @@ impl ProxyStateManager {
             state: DemandProxyState {
                 state,
                 demand,
+                metrics: proxy_metrics,
                 dns_resolver_cfg: config.dns_resolver_cfg.clone(),
                 dns_resolver_opts: config.dns_resolver_opts.clone(),
             },
@@ -869,6 +891,7 @@ impl ProxyStateManager {
 mod tests {
     use crate::state::service::LoadBalancer;
     use crate::state::workload::Locality;
+    use prometheus_client::registry::Registry;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use self::workload::{application_tunnel::Protocol as AppProtocol, ApplicationTunnel};
@@ -886,11 +909,14 @@ mod tests {
             .insert(Arc::new(test_helpers::test_default_workload()), true);
         state.services.insert(test_helpers::mock_default_service());
 
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let mock_proxy_state = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
 
         // Some from Address
@@ -1049,11 +1075,14 @@ mod tests {
         };
         state.workloads.insert(Arc::new(wl), true);
 
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let mock_proxy_state = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
 
         let wi = WorkloadInfo {

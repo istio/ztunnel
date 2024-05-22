@@ -613,6 +613,7 @@ mod tests {
             workload::gatewayaddress::Destination,
         },
     };
+    use prometheus_client::registry::Registry;
     use std::{collections::HashMap, net::Ipv4Addr, sync::RwLock};
 
     #[tokio::test]
@@ -622,11 +623,14 @@ mod tests {
         let mut state = state::ProxyState::default();
         state.workloads.insert(Arc::new(w), true);
         state.services.insert(s);
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let state = state::DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
 
         let gateawy_id = Identity::Spiffe {

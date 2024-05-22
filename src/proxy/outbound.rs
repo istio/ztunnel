@@ -24,7 +24,7 @@ use hyper::header::FORWARDED;
 
 use tokio::net::TcpStream;
 
-use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
@@ -158,8 +158,7 @@ impl OutboundConnection {
         let source_addr =
             socket::to_canonical(source_stream.peer_addr().expect("must receive peer addr"));
         let dst_addr = socket::orig_dst_addr_or_default(&source_stream);
-        self.proxy_to(source_stream, source_addr, dst_addr, false)
-            .await;
+        self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
     // this is a cancellable outbound proxy. If `out_drain` is a Watch drain, will resolve
@@ -174,7 +173,6 @@ impl OutboundConnection {
         stream: TcpStream,
         remote_addr: SocketAddr,
         orig_dst_addr: SocketAddr,
-        block_passthrough: bool,
         out_drain: Option<Watch>,
     ) {
         match out_drain {
@@ -183,12 +181,11 @@ impl OutboundConnection {
                         _ = drain.signaled() => {
                             info!("drain signaled");
                         }
-                        res = self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough) => res
+                        res = self.proxy_to(stream, remote_addr, orig_dst_addr) => res
                 }
             }
             None => {
-                self.proxy_to(stream, remote_addr, orig_dst_addr, block_passthrough)
-                    .await;
+                self.proxy_to(stream, remote_addr, orig_dst_addr).await;
             }
         }
     }
@@ -198,7 +195,6 @@ impl OutboundConnection {
         mut source_stream: TcpStream,
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
-        block_passthrough: bool,
     ) {
         let start = Instant::now();
 
@@ -218,17 +214,6 @@ impl OutboundConnection {
                 return;
             }
         };
-        if block_passthrough && req.actual_destination_workload.is_none() {
-            // This is mostly used by socks5. For typical outbound calls, we need to allow calls to arbitrary
-            // domains. But for socks5
-            metrics::log_early_deny(
-                source_addr,
-                dest_addr,
-                Reporter::source,
-                Error::UnknownDestination(dest_addr.ip()),
-            );
-            return;
-        }
         // TODO: should we use the original address or the actual address? Both seems nice!
         let _conn_guard = self.pi.connection_manager.track_outbound(
             source_addr,
@@ -348,37 +333,21 @@ impl OutboundConnection {
         }
     }
 
+    // build_request computes all information about the request we should send
+    // TODO: Do we want a single lock for source and upstream...?
     async fn build_request(
         &self,
         downstream: IpAddr,
         target: SocketAddr,
     ) -> Result<Request, Error> {
+        let state = &self.pi.state;
         // First find the source workload of this traffic. If we don't know where the request is from
         // we will reject it.
-        let source_workload = {
-            let downstream_network_addr = NetworkAddress {
-                network: self.pi.cfg.network.clone(),
-                address: downstream,
-            };
-            let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await
-            {
-                Some(wl) => wl,
-                None => return Err(Error::UnknownSource(downstream)),
-            };
-            if let Some(ref wl_info) = self.pi.proxy_workload_info {
-                // make sure that the workload we fetched matches the workload info we got over ZDS.
-                if !wl_info.matches(&source_workload) {
-                    return Err(Error::MismatchedSource(downstream, wl_info.clone()));
-                }
-            }
-            source_workload
-        };
+        let source_workload = self.fetch_source_workload(downstream).await?;
 
         // If this is to-service traffic check for a service waypoint
-        // Capture result of whether or not this is svc addressed
-        let svc_addressed = if let Some(Address::Service(target_service)) = self
-            .pi
-            .state
+        // Capture result of whether this is svc addressed
+        let svc_addressed = if let Some(Address::Service(target_service)) = state
             .fetch_destination(&Destination::Address(NetworkAddress {
                 network: strng::new(&self.pi.cfg.network),
                 address: target.ip(),
@@ -386,40 +355,20 @@ impl OutboundConnection {
             .await
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally
-            if let Some(wp) = target_service.waypoint.clone() {
-                let waypoint_vip = match wp.destination {
-                    Destination::Address(a) => a.address,
-                    Destination::Hostname(_) => {
-                        return Err(proxy::Error::UnknownWaypoint(
-                            "hostname lookup not supported yet".to_string(),
-                        ));
-                    }
-                };
-                let waypoint_vip = SocketAddr::new(waypoint_vip, wp.hbone_mtls_port);
-                let waypoint_us = self
-                    .pi
-                    .state
-                    .fetch_upstream(
-                        self.pi.cfg.network.clone(),
-                        &source_workload,
-                        waypoint_vip,
-                        self.pi.metrics.clone(),
-                    )
-                    .await?
-                    .ok_or(proxy::Error::UnknownWaypoint(
-                        "unable to determine waypoint upstream".to_string(),
-                    ))?;
-
-                let upstream_sans = waypoint_us.workload_and_services_san();
-                let waypoint_socket_address =
-                    SocketAddr::new(waypoint_us.selected_workload_ip, waypoint_us.port);
+            if let Some(waypoint) = state
+                .fetch_service_waypoint(&target_service, &source_workload)
+                .await?
+            {
+                let upstream_sans = waypoint.workload_and_services_san();
+                let actual_destination = waypoint.workload_socket_addr();
+                trace!("built request to service waypoint proxy");
                 return Ok(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     hbone_target_destination: Some(target),
-                    actual_destination_workload: Some(waypoint_us.workload),
+                    actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
-                    actual_destination: waypoint_socket_address,
+                    actual_destination,
                     upstream_sans,
                 });
             }
@@ -430,55 +379,42 @@ impl OutboundConnection {
             false
         };
 
-        // TODO: we want a single lock for source and upstream probably...?
-        let us = match self
-            .pi
-            .state
-            .fetch_upstream(
-                source_workload.network.clone(),
-                &source_workload,
-                target,
-                self.pi.metrics.clone(),
-            )
+        let Some(us) = state
+            .fetch_upstream(source_workload.network.clone(), &source_workload, target)
             .await?
-        {
-            Some(us) => us,
-            None => {
-                // For case no upstream found, passthrough it
-                return Ok(Request {
-                    protocol: Protocol::TCP,
-                    source: source_workload,
-                    hbone_target_destination: None,
-                    actual_destination_workload: None,
-                    intended_destination_service: None,
-                    actual_destination: target,
-                    upstream_sans: vec![],
-                });
-            }
+        else {
+            trace!("built request as passthrough; no upstream found");
+            return Ok(Request {
+                protocol: Protocol::TCP,
+                source: source_workload,
+                hbone_target_destination: None,
+                actual_destination_workload: None,
+                intended_destination_service: None,
+                actual_destination: target,
+                upstream_sans: vec![],
+            });
         };
 
-        let workload_ip = us.selected_workload_ip;
-
         let from_waypoint = proxy::check_from_waypoint(
-            &self.pi.state,
+            state,
             &us.workload,
             Some(&source_workload.identity()),
             &downstream,
         )
         .await;
 
+        // Check if we need to go through a workload addressed waypoint.
         // Don't traverse waypoint twice if the source is sandwich-outbound.
-        // Don't traverse waypoint if traffic was addressed to a service which did not have a waypoint
+        // Don't traverse waypoint if traffic was addressed to a service (handled before)
         if !from_waypoint && !svc_addressed {
             // For case upstream server has enabled waypoint
-            let waypoint = self
-                .pi
-                .state
-                .fetch_waypoint(&us.workload, &source_workload, self.pi.metrics.clone())
+            let waypoint = state
+                .fetch_workload_waypoint(&us.workload, &source_workload)
                 .await?;
             if let Some(waypoint) = waypoint {
                 let actual_destination = waypoint.workload_socket_addr();
                 let upstream_sans = waypoint.workload_and_services_san();
+                trace!("built request to workload waypoint proxy");
                 return Ok(Request {
                     // Always use HBONE here
                     protocol: Protocol::HBONE,
@@ -495,8 +431,8 @@ impl OutboundConnection {
         }
 
         // only change the port if we're sending HBONE
-        let gw_addr = match us.workload.protocol {
-            Protocol::HBONE => SocketAddr::from((workload_ip, self.hbone_port)),
+        let actual_destination = match us.workload.protocol {
+            Protocol::HBONE => SocketAddr::from((us.selected_workload_ip, self.hbone_port)),
             Protocol::TCP => us.workload_socket_addr(),
         };
         let hbone_target_destination = match us.workload.protocol {
@@ -505,37 +441,36 @@ impl OutboundConnection {
         };
 
         // For case no waypoint for both side and direct to remote node proxy
-        let id = us.workload.identity();
+        let upstream_sans = us.workload_and_services_san();
+        trace!("built request to workload");
         Ok(Request {
             protocol: us.workload.protocol,
             source: source_workload,
             hbone_target_destination,
             actual_destination_workload: Some(us.workload.clone()),
             intended_destination_service: us.destination_service.clone(),
-            actual_destination: gw_addr,
-            upstream_sans: workload_and_services_san(us.service_sans, id),
+            actual_destination,
+            upstream_sans,
         })
     }
-}
 
-/// workload_and_services_san is a helper to merge service SAN with a distinct workload identity.
-/// We use all the services sans and the workload identity. These are an "OR" logically.
-/// Note: service SANs are uncommon; the typical case is we are only using workload SAN
-fn workload_and_services_san(
-    service_sans: Vec<Strng>,
-    workload_identity: Identity,
-) -> Vec<Identity> {
-    service_sans
-        .into_iter()
-        .flat_map(|san| match Identity::from_str(&san) {
-            Ok(id) => Some(id),
-            Err(err) => {
-                warn!("ignoring invalid SAN {}: {}", san, err);
-                None
+    async fn fetch_source_workload(&self, downstream: IpAddr) -> Result<Arc<Workload>, Error> {
+        let downstream_network_addr = NetworkAddress {
+            network: self.pi.cfg.network.clone(),
+            address: downstream,
+        };
+        let source_workload = match self.pi.state.fetch_workload(&downstream_network_addr).await {
+            Some(wl) => wl,
+            None => return Err(Error::UnknownSource(downstream)),
+        };
+        if let Some(ref wl_info) = self.pi.proxy_workload_info {
+            // make sure that the workload we fetched matches the workload info we got over ZDS.
+            if !wl_info.matches(&source_workload) {
+                return Err(Error::MismatchedSource(downstream, wl_info.clone()));
             }
-        })
-        .chain(std::iter::once(workload_identity))
-        .collect()
+        }
+        Ok(source_workload)
+    }
 }
 
 fn baggage(r: &Request, cluster: String) -> String {

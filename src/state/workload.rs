@@ -701,6 +701,7 @@ mod tests {
     use crate::{cert_fetcher, test_helpers};
     use bytes::Bytes;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use prometheus_client::registry::Registry;
     use std::collections::HashSet;
     use std::default::Default;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -789,11 +790,15 @@ mod tests {
     fn workload_information() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let demand = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
         let updater = ProxyStateUpdateMutator::new_no_fetch();
 
@@ -1148,11 +1153,14 @@ mod tests {
     fn staged_services_cleanup() {
         initialize_telemetry();
         let state = Arc::new(RwLock::new(ProxyState::default()));
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let demand = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
         let updater = ProxyStateUpdateMutator::new_no_fetch();
         assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
@@ -1263,11 +1271,15 @@ mod tests {
                 .join("localhost.yaml"),
         );
         let state = Arc::new(RwLock::new(ProxyState::default()));
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let demand = DemandProxyState::new(
             state.clone(),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         );
         let local_client = LocalClient {
             cfg,

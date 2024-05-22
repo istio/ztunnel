@@ -520,6 +520,7 @@ mod tests {
     };
 
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use prometheus_client::registry::Registry;
     use test_case::test_case;
 
     const CLIENT_POD_IP: &str = "10.0.0.1";
@@ -665,11 +666,14 @@ mod tests {
             state.workloads.insert(Arc::new(wl), true);
         }
 
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         Ok(DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics,
         ))
     }
 
