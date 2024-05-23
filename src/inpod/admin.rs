@@ -169,14 +169,13 @@ mod test {
             &Some(crate::state::WorkloadInfo {
                 name: "name".to_string(),
                 namespace: "ns".to_string(),
-                trust_domain: "td".to_string(),
                 service_account: "sa".to_string(),
             }),
             None,
         );
         assert_eq!(
             data(),
-            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa","trustDomain":"td"},"state":"Up"}}"#
+            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Up"}}"#
         );
         handler.proxy_down(&uid1);
         assert_eq!(data(), "{}");
