@@ -34,6 +34,7 @@ use hickory_resolver::config::*;
 use crate::strng;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
+use prometheus_client::registry::Registry;
 use std::collections::HashMap;
 use std::default::Default;
 use std::fmt::Debug;
@@ -451,11 +452,14 @@ pub fn new_proxy_state(
             .handle(Box::new(&mut vec![XdsUpdate::Update(res)].into_iter()))
             .unwrap();
     }
+    let mut registry = Registry::default();
+    let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
     DemandProxyState::new(
         state,
         None,
         ResolverConfig::default(),
         ResolverOpts::default(),
+        metrics,
     )
 }
 

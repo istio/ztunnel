@@ -69,7 +69,7 @@ impl Default for Fixture {
         let state = Arc::new(RwLock::new(ProxyState::default()));
         let cert_manager: Arc<crate::identity::SecretManager> =
             crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10));
-        let metrics = crate::proxy::Metrics::new(&mut registry);
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let (drain_tx, drain_rx) = drain::channel();
 
         let dstate = DemandProxyState::new(
@@ -77,6 +77,7 @@ impl Default for Fixture {
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
+            metrics.clone(),
         );
 
         let ipc = InPodConfig::new(&cfg).unwrap();
@@ -84,7 +85,7 @@ impl Default for Fixture {
             Arc::new(cfg),
             dstate,
             cert_manager,
-            Some(metrics),
+            metrics,
             None,
             drain_rx.clone(),
         )

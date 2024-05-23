@@ -32,6 +32,7 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
 use crate::strng::{RichStrng, Strng};
 
+#[derive(Debug)]
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
@@ -128,9 +129,9 @@ pub struct DerivedWorkload {
 #[derive(Clone)]
 pub struct ConnectionOpen {
     pub reporter: Reporter,
-    pub source: Option<Workload>,
+    pub source: Option<Arc<Workload>>,
     pub derived_source: Option<DerivedWorkload>,
-    pub destination: Option<Workload>,
+    pub destination: Option<Arc<Workload>>,
     pub destination_service: Option<ServiceDescription>,
     pub connection_security_policy: SecurityPolicy,
 }
@@ -198,8 +199,8 @@ impl From<ConnectionOpen> for CommonTrafficLabels {
             ..CommonTrafficLabels::new()
                 // Intentionally before with_source; source is more reliable
                 .with_derived_source(c.derived_source.as_ref())
-                .with_source(c.source.as_ref())
-                .with_destination(c.destination.as_ref())
+                .with_source(c.source.as_deref())
+                .with_destination(c.destination.as_deref())
                 .with_destination_service(c.destination_service.as_ref())
         }
     }

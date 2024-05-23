@@ -80,11 +80,7 @@ pub async fn build_with_cert(
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
     let xds_metrics = xds::Metrics::new(istio_registry);
-    let proxy_metrics = if config.proxy {
-        Some(proxy::Metrics::new(istio_registry))
-    } else {
-        None
-    };
+    let proxy_metrics = Arc::new(proxy::Metrics::new(istio_registry));
     let dns_metrics = if config.dns_proxy {
         Some(dns::Metrics::new(istio_registry))
     } else {
@@ -93,8 +89,14 @@ pub async fn build_with_cert(
 
     let (xds_tx, xds_rx) = tokio::sync::watch::channel(());
     // Create the manager that updates proxy state from XDS.
-    let state_mgr =
-        ProxyStateManager::new(config.clone(), xds_metrics, xds_tx, cert_manager.clone()).await?;
+    let state_mgr = ProxyStateManager::new(
+        config.clone(),
+        xds_metrics,
+        proxy_metrics.clone(),
+        xds_tx,
+        cert_manager.clone(),
+    )
+    .await?;
     let mut xds_rx_for_task = xds_rx.clone();
     tokio::spawn(async move {
         let _ = xds_rx_for_task.changed().await;
