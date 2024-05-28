@@ -31,6 +31,7 @@ use itertools::Itertools;
 use prometheus_parse::Scrape;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
+use tracing::info;
 
 use crate::app::Bound;
 use crate::identity::SecretManager;
@@ -74,6 +75,10 @@ where
 {
     initialize_telemetry();
     let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
+    info!(
+        "running with config: {}",
+        serde_yaml::to_string(&cfg).unwrap()
+    );
     let app = app::build_with_cert(Arc::new(cfg), cert_manager.clone())
         .await
         .unwrap();
