@@ -913,6 +913,103 @@ mod tests {
     use crate::{strng, test_helpers};
 
     #[tokio::test]
+    async fn test_wait_for_workload() {
+        let mut state = ProxyState::default();
+        let delayed_wl = Arc::new(test_helpers::test_default_workload());
+        state.workloads.insert(delayed_wl.clone(), true);
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+        let mock_proxy_state = DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            metrics,
+        );
+
+        // Some from Address
+        let dst = NetworkAddress {
+            network: strng::EMPTY,
+            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+
+        test_helpers::assert_eventually(
+            Duration::from_secs(1),
+            || mock_proxy_state.wait_for_workload(&dst, Duration::from_millis(50)),
+            Some(delayed_wl),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_workload_delay_fails() {
+        let state = ProxyState::default();
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+        let mock_proxy_state = DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            metrics,
+        );
+
+        // Some from Address
+        let dst = NetworkAddress {
+            network: strng::EMPTY,
+            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+
+        test_helpers::assert_eventually(
+            Duration::from_millis(10),
+            || mock_proxy_state.wait_for_workload(&dst, Duration::from_millis(5)),
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wait_for_workload_eventually() {
+        let state = ProxyState::default();
+        let wrap_state = Arc::new(RwLock::new(state));
+        let delayed_wl = Arc::new(test_helpers::test_default_workload());
+
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+        let mock_proxy_state = DemandProxyState::new(
+            wrap_state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            metrics,
+        );
+
+        // Some from Address
+        let dst = NetworkAddress {
+            network: strng::EMPTY,
+            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+
+        let expected_wl = delayed_wl.clone();
+        let t = tokio::spawn(async move {
+            test_helpers::assert_eventually(
+                Duration::from_millis(500),
+                || mock_proxy_state.wait_for_workload(&dst, Duration::from_millis(250)),
+                Some(expected_wl),
+            )
+            .await;
+        });
+        wrap_state
+            .write()
+            .unwrap()
+            .workloads
+            .insert(delayed_wl, true);
+        t.await.expect("should not fail");
+    }
+
+    #[tokio::test]
     async fn lookup_address() {
         let mut state = ProxyState::default();
         state
