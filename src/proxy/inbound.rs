@@ -60,14 +60,12 @@ impl Inbound {
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.inbound_addr, e))?;
-        let transparent = super::maybe_set_transparent(&pi, &listener)?;
-        // Override with our explicitly configured setting
-        let enable_orig_src = pi.cfg.enable_original_source.unwrap_or(transparent);
+        let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
 
         info!(
             address=%listener.local_addr(),
             component="inbound",
-            transparent,
+            transparent=enable_orig_src,
             "listener established",
         );
         Ok(Inbound {

@@ -32,6 +32,7 @@ pub(super) struct Socks5 {
     pi: Arc<ProxyInputs>,
     listener: socket::Listener,
     drain: Watch,
+    enable_orig_src: bool,
 }
 
 impl Socks5 {
@@ -41,9 +42,12 @@ impl Socks5 {
             .tcp_bind(pi.cfg.socks5_addr.unwrap())
             .map_err(|e| Error::Bind(pi.cfg.socks5_addr.unwrap(), e))?;
 
+        let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
+
         info!(
             address=%listener.local_addr(),
             component="socks5",
+            transparent=enable_orig_src,
             "listener established",
         );
 
@@ -51,6 +55,7 @@ impl Socks5 {
             pi,
             listener,
             drain,
+            enable_orig_src,
         })
     }
 
@@ -70,6 +75,7 @@ impl Socks5 {
                 // but ProxyInfo is overloaded and only `outbound` should ever use the pool.
                 let pool = crate::proxy::pool::WorkloadHBONEPool::new(
                     self.pi.cfg.clone(),
+                    self.enable_orig_src,
                     self.pi.socket_factory.clone(),
                     self.pi.cert_manager.clone(),
                 );
@@ -80,7 +86,7 @@ impl Socks5 {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
                             pool,
-                            enable_orig_src: self.pi.cfg.enable_original_source.unwrap_or_default(),
+                            enable_orig_src: self.enable_orig_src,
                             hbone_port: self.pi.cfg.inbound_addr.port(),
                         };
                         tokio::spawn(async move {

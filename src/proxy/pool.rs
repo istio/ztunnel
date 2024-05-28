@@ -76,6 +76,7 @@ struct PoolState {
 
 struct ConnSpawner {
     cfg: Arc<config::Config>,
+    original_source: bool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     cert_manager: Arc<SecretManager>,
     timeout_rx: watch::Receiver<bool>,
@@ -86,15 +87,13 @@ impl ConnSpawner {
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
-        let local = self
-            .cfg
-            .enable_original_source
-            .unwrap_or_default()
-            .then_some(key.src);
+        let local = self.original_source.then_some(key.src);
         let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
         let connector = cert.outbound_connector(key.dst_id.clone())?;
         let tcp_stream =
             super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
+
+        tracing::error!("freebind {:?} {}", local, tcp_stream.local_addr().unwrap());
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
         let sender =
@@ -337,6 +336,7 @@ impl WorkloadHBONEPool {
     // Callers should then be safe to drop() the pool instance.
     pub fn new(
         cfg: Arc<crate::config::Config>,
+        original_source: bool,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         cert_manager: Arc<SecretManager>,
     ) -> WorkloadHBONEPool {
@@ -346,6 +346,7 @@ impl WorkloadHBONEPool {
 
         let spawner = ConnSpawner {
             cfg,
+            original_source,
             socket_factory,
             cert_manager,
             timeout_rx: timeout_recv.clone(),
@@ -992,7 +993,8 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+        let original_src = false; // for testing, not needed
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), original_src, sock_fact, cert_mgr);
         let server = TestServer {
             conn_counter,
             drop_rx,
