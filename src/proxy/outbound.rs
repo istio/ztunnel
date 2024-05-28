@@ -460,7 +460,7 @@ impl OutboundConnection {
         let source_workload = match self
             .pi
             .state
-            .wait_for_workload(&downstream_network_addr, Duration::from_millis(100))
+            .wait_for_workload(&downstream_network_addr, Duration::from_millis(500))
             .await
         {
             Some(wl) => wl,

@@ -686,28 +686,31 @@ impl DemandProxyState {
         // Take a watch listener *before* checking state (so we don't miss anything)
         let mut wl_sub = self.state.read().unwrap().workloads.new_subscriber();
 
-        match self.fetch_workload(addr).await {
-            Some(wl) => Some(wl),
-            None => {
-                // We didn't find the workload we expected, so
-                // loop until the subscriber wakes us on new workload,
-                // or we hit the deadline timeout and give up
-                let timeout = tokio::time::sleep(deadline);
-                let subscriber = wl_sub.changed();
-                tokio::pin!(timeout);
-                tokio::pin!(subscriber);
-                loop {
-                    tokio::select! {
-                        _ = &mut timeout => break None,
-                        _ = &mut subscriber => {
-                            match self.fetch_workload(addr).await {
-                                Some(found) => break Some(found),
-                                None => continue,
-                            }
-                        }
-                    };
+        debug!(%addr, "got sub, waiting for workload");
+
+        if let Some(wl) = self.fetch_workload(addr).await {
+            return Some(wl);
+        }
+
+        // We didn't find the workload we expected, so
+        // loop until the subscriber wakes us on new workload,
+        // or we hit the deadline timeout and give up
+        let timeout = tokio::time::sleep(deadline);
+        let subscriber = wl_sub.changed();
+        tokio::pin!(timeout);
+        tokio::pin!(subscriber);
+        loop {
+            tokio::select! {
+                _ = &mut timeout => {
+                    warn!("timed out waiting for workload from xds");
+                    break None;
+                },
+                _ = &mut subscriber => {
+                    if let Some(wl) = self.fetch_workload(addr).await {
+                        break Some(wl);
+                    }
                 }
-            }
+            };
         }
     }
 
