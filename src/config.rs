@@ -325,7 +325,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     };
 
     use hickory_resolver::system_conf::read_system_conf;
-    let (dns_resolver_cfg, dns_resolver_opts) = read_system_conf().unwrap();
+    let (dns_resolver_cfg, mut dns_resolver_opts) = read_system_conf().unwrap();
+    // Increase some defaults. Note these are NOT coming from /etc/resolv.conf (only some fields do, we don't override those),
+    // but rather hickory's hardcoded defaults
+    dns_resolver_opts.cache_size = 4096;
+    // TODO: should we override server_ordering_strategy based on our IP support?
 
     let dns_proxy_addr = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
         Some(dns_addr) => dns_addr
