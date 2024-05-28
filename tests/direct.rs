@@ -29,8 +29,8 @@ use tokio::time::timeout;
 
 use ztunnel::config;
 use ztunnel::identity::mock::new_secret_manager;
-use ztunnel::test_helpers::app::TestApp;
 use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
+use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::assert_eventually;
 use ztunnel::test_helpers::dns::run_dns;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
@@ -105,7 +105,10 @@ async fn test_shutdown_drain() {
     assert!(shutdown_rx.try_recv().is_err());
     let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
     let mut stream = ta
-        .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+        .socks5_connect(
+            DestinationAddr::Ip(dst),
+            TEST_WORKLOAD_SOURCE.parse().unwrap(),
+        )
         .await;
     read_write_stream(&mut stream).await;
     // Since we are connected, the app shouldn't shutdown
@@ -148,7 +151,10 @@ async fn test_shutdown_forced_drain() {
     assert!(shutdown_rx.try_recv().is_err());
     let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap());
     let mut stream = ta
-        .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+        .socks5_connect(
+            DestinationAddr::Ip(dst),
+            TEST_WORKLOAD_SOURCE.parse().unwrap(),
+        )
         .await;
     const BODY: &[u8] = "hello world".as_bytes();
     stream.write_all(BODY).await.unwrap();
@@ -206,11 +212,17 @@ async fn run_requests_test(
     };
     tokio::spawn(echo.run());
     testapp::with_app(cfg, |app| async move {
-        let dst = SocketAddr::from_str(target)
-            .unwrap_or_else(|_| helpers::with_ip(echo_addr, target.parse().unwrap()));
+        let dst = match SocketAddr::from_str(target) {
+            Ok(s) => DestinationAddr::Ip(s),
+            Err(_) if target.contains(':') => {
+                let (h, port) = target.split_once(':').unwrap();
+                DestinationAddr::Hostname(h.to_string(), port.parse().unwrap())
+            }
+            _ => DestinationAddr::Ip(helpers::with_ip(echo_addr, target.parse().unwrap())),
+        };
         for _ in 0..num_queries {
             let mut stream = app
-                .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+                .socks5_connect(dst.clone(), TEST_WORKLOAD_SOURCE.parse().unwrap())
                 .await;
             read_write_stream(&mut stream).await;
         }
@@ -293,6 +305,11 @@ async fn test_tcp_request_local() {
 #[tokio::test]
 async fn test_vip_request_local() {
     run_request_test(&format!("{TEST_VIP}:80"), "local").await;
+}
+
+#[tokio::test]
+async fn test_hostname_request_local() {
+    run_request_test(&format!("{TEST_SERVICE_HOST}:80"), "local").await;
 }
 
 #[tokio::test]
@@ -391,7 +408,10 @@ async fn test_tcp_connections_metrics() {
     testapp::with_app(test_config(), |app| async move {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
         let mut stream = app
-            .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+            .socks5_connect(
+                DestinationAddr::Ip(dst),
+                TEST_WORKLOAD_SOURCE.parse().unwrap(),
+            )
             .await;
         read_write_stream(&mut stream).await;
 
@@ -449,7 +469,10 @@ async fn test_tcp_bytes_metrics() {
     testapp::with_app(cfg, |app| async move {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
         let mut stream = app
-            .socks5_connect(dst, TEST_WORKLOAD_SOURCE.parse().unwrap())
+            .socks5_connect(
+                DestinationAddr::Ip(dst),
+                TEST_WORKLOAD_SOURCE.parse().unwrap(),
+            )
             .await;
         let size = read_write_stream(&mut stream).await as u64;
         drop(stream);

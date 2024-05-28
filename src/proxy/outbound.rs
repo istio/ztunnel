@@ -566,6 +566,7 @@ mod tests {
                 socket_factory: sock_fact.clone(),
                 proxy_workload_info: None,
                 connection_manager: ConnectionManager::default(),
+                resolver: None,
             }),
             id: TraceParent::new(),
             pool: pool::WorkloadHBONEPool::new(

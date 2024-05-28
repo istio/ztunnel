@@ -16,13 +16,19 @@ use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 use drain::Watch;
 
+use hickory_proto::op::{Message, MessageType, Query};
+use hickory_proto::rr::{Name, RecordType};
+use hickory_proto::serialize::binary::BinDecodable;
+use hickory_server::authority::MessageRequest;
+use hickory_server::server::{Protocol, Request};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use crate::dns::resolver::Resolver;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::proxy::outbound::OutboundConnection;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent};
@@ -81,7 +87,7 @@ impl Socks5 {
                 );
                 match socket {
                     Ok((stream, remote)) => {
-                        info!("accepted outbound connection from {}", remote);
+                        debug!("accepted outbound connection from {}", remote);
                         let oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
@@ -125,6 +131,8 @@ async fn handle(
     out_drain: Watch,
     is_inpod: bool,
 ) -> Result<(), anyhow::Error> {
+    let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+
     // Version(5), Number of auth methods
     let mut version = [0u8; 2];
     stream.read_exact(&mut version).await?;
@@ -191,7 +199,17 @@ async fn handle(
             stream.read_exact(&mut domain).await?;
             // TODO: DNS lookup, if we want to integrate with HTTP-based apps without
             // a DNS server.
-            return Err(anyhow::anyhow!("unsupported host"));
+            let ds = std::str::from_utf8(&domain)?;
+            let Some(resolver) = &oc.pi.resolver else {
+                return Err(anyhow::anyhow!(
+                    "unsupported hostname lookup, requires DNS enabled"
+                ));
+            };
+
+            ip = dns_lookup(resolver.clone(), remote_addr, ds).await?;
+            // oc.pi.resolver.lookup()
+            // oc.pi.lookup_service_or_query(ds)
+            // return Err(anyhow::anyhow!("unsupported host {ds:?}"));
         }
         _ => {
             return Err(anyhow::anyhow!("unsupported host"));
@@ -204,18 +222,20 @@ async fn handle(
 
     let host = SocketAddr::new(ip, port);
 
-    let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
-
     // Send dummy values - the client generally ignores it.
     let buf = [
-        0x05u8, // versuib
-        0x00, 0x00, // success, rsv
-        0x01, 0x00, 0x00, 0x00, 0x00, // IPv4
-        0x00, 0x00, // port
+        0x05u8, // version
+        // TODO: report appropriate error here. Unfortunately this needs to happen *after* we connect
+        // That is, we need to do this within proxy_to().
+        0x00, // Success.
+        0x00, // reserved
+        // Address. TODO: actually return the address instead of hardcoded 0.0.0.0
+        0x01, 0x00, 0x00, 0x00, 0x00, // Port. TODO: actually return the port
+        0x00, 0x00,
     ];
     stream.write_all(&buf).await?;
 
-    info!("accepted connection from {remote_addr} to {host}");
+    debug!("accepted connection from {remote_addr} to {host}");
     // For inpod, we want this `spawn` to guaranteed-terminate when we drain - the workload is gone.
     // For non-inpod (shared instance for all workloads), let the spawned task run until the proxy process
     // itself is killed, or the connection terminates normally.
@@ -228,4 +248,54 @@ async fn handle(
             .await;
     });
     Ok(())
+}
+
+async fn dns_lookup(
+    resolver: Arc<dyn Resolver + Send + Sync>,
+    client_addr: SocketAddr,
+    hostname: &str,
+) -> Result<IpAddr, Error> {
+    fn new_message(name: Name, rr_type: RecordType) -> Message {
+        let mut msg = Message::new();
+        msg.set_id(rand::random());
+        msg.set_message_type(MessageType::Query);
+        msg.set_recursion_desired(true);
+        msg.add_query(Query::query(name, rr_type));
+        msg
+    }
+    /// Converts the given [Message] into a server-side [Request] with dummy values for
+    /// the client IP and protocol.
+    fn server_request(msg: &Message, client_addr: SocketAddr, protocol: Protocol) -> Request {
+        let wire_bytes = msg.to_vec().unwrap();
+        let msg_request = MessageRequest::from_bytes(&wire_bytes).unwrap();
+        Request::new(msg_request, client_addr, protocol)
+    }
+
+    /// Creates a A-record [Request] for the given name.
+    fn a_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
+        server_request(&new_message(name, RecordType::A), client_addr, protocol)
+    }
+
+    /// Creates a AAAA-record [Request] for the given name.
+    fn aaaa_request(name: Name, client_addr: SocketAddr, protocol: Protocol) -> Request {
+        server_request(&new_message(name, RecordType::AAAA), client_addr, protocol)
+    }
+
+    // TODO: do we need to do the search?
+    let name = Name::from_utf8(hostname)?;
+
+    // TODO: we probably want to race them or something. Is there something higher level that can handle this for us?
+    let req = if client_addr.is_ipv4() {
+        a_request(name, client_addr, Protocol::Udp)
+    } else {
+        aaaa_request(name, client_addr, Protocol::Udp)
+    };
+    let answer = resolver.lookup(&req).await?;
+    let response = answer
+        .record_iter()
+        .filter_map(|rec| rec.data().and_then(|d| d.ip_addr()))
+        .next() // TODO: do not always use the first result
+        .ok_or_else(|| Error::DnsEmpty)?;
+
+    Ok(response)
 }

@@ -80,6 +80,25 @@ impl ProxyFactory {
         let mut result: ProxyResult = Default::default();
         let drain = proxy_drain.unwrap_or_else(|| self.drain.clone());
 
+        let mut resolver = None;
+        // Optionally create the DNS proxy.
+        if self.config.dns_proxy {
+            let server = dns::Server::new(
+                self.config.cluster_domain.clone(),
+                self.config.dns_proxy_addr,
+                self.config.network.clone(),
+                self.state.clone(),
+                dns::forwarder_for_mode(self.config.proxy_mode)?,
+                self.dns_metrics.clone().unwrap(),
+                drain.clone(),
+                socket_factory.as_ref(),
+                false,
+            )
+            .await?;
+            resolver = Some(server.resolver());
+            result.dns_proxy = Some(server);
+        }
+
         // Optionally create the HBONE proxy.
         if self.config.proxy {
             let cm = ConnectionManager::default();
@@ -91,28 +110,12 @@ impl ProxyFactory {
                 self.proxy_metrics.clone(),
                 socket_factory.clone(),
                 proxy_workload_info,
+                resolver,
             );
             result.connection_manager = Some(cm);
-            result.proxy = Some(Proxy::from_inputs(pi, drain.clone()).await?);
+            result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
         }
 
-        // Optionally create the DNS proxy.
-        if self.config.dns_proxy {
-            result.dns_proxy = Some(
-                dns::Server::new(
-                    self.config.cluster_domain.clone(),
-                    self.config.dns_proxy_addr,
-                    self.config.network.clone(),
-                    self.state.clone(),
-                    dns::forwarder_for_mode(self.config.proxy_mode)?,
-                    self.dns_metrics.clone().unwrap(),
-                    drain,
-                    socket_factory.as_ref(),
-                    false,
-                )
-                .await?,
-            );
-        }
         Ok(result)
     }
 }
