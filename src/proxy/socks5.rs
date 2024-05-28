@@ -42,15 +42,12 @@ impl Socks5 {
             .tcp_bind(pi.cfg.socks5_addr.unwrap())
             .map_err(|e| Error::Bind(pi.cfg.socks5_addr.unwrap(), e))?;
 
-        let transparent = super::maybe_set_transparent(&pi, &listener)?;
-        let enable_orig_src = pi
-            .cfg
-            .explicitly_configure_original_source
-            .unwrap_or(transparent);
+        let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
+
         info!(
             address=%listener.local_addr(),
             component="socks5",
-            transparent,
+            transparent=enable_orig_src,
             "listener established",
         );
 

@@ -53,17 +53,12 @@ impl Outbound {
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
-        let transparent = super::maybe_set_transparent(&pi, &listener)?;
-        // Override with our explicitly configured setting
-        let enable_orig_src = pi
-            .cfg
-            .explicitly_configure_original_source
-            .unwrap_or(transparent);
+        let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
 
         info!(
             address=%listener.local_addr(),
             component="outbound",
-            transparent,
+            transparent=enable_orig_src,
             "listener established",
         );
         Ok(Outbound {
@@ -671,7 +666,7 @@ mod tests {
                 sock_fact,
                 cert_mgr.clone(),
             ),
-            enable_orig_src: cfg.explicitly_configure_original_source.unwrap_or_default(),
+            enable_orig_src: cfg.require_original_source.unwrap_or_default(),
             hbone_port: cfg.inbound_addr.port(),
         };
 

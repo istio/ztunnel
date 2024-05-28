@@ -205,7 +205,7 @@ pub struct Config {
 
     // If set, explicitly configure whether to use original source.
     // If unset (recommended), this is automatically detected based on permissions.
-    pub explicitly_configure_original_source: Option<bool>,
+    pub require_original_source: Option<bool>,
 
     // CLI args passed to ztunnel at runtime
     pub proxy_args: String,
@@ -436,7 +436,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             pc.concurrency.unwrap_or(DEFAULT_WORKER_THREADS).into(),
         )?,
 
-        explicitly_configure_original_source: parse(ENABLE_ORIG_SRC)?,
+        require_original_source: parse(ENABLE_ORIG_SRC)?,
         proxy_args: parse_args(),
         dns_resolver_cfg,
         dns_resolver_opts,

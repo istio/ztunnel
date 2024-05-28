@@ -418,7 +418,7 @@ pub(super) fn maybe_set_transparent(
     pi: &ProxyInputs,
     listener: &socket::Listener,
 ) -> Result<bool, Error> {
-    Ok(match pi.cfg.explicitly_configure_original_source {
+    Ok(match pi.cfg.require_original_source {
         Some(true) => {
             // Explicitly enabled. Return error if we cannot set it.
             listener.set_transparent()?;
