@@ -19,6 +19,7 @@ use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::registry::Registry;
 use tracing::error;
 use tracing::field::{display, DisplayValue};
+use tracing_core::field::Value;
 
 use crate::identity::Identity;
 
@@ -107,6 +108,9 @@ pub struct DefaultedUnknown<T>(Option<T>);
 impl DefaultedUnknown<RichStrng> {
     pub fn display(&self) -> Option<DisplayValue<&str>> {
         self.as_ref().map(|rs| display(rs.as_str()))
+    }
+    pub fn display_field(&self) -> Option<impl Value + '_> {
+        self.as_ref().map(|rs| rs.as_str())
     }
 }
 

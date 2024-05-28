@@ -24,15 +24,15 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
 use tracing::event;
+use tracing_core::field::Value;
 
 use crate::identity::Identity;
-use crate::metrics::{DefaultedUnknown, DeferRecorder, Deferred, IncrementRecorder};
+use crate::metrics::DefaultedUnknown;
 
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
 use crate::strng::{RichStrng, Strng};
 
-#[derive(Debug)]
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
@@ -43,38 +43,6 @@ pub struct Metrics {
     pub on_demand_dns: Family<OnDemandDnsLabels, Counter>,
     pub on_demand_dns_cache_misses: Family<OnDemandDnsLabels, Counter>,
 }
-
-impl Metrics {
-    #[must_use = "metric will be dropped (and thus recorded) immediately if not assigned"]
-    /// increment_defer is used to increment a metric now and another metric later once the MetricGuard is dropped
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let connection_open = ConnectionOpen {};
-    /// // Record connection opened now
-    /// let connection_close = self.metrics.increment_defer::<_, ConnectionClosed>(&connection_open);
-    /// // Eventually, report connection closed
-    /// drop(connection_close);
-    /// ```
-    pub fn increment_defer<'a, M1, M2>(
-        &'a self,
-        event: &'a M1,
-    ) -> Deferred<'a, impl FnOnce(&'a Self), Self>
-    where
-        M1: Clone + 'a,
-        M2: From<&'a M1> + 'a,
-        Metrics: IncrementRecorder<M1> + IncrementRecorder<M2>,
-    {
-        self.increment(event);
-        let m2: M2 = event.into();
-        self.defer_record(move |metrics| {
-            metrics.increment(&m2);
-        })
-    }
-}
-
-impl DeferRecorder for Metrics {}
 
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Reporter {
@@ -437,16 +405,16 @@ impl ConnectionResult {
             tracing::Level::DEBUG,
 
             src.addr = %src.0,
-            src.workload = src.1.as_deref().map(display),
-            src.namespace = tl.source_workload_namespace.display(),
-            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+            src.workload = src.1.as_deref().map(display_field),
+            src.namespace = tl.source_workload_namespace.display_field(),
+            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(display_field_owned),
 
             dst.addr = %dst.0,
             dst.hbone_addr = hbone_target.map(display),
-            dst.service = tl.destination_service.display(),
-            dst.workload = dst.1.as_deref().map(display),
-            dst.namespace = tl.destination_workload_namespace.display(),
-            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+            dst.service = tl.destination_service.display_field(),
+            dst.workload = dst.1.as_deref().map(display_field),
+            dst.namespace = tl.destination_workload_namespace.display_field(),
+            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(display_field_owned),
 
             direction = if tl.reporter == Reporter::source {
                 "outbound"
@@ -520,16 +488,16 @@ impl ConnectionResult {
             res,
 
             src.addr = %self.src.0,
-            src.workload = self.src.1.as_deref().map(display),
-            src.namespace = tl.source_workload_namespace.display(),
-            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+            src.workload = self.src.1.as_deref().map(display_field),
+            src.namespace = tl.source_workload_namespace.display_field(),
+            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(display_field_owned),
 
             dst.addr = %self.dst.0,
             dst.hbone_addr = self.hbone_target.map(display),
-            dst.service = tl.destination_service.display(),
-            dst.workload = self.dst.1.as_deref().map(display),
-            dst.namespace = tl.destination_workload_namespace.display(),
-            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(|id| id.to_string()),
+            dst.service = tl.destination_service.display_field(),
+            dst.workload = self.dst.1.as_deref().map(display_field),
+            dst.namespace = tl.destination_workload_namespace.display_field(),
+            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(display_field_owned),
 
             direction = if tl.reporter == Reporter::source {
                 "outbound"
@@ -544,4 +512,13 @@ impl ConnectionResult {
             duration = dur,
         );
     }
+}
+
+fn display_field_owned<T: ToString>(t: T) -> impl Value {
+    t.to_string()
+}
+
+fn display_field<T: AsRef<str>>(t: &T) -> impl Value + '_ {
+    let v: &str = t.as_ref();
+    v
 }
