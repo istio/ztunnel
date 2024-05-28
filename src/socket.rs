@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::io::Error;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
 use tokio::io;
 
@@ -46,16 +46,7 @@ pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
 
 pub fn to_canonical(addr: SocketAddr) -> SocketAddr {
     // another match has to be used for IPv4 and IPv6 support
-    // @zhlsunshine TODO: to_canonical() should be used when it becomes stable a function in Rust
-    let ip = match addr.ip() {
-        IpAddr::V4(_) => return addr,
-        IpAddr::V6(i) => match i.octets() {
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
-                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
-            }
-            _ => return addr,
-        },
-    };
+    let ip = addr.ip().to_canonical();
     SocketAddr::from((ip, addr.port()))
 }
 
