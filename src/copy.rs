@@ -94,19 +94,14 @@ where
     let (sent, received) = tokio::join!(downstream_to_upstream, upstream_to_downstream);
 
     // Convert some error messages to easier to understand
-    let sent = sent.map_err(|e| {
-        if e.kind() == io::ErrorKind::NotConnected {
-            BackendDisconnected
-        } else {
-            e.into()
-        }
+    let sent = sent.map_err(|e| match e.kind() {
+        io::ErrorKind::NotConnected => BackendDisconnected,
+        io::ErrorKind::UnexpectedEof => ClientDisconnected,
+        _ => e.into(),
     })?;
-    let received = received.map_err(|e| {
-        if e.kind() == io::ErrorKind::NotConnected {
-            ClientDisconnected
-        } else {
-            e.into()
-        }
+    let received = received.map_err(|e| match e.kind() {
+        io::ErrorKind::NotConnected => ClientDisconnected,
+        _ => e.into(),
     })?;
     trace!(sent, received, "copy complete");
     Ok(())
