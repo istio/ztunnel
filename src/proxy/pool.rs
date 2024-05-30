@@ -93,7 +93,6 @@ impl ConnSpawner {
         let tcp_stream =
             super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
 
-        tracing::error!("freebind {:?} {}", local, tcp_stream.local_addr().unwrap());
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
         let sender =
