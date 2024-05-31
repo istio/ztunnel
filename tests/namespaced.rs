@@ -991,6 +991,9 @@ mod namespaced {
                     "dst.identity",
                     "spiffe://cluster.local/ns/default/sa/server",
                 );
+            } else {
+                want.insert("src.identity", "");
+                want.insert("dst.identity", "");
             }
             telemetry::testing::assert_contains(want);
         }
@@ -1014,6 +1017,9 @@ mod namespaced {
                     "dst.identity",
                     "spiffe://cluster.local/ns/default/sa/server",
                 );
+            } else {
+                want.insert("src.identity", "");
+                want.insert("dst.identity", "");
             }
             telemetry::testing::assert_contains(want);
         }

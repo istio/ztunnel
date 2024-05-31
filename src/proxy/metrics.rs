@@ -147,7 +147,8 @@ impl CommonTrafficLabels {
         self.source_canonical_service = w.canonical_name.clone().into();
         self.source_canonical_revision = w.canonical_revision.clone().into();
         self.source_workload_namespace = w.namespace.clone().into();
-        self.source_principal = w.identity().into();
+        // We explicitly do not set source_principal here. This is set only with with_derived_source
+        // based on the real mTLS identity.
         self.source_app = w.canonical_name.clone().into();
         self.source_version = w.canonical_revision.clone().into();
         self.source_cluster = w.cluster_id.to_string().into();
@@ -160,10 +161,11 @@ impl CommonTrafficLabels {
         self.source_canonical_service = w.app.clone().into();
         self.source_canonical_revision = w.revision.clone().into();
         self.source_workload_namespace = w.namespace.clone().into();
-        self.source_principal = w.identity.clone().into();
         self.source_app = w.workload_name.clone().into();
         self.source_version = w.revision.clone().into();
         self.source_cluster = w.cluster_id.clone().into();
+        // This is the identity from the TLS handshake; this is the most trustworthy source so use it
+        self.source_principal = w.identity.clone().into();
         self
     }
 
