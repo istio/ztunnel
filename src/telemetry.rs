@@ -443,8 +443,12 @@ pub mod testing {
         let matched = logs.iter().find(|log| {
             for (k, v) in &want {
                 let Some(have) = log.get(k) else {
-                    // Required key not found, continue
-                    return false;
+                    if !v.is_empty() {
+                        // Required key not found, continue
+                        return false;
+                    } else {
+                        continue;
+                    }
                 };
                 let have = match have {
                     Value::Number(n) => format!("{n}"),
@@ -452,7 +456,7 @@ pub mod testing {
                     _ => panic!("assert_contains currently only supports string/number values"),
                 };
                 // TODO fuzzy match
-                if *v != have {
+                if !v.is_empty() && *v != have {
                     // no match
                     return false;
                 }

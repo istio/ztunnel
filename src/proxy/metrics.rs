@@ -147,17 +147,11 @@ impl CommonTrafficLabels {
         self.source_canonical_service = w.canonical_name.clone().into();
         self.source_canonical_revision = w.canonical_revision.clone().into();
         self.source_workload_namespace = w.namespace.clone().into();
-        self.source_principal = w.identity().into();
+        // We explicitly do not set source_principal here. This is set only with with_derived_source
+        // based on the real mTLS identity.
         self.source_app = w.canonical_name.clone().into();
         self.source_version = w.canonical_revision.clone().into();
         self.source_cluster = w.cluster_id.to_string().into();
-        self
-    }
-
-    fn with_derived_source_identity(mut self, w: Option<&DerivedWorkload>) -> Self {
-        let Some(w) = w else { return self };
-        // This is the identity from the TLS handshake; this is the most trustworthy source so use it
-        self.source_principal = w.identity.clone().into();
         self
     }
 
@@ -170,8 +164,8 @@ impl CommonTrafficLabels {
         self.source_app = w.workload_name.clone().into();
         self.source_version = w.revision.clone().into();
         self.source_cluster = w.cluster_id.clone().into();
-        // Intentionally not set is source_principal which is set later, to have priority over 'source'
-        // derived_source is the actual identity we got from the TLS
+        // This is the identity from the TLS handshake; this is the most trustworthy source so use it
+        self.source_principal = w.identity.clone().into();
         self
     }
 
@@ -208,7 +202,6 @@ impl From<ConnectionOpen> for CommonTrafficLabels {
                 // Intentionally before with_source; source is more reliable
                 .with_derived_source(c.derived_source.as_ref())
                 .with_source(c.source.as_deref())
-                .with_derived_source_identity(c.derived_source.as_ref())
                 .with_destination(c.destination.as_deref())
                 .with_destination_service(c.destination_service.as_ref())
         }
