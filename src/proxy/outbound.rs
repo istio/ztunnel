@@ -18,8 +18,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use drain::Watch;
+use futures_util::TryFutureExt;
 
 use hyper::header::FORWARDED;
+use tokio::io::AsyncWriteExt;
 
 use tokio::net::TcpStream;
 
@@ -42,6 +44,22 @@ pub struct Outbound {
     drain: Watch,
     listener: socket::Listener,
     enable_orig_src: bool,
+}
+
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum OutboundProxyError {
+    #[error("General")]
+    General,
+    #[error("NotAllowed")]
+    NotAllowed,
+    #[error("NetworkUnreachable")]
+    NetworkUnreachable,
+    #[error("HostUnreachable")]
+    HostUnreachable,
+    #[error("ConnectionRefused")]
+    ConnectionRefused,
+    #[error("CommandNotSupported")]
+    CommandNotSupported,
 }
 
 impl Outbound {
@@ -147,6 +165,7 @@ pub(super) struct OutboundConnection {
     pub(super) pool: proxy::pool::WorkloadHBONEPool,
     pub(super) enable_orig_src: bool,
     pub(super) hbone_port: u16,
+    pub(super) send_socks5_success: bool,
 }
 
 impl OutboundConnection {
@@ -170,18 +189,19 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         orig_dst_addr: SocketAddr,
         out_drain: Option<Watch>,
-    ) {
+    ) -> Result<(), OutboundProxyError> {
         match out_drain {
             Some(drain) => {
                 tokio::select! {
                         _ = drain.signaled() => {
                             info!("drain signaled");
+                            Ok(())
                         }
                         res = self.proxy_to(stream, remote_addr, orig_dst_addr) => res
                 }
             }
             None => {
-                self.proxy_to(stream, remote_addr, orig_dst_addr).await;
+                self.proxy_to(stream, remote_addr, orig_dst_addr).await
             }
         }
     }
@@ -191,7 +211,7 @@ impl OutboundConnection {
         mut source_stream: TcpStream,
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
-    ) {
+    ) -> Result<(), OutboundProxyError> {
         let start = Instant::now();
 
         // Block calls to ztunnel directly, unless we are in "in-pod".
@@ -201,13 +221,13 @@ impl OutboundConnection {
             && !self.pi.cfg.inpod_enabled
         {
             metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
-            return;
+            return Err(OutboundProxyError::NotAllowed);
         }
         let req = match Box::pin(self.build_request(source_addr.ip(), dest_addr)).await {
             Ok(req) => Box::new(req),
             Err(err) => {
                 metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
-                return;
+                return Err(OutboundProxyError::General);
             }
         };
         // TODO: should we use the original address or the actual address? Both seems nice!
@@ -230,27 +250,23 @@ impl OutboundConnection {
 
         let res = match req.protocol {
             Protocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
-                    .await
+                let r1= Box::pin(self.send_hbone_request(source_addr, &req)).await;
+                let Ok(upgraded) = r1 else {
+                    result_tracker.record(r1.map(|_| ()));
+                    return Err(OutboundProxyError::ConnectionRefused);
+                };
+                self.maybe_send_socks5_success(&mut source_stream)
+                    .and_then(|_| copy::copy_bidirectional(source_stream, upgraded, &result_tracker)).await
             }
             Protocol::TCP => {
                 self.proxy_to_tcp(&mut source_stream, &req, &result_tracker)
                     .await
             }
         };
-        result_tracker.record(res)
+        result_tracker.record(res);
+        Ok(())
     }
 
-    async fn proxy_to_hbone(
-        &mut self,
-        stream: TcpStream,
-        remote_addr: SocketAddr,
-        req: &Request,
-        connection_stats: &ConnectionResult,
-    ) -> Result<(), Error> {
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        copy::copy_bidirectional(stream, upgraded, connection_stats).await
-    }
 
     async fn send_hbone_request(
         &mut self,
@@ -466,6 +482,21 @@ impl OutboundConnection {
             }
         }
         Ok(source_workload)
+    }
+    async fn maybe_send_socks5_success(&mut self, stream: &mut TcpStream) -> Result<(), Error> {
+        if !self.send_socks5_success {
+            return Ok(())
+        }
+        // Send dummy values - the client generally ignores it.
+        let buf = [
+            0x05u8, // version
+            0x00, // Success
+            0x00, // reserved
+            0x01, 0x00, 0x00, 0x00, 0x00, // IPv4
+            0x00, 0x00, // port
+        ];
+        stream.write_all(&buf).await?;
+        Ok(())
     }
 }
 
