@@ -29,7 +29,7 @@ use crate::config::ProxyMode;
 use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
-use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult};
+use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult, DerivedWorkload};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
 use crate::proxy::h2_client::H2Stream;
@@ -316,9 +316,18 @@ impl OutboundConnection {
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
+        let derived_source = if req.protocol == Protocol::HBONE {
+            Some(DerivedWorkload {
+                // We are going to do mTLS, so report our identity
+                identity: Some(req.source.as_ref().identity()),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
         ConnectionOpen {
             reporter: Reporter::source,
-            derived_source: None,
+            derived_source,
             source: Some(req.source.clone()),
             destination: req.actual_destination_workload.clone(),
             connection_security_policy: if req.protocol == Protocol::HBONE {
