@@ -23,9 +23,10 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{error, info};
+use outbound::OutboundProxyError;
 
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{util, Error, ProxyInputs, TraceParent};
+use crate::proxy::{util, Error, ProxyInputs, TraceParent, outbound};
 use crate::socket;
 
 pub(super) struct Socks5 {
@@ -88,6 +89,7 @@ impl Socks5 {
                             pool,
                             enable_orig_src: self.enable_orig_src,
                             hbone_port: self.pi.cfg.inbound_addr.port(),
+                            send_socks5_success: true,
                         };
                         tokio::spawn(async move {
                             if let Err(err) = handle(oc, stream, stream_drain, inpod).await {
@@ -115,6 +117,13 @@ impl Socks5 {
     }
 }
 
+pub fn respond(mut stream: TcpStream, res: Result<(), anyhow::Error>) {
+    match res {
+        Ok(_) => {}
+        Err(_) => {}
+    }
+}
+
 // handle will process a SOCKS5 connection. This supports a minimal subset of the protocol,
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
@@ -136,7 +145,7 @@ async fn handle(
     let nmethods = version[1];
 
     if nmethods == 0 {
-        return Err(anyhow::anyhow!("Invalid auth methods"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     // List of supported auth methods
@@ -145,7 +154,7 @@ async fn handle(
 
     // Client must include 'unauthenticated' (0).
     if !methods.into_iter().any(|x| x == 0) {
-        return Err(anyhow::anyhow!("unsupported auth method"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     // Select 'unauthenticated' (0).
@@ -157,11 +166,11 @@ async fn handle(
     let version = version_command[0];
 
     if version != 0x05 {
-        return Err(anyhow::anyhow!("unsupported version"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     if version_command[1] != 1 {
-        return Err(anyhow::anyhow!("unsupported command"));
+        return Err(OutboundProxyError::CommandNotSupported.into());
     }
 
     // Skip RSV
@@ -191,10 +200,10 @@ async fn handle(
             stream.read_exact(&mut domain).await?;
             // TODO: DNS lookup, if we want to integrate with HTTP-based apps without
             // a DNS server.
-            return Err(anyhow::anyhow!("unsupported host"));
+            return Err(OutboundProxyError::HostUnreachable.into());
         }
         _ => {
-            return Err(anyhow::anyhow!("unsupported host"));
+            return Err(OutboundProxyError::HostUnreachable.into());
         }
     };
 
@@ -208,8 +217,9 @@ async fn handle(
 
     // Send dummy values - the client generally ignores it.
     let buf = [
-        0x05u8, // versuib
-        0x00, 0x00, // success, rsv
+        0x05u8, // version
+        0x00, //
+        0x00, // reserved
         0x01, 0x00, 0x00, 0x00, 0x00, // IPv4
         0x00, 0x00, // port
     ];
@@ -219,13 +229,11 @@ async fn handle(
     // For inpod, we want this `spawn` to guaranteed-terminate when we drain - the workload is gone.
     // For non-inpod (shared instance for all workloads), let the spawned task run until the proxy process
     // itself is killed, or the connection terminates normally.
-    tokio::spawn(async move {
-        let drain = match is_inpod {
-            true => Some(out_drain),
-            false => None,
-        };
-        oc.proxy_to_cancellable(stream, remote_addr, host, drain)
-            .await;
-    });
-    Ok(())
+    let drain = match is_inpod {
+        true => Some(out_drain),
+        false => None,
+    };
+    oc.proxy_to_cancellable(stream, remote_addr, host, drain)
+        .await
+        .into()
 }
