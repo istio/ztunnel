@@ -72,7 +72,7 @@ pub struct Service {
     s: Server<State>,
 }
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDump {
     #[serde(flatten)]
