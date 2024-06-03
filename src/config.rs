@@ -52,6 +52,7 @@ const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
+const CONNECTION_TERMINATION_DEADLINE: &str = "CONNECTION_TERMINATION_DEADLINE";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 
@@ -62,7 +63,7 @@ const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
 const DEFAULT_STATS_PORT: u16 = 15020;
 const DEFAULT_DNS_PORT: u16 = 15053;
-const DEFAULT_SELFTERM_DEADLINE: Duration = Duration::from_secs(5);
+const DEFAULT_CONNECTION_TERMINATION_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_CLUSTER_ID: &str = "Kubernetes";
 const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
@@ -381,7 +382,12 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
 
-        self_termination_deadline: DEFAULT_SELFTERM_DEADLINE,
+        self_termination_deadline: match parse::<String>(CONNECTION_TERMINATION_DEADLINE)? {
+            Some(ttl) => {
+                duration_str::parse(ttl).unwrap_or(DEFAULT_CONNECTION_TERMINATION_DEADLINE)
+            }
+            None => DEFAULT_CONNECTION_TERMINATION_DEADLINE,
+        },
 
         // admin API should only be accessible over localhost
         // todo: bind to both v4 localhost and v6
