@@ -123,7 +123,6 @@ accessible by making an HTTP request to either "/stats/prometheus" or "/metrics"
 - DNS Upstream Failures (`istio_dns_upstream_failures_total`)
 - DNS Upstream Request Duration (`istio_dns_upstream_request_duration_seconds`)
 - On Demand DNS Requests (`istio_on_demand_dns_total`)
-- On Demand DNS Cache Misses (`istio_on_demand_dns_cache_misses_total`)
 
 #### In-Pod metrics
 

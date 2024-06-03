@@ -41,7 +41,6 @@ pub struct Metrics {
 
     // on-demand DNS is not a part of DNS proxy, but part of ztunnel proxy itself
     pub on_demand_dns: Family<OnDemandDnsLabels, Counter>,
-    pub on_demand_dns_cache_misses: Family<OnDemandDnsLabels, Counter>,
 }
 
 impl Metrics {
@@ -311,12 +310,6 @@ impl Metrics {
             "The total number of requests that used on-demand DNS (unstable)",
             on_demand_dns.clone(),
         );
-        let on_demand_dns_cache_misses = Family::default();
-        registry.register(
-            "on_demand_dns_cache_misses",
-            "The total number of cache misses for requests on-demand DNS (unstable)",
-            on_demand_dns_cache_misses.clone(),
-        );
 
         Self {
             connection_opens,
@@ -324,7 +317,6 @@ impl Metrics {
             received_bytes,
             sent_bytes,
             on_demand_dns,
-            on_demand_dns_cache_misses,
         }
     }
 }
