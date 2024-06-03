@@ -758,7 +758,7 @@ enum SearchDomains {
 
 impl SystemForwarder {
     fn new(per_pod: bool, cluster_domain: String) -> Result<Self, Error> {
-        // Get the resolver config from /etc/resolv.conf.
+        // Get the resolver config from `ztunnel's` /etc/resolv.conf.
         let (cfg, opts) = read_system_conf().map_err(|e| Error::Generic(Box::new(e)))?;
 
         // Extract the parts.
@@ -816,9 +816,11 @@ impl Forwarder for SystemForwarder {
         match &self.search_domains {
             SearchDomains::Static(s) => s.clone(),
             SearchDomains::Dynamic(cluster_domain) => vec![
-                Name::from_utf8(format!("{}.svc.{cluster_domain}", wl.namespace)).unwrap(),
-                Name::from_utf8(format!("svc.{cluster_domain}")).unwrap(),
-                Name::from_utf8(cluster_domain).unwrap(),
+                Name::from_utf8(format!("{}.svc.{cluster_domain}", wl.namespace))
+                    .expect("inputs must be valid DNS labels"),
+                Name::from_utf8(format!("svc.{cluster_domain}"))
+                    .expect("inputs must be valid DNS labels"),
+                Name::from_utf8(cluster_domain).expect("inputs must be valid DNS labels"),
             ],
         }
     }
