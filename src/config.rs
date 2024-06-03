@@ -378,7 +378,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         frame_size: 1024 * 1024,
 
         self_termination_deadline: match parse::<String>(CONNECTION_TERMINATION_DEADLINE)? {
-            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_CONNECTION_TERMINATION_DEADLINE),
+            Some(ttl) => {
+                duration_str::parse(ttl).unwrap_or(DEFAULT_CONNECTION_TERMINATION_DEADLINE)
+            }
             None => DEFAULT_CONNECTION_TERMINATION_DEADLINE,
         },
 
