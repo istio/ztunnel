@@ -109,7 +109,7 @@ impl DefaultedUnknown<RichStrng> {
     pub fn display(&self) -> Option<DisplayValue<&str>> {
         self.as_ref().map(|rs| display(rs.as_str()))
     }
-    pub fn display_field(&self) -> Option<impl Value + '_> {
+    pub fn to_value(&self) -> Option<impl Value + '_> {
         self.as_ref().map(|rs| rs.as_str())
     }
 }

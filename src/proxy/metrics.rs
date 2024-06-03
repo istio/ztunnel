@@ -405,16 +405,16 @@ impl ConnectionResult {
             tracing::Level::DEBUG,
 
             src.addr = %src.0,
-            src.workload = src.1.as_deref().map(display_field),
-            src.namespace = tl.source_workload_namespace.display_field(),
-            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(display_field_owned),
+            src.workload = src.1.as_deref().map(to_value),
+            src.namespace = tl.source_workload_namespace.to_value(),
+            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             dst.addr = %dst.0,
             dst.hbone_addr = hbone_target.map(display),
-            dst.service = tl.destination_service.display_field(),
-            dst.workload = dst.1.as_deref().map(display_field),
-            dst.namespace = tl.destination_workload_namespace.display_field(),
-            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(display_field_owned),
+            dst.service = tl.destination_service.to_value(),
+            dst.workload = dst.1.as_deref().map(to_value),
+            dst.namespace = tl.destination_workload_namespace.to_value(),
+            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             direction = if tl.reporter == Reporter::source {
                 "outbound"
@@ -488,16 +488,16 @@ impl ConnectionResult {
             res,
 
             src.addr = %self.src.0,
-            src.workload = self.src.1.as_deref().map(display_field),
-            src.namespace = tl.source_workload_namespace.display_field(),
-            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(display_field_owned),
+            src.workload = self.src.1.as_deref().map(to_value),
+            src.namespace = tl.source_workload_namespace.to_value(),
+            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             dst.addr = %self.dst.0,
             dst.hbone_addr = self.hbone_target.map(display),
-            dst.service = tl.destination_service.display_field(),
-            dst.workload = self.dst.1.as_deref().map(display_field),
-            dst.namespace = tl.destination_workload_namespace.display_field(),
-            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(display_field_owned),
+            dst.service = tl.destination_service.to_value(),
+            dst.workload = self.dst.1.as_deref().map(to_value),
+            dst.namespace = tl.destination_workload_namespace.to_value(),
+            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             direction = if tl.reporter == Reporter::source {
                 "outbound"
@@ -514,11 +514,11 @@ impl ConnectionResult {
     }
 }
 
-fn display_field_owned<T: ToString>(t: T) -> impl Value {
+fn to_value_owned<T: ToString>(t: T) -> impl Value {
     t.to_string()
 }
 
-fn display_field<T: AsRef<str>>(t: &T) -> impl Value + '_ {
+fn to_value<T: AsRef<str>>(t: &T) -> impl Value + '_ {
     let v: &str = t.as_ref();
     v
 }
