@@ -206,7 +206,7 @@ impl TestApp {
         panic!("failed to get ready (last: {last_err:?})");
     }
 
-    pub async fn socks5_connect(&self, addr: SocketAddr, source: IpAddr) -> TcpStream {
+    pub async fn socks5_connect(&self, addr: DestinationAddr, source: IpAddr) -> TcpStream {
         // Always use IPv4 address. In theory, we can resolve `localhost` to pick to support any machine
         // However, we need to make sure the WorkloadStore knows about both families then.
         let socks_addr = with_ip(
@@ -266,8 +266,25 @@ pub async fn dns_request(
     send_request(&mut client, n(hostname), query_type).await
 }
 
-pub async fn socks5_connect(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Result<TcpStream> {
-    let addr_type = if addr.ip().is_ipv4() { 0x01u8 } else { 0x04u8 };
+#[derive(Debug, Clone)]
+pub enum DestinationAddr {
+    Ip(SocketAddr),
+    Hostname(String, u16),
+}
+
+impl DestinationAddr {
+    pub fn port(&self) -> u16 {
+        match self {
+            DestinationAddr::Ip(s) => s.port(),
+            DestinationAddr::Hostname(_, p) => *p,
+        }
+    }
+}
+
+pub async fn socks5_connect(
+    mut stream: TcpStream,
+    addr: DestinationAddr,
+) -> anyhow::Result<TcpStream> {
     stream
         .write_all(&[
             0x05u8, // socks5
@@ -282,12 +299,24 @@ pub async fn socks5_connect(mut stream: TcpStream, addr: SocketAddr) -> anyhow::
         0x05u8, // socks5
         0x1u8,  // establish tcp stream
         0x0u8,  // RSV
-        addr_type,
     ];
-    match socket::to_canonical(addr).ip() {
-        IpAddr::V6(ip) => cmd.extend_from_slice(&ip.octets()),
-        IpAddr::V4(ip) => cmd.extend_from_slice(&ip.octets()),
-    };
+    match addr {
+        DestinationAddr::Ip(socket) => match socket::to_canonical(socket).ip() {
+            IpAddr::V4(ip) => {
+                cmd.push(1);
+                cmd.extend_from_slice(&ip.octets())
+            }
+            IpAddr::V6(ip) => {
+                cmd.push(4);
+                cmd.extend_from_slice(&ip.octets())
+            }
+        },
+        DestinationAddr::Hostname(ref host, _) => {
+            cmd.push(3);
+            cmd.push(host.len() as u8);
+            cmd.extend_from_slice(host.as_bytes())
+        }
+    }
     cmd.extend_from_slice(&addr.port().to_be_bytes());
     stream.write_all(&cmd).await?;
 

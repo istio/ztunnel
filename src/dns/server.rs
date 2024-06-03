@@ -61,6 +61,7 @@ static SVC: Lazy<Name> = Lazy::new(|| as_name("svc"));
 /// A DNS server that serves known hostnames from ztunnel data structures.
 /// Unknown hosts are forwarded to an upstream resolver.
 pub struct Server {
+    store: Arc<Store>,
     tcp_addr: SocketAddr,
     udp_addr: SocketAddr,
     server: ServerFuture<dns::handler::Handler>,
@@ -97,7 +98,8 @@ impl Server {
             metrics,
         );
         store.allow_unknown_source = allow_unknown_source;
-        let handler = dns::handler::Handler::new(Arc::new(store));
+        let store = Arc::new(store);
+        let handler = dns::handler::Handler::new(store.clone());
         let mut server = ServerFuture::new(handler);
         info!(
             address=%addr,
@@ -123,6 +125,7 @@ impl Server {
         server.register_socket(udp_socket);
 
         Ok(Self {
+            store,
             tcp_addr,
             udp_addr,
             server,
@@ -138,6 +141,10 @@ impl Server {
     /// Returns the address to which this DNS server is bound for UDP.
     pub fn udp_address(&self) -> SocketAddr {
         self.udp_addr
+    }
+
+    pub fn resolver(&self) -> Arc<dyn Resolver + Send + Sync> {
+        self.store.clone()
     }
 
     /// Runs this DNS server to completion.

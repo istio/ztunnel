@@ -19,6 +19,7 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use drain::Watch;
+use hickory_proto::error::ProtoError;
 
 use rand::Rng;
 
@@ -31,6 +32,7 @@ pub use metrics::*;
 
 use crate::identity::{Identity, SecretManager};
 
+use crate::dns::resolver::Resolver;
 use crate::proxy::connection_manager::{ConnectionManager, PolicyWatcher};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
@@ -111,6 +113,7 @@ pub(super) struct ProxyInputs {
     metrics: Arc<Metrics>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     proxy_workload_info: Option<Arc<WorkloadInfo>>,
+    resolver: Option<Arc<dyn Resolver + Send + Sync>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,6 +126,7 @@ impl ProxyInputs {
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         proxy_workload_info: Option<WorkloadInfo>,
+        resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
@@ -132,6 +136,7 @@ impl ProxyInputs {
             connection_manager,
             socket_factory,
             proxy_workload_info: proxy_workload_info.map(Arc::new),
+            resolver,
         })
     }
 }
@@ -143,6 +148,7 @@ impl Proxy {
         cert_manager: Arc<SecretManager>,
         metrics: Metrics,
         drain: Watch,
+        resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Result<Proxy, Error> {
         let metrics = Arc::new(metrics);
         let socket_factory = Arc::new(DefaultSocketFactory);
@@ -155,6 +161,7 @@ impl Proxy {
             metrics,
             socket_factory,
             None,
+            resolver,
         );
         Self::from_inputs(pi, drain).await
     }
@@ -323,6 +330,13 @@ pub enum Error {
 
     #[error("connection failed to drain within the timeout")]
     DrainTimeOut,
+
+    #[error("dns: {0}")]
+    Dns(#[from] ProtoError),
+    #[error("dns lookup: {0}")]
+    DnsLookup(#[from] hickory_server::authority::LookupError),
+    #[error("dns response had no valid IP addresses")]
+    DnsEmpty,
 }
 
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;

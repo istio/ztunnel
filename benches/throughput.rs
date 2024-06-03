@@ -32,7 +32,7 @@ use tracing::info;
 
 use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 use ztunnel::state::workload::{Protocol, Workload};
-use ztunnel::test_helpers::app::TestApp;
+use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::TEST_WORKLOAD_HBONE;
 use ztunnel::test_helpers::TEST_WORKLOAD_SOURCE;
@@ -139,13 +139,19 @@ fn initialize_environment(
         });
         let mut hbone = ta
             .socks5_connect(
-                helpers::with_ip(echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap()),
+                DestinationAddr::Ip(helpers::with_ip(
+                    echo_addr,
+                    TEST_WORKLOAD_HBONE.parse().unwrap(),
+                )),
                 TEST_WORKLOAD_SOURCE.parse().unwrap(),
             )
             .await;
         let mut tcp = ta
             .socks5_connect(
-                helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap()),
+                DestinationAddr::Ip(helpers::with_ip(
+                    echo_addr,
+                    TEST_WORKLOAD_TCP.parse().unwrap(),
+                )),
                 TEST_WORKLOAD_SOURCE.parse().unwrap(),
             )
             .await;
@@ -295,7 +301,10 @@ pub fn connections(c: &mut Criterion) {
             let e = env.lock().await;
             let mut s =
                 e.ta.socks5_connect(
-                    helpers::with_ip(e.echo_addr, TEST_WORKLOAD_TCP.parse().unwrap()),
+                    DestinationAddr::Ip(helpers::with_ip(
+                        e.echo_addr,
+                        TEST_WORKLOAD_TCP.parse().unwrap(),
+                    )),
                     TEST_WORKLOAD_SOURCE.parse().unwrap(),
                 )
                 .await;
@@ -308,7 +317,10 @@ pub fn connections(c: &mut Criterion) {
             let e = env.lock().await;
             let mut s =
                 e.ta.socks5_connect(
-                    helpers::with_ip(e.echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap()),
+                    DestinationAddr::Ip(helpers::with_ip(
+                        e.echo_addr,
+                        TEST_WORKLOAD_HBONE.parse().unwrap(),
+                    )),
                     TEST_WORKLOAD_SOURCE.parse().unwrap(),
                 )
                 .await;
@@ -333,7 +345,10 @@ pub fn rbac_connections(c: &mut Criterion) {
             let e = env.lock().await;
             let mut s =
                 e.ta.socks5_connect(
-                    helpers::with_ip(e.echo_addr, TEST_WORKLOAD_TCP.parse().unwrap()),
+                    DestinationAddr::Ip(helpers::with_ip(
+                        e.echo_addr,
+                        TEST_WORKLOAD_TCP.parse().unwrap(),
+                    )),
                     TEST_WORKLOAD_SOURCE.parse().unwrap(),
                 )
                 .await;
@@ -347,7 +362,10 @@ pub fn rbac_connections(c: &mut Criterion) {
             let e = env.lock().await;
             let mut s =
                 e.ta.socks5_connect(
-                    helpers::with_ip(e.echo_addr, TEST_WORKLOAD_HBONE.parse().unwrap()),
+                    DestinationAddr::Ip(helpers::with_ip(
+                        e.echo_addr,
+                        TEST_WORKLOAD_HBONE.parse().unwrap(),
+                    )),
                     TEST_WORKLOAD_SOURCE.parse().unwrap(),
                 )
                 .await;
@@ -491,7 +509,7 @@ fn hbone_connections(c: &mut Criterion) {
 
                 // Start HBONE connection
                 let mut hbone = ta
-                    .socks5_connect(helpers::with_ip(echo_addr, dest_addr), source_addr)
+                    .socks5_connect(DestinationAddr::Ip(helpers::with_ip(echo_addr, dest_addr)), source_addr)
                     .await;
 
                 // TCP ping
