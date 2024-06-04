@@ -337,7 +337,7 @@ impl ProxyState {
 
 /// Wrapper around [ProxyState] that provides additional methods for requesting information
 /// on-demand.
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Clone)]
 pub struct DemandProxyState {
     #[serde(flatten)]
     state: Arc<RwLock<ProxyState>>,
