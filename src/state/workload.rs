@@ -33,6 +33,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
+use tokio::sync::watch::{Receiver, Sender};
 use tracing::{error, trace};
 use xds::istio::workload::ApplicationTunnel as XdsApplicationTunnel;
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
@@ -589,8 +590,13 @@ pub fn network_addr(network: Strng, vip: IpAddr) -> NetworkAddress {
 }
 
 /// A WorkloadStore encapsulates all information about workloads in the mesh
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct WorkloadStore {
+    // TODO this could be expanded to Sender<Workload> + a full subscriber/streaming
+    // model, but for now just notifying watchers to wake when _any_ insert happens
+    // is simpler (and only requires a channelsize of 1)
+    insert_notifier: Sender<()>,
+
     /// byAddress maps workload network addresses to workloads
     pub(super) by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
@@ -601,7 +607,26 @@ pub struct WorkloadStore {
     by_identity: HashMap<Identity, HashSet<Strng>>,
 }
 
+impl Default for WorkloadStore {
+    fn default() -> Self {
+        WorkloadStore {
+            insert_notifier: Sender::new(()),
+            by_addr: Default::default(),
+            by_hostname: Default::default(),
+            by_identity: Default::default(),
+            by_uid: Default::default(),
+        }
+    }
+}
+
 impl WorkloadStore {
+    // Returns a new subscriber. Note that subscribers are only guaranteed to be notified on
+    // new values sent _after_ their creation, so callers should create, check current state,
+    // then sub.
+    pub fn new_subscriber(&self) -> Receiver<()> {
+        self.insert_notifier.subscribe()
+    }
+
     pub fn insert(&mut self, w: Arc<Workload>, track_identity: bool) {
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove(&w.uid);
@@ -621,6 +646,10 @@ impl WorkloadStore {
                 .or_default()
                 .insert(w.uid.clone());
         }
+
+        // We have stored a newly inserted workload, notify watchers
+        // (if any) to wake.
+        self.insert_notifier.send_replace(());
     }
 
     pub fn remove(&mut self, uid: &Strng) -> Option<Workload> {
