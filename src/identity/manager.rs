@@ -102,6 +102,13 @@ impl fmt::Display for Identity {
 }
 
 impl Identity {
+    pub fn from_parts(td: Strng, ns: Strng, sa: Strng) -> Identity {
+        Identity::Spiffe {
+            trust_domain: td,
+            namespace: ns,
+            service_account: sa,
+        }
+    }
     pub fn to_strng(self: &Identity) -> Strng {
         match self {
             Identity::Spiffe {
