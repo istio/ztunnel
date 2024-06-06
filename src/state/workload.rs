@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
 use std::fmt::Write;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -158,8 +158,6 @@ pub struct Workload {
     pub waypoint: Option<GatewayAddress>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub network_gateway: Option<GatewayAddress>,
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub gateway_address: Option<SocketAddr>,
 
     #[serde(default)]
     pub protocol: Protocol,
@@ -238,12 +236,9 @@ impl fmt::Display for Workload {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Workload{{{} with uid {} via {} ({:?})}}",
+            "Workload{{{} with uid {} ({:?})}}",
             self.name,
             self.uid,
-            self.gateway_address
-                .map(|x| x.to_string())
-                .unwrap_or_else(|| "None".into()),
             self.protocol
         )
     }
@@ -382,7 +377,6 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
             workload_ips: addresses,
             waypoint: wp,
             network_gateway: network_gw,
-            gateway_address: None,
 
             protocol: Protocol::from(xds::istio::workload::TunnelProtocol::try_from(
                 resource.tunnel_protocol,
