@@ -237,9 +237,7 @@ impl fmt::Display for Workload {
         write!(
             f,
             "Workload{{{} with uid {} ({:?})}}",
-            self.name,
-            self.uid,
-            self.protocol
+            self.name, self.uid, self.protocol
         )
     }
 }
