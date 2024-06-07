@@ -380,14 +380,8 @@ impl Store {
                         name: search_name,
                         alias,
                     });
-                } else if let Some(wl) = state.workloads.find_hostname(&search_name_str) {
-                    // Didn't find a service, try a workload.
-                    return Some(ServerMatch {
-                        server: Address::Workload(wl),
-                        name: search_name,
-                        alias,
-                    });
                 }
+                // TODO(): add support for workload lookups for headless pods
             }
         }
 
@@ -1212,18 +1206,20 @@ mod tests {
                     a(n("headless.ns1.svc.cluster.local."), ipv4("31.31.31.31"))],
                 ..Default::default()
             },
+            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "success: k8s pod - fqdn",
+                name: "todo: k8s pod - fqdn",
                 host: "headless.pod0.ns1.svc.cluster.local.",
-                expect_records: vec![
-                    a(n("headless.pod0.ns1.svc.cluster.local."), ipv4("30.30.30.30"))],
+                expect_authoritative: false, // forwarded.
+                expect_code: ResponseCode::NXDomain,
                 ..Default::default()
             },
+            // TODO(https://github.com/istio/ztunnel/issues/1119)
             Case {
-                name: "success: k8s pod - name.domain.ns",
+                name: "todo: k8s pod - name.domain.ns",
                 host: "headless.pod0.ns1.",
-                expect_records: vec![
-                    a(n("headless.pod0.ns1."), ipv4("30.30.30.30"))],
+                expect_authoritative: false, // forwarded.
+                expect_code: ResponseCode::NXDomain,
                 ..Default::default()
             },
             Case {

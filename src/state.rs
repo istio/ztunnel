@@ -227,15 +227,11 @@ impl ProxyState {
     pub fn find_hostname(&self, name: &NamespacedHostname) -> Option<Address> {
         // Hostnames for services are more common, so lookup service first and fallback
         // to workload.
-        match self.services.get_by_namespaced_host(name) {
-            None => {
-                // Workload hostnames are globally unique, so ignore the namespace.
-                self.workloads
-                    .find_hostname(&name.hostname)
-                    .map(Address::Workload)
-            }
-            Some(svc) => Some(Address::Service(svc)),
-        }
+        // We do not looking up workloads by hostname. We could, but we only allow referencing "frontends",
+        // not backends
+        self.services
+            .get_by_namespaced_host(name)
+            .map(Address::Service)
     }
 
     fn find_upstream(
