@@ -23,6 +23,7 @@ pub mod manager;
 pub use manager::*;
 
 mod auth;
+use crate::state::WorkloadInfo;
 pub use auth::*;
 
 #[cfg(any(test, feature = "testing"))]
@@ -49,6 +50,8 @@ pub enum Error {
     Spiffe(String),
     #[error("the identity is no longer needed")]
     Forgotten,
+    #[error("BUG: identity requested {0}, but only allowed {1:?}")]
+    BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
 }
 
 impl From<tls::Error> for Error {

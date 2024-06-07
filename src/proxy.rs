@@ -104,10 +104,55 @@ pub struct Proxy {
     policy_watcher: PolicyWatcher,
 }
 
+/// ScopedSecretManager provides an extra check against certificate lookups to ensure only appropriate certificates
+/// are requested for a given workload.
+/// This acts as a second line of defense against *coding errors* that could cause incorrect identity assignment.
+#[derive(Clone)]
+pub struct ScopedSecretManager {
+    cert_manager: Arc<SecretManager>,
+    allowed: Option<Arc<WorkloadInfo>>,
+}
+
+impl ScopedSecretManager {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new(cert_manager: Arc<SecretManager>) -> Self {
+        Self {
+            cert_manager,
+            allowed: None,
+        }
+    }
+
+    pub async fn fetch_certificate(
+        &self,
+        id: &Identity,
+    ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
+        if let Some(allowed) = &self.allowed {
+            match &id {
+                Identity::Spiffe {
+                    namespace,
+                    service_account,
+                    ..
+                } => {
+                    // We cannot compare trust domain, since we don't get this from WorkloadInfo
+                    if namespace != &allowed.namespace
+                        || service_account != &allowed.service_account
+                    {
+                        let err =
+                            identity::Error::BugInvalidIdentityRequest(id.clone(), allowed.clone());
+                        debug_assert!(false, "{err}");
+                        return Err(err);
+                    }
+                }
+            }
+        }
+        self.cert_manager.fetch_certificate(id).await
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ProxyInputs {
     cfg: Arc<config::Config>,
-    cert_manager: Arc<SecretManager>,
+    cert_manager: ScopedSecretManager,
     connection_manager: ConnectionManager,
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
@@ -128,14 +173,18 @@ impl ProxyInputs {
         proxy_workload_info: Option<WorkloadInfo>,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Arc<Self> {
+        let proxy_workload_info = proxy_workload_info.map(Arc::new);
         Arc::new(Self {
             cfg,
             state,
-            cert_manager,
+            cert_manager: ScopedSecretManager {
+                cert_manager,
+                allowed: proxy_workload_info.clone(),
+            },
             metrics,
             connection_manager,
             socket_factory,
-            proxy_workload_info: proxy_workload_info.map(Arc::new),
+            proxy_workload_info,
             resolver,
         })
     }

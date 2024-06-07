@@ -572,11 +572,13 @@ mod tests {
         };
 
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
+            Duration::from_secs(10),
+        ));
         let original_src = false; // for testing, not needed
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {
-                cert_manager: identity::mock::new_secret_manager(Duration::from_secs(10)),
+                cert_manager: cert_mgr.clone(),
                 state,
                 cfg: cfg.clone(),
                 metrics: test_proxy_metrics(),

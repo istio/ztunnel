@@ -27,9 +27,9 @@ use tokio::net::TcpStream;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
 
-use super::Error;
+use super::{Error, ScopedSecretManager};
 use crate::baggage::parse_baggage_header;
-use crate::identity::{Identity, SecretManager};
+use crate::identity::Identity;
 
 use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
@@ -447,7 +447,7 @@ impl<'a, T: Display> Display for OptionDisplay<'a, T> {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: Arc<SecretManager>,
+    cert_manager: ScopedSecretManager,
     state: DemandProxyState,
     network: Strng,
 }

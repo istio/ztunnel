@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::h2;
+use super::{h2, ScopedSecretManager};
 use super::{Error, SocketFactory};
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, trace};
 
 use crate::config;
-use crate::identity::{Identity, SecretManager};
+use crate::identity::Identity;
 
 use flurry;
 
@@ -78,7 +78,7 @@ struct ConnSpawner {
     cfg: Arc<config::Config>,
     original_source: bool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    cert_manager: Arc<SecretManager>,
+    cert_manager: ScopedSecretManager,
     timeout_rx: watch::Receiver<bool>,
 }
 
@@ -337,7 +337,7 @@ impl WorkloadHBONEPool {
         cfg: Arc<crate::config::Config>,
         original_source: bool,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-        cert_manager: Arc<SecretManager>,
+        cert_manager: ScopedSecretManager,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
         let (timeout_send, timeout_recv) = watch::channel(false);
@@ -561,7 +561,7 @@ mod test {
     use std::net::SocketAddr;
     use std::time::Instant;
 
-    use crate::identity;
+    use crate::{identity, proxy};
 
     use drain::Watch;
     use futures_util::{future, StreamExt};
@@ -991,7 +991,9 @@ mod test {
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
+            Duration::from_secs(10),
+        ));
         let original_src = false; // for testing, not needed
         let pool = WorkloadHBONEPool::new(Arc::new(cfg), original_src, sock_fact, cert_mgr);
         let server = TestServer {
