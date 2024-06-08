@@ -46,7 +46,7 @@ pub fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
     Lazy::force(&APPLICATION_START_TIME);
     let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
         .lossy(false)
-        .buffered_lines_limit(128_000)
+        .buffered_lines_limit(1000) // Buffer up to 1000 lines to avoid blocking on logs
         .finish(std::io::stdout());
     tracing_subscriber::registry()
         .with(fmt_layer(non_blocking))
