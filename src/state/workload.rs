@@ -601,8 +601,6 @@ pub struct WorkloadStore {
     pub(super) by_addr: HashMap<NetworkAddress, Arc<Workload>>,
     /// byUid maps workload UIDs to workloads
     by_uid: HashMap<Strng, Arc<Workload>>,
-    /// byHostname maps workload hostname to workloads.
-    by_hostname: HashMap<Strng, Arc<Workload>>,
     // Identity->Set of UIDs. Only stores local nodes
     by_identity: HashMap<Identity, HashSet<Strng>>,
 }
@@ -612,7 +610,6 @@ impl Default for WorkloadStore {
         WorkloadStore {
             insert_notifier: Sender::new(()),
             by_addr: Default::default(),
-            by_hostname: Default::default(),
             by_identity: Default::default(),
             by_uid: Default::default(),
         }
@@ -634,9 +631,6 @@ impl WorkloadStore {
         for ip in &w.workload_ips {
             self.by_addr
                 .insert(network_addr(w.network.clone(), *ip), w.clone());
-        }
-        if !w.hostname.is_empty() {
-            self.by_hostname.insert(w.hostname.clone(), w.clone());
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
         // Only track local nodes to avoid overhead
@@ -663,7 +657,6 @@ impl WorkloadStore {
                     self.by_addr
                         .remove(&network_addr(prev.network.clone(), *wip));
                 }
-                self.by_hostname.remove(&prev.hostname);
 
                 let id = prev.identity();
                 if let Some(set) = self.by_identity.get_mut(&id) {
@@ -680,11 +673,6 @@ impl WorkloadStore {
     /// Finds the workload by address, as an arc.
     pub fn find_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
         self.by_addr.get(addr).cloned()
-    }
-
-    /// Finds the workload by hostname.
-    pub fn find_hostname(&self, hostname: &Strng) -> Option<Arc<Workload>> {
-        self.by_hostname.get(hostname).cloned()
     }
 
     /// Finds the workload by uid.
