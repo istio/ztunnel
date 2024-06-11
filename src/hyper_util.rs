@@ -214,7 +214,6 @@ impl<S> Server<S> {
         let drain_stream = self.drain_rx.clone();
         let drain_connections = self.drain_rx;
         let _name = self.name.clone();
-        // let (tx, rx) = oneshot::channel();
         let state = Arc::new(self.state);
         let f = Arc::new(f);
         info!(

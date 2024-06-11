@@ -135,6 +135,8 @@ where
             }
             _ = &mut ping_drop_rx => {
                 warn!("HBONE ping timeout/error");
+                conn.abrupt_shutdown(h2::Reason::NO_ERROR);
+                break
             }
             _shutdown = drain.signaled() => {
                 debug!("starting graceful drain...");
