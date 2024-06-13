@@ -389,6 +389,9 @@ impl OutboundConnection {
             .fetch_upstream(source_workload.network.clone(), &source_workload, target)
             .await?
         else {
+            if svc_addressed {
+                return Err(Error::NoHealthyUpstream(target));
+            }
             debug!("built request as passthrough; no upstream found");
             return Ok(Request {
                 protocol: Protocol::TCP,
@@ -827,6 +830,28 @@ mod tests {
                 hbone_destination: "127.0.0.3:80",
                 destination: "127.0.0.10:15008",
             }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_empty_service() {
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            XdsAddressType::Service(XdsService {
+                addresses: vec![XdsNetworkAddress {
+                    network: "".to_string(),
+                    address: vec![127, 0, 0, 3],
+                }],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 8080,
+                }],
+                ..Default::default()
+            }),
+            // Should use the waypoint
+            None,
         )
         .await;
     }

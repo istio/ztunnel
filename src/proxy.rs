@@ -314,6 +314,9 @@ pub enum Error {
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
 
+    #[error("no healthy upstream: {0}")]
+    NoHealthyUpstream(SocketAddr),
+
     #[error("no ip addresses were resolved for workload: {0}")]
     NoResolvedAddresses(String),
 
