@@ -155,14 +155,6 @@ impl WorkloadProxyManager {
     async fn run_internal(&mut self, drain: Watch) {
         // for now just drop block_ready, until we support knowing that our state is in sync.
         debug!("workload proxy manager is running");
-
-        // the UDS socket `connect` has its own retry+backoff logic, but
-        // we also need to backoff at the protocol level if we successfully connect to the socket,
-        // in case we can't agree with the server on the protocol/message format
-        // (so we don't keep succesfully connecting, and spamming them with bad messages)
-        const MAX_BACKOFF: Duration = Duration::from_secs(15);
-        let mut backoff = Duration::from_millis(10);
-
         // hold the  release shutdown until we are done with `state.drain` below.
         let _rs = loop {
             // Accept a connection
@@ -192,9 +184,6 @@ impl WorkloadProxyManager {
             };
             debug!("workload proxy manager is NOT ready");
             self.readiness.not_ready();
-            backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
-            warn!("could not announce, retrying in {:?}", backoff);
-            tokio::time::sleep(backoff).await;
         };
     }
 }
