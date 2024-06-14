@@ -35,6 +35,7 @@ use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEP
 use crate::proxy::h2_client::H2Stream;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
+use crate::state::ServiceResolutionMode;
 use crate::{assertions, copy, proxy, socket};
 
 pub struct Outbound {
@@ -386,7 +387,12 @@ impl OutboundConnection {
         };
 
         let Some(us) = state
-            .fetch_upstream(source_workload.network.clone(), &source_workload, target)
+            .fetch_upstream(
+                source_workload.network.clone(),
+                &source_workload,
+                target,
+                ServiceResolutionMode::Standard,
+            )
             .await?
         else {
             if svc_addressed {
@@ -536,17 +542,26 @@ mod tests {
     use crate::test_helpers::helpers::test_proxy_metrics;
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::address::Type as XdsAddressType;
-    use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::Port;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::xds::istio::workload::{NetworkAddress as XdsNetworkAddress, PortList};
     use crate::{identity, xds};
 
     async fn run_build_request(
         from: &str,
         to: &str,
         xds: XdsAddressType,
+        expect: Option<ExpectedRequest<'_>>,
+    ) {
+        run_build_request_multi(from, to, vec![xds], expect).await;
+    }
+
+    async fn run_build_request_multi(
+        from: &str,
+        to: &str,
+        xds: Vec<XdsAddressType>,
         expect: Option<ExpectedRequest<'_>>,
     ) {
         let cfg = Arc::new(Config {
@@ -570,10 +585,15 @@ mod tests {
             service_account: "waypoint-sa".to_string(),
             ..Default::default()
         };
-        let state = match xds {
-            XdsAddressType::Workload(wl) => new_proxy_state(&[source, waypoint, wl], &[], &[]),
-            XdsAddressType::Service(svc) => new_proxy_state(&[source, waypoint], &[svc], &[]),
-        };
+        let mut workloads = vec![source, waypoint];
+        let mut services = vec![];
+        for x in xds {
+            match x {
+                XdsAddressType::Workload(wl) => workloads.push(wl),
+                XdsAddressType::Service(svc) => services.push(svc),
+            };
+        }
+        let state = new_proxy_state(&workloads, &services, &[]);
 
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
         let cert_mgr = identity::mock::new_secret_manager(Duration::from_secs(10));
@@ -852,6 +872,69 @@ mod tests {
             }),
             // Should use the waypoint
             None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_target_port() {
+        run_build_request_multi(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            vec![
+                XdsAddressType::Service(XdsService {
+                    hostname: "example.com".to_string(),
+                    addresses: vec![XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vec![127, 0, 0, 3],
+                    }],
+                    ports: vec![
+                        Port {
+                            service_port: 80,
+                            target_port: 0, // named port
+                        },
+                        Port {
+                            service_port: 8080,
+                            target_port: 0, // named port
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                XdsAddressType::Workload(XdsWorkload {
+                    uid: "cluster1//v1/Pod/default/matching-pod".to_string(),
+                    addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
+                    services: std::collections::HashMap::from([(
+                        "/example.com".to_string(),
+                        PortList {
+                            ports: vec![Port {
+                                service_port: 80,
+                                target_port: 1234,
+                            }],
+                        },
+                    )]),
+                    ..Default::default()
+                }),
+                // This pod does not have a port 80 defined at all
+                XdsAddressType::Workload(XdsWorkload {
+                    uid: "cluster1//v1/Pod/default/unmatching-pod".to_string(),
+                    addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 4])],
+                    services: std::collections::HashMap::from([(
+                        "/example.com".to_string(),
+                        PortList {
+                            ports: vec![Port {
+                                service_port: 8080,
+                                target_port: 9999,
+                            }],
+                        },
+                    )]),
+                    ..Default::default()
+                }),
+            ],
+            Some(ExpectedRequest {
+                protocol: Protocol::TCP,
+                hbone_destination: "",
+                destination: "127.0.0.2:1234",
+            }),
         )
         .await;
     }
