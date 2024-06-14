@@ -187,7 +187,7 @@ impl WorkloadProxyManager {
                 Err(Error::ProtocolError) => {
                     error!("protocol mismatch error while processing stream, shutting down");
                     self.readiness.not_ready();
-                    return Err(anyhow::anyhow!("protocol error"))
+                    return Err(anyhow::anyhow!("protocol error"));
                 }
                 Err(e) => {
                     // for other errors, just retry
