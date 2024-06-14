@@ -115,6 +115,7 @@ fn ignore_shutdown_errors(res: Result<(), io::Error>) -> Result<(), io::Error> {
             if e.kind() == io::ErrorKind::NotConnected
                 || e.kind() == io::ErrorKind::UnexpectedEof =>
         {
+            trace!(err=%e, "failed to shutdown peer, they already shutdown");
             Ok(())
         }
         _ => res,
