@@ -145,13 +145,19 @@ impl WorkloadProxyManager {
     pub async fn run(mut self, drain: Watch) -> Result<(), anyhow::Error> {
         self.run_internal(drain).await;
 
-        // we broke the loop, this can only happen when drain was signaled. drain our proxies.
+        // We broke the loop, this can only happen when drain was signaled
+        // or we got a terminal protocol error. Drain our proxies.
         debug!("workload proxy manager waiting for proxies to drain");
         self.state.drain().await;
         debug!("workload proxy manager proxies drained");
         Ok(())
     }
 
+    // This func will run and attempt to (re)connect to the node agent over uds, until
+    // - a drain is signaled
+    // - we have a ProtocolError (we have a serious version mismatch)
+    // We should never _have_ a protocol error as the gRPC proto should be forwards+backwards compatible,
+    // so this is mostly a safeguard
     async fn run_internal(&mut self, drain: Watch) {
         // for now just drop block_ready, until we support knowing that our state is in sync.
         debug!("workload proxy manager is running");
@@ -178,7 +184,12 @@ impl WorkloadProxyManager {
                 Ok(()) => {
                     info!("process stream ended with eof");
                 }
+                Err(Error::ProtocolError) => {
+                    error!("protocol mismatch error while processing stream, shutting down");
+                    return
+                }
                 Err(e) => {
+                    // for other errors, just retry
                     warn!("process stream ended: {:?}", e);
                 }
             };
