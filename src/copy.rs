@@ -79,14 +79,14 @@ where
     let downstream_to_upstream = async {
         let res = copy_buf(&mut rd, &mut wu, stats, false).await;
         trace!(?res, "send");
-        wu.shutdown().await?;
+        ignore_shutdown_errors(wu.shutdown().await)?;
         res
     };
 
     let upstream_to_downstream = async {
         let res = copy_buf(&mut ru, &mut wd, stats, true).await;
         trace!(?res, "receive");
-        wd.shutdown().await?;
+        ignore_shutdown_errors(wd.shutdown().await)?;
         res
     };
 
@@ -105,6 +105,20 @@ where
     })?;
     trace!(sent, received, "copy complete");
     Ok(())
+}
+
+// During shutdown, the other end may have already disconnected. That is fine, they shutdown for us.
+// Ignore it.
+fn ignore_shutdown_errors(res: Result<(), io::Error>) -> Result<(), io::Error> {
+    match &res {
+        Err(e)
+            if e.kind() == io::ErrorKind::NotConnected
+                || e.kind() == io::ErrorKind::UnexpectedEof =>
+        {
+            Ok(())
+        }
+        _ => res,
+    }
 }
 
 // CopyBuf is a fork of Tokio's same struct, with additional support for resizing and metrics reporting.
