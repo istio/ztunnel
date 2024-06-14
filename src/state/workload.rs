@@ -700,7 +700,7 @@ pub enum WorkloadError {
 mod tests {
     use super::*;
     use crate::config::ConfigSource;
-    use crate::state::{DemandProxyState, ProxyState};
+    use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode};
     use crate::test_helpers::helpers::initialize_telemetry;
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;
@@ -1258,6 +1258,7 @@ mod tests {
                 strng::EMPTY,
                 &wl,
                 "127.0.1.1:80".parse().unwrap(),
+                ServiceResolutionMode::Standard,
             ) {
                 let n = &workload.name; // borrow name instead of cloning
                 found.insert(n.to_string()); // insert an owned copy of the borrowed n
@@ -1313,6 +1314,7 @@ mod tests {
                 strng::EMPTY,
                 wl.as_ref().unwrap(),
                 "127.10.0.1:80".parse().unwrap(),
+                ServiceResolutionMode::Standard,
             )
             .expect("should get");
         // Make sure we get a valid VIP
@@ -1331,6 +1333,7 @@ mod tests {
                 "remote".into(),
                 wl.as_ref().unwrap(),
                 "127.10.0.2:80".parse().unwrap(),
+                ServiceResolutionMode::Standard,
             )
             .expect("should get");
         // Make sure we get a valid VIP
