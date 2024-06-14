@@ -50,19 +50,21 @@ impl Outbound {
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
-        let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
+        let transparent = super::maybe_set_transparent(&pi, &listener)?;
 
         info!(
             address=%listener.local_addr(),
             component="outbound",
-            transparent=enable_orig_src,
+            transparent,
             "listener established",
         );
+        let inpod = pi.cfg.inpod_enabled;
         Ok(Outbound {
             pi,
             listener,
             drain,
-            enable_orig_src,
+            // Do not need to spoof with inpod mode for outbound
+            enable_orig_src: transparent && !inpod,
         })
     }
 
@@ -79,8 +81,7 @@ impl Outbound {
         let (sub_drain_signal, sub_drain) = drain::channel();
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
-            // Do not need to spoof with inpod mode for outbound
-            self.enable_orig_src && !self.pi.cfg.inpod_enabled,
+            self.enable_orig_src,
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );

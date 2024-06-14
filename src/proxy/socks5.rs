@@ -48,20 +48,22 @@ impl Socks5 {
             .tcp_bind(pi.cfg.socks5_addr.unwrap())
             .map_err(|e| Error::Bind(pi.cfg.socks5_addr.unwrap(), e))?;
 
-        let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
+        let transparent = super::maybe_set_transparent(&pi, &listener)?;
 
         info!(
             address=%listener.local_addr(),
             component="socks5",
-            transparent=enable_orig_src,
+            transparent,
             "listener established",
         );
 
+        let inpod = pi.cfg.inpod_enabled;
         Ok(Socks5 {
             pi,
             listener,
             drain,
-            enable_orig_src,
+            // Do not need to spoof with inpod mode for outbound
+            enable_orig_src: transparent && !inpod,
         })
     }
 
@@ -81,8 +83,7 @@ impl Socks5 {
                 // but ProxyInfo is overloaded and only `outbound` should ever use the pool.
                 let pool = crate::proxy::pool::WorkloadHBONEPool::new(
                     self.pi.cfg.clone(),
-                    // Do not need to spoof with inpod mode for outbound
-                    self.enable_orig_src && !self.pi.cfg.inpod_enabled,
+                    self.enable_orig_src,
                     self.pi.socket_factory.clone(),
                     self.pi.cert_manager.clone(),
                 );
