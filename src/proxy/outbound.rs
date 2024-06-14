@@ -79,7 +79,8 @@ impl Outbound {
         let (sub_drain_signal, sub_drain) = drain::channel();
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
-            self.enable_orig_src,
+            // Do not need to spoof with inpod mode for outbound
+            self.enable_orig_src && !self.pi.cfg.inpod_enabled,
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );
@@ -298,7 +299,8 @@ impl OutboundConnection {
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         // Create a TCP connection to upstream
-        let local = if self.enable_orig_src {
+        // We do not need spoofing for inbound
+        let local = if self.enable_orig_src && !self.pi.cfg.inpod_enabled {
             super::get_original_src_from_stream(stream)
         } else {
             None

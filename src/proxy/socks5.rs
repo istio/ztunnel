@@ -81,7 +81,8 @@ impl Socks5 {
                 // but ProxyInfo is overloaded and only `outbound` should ever use the pool.
                 let pool = crate::proxy::pool::WorkloadHBONEPool::new(
                     self.pi.cfg.clone(),
-                    self.enable_orig_src,
+                    // Do not need to spoof with inpod mode for outbound
+                    self.enable_orig_src && !self.pi.cfg.inpod_enabled,
                     self.pi.socket_factory.clone(),
                     self.pi.cert_manager.clone(),
                 );
