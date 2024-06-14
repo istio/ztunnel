@@ -51,19 +51,21 @@ impl Outbound {
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
-        let enable_orig_src = super::maybe_set_transparent(&pi, &listener)?;
+        let transparent = super::maybe_set_transparent(&pi, &listener)?;
 
         info!(
             address=%listener.local_addr(),
             component="outbound",
-            transparent=enable_orig_src,
+            transparent,
             "listener established",
         );
+        let inpod = pi.cfg.inpod_enabled;
         Ok(Outbound {
             pi,
             listener,
             drain,
-            enable_orig_src,
+            // Do not need to spoof with inpod mode for outbound
+            enable_orig_src: transparent && !inpod,
         })
     }
 
@@ -299,7 +301,8 @@ impl OutboundConnection {
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         // Create a TCP connection to upstream
-        let local = if self.enable_orig_src {
+        // We do not need spoofing for inbound
+        let local = if self.enable_orig_src && !self.pi.cfg.inpod_enabled {
             super::get_original_src_from_stream(stream)
         } else {
             None
