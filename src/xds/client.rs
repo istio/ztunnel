@@ -606,7 +606,7 @@ impl AdsClient {
 
         let outbound = async_stream::stream! {
             for initial in initial_requests {
-                info!(resources=initial.initial_resource_versions.len(), type_url=initial.type_url, "sending initial request");
+                debug!(resources=initial.initial_resource_versions.len(), type_url=initial.type_url, "sending initial request");
                 yield initial;
             }
             while let Some(message) = discovery_req_rx.recv().await {
