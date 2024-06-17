@@ -125,6 +125,7 @@ impl Namespace {
     {
         let name = self.name.clone();
         let node_name = self.node_name.clone();
+        let t_name = format!("{name}-{node_name}");
         let (tx, rx) = sync::mpsc::sync_channel::<()>(0);
         let netns = self.netns.clone();
         // Change network namespaces changes the entire thread, so we want to run each network in its own thread
@@ -133,6 +134,7 @@ impl Namespace {
                 .run(|_n| {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
+                        .thread_name(t_name)
                         .build()
                         .unwrap();
                     rt.block_on(f(Ready(tx)).instrument(tracing::info_span!(

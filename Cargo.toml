@@ -121,6 +121,9 @@ opt-level = 3
 codegen-units = 1
 lto = true
 
+[profile.bench]
+inherits = "quick-release"
+
 [profile.symbols-release]
 inherits = "release"
 debug = true
