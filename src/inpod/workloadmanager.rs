@@ -98,8 +98,8 @@ impl WorkloadProxyNetworkHandler {
                 Err(e) => {
                     backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
                     warn!(
-                        "failed to connect to server: {:?}. retrying in {:?}",
-                        e, backoff
+                        "failed to connect to server {:?}: {:?}. retrying in {:?}",
+                        &self.uds, e, backoff
                     );
                     tokio::time::sleep(backoff).await;
                     continue;

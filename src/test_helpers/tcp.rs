@@ -29,7 +29,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::hyper_util::TokioExecutor;
 use crate::{identity, tls};
@@ -77,20 +77,19 @@ pub async fn run_client(
                 transferred += r.read(&mut buf[..length]).await?;
             }
         }
-        debug!(
+        trace!(
             "throughput: {:.3} Gb/s, transferred {} Gb ({:.3}%) in {:?} ({:?})",
-            transferred as f64 / (start.elapsed().as_micros() as f64 / 1_000_000.0) / 0.125e9,
+            transferred as f64 / (start.elapsed().as_secs_f64()) / 0.125e9,
             transferred as f64 / 0.125e9,
             100.0 * transferred as f64 / target as f64,
             start.elapsed(),
             mode
         );
     }
-    let elapsed = start.elapsed().as_micros() as f64 / 1_000_000.0;
-    let throughput = transferred as f64 / elapsed / 0.125e9;
-    info!(
-        "throughput: {:.3} Gb/s, transferred {transferred} in {:?} ({:?})",
-        throughput,
+    debug!(
+        "throughput: {:.3} Gb/s, transferred {} Gb in {:?} ({:?})",
+        transferred as f64 / (start.elapsed().as_secs_f64()) / 0.125e9,
+        transferred as f64 / 0.125e9,
         start.elapsed(),
         mode
     );

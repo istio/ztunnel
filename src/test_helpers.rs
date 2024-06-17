@@ -59,6 +59,8 @@ pub mod xds;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
+pub mod namespaced;
+#[cfg(target_os = "linux")]
 pub mod netns;
 
 pub fn can_run_privilged_test() -> bool {

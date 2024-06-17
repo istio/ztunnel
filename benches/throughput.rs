@@ -13,54 +13,50 @@
 // limitations under the License.
 
 use std::cmp::Ordering::{Equal, Greater, Less};
-use std::env;
+use std::future::Future;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bytes::BufMut;
+use criterion::measurement::Measurement;
 use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+    criterion_group, criterion_main, BenchmarkGroup, Criterion, SamplingMode, Throughput,
 };
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use pprof::criterion::{Output, PProfProfiler};
 use prometheus_client::registry::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tracing::info;
 
 use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 use ztunnel::state::workload::{Protocol, Workload};
+use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
+use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
 use ztunnel::test_helpers::tcp::Mode;
-use ztunnel::test_helpers::TEST_WORKLOAD_HBONE;
-use ztunnel::test_helpers::TEST_WORKLOAD_SOURCE;
-use ztunnel::test_helpers::TEST_WORKLOAD_TCP;
 use ztunnel::test_helpers::{helpers, tcp};
 use ztunnel::xds::LocalWorkload;
-use ztunnel::{app, identity, metrics, proxy, strng, test_helpers};
+use ztunnel::{app, identity, metrics, proxy, rbac, setup_netns_test, strng, test_helpers};
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
+const GB: usize = 1024 * MB;
 // Must be less than or equal to 254
 const MAX_HBONE_WORKLOADS: u8 = 64;
-
-struct TestEnv {
-    ta: TestApp,
-    echo_addr: SocketAddr,
-    direct: TcpStream,
-    tcp: TcpStream,
-    hbone: TcpStream,
-}
-
-/// initialize_environment sets up a benchmarking environment. This works around issues in async setup with criterion.
-/// Since tests are only sending data on existing connections, we setup a connection for each test type in the setup phase.
-/// Tests consume the
 
 const N_RULES: usize = 10;
 const N_POLICIES: usize = 10_000;
 const DUMMY_NETWORK: &str = "198.51.100.0/24";
+
+#[ctor::ctor]
+fn initialize_namespace_tests() {
+    ztunnel::test_helpers::namespaced::initialize_namespace_tests();
+}
 
 fn create_test_policies() -> Vec<Authorization> {
     let mut policies: Vec<Authorization> = vec![];
@@ -101,275 +97,237 @@ fn create_test_policies() -> Vec<Authorization> {
     policies
 }
 
-fn initialize_environment(
-    mode: Mode,
-    policies: Vec<Authorization>,
-) -> (Arc<Mutex<TestEnv>>, Runtime) {
-    if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "error")
-    }
-    helpers::initialize_telemetry();
-    let rt = tokio::runtime::Builder::new_multi_thread()
+fn run_async_blocking<Fut, O>(f: Fut) -> O
+where
+    Fut: Future<Output = O>,
+    O: Send + 'static,
+{
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
-    // Global setup: spin up an echo server and ztunnel instance
-    let (env, _) = rt.block_on(async move {
-        let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
-        let port = 80;
-        let config_source = Some(ztunnel::config::ConfigSource::Static(
-            test_helpers::local_xds_config(port, None, policies).unwrap(),
-        ));
-        let config = test_helpers::test_config_with_port_xds_addr_and_root_cert(
-            port,
-            None,
-            None,
-            config_source,
-        );
-        let app = app::build_with_cert(Arc::new(config), cert_manager.clone())
+        .unwrap()
+        .block_on(f)
+}
+
+#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+pub enum WorkloadMode {
+    HBONE,
+    TcpClient,
+    Direct,
+}
+
+#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+pub enum TestTrafficMode {
+    // Each iteration sends a new request
+    Request,
+    // Each iteration establishes a new connection
+    Connection,
+}
+
+#[allow(clippy::type_complexity)]
+fn initialize_environment(
+    ztunnel_mode: WorkloadMode,
+    traffic_mode: TestTrafficMode,
+    echo_mode: Mode,
+) -> anyhow::Result<(
+    WorkloadManager,
+    SyncSender<usize>,
+    Receiver<Result<(), io::Error>>,
+)> {
+    let mut manager = setup_netns_test!(TestMode::InPod);
+    let (client, server, manager) = run_async_blocking(async move {
+        if ztunnel_mode != WorkloadMode::Direct {
+            // we need a client ztunnel
+            manager.deploy_ztunnel("LOCAL").await.unwrap();
+        }
+        if ztunnel_mode == WorkloadMode::HBONE {
+            // we need a server ztunnel
+            manager.deploy_ztunnel("REMOTE").await.unwrap();
+        }
+
+        let server = manager
+            .workload_builder("server", "REMOTE")
+            .register()
             .await
             .unwrap();
-
-        let ta = TestApp::from((&app, cert_manager));
-        ta.ready().await;
-        let echo = tcp::TestServer::new(mode, 0).await;
-        let echo_addr = helpers::with_ip(echo.address(), TEST_WORKLOAD_SOURCE.parse().unwrap());
-        let t = tokio::spawn(async move {
-            let _ = tokio::join!(app.wait_termination(), echo.run());
-        });
-        let mut hbone = ta
-            .socks5_connect(
-                DestinationAddr::Ip(helpers::with_ip(
-                    echo_addr,
-                    TEST_WORKLOAD_HBONE.parse().unwrap(),
-                )),
-                TEST_WORKLOAD_SOURCE.parse().unwrap(),
-            )
-            .await;
-        let mut tcp = ta
-            .socks5_connect(
-                DestinationAddr::Ip(helpers::with_ip(
-                    echo_addr,
-                    TEST_WORKLOAD_TCP.parse().unwrap(),
-                )),
-                TEST_WORKLOAD_SOURCE.parse().unwrap(),
-            )
-            .await;
-        let mut direct = TcpStream::connect(echo_addr).await.unwrap();
-        direct.set_nodelay(true).unwrap();
-        info!("setup complete");
-
-        let client_mode = match mode {
-            Mode::ReadWrite => Mode::ReadWrite,
-            Mode::ReadDoubleWrite => Mode::ReadDoubleWrite,
-            Mode::Write => Mode::Read,
-            Mode::Read => Mode::Write,
-            Mode::Forward(_) => todo!("not implemented for benchmark"),
-            Mode::ForwardProxyProtocol => todo!("not implemented for benchmark"),
-        };
-        // warmup: send 1 byte so we ensure we have the full connection setup.
-        tcp::run_client(&mut hbone, 1, client_mode).await.unwrap();
-        tcp::run_client(&mut tcp, 1, client_mode).await.unwrap();
-        tcp::run_client(&mut direct, 1, client_mode).await.unwrap();
-        info!("warmup complete");
-
-        (
-            Arc::new(Mutex::new(TestEnv {
-                hbone,
-                tcp,
-                direct,
-                ta,
-                echo_addr,
-            })),
-            t,
-        )
+        let client = manager
+            .workload_builder("client", "LOCAL")
+            .register()
+            .await
+            .unwrap();
+        (client, server, manager)
     });
-    (env, rt)
-}
+    server
+        .run_ready(move |ready| async move {
+            let echo = tcp::TestServer::new(echo_mode, 8080).await;
+            ready.set_ready();
+            echo.run().await;
+            Ok(())
+        })
+        .unwrap();
+    let echo_addr = SocketAddr::new(manager.resolver().resolve("server").unwrap(), 8080);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<usize>(0);
+    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<Result<(), io::Error>>(0);
 
-pub fn latency(c: &mut Criterion) {
-    let (env, rt) = initialize_environment(Mode::ReadWrite, vec![]);
-    let mut c = c.benchmark_group("latency");
-    for size in [1usize, KB] {
-        c.bench_with_input(BenchmarkId::new("direct", size), &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.direct, *size, Mode::ReadWrite).await
-            })
-        });
-        c.bench_with_input(BenchmarkId::new("tcp", size), &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.tcp, *size, Mode::ReadWrite).await
-            })
-        });
-        c.bench_with_input(BenchmarkId::new("hbone", size), &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.hbone, *size, Mode::ReadWrite).await
-            })
-        });
-    }
-}
+    let client_mode = match echo_mode {
+        Mode::ReadWrite => Mode::ReadWrite,
+        Mode::ReadDoubleWrite => Mode::ReadDoubleWrite,
+        Mode::Write => Mode::Read,
+        Mode::Read => Mode::Write,
+        Mode::Forward(_) => todo!("not implemented for benchmark"),
+        Mode::ForwardProxyProtocol => todo!("not implemented for benchmark"),
+    };
+    if traffic_mode == TestTrafficMode::Request {
+        client
+            .run_ready(move |ready| async move {
+                let mut conn = TcpStream::connect(echo_addr).await.unwrap();
+                conn.set_nodelay(true).unwrap();
+                info!("setup complete");
 
-pub fn rbac_latency(c: &mut Criterion) {
-    let (env, rt) = initialize_environment(Mode::ReadWrite, create_test_policies());
-    let mut c = c.benchmark_group("rbac_latency");
-    for size in [1usize, KB] {
-        c.bench_with_input(BenchmarkId::new("direct", size), &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.direct, *size, Mode::ReadWrite).await
+                // warmup: send 1 byte so we ensure we have the full connection setup.
+                tcp::run_client(&mut conn, 1, client_mode).await.unwrap();
+                info!("warmup complete");
+                ready.set_ready();
+
+                // Accept requests and process them
+                while let Ok(size) = rx.recv() {
+                    // Send `size` bytes.
+                    let res = tcp::run_client(&mut conn, size, client_mode).await;
+                    // Report we are done.
+                    ack_tx.send(res).unwrap();
+                }
+                Ok(())
             })
-        });
-        c.bench_with_input(BenchmarkId::new("tcp", size), &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.tcp, *size, Mode::ReadWrite).await
+            .unwrap();
+    } else {
+        client
+            .run_ready(move |ready| async move {
+                ready.set_ready();
+                // Accept requests and process them
+                while let Ok(size) = rx.recv() {
+                    // Open connection
+                    let mut conn = TcpStream::connect(echo_addr).await.unwrap();
+                    conn.set_nodelay(true).unwrap();
+                    // Send `size` bytes.
+                    let res = tcp::run_client(&mut conn, size, client_mode).await;
+                    // Report we are done.
+                    ack_tx.send(res).unwrap();
+                }
+                Ok(())
             })
-        });
-        c.bench_with_input(BenchmarkId::new("hbone", size), &size, |b, size| {
-            b.to_async(&rt).iter(|| async {
-                tcp::run_client(&mut env.lock().await.hbone, *size, Mode::ReadWrite).await
-            })
-        });
+            .unwrap();
     }
+    Ok((manager, tx, ack_rx))
 }
 
 pub fn throughput(c: &mut Criterion) {
-    let (env, rt) = initialize_environment(Mode::Read, vec![]);
+    const THROUGHPUT_SEND_SIZE: usize = GB;
+    fn run_throughput<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
+        let (_manager, tx, ack) =
+            initialize_environment(mode, TestTrafficMode::Request, Mode::Read).unwrap();
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                tx.send(THROUGHPUT_SEND_SIZE).unwrap();
+                ack.recv().unwrap().unwrap();
+            })
+        });
+    }
+
     let mut c = c.benchmark_group("throughput");
 
-    let size: usize = 10 * MB;
-    c.throughput(Throughput::Bytes(size as u64));
-
+    // Measure in bits, not bytes, to match tools like iperf
+    c.throughput(Throughput::Elements((THROUGHPUT_SEND_SIZE * 8) as u64));
     // Test takes a while, so reduce how many iterations we run
     c.sample_size(10);
     c.sampling_mode(SamplingMode::Flat);
     c.measurement_time(Duration::from_secs(5));
-    c.bench_with_input("direct", &size, |b, size| {
-        b.to_async(&rt).iter(|| async {
-            tcp::run_client(&mut env.lock().await.direct, *size, Mode::Write).await
-        })
-    });
-    c.bench_with_input("tcp", &size, |b, size| {
-        b.to_async(&rt)
-            .iter(|| async { tcp::run_client(&mut env.lock().await.tcp, *size, Mode::Write).await })
-    });
-    c.bench_with_input("hbone", &size, |b, size| {
-        b.to_async(&rt).iter(|| async {
-            tcp::run_client(&mut env.lock().await.hbone, *size, Mode::Write).await
-        })
-    });
+    // Send request in various modes.
+    // Each test will use a pre-existing connection and send 1GB for multiple iterations
+    run_throughput(&mut c, "direct", WorkloadMode::Direct);
+    run_throughput(&mut c, "tcp", WorkloadMode::TcpClient);
+    run_throughput(&mut c, "hbone", WorkloadMode::HBONE);
 }
 
-pub fn rbac_throughput(c: &mut Criterion) {
-    let (env, rt) = initialize_environment(Mode::Read, create_test_policies());
-    let mut c = c.benchmark_group("rbac_throughput");
+pub fn latency(c: &mut Criterion) {
+    const LATENCY_SEND_SIZE: usize = KB;
+    fn run_latency<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
+        let (_manager, tx, ack) =
+            initialize_environment(mode, TestTrafficMode::Request, Mode::Read).unwrap();
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                tx.send(LATENCY_SEND_SIZE).unwrap();
+                ack.recv().unwrap().unwrap();
+            })
+        });
+    }
 
-    let size: usize = 10 * MB;
-    c.throughput(Throughput::Bytes(size as u64));
+    let mut c = c.benchmark_group("latency");
 
+    // Measure in RPS
+    c.throughput(Throughput::Elements(1));
     // Test takes a while, so reduce how many iterations we run
-    c.sample_size(10);
-    c.sampling_mode(SamplingMode::Flat);
-    c.measurement_time(Duration::from_secs(5));
-    c.bench_with_input("direct", &size, |b, size| {
-        b.to_async(&rt).iter(|| async {
-            tcp::run_client(&mut env.lock().await.direct, *size, Mode::Write).await
-        })
-    });
-    c.bench_with_input("tcp", &size, |b, size| {
-        b.to_async(&rt)
-            .iter(|| async { tcp::run_client(&mut env.lock().await.tcp, *size, Mode::Write).await })
-    });
-    c.bench_with_input("hbone", &size, |b, size| {
-        b.to_async(&rt).iter(|| async {
-            tcp::run_client(&mut env.lock().await.hbone, *size, Mode::Write).await
-        })
-    });
+    // Send request in various modes.
+    // Each test will use a pre-existing connection and send 1GB for multiple iterations
+    run_latency(&mut c, "direct", WorkloadMode::Direct);
+    run_latency(&mut c, "tcp", WorkloadMode::TcpClient);
+    run_latency(&mut c, "hbone", WorkloadMode::HBONE);
 }
 
 pub fn connections(c: &mut Criterion) {
-    let (env, rt) = initialize_environment(Mode::ReadWrite, vec![]);
+    fn run_connections<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
+        let (_manager, tx, ack) =
+            initialize_environment(mode, TestTrafficMode::Connection, Mode::ReadWrite).unwrap();
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                tx.send(1).unwrap();
+                ack.recv().unwrap().unwrap();
+            })
+        });
+    }
+
     let mut c = c.benchmark_group("connections");
-    c.bench_function("direct", |b| {
-        b.to_async(&rt).iter(|| async {
-            let e = env.lock().await;
-            let mut s = TcpStream::connect(e.echo_addr).await.unwrap();
-            s.set_nodelay(true).unwrap();
-            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-        })
-    });
-    c.bench_function("tcp", |b| {
-        b.to_async(&rt).iter(|| async {
-            let e = env.lock().await;
-            let mut s =
-                e.ta.socks5_connect(
-                    DestinationAddr::Ip(helpers::with_ip(
-                        e.echo_addr,
-                        TEST_WORKLOAD_TCP.parse().unwrap(),
-                    )),
-                    TEST_WORKLOAD_SOURCE.parse().unwrap(),
-                )
-                .await;
-            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-        })
-    });
-    // This tests connection time over an existing HBONE connection.
-    c.bench_function("hbone", |b| {
-        b.to_async(&rt).iter(|| async {
-            let e = env.lock().await;
-            let mut s =
-                e.ta.socks5_connect(
-                    DestinationAddr::Ip(helpers::with_ip(
-                        e.echo_addr,
-                        TEST_WORKLOAD_HBONE.parse().unwrap(),
-                    )),
-                    TEST_WORKLOAD_SOURCE.parse().unwrap(),
-                )
-                .await;
-            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-        })
-    });
+
+    // Measure in connections/s
+    c.throughput(Throughput::Elements(1));
+    // Send request in various modes.
+    // Each test will use a pre-existing connection and send 1GB for multiple iterations
+    run_connections(&mut c, "direct", WorkloadMode::Direct);
+    run_connections(&mut c, "tcp", WorkloadMode::TcpClient);
+    run_connections(&mut c, "hbone", WorkloadMode::HBONE);
 }
 
-pub fn rbac_connections(c: &mut Criterion) {
-    let (env, rt) = initialize_environment(Mode::ReadWrite, create_test_policies());
-    let mut c = c.benchmark_group("rbac_connections");
-    c.bench_function("direct", |b| {
+pub fn rbac(c: &mut Criterion) {
+    let policies = create_test_policies();
+    let mut state = ProxyState::default();
+    for p in policies {
+        state.policies.insert(p);
+    }
+
+    let mut registry = Registry::default();
+    let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+    let mock_proxy_state = DemandProxyState::new(
+        Arc::new(RwLock::new(state)),
+        None,
+        ResolverConfig::default(),
+        ResolverOpts::default(),
+        metrics,
+    );
+    let rc = ProxyRbacContext {
+        conn: rbac::Connection {
+            src: "127.0.0.1:12345".parse().unwrap(),
+            dst: "127.0.0.2:12345".parse().unwrap(),
+            src_identity: None,
+            dst_network: "".into(),
+        },
+        dest_workload_info: None,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    c.bench_function("rbac", |b| {
         b.to_async(&rt).iter(|| async {
-            let e = env.lock().await;
-            let mut s = TcpStream::connect(e.echo_addr).await.unwrap();
-            s.set_nodelay(true).unwrap();
-            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-        })
-    });
-    c.bench_function("tcp", |b| {
-        b.to_async(&rt).iter(|| async {
-            let e = env.lock().await;
-            let mut s =
-                e.ta.socks5_connect(
-                    DestinationAddr::Ip(helpers::with_ip(
-                        e.echo_addr,
-                        TEST_WORKLOAD_TCP.parse().unwrap(),
-                    )),
-                    TEST_WORKLOAD_SOURCE.parse().unwrap(),
-                )
-                .await;
-            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
-        })
-    });
-    // TODO(https://github.com/istio/ztunnel/issues/15): when we have pooling, split this into "new hbone connection"
-    // and "new connection on existing HBONE connection"
-    c.bench_function("hbone", |b| {
-        b.to_async(&rt).iter(|| async {
-            let e = env.lock().await;
-            let mut s =
-                e.ta.socks5_connect(
-                    DestinationAddr::Ip(helpers::with_ip(
-                        e.echo_addr,
-                        TEST_WORKLOAD_HBONE.parse().unwrap(),
-                    )),
-                    TEST_WORKLOAD_SOURCE.parse().unwrap(),
-                )
-                .await;
-            tcp::run_client(&mut s, 1, Mode::ReadWrite).await
+            mock_proxy_state.assert_rbac(&rc).await;
         })
     });
 }
@@ -459,6 +417,7 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
 /// connection. Instead, we register MAX_HBONE_WORKLOADS giving us O(MAX_HBONE_WORKLOADS^2)
 /// source/destination IP combinations which is (hopefully) enough.
 fn hbone_connections(c: &mut Criterion) {
+    helpers::run_command("ip link set dev lo up").unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -492,10 +451,12 @@ fn hbone_connections(c: &mut Criterion) {
     let ta: Arc<Mutex<TestApp>> = Arc::new(Mutex::new(ta));
     let addresses = Arc::new(Mutex::new((1u8, 2u8)));
 
-    let mut c = c.benchmark_group("hbone_connection");
+    let mut c = c.benchmark_group("hbone_connections");
     // WARNING: increasing the measurement time could lead to running out of IP pairs or having too
     // many open connections.
     c.measurement_time(Duration::from_secs(5));
+    // Connections/second
+    c.throughput(Throughput::Elements(1));
     c.bench_function("connect_request_response", |b| {
         b.to_async(&rt).iter(|| async {
             let bench = async {
@@ -532,7 +493,7 @@ criterion_group! {
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = hbone_connections, latency, throughput, connections, rbac_latency, rbac_throughput, rbac_connections,
+    targets = hbone_connections, throughput, latency, connections, metrics, rbac
 }
 
 criterion_main!(benches);
