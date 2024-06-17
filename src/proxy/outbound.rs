@@ -315,7 +315,12 @@ impl OutboundConnection {
         .await?;
 
         // Proxying data between downstream and upstream
-        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), copy::TcpStreamSplitter(outbound), connection_stats).await
+        copy::copy_bidirectional(
+            copy::TcpStreamSplitter(stream),
+            copy::TcpStreamSplitter(outbound),
+            connection_stats,
+        )
+        .await
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
