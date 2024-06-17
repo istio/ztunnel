@@ -239,12 +239,29 @@ impl ProxyState {
         network: Strng,
         source_workload: &Workload,
         addr: SocketAddr,
+        resolution_mode: ServiceResolutionMode,
     ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
         if let Some(svc) = self
             .services
             .get_by_vip(&network_addr(network.clone(), addr.ip()))
         {
-            let Some(target_port) = svc.ports.get(&addr.port()) else {
+            // Randomly pick an upstream
+            // TODO: do this more efficiently, and not just randomly
+            let Some((ep, wl)) = self.load_balance(source_workload, &svc, addr, resolution_mode)
+            else {
+                debug!("VIP {} has no healthy endpoints", addr);
+                return None;
+            };
+
+            let svc_port = svc.ports.get(&addr.port()).copied().unwrap_or_default();
+            let target_port = if let Some(&port) = ep.port.get(&addr.port()) {
+                // prefer endpoint port mapping
+                port
+            } else if svc_port > 0 {
+                // otherwise, see if the service has this port
+                svc_port
+            } else {
+                // no app tunnel or port mapping, error
                 debug!(
                     "found VIP {}, but port {} was unknown",
                     addr.ip(),
@@ -252,19 +269,8 @@ impl ProxyState {
                 );
                 return None;
             };
-            // Randomly pick an upstream
-            // TODO: do this more efficiently, and not just randomly
-            let Some(ep) = self.load_balance(source_workload, &svc) else {
-                debug!("VIP {} has no healthy endpoints", addr);
-                return None;
-            };
-            let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
-                debug!("failed to fetch workload for {}", ep.workload_uid);
-                return None;
-            };
-            // If endpoint overrides the target port, use that instead
-            let target_port = ep.port.get(&addr.port()).unwrap_or(target_port);
-            return Some((wl, *target_port, Some(svc)));
+
+            return Some((wl, target_port, Some(svc)));
         }
         if let Some(wl) = self
             .workloads
@@ -275,18 +281,66 @@ impl ProxyState {
         None
     }
 
-    fn load_balance<'a>(&self, src: &Workload, svc: &'a Service) -> Option<&'a Endpoint> {
+    fn load_balance<'a>(
+        &self,
+        src: &Workload,
+        svc: &'a Service,
+        svc_addr: SocketAddr,
+        resolution_mode: ServiceResolutionMode,
+    ) -> Option<(&'a Endpoint, Arc<Workload>)> {
+        let target_port = svc.ports.get(&svc_addr.port()).copied();
+
+        if resolution_mode == ServiceResolutionMode::Standard && target_port.is_none() {
+            // Port doesn't exist on the service at all, this is invalid
+            debug!(
+                "service {} does not have port {}",
+                svc.hostname,
+                svc_addr.port()
+            );
+            return None;
+        };
+
+        let endpoints = svc.endpoints.values().filter_map(|ep| {
+            let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
+                debug!("failed to fetch workload for {}", ep.workload_uid);
+                return None;
+            };
+            match resolution_mode {
+                ServiceResolutionMode::Standard => {
+                    if target_port.unwrap_or_default() == 0
+                        && !ep.port.contains_key(&svc_addr.port())
+                    {
+                        // Filter workload out, it doesn't have a matching port
+                        trace!(
+                            "filter endpoint {}, it does not have service port {}",
+                            ep.workload_uid,
+                            svc_addr.port()
+                        );
+                        return None;
+                    }
+                }
+                ServiceResolutionMode::Waypoint => {
+                    if target_port.is_none() && wl.application_tunnel.is_none() {
+                        // We ignore this for app_tunnel; in this case, the port does not need to be on the service.
+                        // This is only valid for waypoints, which are not explicitly addressed by users.
+                        // We do happen to do a lookup by `waypoint-svc:15008`, this is not a literal call on that service;
+                        // the port is not required at all if they have application tunnel, as it will be handled by ztunnel on the other end.
+                        trace!(
+                            "filter waypoint endpoint {}, target port is not defined",
+                            ep.workload_uid
+                        );
+                        return None;
+                    }
+                }
+            }
+            Some((ep, wl))
+        });
+
         match svc.load_balancer {
-            None => svc.endpoints.values().choose(&mut rand::thread_rng()),
+            None => endpoints.choose(&mut rand::thread_rng()),
             Some(ref lb) => {
-                let ranks = svc
-                    .endpoints
-                    .iter()
-                    .filter_map(|(_, ep)| {
-                        let Some(wl) = self.workloads.find_uid(&ep.workload_uid) else {
-                            debug!("failed to fetch workload for {}", ep.workload_uid);
-                            return None;
-                        };
+                let ranks = endpoints
+                    .filter_map(|(ep, wl)| {
                         // Load balancer will define N targets we want to match
                         // Consider [network, region, zone]
                         // Rank = 3 means we match all of them
@@ -318,14 +372,14 @@ impl ProxyState {
                         {
                             return None;
                         }
-                        Some((rank, ep))
+                        Some((rank, ep, wl))
                     })
                     .collect::<Vec<_>>();
-                let max = *ranks.iter().map(|(rank, _ep)| rank).max()?;
+                let max = *ranks.iter().map(|(rank, _ep, _wl)| rank).max()?;
                 ranks
                     .into_iter()
-                    .filter(|(rank, _ep)| *rank == max)
-                    .map(|(_, ep)| ep)
+                    .filter(|(rank, _ep, _wl)| *rank == max)
+                    .map(|(_, ep, wl)| (ep, wl))
                     .choose(&mut rand::thread_rng())
             }
         }
@@ -701,15 +755,16 @@ impl DemandProxyState {
         network: Strng,
         source_workload: &Workload,
         addr: SocketAddr,
+        resolution_mode: ServiceResolutionMode,
     ) -> Result<Option<Upstream>, Error> {
         self.fetch_address(&network_addr(network.clone(), addr.ip()))
             .await;
-        let Some((wl, port, svc)) =
-            self.state
-                .read()
-                .unwrap()
-                .find_upstream(network, source_workload, addr)
-        else {
+        let Some((wl, port, svc)) = self.state.read().unwrap().find_upstream(
+            network,
+            source_workload,
+            addr,
+            resolution_mode,
+        ) else {
             return Ok(None);
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
@@ -739,11 +794,14 @@ impl DemandProxyState {
             }
         };
         let wp_socket_addr = SocketAddr::new(wp_nw_addr.address, gw_address.hbone_mtls_port);
-        self.fetch_upstream(wp_nw_addr.network.clone(), source_workload, wp_socket_addr)
-            .await?
-            .ok_or_else(|| {
-                Error::UnknownWaypoint(format!("waypoint {} not found", wp_nw_addr.address))
-            })
+        self.fetch_upstream(
+            wp_nw_addr.network.clone(),
+            source_workload,
+            wp_socket_addr,
+            ServiceResolutionMode::Waypoint,
+        )
+        .await?
+        .ok_or_else(|| Error::UnknownWaypoint(format!("waypoint {} not found", wp_nw_addr.address)))
     }
 
     pub async fn fetch_service_waypoint(
@@ -834,6 +892,14 @@ impl DemandProxyState {
     }
 }
 
+#[derive(Eq, PartialEq, Clone, Copy, Debug)]
+pub enum ServiceResolutionMode {
+    // We are resolving a normal service
+    Standard,
+    // We are resolving a waypoint proxy
+    Waypoint,
+}
+
 #[derive(serde::Serialize)]
 pub struct ProxyStateManager {
     #[serde(flatten)]
@@ -908,6 +974,7 @@ mod tests {
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use super::*;
+    use crate::test_helpers::helpers::initialize_telemetry;
     use crate::test_helpers::TEST_SERVICE_NAMESPACE;
     use crate::{strng, test_helpers};
 
@@ -1148,6 +1215,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_balance() {
+        initialize_telemetry();
         let mut state = ProxyState::default();
         let wl_no_locality = Workload {
             uid: "cluster1//v1/Pod/default/wl_no_locality".into(),
@@ -1275,6 +1343,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
             }),
+            ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
         };
         let failover_svc = Service {
@@ -1287,6 +1356,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
             }),
+            ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
         };
         state
@@ -1299,8 +1369,13 @@ mod tests {
 
         let assert_endpoint = |src: &Workload, svc: &Service, ips: Vec<&str>, desc: &str| {
             let got = state
-                .load_balance(src, svc)
-                .and_then(|ep| ep.address.clone())
+                .load_balance(
+                    src,
+                    svc,
+                    "0.0.0.0:80".parse().unwrap(),
+                    ServiceResolutionMode::Standard,
+                )
+                .and_then(|(ep, _)| ep.address.clone())
                 .map(|addr| addr.address.to_string());
             if ips.is_empty() {
                 assert!(got.is_none(), "{}", desc);
