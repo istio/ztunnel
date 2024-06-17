@@ -299,7 +299,7 @@ impl Inbound {
                     .instrument(trace_span!("proxy protocol"))
                     .await?;
             }
-            copy::copy_bidirectional(h2_stream, stream, &result_tracker)
+            copy::copy_bidirectional(h2_stream, copy::TcpStreamSplitter(stream), &result_tracker)
                 .instrument(trace_span!("hbone server"))
                 .await
         };

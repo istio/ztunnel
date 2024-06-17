@@ -109,7 +109,7 @@ impl InboundPassthrough {
     async fn proxy_inbound_plaintext(
         pi: Arc<ProxyInputs>,
         source_addr: SocketAddr,
-        mut inbound_stream: TcpStream,
+        inbound_stream: TcpStream,
         enable_orig_src: bool,
     ) {
         let start = Instant::now();
@@ -217,13 +217,17 @@ impl InboundPassthrough {
             let result_tracker = result_tracker.clone();
             trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
 
-            let mut outbound =
-                super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref())
-                    .await
-                    .map_err(Error::ConnectionFailed)?;
+            let outbound = super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref())
+                .await
+                .map_err(Error::ConnectionFailed)?;
 
             trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
-            copy::copy_bidirectional(&mut inbound_stream, &mut outbound, &result_tracker).await
+            copy::copy_bidirectional(
+                copy::TcpStreamSplitter(inbound_stream),
+                copy::TcpStreamSplitter(outbound),
+                &result_tracker,
+            )
+            .await
         };
 
         let res = conn_guard.handle_connection(send).await;

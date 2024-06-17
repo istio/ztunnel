@@ -22,6 +22,8 @@ use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
 use tracing::trace;
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
@@ -40,6 +42,21 @@ where
     type W = io::WriteHalf<I>;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
         let (rh, wh) = tokio::io::split(self);
+        let rb = BufReader::new(rh);
+        (rb, wh)
+    }
+}
+
+// TcpStreamSplitter is a specialized BufferedSplitter for TcpStream, which is more efficient than the generic
+// `tokio::io::split`. The generic method involves locking to access the read and write halves
+pub struct TcpStreamSplitter(pub TcpStream);
+
+impl BufferedSplitter for TcpStreamSplitter {
+    type R = BufReader<OwnedReadHalf>;
+    type W = OwnedWriteHalf;
+
+    fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
+        let (rh, wh) = self.0.into_split();
         let rb = BufReader::new(rh);
         (rb, wh)
     }

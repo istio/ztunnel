@@ -191,7 +191,7 @@ impl OutboundConnection {
 
     async fn proxy_to(
         &mut self,
-        mut source_stream: TcpStream,
+        source_stream: TcpStream,
         source_addr: SocketAddr,
         dest_addr: SocketAddr,
     ) {
@@ -237,7 +237,7 @@ impl OutboundConnection {
                     .await
             }
             Protocol::TCP => {
-                self.proxy_to_tcp(&mut source_stream, &req, &result_tracker)
+                self.proxy_to_tcp(source_stream, &req, &result_tracker)
                     .await
             }
         };
@@ -252,7 +252,7 @@ impl OutboundConnection {
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        copy::copy_bidirectional(stream, upgraded, connection_stats).await
+        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
     }
 
     async fn send_hbone_request(
@@ -296,18 +296,18 @@ impl OutboundConnection {
 
     async fn proxy_to_tcp(
         &mut self,
-        stream: &mut TcpStream,
+        stream: TcpStream,
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         // Create a TCP connection to upstream
         // We do not need spoofing for inbound
         let local = if self.enable_orig_src && !self.pi.cfg.inpod_enabled {
-            super::get_original_src_from_stream(stream)
+            super::get_original_src_from_stream(&stream)
         } else {
             None
         };
-        let mut outbound = super::freebind_connect(
+        let outbound = super::freebind_connect(
             local,
             req.actual_destination,
             self.pi.socket_factory.as_ref(),
@@ -315,7 +315,12 @@ impl OutboundConnection {
         .await?;
 
         // Proxying data between downstream and upstream
-        copy::copy_bidirectional(stream, &mut outbound, connection_stats).await
+        copy::copy_bidirectional(
+            copy::TcpStreamSplitter(stream),
+            copy::TcpStreamSplitter(outbound),
+            connection_stats,
+        )
+        .await
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
