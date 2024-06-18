@@ -18,8 +18,10 @@ use std::time::Instant;
 
 use drain::Watch;
 use tokio::net::TcpStream;
+use tokio::sync::watch;
+use tokio::time::timeout;
 
-use tracing::{error, info, trace, Instrument};
+use tracing::{debug, error, info, trace, warn, Instrument};
 
 use crate::config::ProxyMode;
 
@@ -64,21 +66,36 @@ impl InboundPassthrough {
     }
 
     pub(super) async fn run(self) {
+        let (sub_drain_signal, sub_drain) = drain::channel();
+        let deadline = self.pi.cfg.self_termination_deadline;
+        let (trigger_force_shutdown, force_shutdown) = watch::channel(());
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
+                let start = Instant::now();
+                let mut force_shutdown = force_shutdown.clone();
+                let drain = sub_drain.clone();
                 let pi = self.pi.clone();
                 match socket {
                     Ok((stream, remote)) => {
                         let serve_client = async move {
-                            Self::proxy_inbound_plaintext(
-                                pi, // pi cloned above; OK to move
-                                socket::to_canonical(remote),
-                                stream,
-                                self.enable_orig_src,
-                            )
-                            .await
+                            debug!(dur=?start.elapsed(), "inbound passthrough connection started");
+                            // Since this task is spawned, make sure we are guaranteed to terminate
+                            tokio::select! {
+                                _ = force_shutdown.changed() => {
+                                    debug!("inbound passthrough connection forcefully terminated signaled");
+                                }
+                                _ = Self::proxy_inbound_plaintext(
+                            pi, // pi cloned above; OK to move
+                            socket::to_canonical(remote),
+                            stream,
+                            self.enable_orig_src,
+                        ) => {}
+                            }
+                            // Mark we are done with the connection, so drain can complete
+                            drop(drain);
+                            debug!(dur=?start.elapsed(), "inbound passthrough connection completed");
                         }
                         .in_current_span();
 
@@ -95,13 +112,24 @@ impl InboundPassthrough {
             }
         }
         .in_current_span();
+
         // Stop accepting once we drain.
-        // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
-        // this, but will need some timeout period, as we have no back-pressure mechanism on connections.
+        // We will then allow connections up to `deadline` to terminate on their own.
+        // After that, they will be forcefully terminated.
         tokio::select! {
             res = accept => { res }
-            _ = self.drain.signaled() => {
-                info!("inbound passthrough drained");
+            res = self.drain.signaled() => {
+                debug!("inbound passthrough drained, waiting {:?} for any outbound connections to close", deadline);
+                if let Err(e) = timeout(deadline, sub_drain_signal.drain()).await {
+                    // Not all connections completed within time, we will force shut them down
+                    warn!("drain duration expired with pending connections, forcefully shutting down: {e:?}");
+                }
+                // Trigger force shutdown. In theory, this is only needed in the timeout case. However,
+                // it doesn't hurt to always trigger it.
+                let _ = trigger_force_shutdown.send(());
+
+                info!("outbound drain complete");
+                drop(res);
             }
         }
     }
