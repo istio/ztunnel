@@ -22,8 +22,10 @@ use drain::Watch;
 use hyper::header::FORWARDED;
 
 use tokio::net::TcpStream;
+use tokio::sync::watch;
+use tokio::time::timeout;
 
-use tracing::{debug, error, info, info_span, trace_span, Instrument};
+use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
@@ -86,12 +88,15 @@ impl Outbound {
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );
+        let deadline = self.pi.cfg.self_termination_deadline;
+        let (trigger_force_shutdown, force_shutdown) = watch::channel(());
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 let start_outbound_instant = Instant::now();
-                let outbound_drain = sub_drain.clone();
+                let drain = sub_drain.clone();
+                let mut force_shutdown = force_shutdown.clone();
                 match socket {
                     Ok((stream, _remote)) => {
                         let mut oc = OutboundConnection {
@@ -104,15 +109,17 @@ impl Outbound {
                         stream.set_nodelay(true).unwrap();
                         let span = info_span!("outbound", id=%oc.id);
                         let serve_outbound_connection = (async move {
-                            debug!(dur=?start_outbound_instant.elapsed(), "outbound spawn START");
+                            debug!(dur=?start_outbound_instant.elapsed(), "outbound connection started");
                             // Since this task is spawned, make sure we are guaranteed to terminate
                             tokio::select! {
-                                _ = outbound_drain.signaled() => {
-                                    debug!("outbound drain signaled");
+                                _ = force_shutdown.changed() => {
+                                    debug!("outbound connection forcefully terminated signaled");
                                 }
                                 _ = oc.proxy(stream) => {}
                             }
-                            debug!(dur=?start_outbound_instant.elapsed(), "outbound spawn DONE");
+                            // Mark we are done with the connection, so drain can complete
+                            drop(drain);
+                            debug!(dur=?start_outbound_instant.elapsed(), "outbound connection completed");
                         })
                         .instrument(span);
 
@@ -131,14 +138,22 @@ impl Outbound {
         .in_current_span();
 
         // Stop accepting once we drain.
-        // Note: we are *not* waiting for all connections to be closed. In the future, we may consider
-        // this, but will need some timeout period, as we have no back-pressure mechanism on connections.
+        // We will then allow connections up to `deadline` to terminate on their own.
+        // After that, they will be forcefully terminated.
         tokio::select! {
             res = accept => { res }
-            _ = self.drain.signaled() => {
-                debug!("outbound drained, dropping any outbound connections");
-                sub_drain_signal.drain().await;
-                info!("outbound drained");
+            res = self.drain.signaled() => {
+                debug!("outbound drained, waiting {:?} for any outbound connections to close", deadline);
+                if let Err(e) = timeout(deadline, sub_drain_signal.drain()).await {
+                    // Not all connections completed within time, we will force shut them down
+                    warn!("drain duration expired with pending connections, forcefully shutting down: {e:?}");
+                }
+                // Trigger force shutdown. In theory, this is only needed in the timeout case. However,
+                // it doesn't hurt to always trigger it.
+                let _ = trigger_force_shutdown.send(());
+
+                info!("outbound drain complete");
+                drop(res);
             }
         }
     }
