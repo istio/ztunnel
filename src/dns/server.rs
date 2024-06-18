@@ -39,7 +39,6 @@ use tracing::{debug, info, instrument, trace, warn};
 use crate::proxy::SocketFactory;
 
 use crate::config::ProxyMode;
-use crate::dns;
 use crate::dns::metrics::{
     DnsRequest, ForwardedDuration, ForwardedFailure, ForwardedRequest, Metrics,
 };
@@ -52,6 +51,7 @@ use crate::state::workload::address::Address;
 use crate::state::workload::{NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::strng::Strng;
+use crate::{config, dns};
 
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
 const DEFAULT_TTL_SECONDS: u32 = 30;
@@ -80,7 +80,7 @@ impl Server {
     #[allow(clippy::too_many_arguments)] // no good way of grouping arguments here..
     pub async fn new<S: AsRef<str>>(
         domain: String,
-        addr: SocketAddr,
+        address: config::Address,
         network: S,
         state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
@@ -102,32 +102,41 @@ impl Server {
         let handler = dns::handler::Handler::new(store.clone());
         let mut server = ServerFuture::new(handler);
         info!(
-            address=%addr,
+            address=%address,
             component="dns",
             "starting local DNS server",
         );
-        // Bind and register the TCP socket.
-        let tcp_listener = socket_factory
-            .tcp_bind(addr)
-            .map_err(|e| Error::Bind(addr, e))?;
-        // Save the bound address.
-        let tcp_addr = tcp_listener.local_addr();
-        server.register_listener(
-            tcp_listener.inner(),
-            Duration::from_secs(DEFAULT_TCP_REQUEST_TIMEOUT),
-        );
+        // We may have multiple TCP/UDP addresses; we will just take one. This is only for tests, so one is sufficient.
+        let mut tcp_addr = None;
+        let mut udp_addr = None;
+        for addr in address.into_iter() {
+            // Bind and register the TCP socket.
+            let tcp_listener = socket_factory
+                .tcp_bind(addr)
+                .map_err(|e| Error::Bind(addr, e))?;
+            // Save the bound address.
+            tcp_addr = Some(tcp_listener.local_addr());
+            server.register_listener(
+                tcp_listener.inner(),
+                Duration::from_secs(DEFAULT_TCP_REQUEST_TIMEOUT),
+            );
 
-        // Bind and register the UDP socket.
-        let udp_socket = socket_factory
-            .udp_bind(addr)
-            .map_err(|e| Error::Bind(addr, e))?;
-        let udp_addr = udp_socket.local_addr().unwrap();
-        server.register_socket(udp_socket);
+            // Bind and register the UDP socket.
+            let udp_socket = socket_factory
+                .udp_bind(addr)
+                .map_err(|e| Error::Bind(addr, e))?;
+            udp_addr = Some(
+                udp_socket
+                    .local_addr()
+                    .expect("bound udp socket must have a local address"),
+            );
+            server.register_socket(udp_socket);
+        }
 
         Ok(Self {
             store,
-            tcp_addr,
-            udp_addr,
+            tcp_addr: tcp_addr.expect("must have at least one address"),
+            udp_addr: udp_addr.expect("must have at least one address"),
             server,
             drain,
         })
@@ -1253,7 +1262,7 @@ mod tests {
         let factory = crate::proxy::DefaultSocketFactory;
         let proxy = Server::new(
             domain,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
+            config::Address::Localhost(0),
             NW1,
             state,
             forwarder,
@@ -1372,7 +1381,7 @@ mod tests {
         let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
             domain,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
+            config::Address::Localhost(0),
             NW1,
             state,
             forwarder,
@@ -1449,7 +1458,7 @@ mod tests {
         let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
             domain,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
+            config::Address::Localhost(0),
             NW1,
             state,
             forwarder,

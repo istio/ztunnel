@@ -121,7 +121,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         stats_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        dns_proxy_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        dns_proxy_addr: config::Address::Localhost(0),
         illegal_ports: HashSet::new(), // for "direct" tests, since the ports are latebound, we can't test illegal ports
         fake_self_inbound: true, // for "direct" tests, since the ports are latebound, we have to do this. Yes, this is test concerns leaking into prod code
         ..config::parse_config().unwrap()
