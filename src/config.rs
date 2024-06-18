@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -154,7 +155,7 @@ pub struct Config {
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
     /// The socket address for the DNS proxy. Only applies if `dns_proxy` is true.
-    pub dns_proxy_addr: SocketAddr,
+    pub dns_proxy_addr: Address,
     /// Populated with the internal ports of all the proxy handlers defined above.
     /// illegal_ports are internal ports that clients are not authorized to send to
     pub illegal_ports: HashSet<u16>,
@@ -332,11 +333,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     dns_resolver_opts.cache_size = 4096;
     // TODO: should we override server_ordering_strategy based on our IP support?
 
-    let dns_proxy_addr = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
+    let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
         Some(dns_addr) => dns_addr
             .parse()
             .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
-        None => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
+        None => Address::Localhost(DEFAULT_DNS_PORT),
     };
 
     let socks5_addr = if let Some(true) = parse(UNSTABLE_ENABLE_SOCKS5)? {
@@ -582,6 +583,55 @@ pub fn empty_to_none<A: AsRef<str>>(inp: Option<A>) -> Option<A> {
         }
     }
     inp
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+// Address is a wrapper around either a normal SocketAddr or "bind to localhost on IPv4 and IPv6"
+pub enum Address {
+    // Bind to localhost (dual stack) on a specific port
+    Localhost(u16),
+    // Bind to an explicit IP/port
+    SocketAddr(SocketAddr),
+}
+
+impl Display for Address {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Address::Localhost(port) => write!(f, "localhost:{port}"),
+            Address::SocketAddr(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl IntoIterator for Address {
+    type Item = SocketAddr;
+    type IntoIter = <Vec<std::net::SocketAddr> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            // TODO(https://github.com/istio/ztunnel/issues/1131) allow only v4
+            Address::Localhost(port) => vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+            ]
+            .into_iter(),
+            Address::SocketAddr(s) => vec![s].into_iter(),
+        }
+    }
+}
+
+impl FromStr for Address {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with("localhost:") {
+            let (_host, ports) = s.split_once(':').expect("already checked it has a :");
+            let port: u16 = ports.parse()?;
+            Ok(Address::Localhost(port))
+        } else {
+            Ok(Address::SocketAddr(s.parse()?))
+        }
+    }
 }
 
 #[cfg(test)]
