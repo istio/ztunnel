@@ -17,7 +17,9 @@ use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
-use crate::state::service::{Endpoint, LoadBalancerMode, LoadBalancerScopes, ServiceStore};
+use crate::state::service::{
+    Endpoint, IpFamily, LoadBalancerMode, LoadBalancerScopes, ServiceStore,
+};
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
     address::Address, gatewayaddress::Destination, network_addr, GatewayAddress,
@@ -35,7 +37,6 @@ use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioAsyncResolver;
 use itertools::Itertools;
 use rand::prelude::IteratorRandom;
-use rand::seq::SliceRandom;
 use serde::Serializer;
 use std::collections::HashMap;
 use std::convert::Into;
@@ -522,6 +523,7 @@ impl DemandProxyState {
         dst_workload: &Workload,
         src_workload: &Workload,
         original_target_address: SocketAddr,
+        ip_family_restriction: Option<IpFamily>,
     ) -> Result<IpAddr, Error> {
         // If the user requested the pod by a specific IP, use that directly.
         if dst_workload
@@ -530,10 +532,19 @@ impl DemandProxyState {
         {
             return Ok(original_target_address.ip());
         }
-        // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-        // if/when we support that, this function may need to move to get access to the necessary metadata.
-        // Randomly pick an IP. Note this is a workload, not a service, so this should only have up to 2 IPs (dual stack).
-        if let Some(ip) = dst_workload.workload_ips.choose(&mut rand::thread_rng()) {
+        // They may have 1 or 2 IPs (single/dual stack)
+        // Ensure we are meeting the Service family restriction (if any is defined).
+        // Otherwise, prefer the same IP family as the original request.
+        if let Some(ip) = dst_workload
+            .workload_ips
+            .iter()
+            .filter(|ip| {
+                ip_family_restriction
+                    .map(|f| f.accepts_ip(**ip))
+                    .unwrap_or(true)
+            })
+            .find_or_first(|ip| ip.is_ipv6() == original_target_address.is_ipv6())
+        {
             return Ok(*ip);
         }
         if dst_workload.hostname.is_empty() {
@@ -698,8 +709,9 @@ impl DemandProxyState {
             return Ok(None);
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
+        let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
         let selected_workload_ip = self
-            .pick_workload_destination_or_resolve(&wl, source_workload, addr)
+            .pick_workload_destination_or_resolve(&wl, source_workload, addr, ip_family_restriction)
             .await?; // if we can't load balance just return the error
         Ok(Some(Upstream {
             workload: wl,

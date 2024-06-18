@@ -630,6 +630,7 @@ mod tests {
                 subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
                 waypoint: waypoint.service_attached(),
                 load_balancer: None,
+                ip_families: None,
             }
         });
 

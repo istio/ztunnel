@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ use crate::state::workload::{
 };
 use crate::strng::Strng;
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
-use crate::xds::istio::workload::PortList;
+use crate::xds::istio::workload::{IpFamilies, PortList};
 use crate::{strng, xds};
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -51,6 +52,9 @@ pub struct Service {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub load_balancer: Option<LoadBalancer>,
+
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub ip_families: Option<IpFamily>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -101,6 +105,35 @@ impl TryFrom<XdsScope> for LoadBalancerScopes {
 pub struct LoadBalancer {
     pub routing_preferences: Vec<LoadBalancerScopes>,
     pub mode: LoadBalancerMode,
+}
+
+impl From<xds::istio::workload::IpFamilies> for Option<IpFamily> {
+    fn from(value: xds::istio::workload::IpFamilies) -> Self {
+        match value {
+            IpFamilies::Automatic => None,
+            IpFamilies::Ipv4Only => Some(IpFamily::IPv4),
+            IpFamilies::Ipv6Only => Some(IpFamily::IPv6),
+            IpFamilies::Dual => Some(IpFamily::Dual),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum IpFamily {
+    Dual,
+    IPv4,
+    IPv6,
+}
+
+impl IpFamily {
+    /// accepts_ip returns true if the provided IP is supposed by the IP family
+    pub fn accepts_ip(&self, ip: IpAddr) -> bool {
+        match self {
+            IpFamily::Dual => true,
+            IpFamily::IPv4 => ip.is_ipv4(),
+            IpFamily::IPv6 => ip.is_ipv6(),
+        }
+    }
 }
 
 impl Service {
@@ -191,6 +224,7 @@ impl TryFrom<&XdsService> for Service {
         } else {
             None
         };
+        let ip_families = xds::istio::workload::IpFamilies::try_from(s.ip_families)?.into();
         let svc = Service {
             name: Strng::from(&s.name),
             namespace: Strng::from(&s.namespace),
@@ -204,6 +238,7 @@ impl TryFrom<&XdsService> for Service {
             subject_alt_names: s.subject_alt_names.iter().map(strng::new).collect(),
             waypoint,
             load_balancer: lb,
+            ip_families,
         };
         Ok(svc)
     }
