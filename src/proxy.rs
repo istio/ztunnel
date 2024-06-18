@@ -832,7 +832,6 @@ mod tests {
                 address: IpAddr::V4(mock_default_gateway_ipaddr()),
             }),
             hbone_mtls_port: 15008,
-            hbone_single_tls_port: Some(15003),
         }
     }
 
@@ -843,7 +842,6 @@ mod tests {
                 hostname: "gateway".into(),
             }),
             hbone_mtls_port: 15008,
-            hbone_single_tls_port: Some(15003),
         }
     }
 
