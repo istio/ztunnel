@@ -97,7 +97,6 @@ impl From<xds::istio::workload::WorkloadStatus> for HealthStatus {
 pub struct GatewayAddress {
     pub destination: gatewayaddress::Destination,
     pub hbone_mtls_port: u16,
-    pub hbone_single_tls_port: Option<u16>,
 }
 
 pub mod gatewayaddress {
@@ -310,11 +309,6 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                             byte_to_ip(&Bytes::copy_from_slice(&addr.address))?,
                         )),
                         hbone_mtls_port: value.hbone_mtls_port as u16,
-                        hbone_single_tls_port: if value.hbone_single_tls_port == 0 {
-                            None
-                        } else {
-                            Some(value.hbone_single_tls_port as u16)
-                        },
                     }
                 }
                 xds::istio::workload::gateway_address::Destination::Hostname(hn) => {
@@ -324,11 +318,6 @@ impl TryFrom<&XdsGatewayAddress> for GatewayAddress {
                             hostname: Strng::from(&hn.hostname),
                         }),
                         hbone_mtls_port: value.hbone_mtls_port as u16,
-                        hbone_single_tls_port: if value.hbone_single_tls_port == 0 {
-                            None
-                        } else {
-                            Some(value.hbone_single_tls_port as u16)
-                        },
                     }
                 }
             },

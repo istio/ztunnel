@@ -701,7 +701,6 @@ mod tests {
                     address: s.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
-                hbone_single_tls_port: None,
             })
         }
 
@@ -715,7 +714,6 @@ mod tests {
                     address: w.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
-                hbone_single_tls_port: None,
             })
         }
     }

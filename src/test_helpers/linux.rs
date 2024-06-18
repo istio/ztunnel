@@ -295,7 +295,6 @@ impl<'a> TestServiceBuilder<'a> {
                 address: waypoint,
             }),
             hbone_mtls_port: 15008,
-            hbone_single_tls_port: Some(15003),
         });
         self
     }
@@ -363,7 +362,6 @@ impl<'a> TestWorkloadBuilder<'a> {
                 address: waypoint,
             }),
             hbone_mtls_port: 15008,
-            hbone_single_tls_port: Some(15003),
         });
         self
     }
