@@ -539,6 +539,7 @@ struct Request {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -951,6 +952,46 @@ mod tests {
                 protocol: Protocol::TCP,
                 hbone_destination: "",
                 destination: "127.0.0.2:1234",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn multiple_address_workload() {
+        let workload = XdsAddressType::Workload(XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/test-tcp".to_string(),
+            name: "test-tcp".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![
+                Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                Bytes::copy_from_slice("ff06::c3".parse::<Ipv6Addr>().unwrap().octets().as_slice()),
+            ],
+            tunnel_protocol: XdsProtocol::None as i32,
+            node: "remote-node".to_string(),
+            ..Default::default()
+        });
+        // v4 goes go v4
+        run_build_request(
+            "127.0.0.1",
+            "127.0.0.2:80",
+            workload.clone(),
+            Some(ExpectedRequest {
+                protocol: Protocol::TCP,
+                hbone_destination: "",
+                destination: "127.0.0.2:80",
+            }),
+        )
+        .await;
+        // v6 goes go v6
+        run_build_request(
+            "127.0.0.1",
+            "[ff06::c3]:80",
+            workload.clone(),
+            Some(ExpectedRequest {
+                protocol: Protocol::TCP,
+                hbone_destination: "",
+                destination: "[ff06::c3]:80",
             }),
         )
         .await;
