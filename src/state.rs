@@ -509,7 +509,15 @@ impl DemandProxyState {
         &self,
         dst_workload: &Workload,
         src_workload: &Workload,
+        original_target_address: SocketAddr,
     ) -> Result<IpAddr, Error> {
+        // If the user requested the pod by a specific IP, use that directly.
+        if dst_workload
+            .workload_ips
+            .contains(&original_target_address.ip())
+        {
+            return Ok(original_target_address.ip());
+        }
         // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
         // if/when we support that, this function may need to move to get access to the necessary metadata.
         // Randomly pick an IP. Note this is a workload, not a service, so this should only have up to 2 IPs (dual stack).
@@ -769,7 +777,7 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let selected_workload_ip = self
-            .pick_workload_destination_or_resolve(&wl, source_workload)
+            .pick_workload_destination_or_resolve(&wl, source_workload, addr)
             .await?; // if we can't load balance just return the error
         Ok(Some(Upstream {
             workload: wl,
