@@ -1262,7 +1262,7 @@ mod tests {
         let factory = crate::proxy::DefaultSocketFactory;
         let proxy = Server::new(
             domain,
-            config::Address::Localhost(0),
+            config::Address::Localhost(false, 0),
             NW1,
             state,
             forwarder,
@@ -1381,7 +1381,7 @@ mod tests {
         let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
             domain,
-            config::Address::Localhost(0),
+            config::Address::Localhost(false, 0),
             NW1,
             state,
             forwarder,
@@ -1458,7 +1458,7 @@ mod tests {
         let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
             domain,
-            config::Address::Localhost(0),
+            config::Address::Localhost(false, 0),
             NW1,
             state,
             forwarder,

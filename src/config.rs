@@ -56,6 +56,7 @@ const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 const CONNECTION_TERMINATION_DEADLINE: &str = "CONNECTION_TERMINATION_DEADLINE";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
+const IPV6_DISABLED: &str = "IPV6_DISABLED";
 
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
@@ -272,6 +273,12 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
 }
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
+    let ipv6_enabled = !parse::<bool>(IPV6_DISABLED)?.unwrap_or_default();
+    let bind_wildcard = if ipv6_enabled {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    };
     let default_istiod_address = if env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {
@@ -334,21 +341,21 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     // TODO: should we override server_ordering_strategy based on our IP support?
 
     let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
-        Some(dns_addr) => dns_addr
-            .parse()
+        Some(dns_addr) => Address::from_str(ipv6_enabled, dns_addr)
             .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
-        None => Address::Localhost(DEFAULT_DNS_PORT),
+        None => Address::Localhost(ipv6_enabled, DEFAULT_DNS_PORT),
     };
 
     let socks5_addr = if let Some(true) = parse(UNSTABLE_ENABLE_SOCKS5)? {
+        // TODO: use Address::Localhost for dual stack binding
         Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 15080))
     } else {
         None
     };
 
-    let inbound_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
-    let inbound_plaintext_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006);
-    let outbound_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001);
+    let inbound_addr = SocketAddr::new(bind_wildcard, 15008);
+    let inbound_plaintext_addr = SocketAddr::new(bind_wildcard, 15006);
+    let outbound_addr = SocketAddr::new(bind_wildcard, 15001);
 
     let mut illegal_ports = HashSet::from([
         // HBONE doesn't have redirection, so we cannot have loops, but this would allow multiple layers of HBONE.
@@ -391,17 +398,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         },
 
         // admin API should only be accessible over localhost
-        // todo: bind to both v4 localhost and v6
+        // TODO: use Address::Localhost for dual stack binding
         admin_addr: SocketAddr::new(
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
         ),
-        stats_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            pc.stats_port.unwrap_or(DEFAULT_STATS_PORT),
-        ),
+        stats_addr: SocketAddr::new(bind_wildcard, pc.stats_port.unwrap_or(DEFAULT_STATS_PORT)),
         readiness_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            bind_wildcard,
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
 
@@ -589,7 +593,8 @@ pub fn empty_to_none<A: AsRef<str>>(inp: Option<A>) -> Option<A> {
 // Address is a wrapper around either a normal SocketAddr or "bind to localhost on IPv4 and IPv6"
 pub enum Address {
     // Bind to localhost (dual stack) on a specific port
-    Localhost(u16),
+    // (ipv6_enabled, port)
+    Localhost(bool, u16),
     // Bind to an explicit IP/port
     SocketAddr(SocketAddr),
 }
@@ -597,7 +602,7 @@ pub enum Address {
 impl Display for Address {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Address::Localhost(port) => write!(f, "localhost:{port}"),
+            Address::Localhost(_, port) => write!(f, "localhost:{port}"),
             Address::SocketAddr(s) => write!(f, "{s}"),
         }
     }
@@ -609,25 +614,28 @@ impl IntoIterator for Address {
 
     fn into_iter(self) -> Self::IntoIter {
         match self {
-            // TODO(https://github.com/istio/ztunnel/issues/1131) allow only v4
-            Address::Localhost(port) => vec![
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
-            ]
-            .into_iter(),
+            Address::Localhost(ipv6_enabled, port) => {
+                if ipv6_enabled {
+                    vec![
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+                    ]
+                    .into_iter()
+                } else {
+                    vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)].into_iter()
+                }
+            }
             Address::SocketAddr(s) => vec![s].into_iter(),
         }
     }
 }
 
-impl FromStr for Address {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl Address {
+    fn from_str(ipv6_enabled: bool, s: &str) -> anyhow::Result<Self> {
         if s.starts_with("localhost:") {
             let (_host, ports) = s.split_once(':').expect("already checked it has a :");
             let port: u16 = ports.parse()?;
-            Ok(Address::Localhost(port))
+            Ok(Address::Localhost(ipv6_enabled, port))
         } else {
             Ok(Address::SocketAddr(s.parse()?))
         }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::config::Address;
 use crate::dns::resolver::{Answer, Resolver};
 use crate::dns::Metrics;
 use crate::proxy::Error;
@@ -263,7 +264,7 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
     });
     let srv = crate::dns::Server::new(
         "example.com".to_string(),
-        "127.0.0.1:0".parse()?,
+        Address::Localhost(false, 0),
         "",
         state,
         forwarder,
