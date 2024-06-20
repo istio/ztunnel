@@ -116,9 +116,9 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         // inbound_addr cannot do localhost since we abuse that its listening on all of 127.0.0.0/8 range.
         inbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         socks5_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
-        admin_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        readiness_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        stats_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        admin_addr: config::Address::Localhost(true, 0),
+        readiness_addr: config::Address::Localhost(true, 0),
+        stats_addr: config::Address::Localhost(true, 0),
         outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         dns_proxy_addr: config::Address::Localhost(false, 0),

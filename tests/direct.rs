@@ -62,6 +62,21 @@ async fn test_bind_conflict<F: FnOnce(&mut ztunnel::config::Config) -> &mut Sock
     assert!(ztunnel::app::build(Arc::new(cfg)).await.is_err());
 }
 
+// Check that port conflicts on any address results in the app failing instead of silently failing
+async fn test_bind_conflict_address<
+    F: FnOnce(&mut ztunnel::config::Config) -> &mut config::Address,
+>(
+    f: F,
+) {
+    helpers::initialize_telemetry();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = test_config();
+    let sa = f(&mut cfg);
+    *sa = config::Address::SocketAddr(l.local_addr().unwrap());
+
+    assert!(ztunnel::app::build(Arc::new(cfg)).await.is_err());
+}
+
 #[tokio::test]
 async fn test_conflicting_bind_error_inbound() {
     test_bind_conflict(|c| &mut c.inbound_addr).await;
@@ -79,7 +94,7 @@ async fn test_conflicting_bind_error_outbound() {
 
 #[tokio::test]
 async fn test_conflicting_bind_error_admin() {
-    test_bind_conflict(|c| &mut c.admin_addr).await;
+    test_bind_conflict_address(|c| &mut c.admin_addr).await;
 }
 
 #[tokio::test]
