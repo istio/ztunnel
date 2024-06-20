@@ -341,7 +341,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     // TODO: should we override server_ordering_strategy based on our IP support?
 
     let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
-        Some(dns_addr) => Address::from_str(ipv6_enabled, dns_addr)
+        Some(dns_addr) => Address::new(ipv6_enabled, dns_addr)
             .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
         None => Address::Localhost(ipv6_enabled, DEFAULT_DNS_PORT),
     };
@@ -631,7 +631,7 @@ impl IntoIterator for Address {
 }
 
 impl Address {
-    fn from_str(ipv6_enabled: bool, s: &str) -> anyhow::Result<Self> {
+    fn new(ipv6_enabled: bool, s: &str) -> anyhow::Result<Self> {
         if s.starts_with("localhost:") {
             let (_host, ports) = s.split_once(':').expect("already checked it has a :");
             let port: u16 = ports.parse()?;
