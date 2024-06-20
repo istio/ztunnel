@@ -1024,12 +1024,7 @@ mod tests {
             tunnel_protocol: 1,
             services: std::collections::HashMap::from([(
                 "/example.com".to_string(),
-                PortList {
-                    ports: vec![Port {
-                        service_port: 80,
-                        target_port: 1234,
-                    }],
-                },
+                PortList { ports: vec![] },
             )]),
             ..Default::default()
         });
@@ -1046,16 +1041,10 @@ mod tests {
                         address: "::3".parse::<Ipv6Addr>().unwrap().octets().into(),
                     },
                 ],
-                ports: vec![
-                    Port {
-                        service_port: 80,
-                        target_port: 0, // named port
-                    },
-                    Port {
-                        service_port: 8080,
-                        target_port: 0, // named port
-                    },
-                ],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 80,
+                }],
                 ..Default::default()
             };
             s.set_ip_families(f);
@@ -1068,7 +1057,7 @@ mod tests {
             vec![svc(IpFamilies::Ipv6Only), workload.clone()],
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                hbone_destination: "[ff06::c3]:1234",
+                hbone_destination: "[ff06::c3]:80",
                 destination: "[ff06::c3]:15008",
             }),
         )
@@ -1080,7 +1069,7 @@ mod tests {
             vec![svc(IpFamilies::Ipv4Only), workload.clone()],
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                hbone_destination: "127.0.0.2:1234",
+                hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.2:15008",
             }),
         )
@@ -1092,7 +1081,7 @@ mod tests {
             vec![svc(IpFamilies::Dual), workload.clone()],
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                hbone_destination: "127.0.0.2:1234",
+                hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.2:15008",
             }),
         )
@@ -1104,7 +1093,7 @@ mod tests {
             vec![svc(IpFamilies::Dual), workload.clone()],
             Some(ExpectedRequest {
                 protocol: Protocol::HBONE,
-                hbone_destination: "[ff06::c3]:1234",
+                hbone_destination: "[ff06::c3]:80",
                 destination: "[ff06::c3]:15008",
             }),
         )

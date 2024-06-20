@@ -46,6 +46,7 @@ use crate::dns::resolver::{Answer, Resolver};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::socket::to_canonical;
+use crate::state::service::IpFamily;
 use crate::state::workload::address::Address;
 use crate::state::workload::{NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -425,15 +426,11 @@ impl Store {
             Address::Service(service) => {
                 if service.vips.is_empty() {
                     // Headless service. Use the endpoint IPs.
-                    let family = service.ip_families;
                     service
                         .endpoints
                         .iter()
                         .filter_map(|(_, ep)| match &ep.address {
                             Some(addr) => {
-                                if let Some(false) = family.map(|f| f.accepts_ip(addr.address)) {
-                                    return None;
-                                }
                                 if is_record_type(&addr.address, record_type) {
                                     Some(addr.address)
                                 } else {
@@ -566,11 +563,17 @@ impl Resolver for Store {
             source: Some(&client),
         });
 
-        // Get the addresses for the service.
-        let addresses = self.get_addresses(&client, &service_match.server, record_type);
-
         // From this point on, we are the authority for the response.
         let is_authoritative = true;
+
+        if !service_family_allowed(&service_match.server, record_type) {
+            debug!(alias=%service_match.alias, %record_type, ans=?Answer::new(Vec::default(), is_authoritative), "service does not support this record type");
+            // This is not NXDOMAIN, since we found the host. Just return an empty set of records.
+            return Ok(Answer::new(Vec::default(), is_authoritative));
+        }
+
+        // Get the addresses for the service.
+        let addresses = self.get_addresses(&client, &service_match.server, record_type);
 
         if addresses.is_empty() {
             debug!(alias=%service_match.alias, name=%service_match.name, "no records");
@@ -619,6 +622,22 @@ impl Resolver for Store {
         ip_records(ip_record_name, addresses, &mut records);
 
         Ok(Answer::new(records, is_authoritative))
+    }
+}
+
+/// service_family_allowed indicates whether the service supports the given record type.
+/// This is primarily to support headless services; an IPv4 only service should only have IPv4 addresses
+/// anyway, so would naturally work.
+/// Headless services, however, do not have VIPs, and the Pods behind them can have dual stack IPs even with
+/// the Service being single-stack. In this case, we are NOT supposed to return both IPs.
+fn service_family_allowed(server: &Address, record_type: RecordType) -> bool {
+    match server {
+        Address::Service(service) => match service.ip_families {
+            Some(IpFamily::IPv4) if record_type == RecordType::AAAA => false,
+            Some(IpFamily::IPv6) if record_type == RecordType::A => false,
+            _ => true,
+        },
+        _ => true,
     }
 }
 
