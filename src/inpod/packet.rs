@@ -19,6 +19,7 @@ use nix::sys::socket::{
     bind as nixbind, connect as nixconnect, listen, socket, AddressFamily, SockFlag, SockType,
     UnixAddr,
 };
+use std::cmp;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use tokio::net::{UnixListener, UnixStream};
@@ -34,7 +35,9 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     let addr = UnixAddr::new(path)?;
 
     nixbind(socket.as_raw_fd(), &addr)?;
-    listen(&socket, nix::sys::socket::Backlog::new(1024)?)?;
+    // Do not exceed maximum
+    let backlog = cmp::min(1024, libc::SOMAXCONN - 1);
+    listen(&socket, nix::sys::socket::Backlog::new(backlog)?)?;
 
     let std_socket = std::os::unix::net::UnixListener::from(socket);
     UnixListener::from_std(std_socket)
