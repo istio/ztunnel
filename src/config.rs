@@ -54,6 +54,7 @@ const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
+const IPV6_DISABLED: &str = "IPV6_DISABLED";
 
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
@@ -264,6 +265,12 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
 }
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
+    let ipv6_enabled = !parse::<bool>(IPV6_DISABLED)?.unwrap_or_default();
+    let bind_wildcard = if ipv6_enabled {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    };
     let default_istiod_address = if env::var(KUBERNETES_SERVICE_HOST).is_ok() {
         "https://istiod.istio-system.svc:15012".to_string()
     } else {
@@ -325,7 +332,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(dns_addr) => dns_addr
             .parse()
             .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
-        None => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), DEFAULT_DNS_PORT),
+        None => SocketAddr::new(bind_wildcard, DEFAULT_DNS_PORT),
     };
 
     let socks5_addr = if let Some(true) = parse(UNSTABLE_ENABLE_SOCKS5)? {
@@ -363,19 +370,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
         ),
-        stats_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            pc.stats_port.unwrap_or(DEFAULT_STATS_PORT),
-        ),
+        stats_addr: SocketAddr::new(bind_wildcard, pc.stats_port.unwrap_or(DEFAULT_STATS_PORT)),
         readiness_addr: SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            bind_wildcard,
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
         ),
 
         socks5_addr,
-        inbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008),
-        inbound_plaintext_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15006),
-        outbound_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15001),
+        inbound_addr: SocketAddr::new(bind_wildcard, 15008),
+        inbound_plaintext_addr: SocketAddr::new(bind_wildcard, 15006),
+        outbound_addr: SocketAddr::new(bind_wildcard, 15001),
         dns_proxy_addr,
 
         network: parse(NETWORK)?.unwrap_or_default(),
