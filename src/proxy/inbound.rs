@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -123,7 +121,7 @@ impl Inbound {
                 serve.await
             };
             assertions::size_between_ref(1000, 1500, &serve_client);
-            tokio::task::spawn(serve_client);
+            tokio::task::spawn(serve_client.in_current_span());
         }
         info!("draining connections");
         drop(sub_drain); // sub_drain_signal.drain() will never resolve while sub_drain is valid, will deadlock if not dropped
@@ -143,7 +141,6 @@ impl Inbound {
     #[instrument(name="inbound", skip_all, fields(
         id=%Self::extract_traceparent(&req),
         peer=%conn.src,
-        peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
         pi: Arc<ProxyInputs>,
@@ -431,17 +428,6 @@ impl Inbound {
             state.fetch_on_demand(strng::new(hbone_dst.to_string())),
         ];
         lookup().flatten()
-    }
-}
-
-struct OptionDisplay<'a, T>(&'a Option<T>);
-
-impl<'a, T: Display> Display for OptionDisplay<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            None => write!(f, "None"),
-            Some(i) => write!(f, "{i}"),
-        }
     }
 }
 

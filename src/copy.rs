@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::proxy::ConnectionResult;
-use crate::proxy::Error::{BackendDisconnected, ClientDisconnected};
+use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
 use pin_project_lite::pin_project;
 use std::cmp;
 use std::future::Future;
@@ -111,15 +111,19 @@ where
     let (sent, received) = tokio::join!(downstream_to_upstream, upstream_to_downstream);
 
     // Convert some error messages to easier to understand
-    let sent = sent.map_err(|e| match e.kind() {
-        io::ErrorKind::NotConnected => BackendDisconnected,
-        io::ErrorKind::UnexpectedEof => ClientDisconnected,
-        _ => e.into(),
-    })?;
-    let received = received.map_err(|e| match e.kind() {
-        io::ErrorKind::NotConnected => ClientDisconnected,
-        _ => e.into(),
-    })?;
+    let sent = sent
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotConnected => BackendDisconnected,
+            io::ErrorKind::UnexpectedEof => ClientDisconnected,
+            _ => e.into(),
+        })
+        .map_err(|e| SendError(Box::new(e)))?;
+    let received = received
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotConnected => ClientDisconnected,
+            _ => e.into(),
+        })
+        .map_err(|e| ReceiveError(Box::new(e)))?;
     trace!(sent, received, "copy complete");
     Ok(())
 }

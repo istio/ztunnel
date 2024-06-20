@@ -32,7 +32,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use tokio::sync::Mutex;
-use tracing::{debug, trace};
+use tracing::{debug, trace, Instrument};
 
 use crate::config;
 use crate::identity::Identity;
@@ -140,16 +140,19 @@ impl PoolState {
         let pool_ref = self.connected_pool.clone();
         let pool_key_ref = pool_key.clone();
         let release_timeout = self.pool_unused_release_timeout;
-        tokio::spawn(async move {
-            debug!("starting an idle timeout for connection {:?}", pool_key_ref);
-            pool_ref
-                .idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup)
-                .await;
-            debug!(
-                "connection {:?} was removed/checked out/timed out of the pool",
-                pool_key_ref
-            )
-        });
+        tokio::spawn(
+            async move {
+                debug!("starting an idle timeout for connection {:?}", pool_key_ref);
+                pool_ref
+                    .idle_timeout(&pool_key_ref, release_timeout, evict, rx, pickup)
+                    .await;
+                debug!(
+                    "connection {:?} was removed/checked out/timed out of the pool",
+                    pool_key_ref
+                )
+            }
+            .in_current_span(),
+        );
         let _ = self.pool_notifier.send(true);
     }
 
