@@ -38,7 +38,7 @@ This allows high throughput workloads to perform well, without excessive memory 
 This case ends up being much more complex, as we flow through HTTP2 and TLS.
 The full flow looks as such (pseudocode):
 
-```
+```raw
 copy_bidi():
     loop {
         data = tcp_in.read(up to 256k) # based on dynamic buffer size
@@ -55,7 +55,8 @@ rustls::write(data):
 ```
 
 From an `iperf` load, this ends up looking something like this in `strace`:
-```
+
+```raw
 % time     seconds  usecs/call     calls    errors syscall
 ------ ----------- ----------- --------- --------- ----------------
  55.21    0.841290           5    140711           writev
@@ -82,7 +83,8 @@ We read these in [`recv_stream.poll_data`](../src/proxy/h2.rs), trigger by the `
 Ultimately, this will write out 1 DATA frame worth of data to the upstream TCP connection
 
 From an `iperf` load, this ends up looking something like this in `strace`:
-```
+
+```raw
 % time     seconds  usecs/call     calls    errors syscall
 ------ ----------- ----------- --------- --------- ----------------
  61.08    1.253541          50     24703           sendto
@@ -94,24 +96,25 @@ This will be from `sendto(256kb)` calls, with many `recvfrom()` calls ranging fr
 #### Comparison to Envoy
 
 Under an `iperf` load, Envoy client:
-```
+
+```raw
 % time     seconds  usecs/call     calls    errors syscall
 ------ ----------- ----------- --------- --------- ----------------
  68.24    1.363149           3    440440         1 sendto
  31.72    0.633584          11     55114        31 readv
 ```
+
 This is from many `sendto(16k)` calls, and `readv([16k]*8)`.
 
 Envoy Server:
-```
+
+```raw
 % time     seconds  usecs/call     calls    errors syscall
 ------ ----------- ----------- --------- --------- ----------------
  65.24    1.199264           1    757275         8 recvfrom
  34.73    0.638315          26     23670           writev
 ```
-This is from many calls of `recvfrom(5); recvfrom(16k)`, and `writev([16k]*16)`.
 
-On my machine, Envoy maintains an advantage, handling ~11GB/s vs 9Gb/s for ztunnel.
-With multiple parallel streams, Ztunnel is unable to exceed 9Gb/s; Envoy can handle up to 17Gb/s *if you get lucky with thread distribution*.
+This is from many calls of `recvfrom(5); recvfrom(16k)`, and `writev([16k]*16)`.
 
 (All strace commands are looking at `-e trace=write,writev,read,recvfrom,sendto,readv`).

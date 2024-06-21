@@ -126,7 +126,7 @@ lto = true
 inherits = "quick-release"
 
 [profile.symbols-release]
-inherits = "quick-release"
+inherits = "release"
 debug = true
 
 # Release optimized but without as many dependencies, suitable for incremental development

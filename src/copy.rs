@@ -63,6 +63,7 @@ impl BufferedSplitter for TcpStreamSplitter {
     }
 }
 
+// AsyncWriteBuf is like AsyncWrite, but writes a Bytes instead of &[u8]. This allows avoiding copies.
 pub trait AsyncWriteBuf {
     fn poll_write_buf(
         self: Pin<&mut Self>,
@@ -76,6 +77,7 @@ pub trait AsyncWriteBuf {
     ) -> Poll<Result<(), std::io::Error>>;
 }
 
+// Allow &T to be AsyncWriteBuf
 impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
     fn poll_write_buf(
         mut self: Pin<&mut Self>,
@@ -94,6 +96,7 @@ impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
     }
 }
 
+// Allow anything that is AsyncWrite to be AsyncWriteBuf.
 pub struct WriteAdapter<T>(T);
 
 impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
