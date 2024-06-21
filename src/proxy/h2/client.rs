@@ -80,7 +80,6 @@ impl H2ConnectClient {
         let (dropped1, dropped2) = crate::proxy::h2::DropCounter::new(self.stream_count.clone());
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
-            buf: Default::default(),
             _dropped: dropped1,
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {

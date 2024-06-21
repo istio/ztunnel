@@ -60,7 +60,6 @@ impl H2Request {
         let send = send.send_response(resp, false)?;
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
-            buf: Default::default(),
             _dropped: None, // We do not need to track on the server
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {

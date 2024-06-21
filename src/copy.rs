@@ -14,19 +14,18 @@
 
 use crate::proxy::ConnectionResult;
 use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use pin_project_lite::pin_project;
-use std::cmp;
 use std::future::Future;
 use std::io::{Error, IoSlice};
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
-use bytes::{Buf, Bytes, BytesMut};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tracing::{error, trace};
+use tracing::trace;
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
 pub trait BufferedSplitter: Unpin {
@@ -71,11 +70,18 @@ pub trait AsyncWriteBuf {
         buf: Bytes,
     ) -> Poll<std::io::Result<usize>>;
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>>;
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>>;
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>>;
 }
 
 impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
-    fn poll_write_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: Bytes) -> Poll<std::io::Result<usize>> {
+    fn poll_write_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: Bytes,
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut **self).poll_write_buf(cx, buf)
     }
 
@@ -91,7 +97,11 @@ impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
 pub struct WriteAdapter<T>(T);
 
 impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
-    fn poll_write_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: Bytes) -> Poll<std::io::Result<usize>> {
+    fn poll_write_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: Bytes,
+    ) -> Poll<std::io::Result<usize>> {
         AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf.chunk())
     }
 
@@ -104,11 +114,9 @@ impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
     }
 }
 
-
 // ResizeBufRead is like AsyncBufRead, but allows triggering a resize.
 pub trait ResizeBufRead {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>>;
-    fn consume(self: Pin<&mut Self>, amt: usize);
+    fn poll_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>>;
     fn resize(self: Pin<&mut Self>, new_size: usize);
 }
 
@@ -136,7 +144,6 @@ where
     A: BufferedSplitter,
     B: BufferedSplitter,
 {
-    use tokio::io::AsyncWriteExt;
     let (mut rd, mut wd) = downstream.split_into_buffered_reader();
     let (mut ru, mut wu) = upstream.split_into_buffered_reader();
 
@@ -196,6 +203,7 @@ struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     send: bool,
     reader: &'a mut R,
     writer: &'a mut W,
+    buf: Option<Bytes>,
     metrics: &'a ConnectionResult,
     amt: u64,
 }
@@ -214,6 +222,7 @@ where
         send: is_send,
         reader,
         writer,
+        buf: None,
         metrics,
         amt: 0,
     }
@@ -230,15 +239,28 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             let me = &mut *self;
-            let mut buffer = ready!(Pin::new(&mut *me.reader).poll_fill_buf(cx))?;
+
+            // Get our stored buffer if there is any remaining, or fetch some more.
+            let buffer = if let Some(buffer) = me.buf.take() {
+                buffer
+            } else {
+                ready!(Pin::new(&mut *me.reader).poll_bytes(cx))?
+            };
             if buffer.is_empty() {
                 ready!(AsyncWriteBuf::poll_shutdown(Pin::new(&mut self.writer), cx))?;
                 return Poll::Ready(Ok(self.amt));
             }
 
+            // This is just a reference counter. Hold onto it in case the write() is not complete.
+            let mut our_copy = buffer.clone();
             let i = ready!(Pin::new(&mut *me.writer).poll_write_buf(cx, buffer))?;
             if i == 0 {
                 return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+            }
+            if our_copy.len() < i {
+                // We only partially consumed it; store it back for a future call, skipping the number of bytes we did read.
+                our_copy.advance(i);
+                me.buf = Some(our_copy);
             }
             if me.send {
                 me.metrics.increment_send(i as u64);
@@ -255,7 +277,6 @@ where
             if old < RESIZE_THRESHOLD_JUMBO && RESIZE_THRESHOLD_JUMBO <= self.amt {
                 Pin::new(&mut *self.reader).resize(JUMBO_BUFFER_SIZE);
             }
-            Pin::new(&mut *self.reader).consume(i);
         }
     }
 }
@@ -265,7 +286,7 @@ pin_project! {
     pub struct BufReader<R> {
         #[pin]
         inner: R,
-        buf: Option<Bytes>,
+        buf: BytesMut,
         buffer_size: usize
     }
 }
@@ -275,8 +296,8 @@ impl<R: AsyncRead> BufReader<R> {
     pub fn new(inner: R) -> Self {
         Self {
             inner,
-            buf: None,
-            buffer_size: INITIAL_BUFFER_SIZE
+            buf: BytesMut::with_capacity(INITIAL_BUFFER_SIZE),
+            buffer_size: INITIAL_BUFFER_SIZE,
         }
     }
 
@@ -290,37 +311,18 @@ impl<R: AsyncRead> BufReader<R> {
 }
 
 impl<R: AsyncRead> ResizeBufRead for BufReader<R> {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<Bytes>> {
+    fn poll_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<Bytes>> {
         let me = self.project();
 
-        if me.buf.is_none() {
-            // TODO: do not alloc every time?
-            let mut buf = BytesMut::with_capacity(*me.buffer_size);
-            ready!(tokio_util::io::poll_read_buf(me.inner, cx, &mut buf))?;
-            *me.buf = Some(buf.freeze());
-        }
-        let b = me.buf.as_ref().map(|x| x.clone()).unwrap();
-        Poll::Ready(Ok(b))
-    }
-
-    fn consume(self: Pin<&mut Self>, amt: usize) {
-        let me = self.project();
-        let mut b = me.buf.take().unwrap();
-        b.advance(amt);
-        if b.remaining() > 0 {
-            *me.buf = Some(b);
-        } else {
-            *me.buf = None;
-        }
-        // *me.pos = cmp::min(*me.pos + amt, *me.cap);
+        // Give us enough space to read a full chunk
+        me.buf.reserve(*me.buffer_size);
+        ready!(tokio_util::io::poll_read_buf(me.inner, cx, me.buf))?;
+        Poll::Ready(Ok(me.buf.split().freeze()))
     }
 
     fn resize(self: Pin<&mut Self>, new_size: usize) {
         let me = self.project();
         *me.buffer_size = new_size;
-        //  TODO
-        // me.buf.resize(new_size, 0);
-        // trace!("resized buffer to {}", new_size)
     }
 }
 

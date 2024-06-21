@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use crate::copy;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use futures_core::ready;
 use h2::Reason;
-use std::io::{Cursor, Error};
+use std::io::Error;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
@@ -77,7 +77,6 @@ pub struct H2Stream {
 
 pub struct H2StreamReadHalf {
     recv_stream: h2::RecvStream,
-    buf: Bytes,
     _dropped: Option<DropCounter>,
 }
 
@@ -140,16 +139,10 @@ impl Drop for DropCounter {
 }
 
 impl copy::ResizeBufRead for H2StreamReadHalf {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>> {
+    fn poll_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>> {
         const EOF: Poll<std::io::Result<Bytes>> = Poll::Ready(Ok(Bytes::new()));
         let this = self.get_mut();
-        let self_buf = &mut this.buf;
         loop {
-            {
-                if self_buf.has_remaining() {
-                    return Poll::Ready(Ok(self_buf.clone()));
-                }
-            }
             match ready!(this.recv_stream.poll_data(cx)) {
                 None => return EOF,
                 Some(Ok(buf)) if buf.is_empty() && !this.recv_stream.is_end_stream() => continue,
@@ -159,7 +152,7 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
                     // We may want to; if so, modify here.
                     // this.ping.record_data(buf.len());
                     let _ = this.recv_stream.flow_control().release_capacity(buf.len());
-                    *self_buf = buf;
+                    return Poll::Ready(Ok(buf));
                 }
                 Some(Err(e)) => {
                     return Poll::Ready(match e.reason() {
@@ -172,10 +165,6 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
                 }
             }
         }
-    }
-
-    fn consume(mut self: Pin<&mut Self>, amt: usize) {
-        self.as_mut().buf.advance(amt)
     }
 
     fn resize(self: Pin<&mut Self>, _new_size: usize) {
@@ -256,7 +245,10 @@ impl AsyncWrite for H2StreamWriteHalf {
         // will get the correct from `poll_reset` anyway.
         let cnt = match ready!(self.send_stream.poll_capacity(cx)) {
             None => Some(0),
-            Some(Ok(cnt)) => self.write_slice(Bytes::copy_from_slice(&buf[..cnt]), false).ok().map(|()| cnt),
+            Some(Ok(cnt)) => self
+                .write_slice(Bytes::copy_from_slice(&buf[..cnt]), false)
+                .ok()
+                .map(|()| cnt),
             Some(Err(_)) => None,
         };
 
