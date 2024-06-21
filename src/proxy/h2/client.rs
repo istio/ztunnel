@@ -120,7 +120,8 @@ pub async fn spawn_connection(
         .max_frame_size(cfg.frame_size)
         .initial_max_send_streams(cfg.pool_max_streams_per_conn as usize)
         .max_header_list_size(1024 * 16)
-        .max_send_buffer_size(1024 * 1024)
+        // 256kb. Aligned with copy.rs to avoid fragmentation
+        .max_send_buffer_size(16_384 * 16_384)
         .enable_push(false);
 
     let (send_req, connection) = builder

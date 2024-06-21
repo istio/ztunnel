@@ -180,7 +180,7 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
         self.as_mut().buf.advance(amt)
     }
 
-    fn resize(self: Pin<&mut Self>) {
+    fn resize(self: Pin<&mut Self>, _new_size: usize) {
         // NOP, we don't need to resize as we are abstracting the h2 buffer
     }
 }

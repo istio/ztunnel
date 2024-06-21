@@ -24,7 +24,7 @@ use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tracing::trace;
+use tracing::{error, trace};
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
 pub trait BufferedSplitter: Unpin {
@@ -66,7 +66,7 @@ impl BufferedSplitter for TcpStreamSplitter {
 pub trait ResizeBufRead {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>>;
     fn consume(self: Pin<&mut Self>, amt: usize);
-    fn resize(self: Pin<&mut Self>);
+    fn resize(self: Pin<&mut Self>, new_size: usize);
 }
 
 // Initially we create a 1k buffer for each connection. Note currently there are 3 buffers per connection.
@@ -76,9 +76,13 @@ const INITIAL_BUFFER_SIZE: usize = 1024;
 // We increase up to 16k for high traffic connections.
 // TLS record size max is 16k. But we also have an H2 frame header, so leave a bit of room for that.
 const LARGE_BUFFER_SIZE: usize = 16_384 - 64;
+// For ultra-high bandwidth connections, increase up to 256Kb
+const JUMBO_BUFFER_SIZE: usize = (16 * 16_384) - 64;
 // After 128k of data we will trigger a resize from INITIAL to LARGE
 // Loosely inspired by https://github.com/golang/go/blame/5122a6796ef98e3453c994c95abd640596540bea/src/crypto/tls/conn.go#L873
 const RESIZE_THRESHOLD: u64 = 128 * 1024;
+// After 10Mb of data we will trigger a resize from LARGE to JUMBO
+const RESIZE_THRESHOLD_JUMBO: u64 = 10 * 1024 * 1024;
 
 pub async fn copy_bidirectional<A, B>(
     downstream: A,
@@ -203,7 +207,10 @@ where
 
             // If we were below the resize threshold before but are now above it, trigger the buffer to resize
             if old < RESIZE_THRESHOLD && RESIZE_THRESHOLD <= self.amt {
-                Pin::new(&mut *self.reader).resize();
+                Pin::new(&mut *self.reader).resize(LARGE_BUFFER_SIZE);
+            }
+            if old < RESIZE_THRESHOLD_JUMBO && RESIZE_THRESHOLD_JUMBO <= self.amt {
+                Pin::new(&mut *self.reader).resize(JUMBO_BUFFER_SIZE);
             }
             Pin::new(&mut *self.reader).consume(i);
         }
@@ -265,16 +272,14 @@ impl<R: AsyncRead> ResizeBufRead for BufReader<R> {
         *me.pos = cmp::min(*me.pos + amt, *me.cap);
     }
 
-    fn resize(self: Pin<&mut Self>) {
+    fn resize(self: Pin<&mut Self>, new_size: usize) {
         let me = self.project();
-        // If we don't hit this, we somehow called resize twice unexpectedly
-        debug_assert_eq!(me.buf.len(), INITIAL_BUFFER_SIZE);
         // Make a new buffer of the large size, and swap it into place
-        let mut now = vec![0u8; LARGE_BUFFER_SIZE].into_boxed_slice();
+        let mut now = vec![0u8; new_size].into_boxed_slice();
         std::mem::swap(me.buf, &mut now);
         // Now copy over any data from the old buffer.
         me.buf[0..now.len()].copy_from_slice(&now);
-        trace!("resized buffer to {}", LARGE_BUFFER_SIZE)
+        trace!("resized buffer to {}", new_size)
     }
 }
 
