@@ -206,7 +206,7 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
         )))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         Poll::Ready(Ok(()))
     }
 
@@ -214,7 +214,9 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        if self.write_slice(Bytes::new(), true).is_ok() {
+        let r = self.write_slice(Bytes::new(), true);
+        tracing::error!("howardjohn: poll h2 {r:?}");
+        if r.is_ok() {
             return Poll::Ready(Ok(()));
         }
 
