@@ -14,6 +14,7 @@
 
 use crate::config;
 use crate::proxy::Error;
+use bytes::Bytes;
 use futures_util::FutureExt;
 use http::request::Parts;
 use http::Response;
@@ -28,7 +29,7 @@ use tracing::{debug, warn};
 pub struct H2Request {
     request: Parts,
     recv: h2::RecvStream,
-    send: h2::server::SendResponse<crate::proxy::h2::SendBuf>,
+    send: h2::server::SendResponse<Bytes>,
 }
 
 impl H2Request {

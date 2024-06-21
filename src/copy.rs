@@ -14,7 +14,7 @@
 
 use crate::proxy::ConnectionResult;
 use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use std::future::Future;
 use std::io::{Error, IoSlice};
@@ -150,18 +150,14 @@ where
     let downstream_to_upstream = async {
         let res = copy_buf(&mut rd, &mut wu, stats, false).await;
         trace!(?res, "send");
-        tracing::error!("howardjohn: SHUT1");
         ignore_shutdown_errors(shutdown(&mut wu).await)?;
-        tracing::error!("howardjohn: SHUT11");
         res
     };
 
     let upstream_to_downstream = async {
         let res = copy_buf(&mut ru, &mut wd, stats, true).await;
         trace!(?res, "receive");
-        tracing::error!("howardjohn: SHUT2");
         ignore_shutdown_errors(shutdown(&mut wd).await)?;
-        tracing::error!("howardjohn: SHUT22");
         res
     };
 
@@ -250,9 +246,7 @@ where
             } else {
                 ready!(Pin::new(&mut *me.reader).poll_bytes(cx))?
             };
-            tracing::error!("howardjohn: got buffer {}", buffer.len());
             if buffer.is_empty() {
-                tracing::error!("howardjohn: SHUtdown");
                 ready!(AsyncWriteBuf::poll_flush(Pin::new(&mut self.writer), cx))?;
                 return Poll::Ready(Ok(self.amt));
             }
@@ -396,8 +390,6 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let me = self.project();
-        let res = AsyncWriteBuf::poll_shutdown(Pin::new(me.a), cx);
-        tracing::error!("howardjohn: poll shut {res:?}");
-        res
+        AsyncWriteBuf::poll_shutdown(Pin::new(me.a), cx)
     }
 }
