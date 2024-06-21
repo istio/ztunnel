@@ -31,7 +31,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Status, Streaming};
 use tracing::{debug, error, info};
 
-use super::test_config_with_port_xds_addr_and_root_cert;
+use super::{hyper_tower, test_config_with_port_xds_addr_and_root_cert};
 use crate::config::RootCert;
 use crate::hyper_util::TokioExecutor;
 use crate::metrics::sub_registry;
@@ -85,7 +85,7 @@ impl AdsServer {
                     if let Err(err) = http2::Builder::new(TokioExecutor)
                         .serve_connection(
                             TokioIo::new(socket),
-                            tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
+                            hyper_tower::TowerToHyperService::new(srv),
                         )
                         .await
                     {

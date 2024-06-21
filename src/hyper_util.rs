@@ -155,7 +155,7 @@ pub fn http2_client() -> client::conn::http2::Builder<TokioExecutor> {
 
 pub fn pooling_client<B>() -> ::hyper_util::client::legacy::Client<HttpConnector, B>
 where
-    B: http_body_1::Body + Send,
+    B: http_body::Body + Send,
     B::Data: Send,
 {
     ::hyper_util::client::legacy::Client::builder(::hyper_util::rt::TokioExecutor::new())
