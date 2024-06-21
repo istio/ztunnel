@@ -74,5 +74,4 @@ skip = [
 
 allow-git = [
     "https://github.com/janrueth/boring-rustls-provider",
-    "https://github.com/howardjohn/tower-hyper-http-body-compat"
 ]

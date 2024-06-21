@@ -16,8 +16,7 @@ use crate::config::RootCert;
 use crate::tls::lib::provider;
 use crate::tls::{ClientCertProvider, Error, WorkloadCertificate};
 use bytes::Bytes;
-use http_body_1::{Body, Frame};
-use hyper::body::Incoming;
+use http_body::{Body, Frame};
 use hyper::Uri;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -26,13 +25,11 @@ use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
 
+use hyper::body::Incoming;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tonic::body::BoxBody;
-use tower_hyper_http_body_compat::{
-    http02_request_to_http1, http1_response_to_http02, HttpBody04ToHttpBody1, HttpBody1ToHttpBody04,
-};
 
 async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Error> {
     let mut roots = rustls::RootCertStore::empty();
@@ -92,10 +89,11 @@ async fn control_plane_client_config(root_cert: &RootCert) -> Result<ClientConfi
         .with_no_client_auth())
 }
 
+// pub type TlsGrpcChannel = hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, BoxBody>;
 #[derive(Clone, Debug)]
 pub struct TlsGrpcChannel {
     uri: Uri,
-    client: hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, BoxBody1>,
+    client: hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, BoxBody>,
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
@@ -133,13 +131,9 @@ pub fn grpc_connector(uri: String, cc: ClientConfig) -> Result<TlsGrpcChannel, E
         .timer(crate::hyper_util::TokioTimer)
         .build(https);
 
+    // Ok(client)
     Ok(TlsGrpcChannel { uri, client })
 }
-
-// Everything here is to hack hyper 1.0 onto tonic.
-// TODO(https://github.com/hyperium/tonic/issues/1307) remove all of this and use tonic 'transport'
-
-type BoxBody1 = HttpBody04ToHttpBody1<BoxBody>;
 
 #[derive(Default)]
 pub enum DefaultIncoming {
@@ -165,8 +159,8 @@ impl Body for DefaultIncoming {
     }
 }
 
-impl tower::Service<http_02::Request<BoxBody>> for TlsGrpcChannel {
-    type Response = http_02::Response<HttpBody1ToHttpBody04<DefaultIncoming>>;
+impl tower::Service<http::Request<BoxBody>> for TlsGrpcChannel {
+    type Response = http::Response<DefaultIncoming>;
     type Error = hyper_util::client::legacy::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -174,8 +168,7 @@ impl tower::Service<http_02::Request<BoxBody>> for TlsGrpcChannel {
         Ok(()).into()
     }
 
-    fn call(&mut self, req: http_02::Request<BoxBody>) -> Self::Future {
-        let mut req = http02_request_to_http1(req.map(HttpBody04ToHttpBody1::new));
+    fn call(&mut self, mut req: http::Request<BoxBody>) -> Self::Future {
         let mut uri = Uri::builder();
         if let Some(scheme) = self.uri.scheme() {
             uri = uri.scheme(scheme.to_owned());
@@ -191,10 +184,7 @@ impl tower::Service<http_02::Request<BoxBody>> for TlsGrpcChannel {
         let future = self.client.request(req);
         Box::pin(async move {
             let res = future.await?;
-            Ok(http1_response_to_http02(
-                res.map(DefaultIncoming::Some)
-                    .map(HttpBody1ToHttpBody04::new),
-            ))
+            Ok(res.map(DefaultIncoming::Some))
         })
     }
 }
