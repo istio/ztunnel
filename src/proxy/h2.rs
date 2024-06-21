@@ -16,7 +16,7 @@ use crate::copy;
 use bytes::{Buf, Bytes};
 use futures_core::ready;
 use h2::Reason;
-use std::io::Cursor;
+use std::io::{Cursor, Error};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
@@ -82,7 +82,7 @@ pub struct H2StreamReadHalf {
 }
 
 pub struct H2StreamWriteHalf {
-    send_stream: h2::SendStream<SendBuf>,
+    send_stream: h2::SendStream<Bytes>,
     _dropped: Option<DropCounter>,
 }
 
@@ -118,10 +118,9 @@ impl crate::copy::BufferedSplitter for H2Stream {
 }
 
 impl H2StreamWriteHalf {
-    fn write_slice(&mut self, buf: &[u8], end_of_stream: bool) -> Result<(), std::io::Error> {
-        let send_buf: SendBuf = Cursor::new(buf.into());
+    fn write_slice(&mut self, buf: Bytes, end_of_stream: bool) -> Result<(), std::io::Error> {
         self.send_stream
-            .send_data(send_buf, end_of_stream)
+            .send_data(buf, end_of_stream)
             .map_err(h2_to_io_error)
     }
 }
@@ -141,15 +140,14 @@ impl Drop for DropCounter {
 }
 
 impl copy::ResizeBufRead for H2StreamReadHalf {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
-        const EOF: Poll<std::io::Result<&[u8]>> = Poll::Ready(Ok(&[]));
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>> {
+        const EOF: Poll<std::io::Result<Bytes>> = Poll::Ready(Ok(Bytes::new()));
         let this = self.get_mut();
         let self_buf = &mut this.buf;
         loop {
             {
-                if !self_buf.chunk().is_empty() {
-                    let chunk = (*self_buf).chunk();
-                    return Poll::Ready(Ok(chunk));
+                if self_buf.has_remaining() {
+                    return Poll::Ready(Ok(self_buf.clone()));
                 }
             }
             match ready!(this.recv_stream.poll_data(cx)) {
@@ -165,7 +163,7 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
                 }
                 Some(Err(e)) => {
                     return Poll::Ready(match e.reason() {
-                        Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => Ok(&[]),
+                        Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => return EOF,
                         Some(Reason::STREAM_CLOSED) => {
                             Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
                         }
@@ -185,6 +183,64 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
     }
 }
 
+impl copy::AsyncWriteBuf for H2StreamWriteHalf {
+    fn poll_write_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: Bytes,
+    ) -> Poll<std::io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        self.send_stream.reserve_capacity(buf.len());
+
+        // We ignore all errors returned by `poll_capacity` and `write`, as we
+        // will get the correct from `poll_reset` anyway.
+        let cnt = match ready!(self.send_stream.poll_capacity(cx)) {
+            None => Some(0),
+            Some(Ok(cnt)) => self.write_slice(buf.slice(..cnt), false).ok().map(|()| cnt),
+            Some(Err(_)) => None,
+        };
+
+        if let Some(cnt) = cnt {
+            return Poll::Ready(Ok(cnt));
+        }
+
+        Poll::Ready(Err(h2_to_io_error(
+            match ready!(self.send_stream.poll_reset(cx)) {
+                Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+                }
+                Ok(reason) => reason.into(),
+                Err(e) => e,
+            },
+        )))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        if self.write_slice(Bytes::new(), true).is_ok() {
+            return Poll::Ready(Ok(()));
+        }
+
+        Poll::Ready(Err(h2_to_io_error(
+            match ready!(self.send_stream.poll_reset(cx)) {
+                Ok(Reason::NO_ERROR) => return Poll::Ready(Ok(())),
+                Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+                }
+                Ok(reason) => reason.into(),
+                Err(e) => e,
+            },
+        )))
+    }
+}
 impl AsyncWrite for H2StreamWriteHalf {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -200,7 +256,7 @@ impl AsyncWrite for H2StreamWriteHalf {
         // will get the correct from `poll_reset` anyway.
         let cnt = match ready!(self.send_stream.poll_capacity(cx)) {
             None => Some(0),
-            Some(Ok(cnt)) => self.write_slice(&buf[..cnt], false).ok().map(|()| cnt),
+            Some(Ok(cnt)) => self.write_slice(Bytes::copy_from_slice(&buf[..cnt]), false).ok().map(|()| cnt),
             Some(Err(_)) => None,
         };
 
@@ -227,7 +283,7 @@ impl AsyncWrite for H2StreamWriteHalf {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        if self.write_slice(&[], true).is_ok() {
+        if self.write_slice(Bytes::new(), true).is_ok() {
             return Poll::Ready(Ok(()));
         }
 
@@ -244,7 +300,7 @@ impl AsyncWrite for H2StreamWriteHalf {
     }
 }
 
-pub type SendBuf = Cursor<Box<[u8]>>;
+pub type SendBuf = Bytes;
 
 fn h2_to_io_error(e: h2::Error) -> std::io::Error {
     if e.is_io() {

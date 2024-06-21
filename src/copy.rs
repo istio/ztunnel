@@ -17,9 +17,11 @@ use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError,
 use pin_project_lite::pin_project;
 use std::cmp;
 use std::future::Future;
-use std::io::IoSlice;
+use std::io::{Error, IoSlice};
+use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -29,7 +31,7 @@ use tracing::{error, trace};
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
 pub trait BufferedSplitter: Unpin {
     type R: ResizeBufRead + Unpin;
-    type W: AsyncWrite + Unpin;
+    type W: AsyncWriteBuf + Unpin;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W);
 }
 
@@ -39,11 +41,11 @@ where
     I: AsyncRead + AsyncWrite + Unpin,
 {
     type R = BufReader<io::ReadHalf<I>>;
-    type W = io::WriteHalf<I>;
+    type W = WriteAdapter<io::WriteHalf<I>>;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
         let (rh, wh) = tokio::io::split(self);
         let rb = BufReader::new(rh);
-        (rb, wh)
+        (rb, WriteAdapter(wh))
     }
 }
 
@@ -53,18 +55,59 @@ pub struct TcpStreamSplitter(pub TcpStream);
 
 impl BufferedSplitter for TcpStreamSplitter {
     type R = BufReader<OwnedReadHalf>;
-    type W = OwnedWriteHalf;
+    type W = WriteAdapter<OwnedWriteHalf>;
 
     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
         let (rh, wh) = self.0.into_split();
         let rb = BufReader::new(rh);
-        (rb, wh)
+        (rb, WriteAdapter(wh))
     }
 }
 
+pub trait AsyncWriteBuf {
+    fn poll_write_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: Bytes,
+    ) -> Poll<std::io::Result<usize>>;
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>>;
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>>;
+}
+
+impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
+    fn poll_write_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: Bytes) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut **self).poll_write_buf(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut **self).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut **self).poll_shutdown(cx)
+    }
+}
+
+pub struct WriteAdapter<T>(T);
+
+impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
+    fn poll_write_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: Bytes) -> Poll<std::io::Result<usize>> {
+        AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf.chunk())
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+
 // ResizeBufRead is like AsyncBufRead, but allows triggering a resize.
 pub trait ResizeBufRead {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>>;
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>>;
     fn consume(self: Pin<&mut Self>, amt: usize);
     fn resize(self: Pin<&mut Self>, new_size: usize);
 }
@@ -100,14 +143,14 @@ where
     let downstream_to_upstream = async {
         let res = copy_buf(&mut rd, &mut wu, stats, false).await;
         trace!(?res, "send");
-        ignore_shutdown_errors(wu.shutdown().await)?;
+        ignore_shutdown_errors(shutdown(&mut wu).await)?;
         res
     };
 
     let upstream_to_downstream = async {
         let res = copy_buf(&mut ru, &mut wd, stats, true).await;
         trace!(?res, "receive");
-        ignore_shutdown_errors(wd.shutdown().await)?;
+        ignore_shutdown_errors(shutdown(&mut wd).await)?;
         res
     };
 
@@ -165,7 +208,7 @@ async fn copy_buf<'a, R, W>(
 ) -> std::io::Result<u64>
 where
     R: ResizeBufRead + Unpin + ?Sized,
-    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+    W: AsyncWriteBuf + Unpin + ?Sized,
 {
     CopyBuf {
         send: is_send,
@@ -180,20 +223,20 @@ where
 impl<R, W> Future for CopyBuf<'_, R, W>
 where
     R: ResizeBufRead + Unpin + ?Sized,
-    W: AsyncWrite + Unpin + ?Sized,
+    W: AsyncWriteBuf + Unpin + ?Sized,
 {
     type Output = std::io::Result<u64>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             let me = &mut *self;
-            let buffer = ready!(Pin::new(&mut *me.reader).poll_fill_buf(cx))?;
+            let mut buffer = ready!(Pin::new(&mut *me.reader).poll_fill_buf(cx))?;
             if buffer.is_empty() {
-                ready!(Pin::new(&mut self.writer).poll_flush(cx))?;
+                ready!(AsyncWriteBuf::poll_shutdown(Pin::new(&mut self.writer), cx))?;
                 return Poll::Ready(Ok(self.amt));
             }
 
-            let i = ready!(Pin::new(&mut *me.writer).poll_write(cx, buffer))?;
+            let i = ready!(Pin::new(&mut *me.writer).poll_write_buf(cx, buffer))?;
             if i == 0 {
                 return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
             }
@@ -222,21 +265,18 @@ pin_project! {
     pub struct BufReader<R> {
         #[pin]
         inner: R,
-        buf: Box<[u8]>,
-        pos: usize,
-        cap: usize,
+        buf: Option<Bytes>,
+        buffer_size: usize
     }
 }
 
 impl<R: AsyncRead> BufReader<R> {
     /// Creates a new `BufReader` with a default buffer capacity. The default is currently INITIAL_BUFFER_SIZE
     pub fn new(inner: R) -> Self {
-        let buffer = vec![0; INITIAL_BUFFER_SIZE];
         Self {
             inner,
-            buf: buffer.into_boxed_slice(),
-            pos: 0,
-            cap: 0,
+            buf: None,
+            buffer_size: INITIAL_BUFFER_SIZE
         }
     }
 
@@ -250,36 +290,37 @@ impl<R: AsyncRead> BufReader<R> {
 }
 
 impl<R: AsyncRead> ResizeBufRead for BufReader<R> {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<Bytes>> {
         let me = self.project();
 
-        // If we've reached the end of our internal buffer then we need to fetch
-        // some more data from the underlying reader.
-        // Branch using `>=` instead of the more correct `==`
-        // to tell the compiler that the pos..cap slice is always valid.
-        if *me.pos >= *me.cap {
-            debug_assert!(*me.pos == *me.cap);
-            let mut buf = tokio::io::ReadBuf::new(me.buf);
-            ready!(me.inner.poll_read(cx, &mut buf))?;
-            *me.cap = buf.filled().len();
-            *me.pos = 0;
+        if me.buf.is_none() {
+            // TODO: do not alloc every time?
+            let mut buf = BytesMut::with_capacity(*me.buffer_size);
+            ready!(tokio_util::io::poll_read_buf(me.inner, cx, &mut buf))?;
+            *me.buf = Some(buf.freeze());
         }
-        Poll::Ready(Ok(&me.buf[*me.pos..*me.cap]))
+        let b = me.buf.as_ref().map(|x| x.clone()).unwrap();
+        Poll::Ready(Ok(b))
     }
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
         let me = self.project();
-        *me.pos = cmp::min(*me.pos + amt, *me.cap);
+        let mut b = me.buf.take().unwrap();
+        b.advance(amt);
+        if b.remaining() > 0 {
+            *me.buf = Some(b);
+        } else {
+            *me.buf = None;
+        }
+        // *me.pos = cmp::min(*me.pos + amt, *me.cap);
     }
 
     fn resize(self: Pin<&mut Self>, new_size: usize) {
         let me = self.project();
-        // Make a new buffer of the large size, and swap it into place
-        let mut now = vec![0u8; new_size].into_boxed_slice();
-        std::mem::swap(me.buf, &mut now);
-        // Now copy over any data from the old buffer.
-        me.buf[0..now.len()].copy_from_slice(&now);
-        trace!("resized buffer to {}", new_size)
+        *me.buffer_size = new_size;
+        //  TODO
+        // me.buf.resize(new_size, 0);
+        // trace!("resized buffer to {}", new_size)
     }
 }
 
@@ -310,5 +351,43 @@ impl<R: AsyncRead + AsyncWrite> AsyncWrite for BufReader<R> {
 
     fn is_write_vectored(&self) -> bool {
         self.get_ref().is_write_vectored()
+    }
+}
+
+pin_project! {
+    /// A future used to shutdown an I/O object.
+    ///
+    /// Created by the [`AsyncWriteExt::shutdown`][shutdown] function.
+    /// [shutdown]: [`crate::io::AsyncWriteExt::shutdown`]
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
+    #[derive(Debug)]
+    pub struct Shutdown<'a, A: ?Sized> {
+        a: &'a mut A,
+        // Make this future `!Unpin` for compatibility with async trait methods.
+        #[pin]
+        _pin: PhantomPinned,
+    }
+}
+
+/// Creates a future which will shutdown an I/O object.
+pub(super) fn shutdown<A>(a: &mut A) -> Shutdown<'_, A>
+where
+    A: AsyncWriteBuf + Unpin + ?Sized,
+{
+    Shutdown {
+        a,
+        _pin: PhantomPinned,
+    }
+}
+
+impl<A> Future for Shutdown<'_, A>
+where
+    A: AsyncWriteBuf + Unpin + ?Sized,
+{
+    type Output = std::io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let me = self.project();
+        AsyncWriteBuf::poll_shutdown(Pin::new(me.a), cx)
     }
 }
