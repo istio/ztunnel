@@ -396,3 +396,53 @@ where
         AsyncWriteBuf::poll_shutdown(Pin::new(me.a), cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncWriteExt};
+    use tokio::io::{AsyncReadExt};
+    use crate::test_helpers::helpers::initialize_telemetry;
+
+    #[tokio::test]
+    async fn copy() {
+        initialize_telemetry();
+        let (mut client, ztunnel_downsteam) = tokio::io::duplex(32000);
+        let (mut server, ztunnel_upsteam) = tokio::io::duplex(32000);
+
+        // Spawn copy
+        tokio::task::spawn(async move {
+            let mut registry = prometheus_client::registry::Registry::default();
+            let metrics =
+                std::sync::Arc::new(crate::proxy::Metrics::new(crate::metrics::sub_registry(&mut registry)));
+            let source_addr = "127.0.0.1:12345".parse().unwrap();
+            let dest_addr = "127.0.0.1:34567".parse().unwrap();
+            let cr = ConnectionResult::new(
+                source_addr,
+                dest_addr,
+                None,
+                std::time::Instant::now(),
+                crate::proxy::metrics::ConnectionOpen {
+                    reporter: crate::proxy::Reporter::destination,
+                    source: None,
+                    derived_source: None,
+                    destination: None,
+                    connection_security_policy: crate::proxy::metrics::SecurityPolicy::unknown,
+                    destination_service: None,
+                },
+                metrics.clone(),
+            );
+            copy_bidirectional(ztunnel_downsteam, ztunnel_upsteam, &cr).await
+        });
+        const ITERS: usize = 1000;
+        const REPEATS: usize = 6400;
+        // Make sure we write enough to trigger the resize
+        assert!(ITERS*REPEATS > JUMBO_BUFFER_SIZE);
+        for i in 0..ITERS {
+            let body = [1,2,3,4, i as u8].repeat(REPEATS);
+            let mut res = vec![0; body.len()];
+            tokio::try_join!(client.write_all(&body), server.read_exact(&mut res)).unwrap();
+            assert_eq!(res.as_slice(), body);
+        }
+    }
+}
