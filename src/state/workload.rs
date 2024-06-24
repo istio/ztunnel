@@ -915,6 +915,7 @@ mod tests {
                     subject_alt_names: vec![],
                     waypoint: None,
                     load_balancing: None,
+                    ip_families: 0,
                 },
             )
             .unwrap();
@@ -947,6 +948,7 @@ mod tests {
                     subject_alt_names: vec![],
                     waypoint: None,
                     load_balancing: None,
+                    ip_families: 0,
                 },
             )
             .unwrap();
@@ -1002,6 +1004,7 @@ mod tests {
                     subject_alt_names: vec![],
                     waypoint: None,
                     load_balancing: None,
+                    ip_families: 0,
                 },
             )
             .unwrap();

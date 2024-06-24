@@ -12,14 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr};
-use std::ops::Deref;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
-
 use drain::Watch;
 use hickory_proto::error::ProtoErrorKind;
 use hickory_proto::op::ResponseCode;
@@ -34,6 +26,13 @@ use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
+use std::net::{IpAddr, SocketAddr};
+use std::ops::Deref;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::proxy::SocketFactory;
@@ -47,6 +46,7 @@ use crate::dns::resolver::{Answer, Resolver};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::socket::to_canonical;
+use crate::state::service::IpFamily;
 use crate::state::workload::address::Address;
 use crate::state::workload::{NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -563,11 +563,17 @@ impl Resolver for Store {
             source: Some(&client),
         });
 
-        // Get the addresses for the service.
-        let addresses = self.get_addresses(&client, &service_match.server, record_type);
-
         // From this point on, we are the authority for the response.
         let is_authoritative = true;
+
+        if !service_family_allowed(&service_match.server, record_type) {
+            debug!(alias=%service_match.alias, %record_type, ans=?Answer::new(Vec::default(), is_authoritative), "service does not support this record type");
+            // This is not NXDOMAIN, since we found the host. Just return an empty set of records.
+            return Ok(Answer::new(Vec::default(), is_authoritative));
+        }
+
+        // Get the addresses for the service.
+        let addresses = self.get_addresses(&client, &service_match.server, record_type);
 
         if addresses.is_empty() {
             debug!(alias=%service_match.alias, name=%service_match.name, "no records");
@@ -616,6 +622,22 @@ impl Resolver for Store {
         ip_records(ip_record_name, addresses, &mut records);
 
         Ok(Answer::new(records, is_authoritative))
+    }
+}
+
+/// service_family_allowed indicates whether the service supports the given record type.
+/// This is primarily to support headless services; an IPv4 only service should only have IPv4 addresses
+/// anyway, so would naturally work.
+/// Headless services, however, do not have VIPs, and the Pods behind them can have dual stack IPs even with
+/// the Service being single-stack. In this case, we are NOT supposed to return both IPs.
+fn service_family_allowed(server: &Address, record_type: RecordType) -> bool {
+    match server {
+        Address::Service(service) => match service.ip_families {
+            Some(IpFamily::IPv4) if record_type == RecordType::AAAA => false,
+            Some(IpFamily::IPv6) if record_type == RecordType::A => false,
+            _ => true,
+        },
+        _ => true,
     }
 }
 
@@ -839,6 +861,7 @@ impl Forwarder for SystemForwarder {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
     use std::cmp::Ordering;
     use std::collections::HashMap;
     use std::net::{SocketAddrV4, SocketAddrV6};
@@ -855,11 +878,11 @@ mod tests {
     };
     use crate::test_helpers::helpers::initialize_telemetry;
     use crate::test_helpers::{new_proxy_state, test_default_workload};
-    use crate::xds::istio::workload::NetworkAddress as XdsNetworkAddress;
     use crate::xds::istio::workload::Port as XdsPort;
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::xds::istio::workload::{IpFamilies, NetworkAddress as XdsNetworkAddress};
     use crate::{metrics, test_helpers};
 
     const NS1: &str = "ns1";
@@ -1215,11 +1238,34 @@ mod tests {
                 ..Default::default()
             },
             Case {
-                name: "success: headless service returns workload ips",
+                name: "success: headless service returns workload ips for A",
                 host: "headless.ns1.svc.cluster.local.",
                 expect_records: vec![
                     a(n("headless.ns1.svc.cluster.local."), ipv4("30.30.30.30")),
                     a(n("headless.ns1.svc.cluster.local."), ipv4("31.31.31.31"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless service returns workload ips for AAAA",
+                host: "headless.ns1.svc.cluster.local.",
+                query_type: RecordType::AAAA,
+                expect_records: vec![
+                    aaaa(n("headless.ns1.svc.cluster.local."), ipv6("2001:db8::30")),
+                    aaaa(n("headless.ns1.svc.cluster.local."), ipv6("2001:db8::31"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless-ipv6 service returns records for AAAA",
+                host: "headless-ipv6.ns1.svc.cluster.local.",
+                query_type: RecordType::AAAA,
+                expect_records: vec![
+                aaaa(n("headless-ipv6.ns1.svc.cluster.local."), ipv6("2001:db8::33"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: headless-ipv6 service returns empty for A",
+                host: "headless-ipv6.ns1.svc.cluster.local.",
+                expect_records: vec![],
                 ..Default::default()
             },
             // TODO(https://github.com/istio/ztunnel/issues/1119)
@@ -1286,7 +1332,7 @@ mod tests {
             for (protocol, mut client) in [("tcp", tcp_client.clone()), ("udp", udp_client.clone())]
             {
                 let c = c.clone();
-                tasks.push(tokio::task::spawn(async move {
+                tasks.push(async move {
                     let name = format!("[{protocol}] {}", c.name);
                     let resp = send_request(&mut client, n(c.host), c.query_type).await;
                     assert_eq!(c.expect_authoritative, resp.authoritative(), "{}", name);
@@ -1303,12 +1349,11 @@ mod tests {
                         }
                         assert_eq!(c.expect_records, actual, "{}", name);
                     }
-                }));
+                });
             }
         }
-        for t in tasks {
-            t.await.unwrap();
-        }
+        let stream = futures::stream::iter(tasks).buffer_unordered(10);
+        let _ = stream.collect::<Vec<_>>().await;
     }
 
     #[tokio::test]
@@ -1575,6 +1620,8 @@ mod tests {
     }
 
     fn state() -> DemandProxyState {
+        let mut headless_ipv6 = xds_service("headless-ipv6", NS1, &[]);
+        headless_ipv6.set_ip_families(IpFamilies::Ipv6Only);
         let services = vec![
             xds_external_service("www.google.com", &[na(NW1, "1.1.1.1")]),
             xds_service("productpage", NS1, &[na(NW1, "9.9.9.9")]),
@@ -1615,6 +1662,7 @@ mod tests {
             xds_service("headless", NS1, &[]),
             xds_external_service("headless.example.com", &[]),
             xds_external_service("headless-no-endpoints.example.com", &[]),
+            headless_ipv6,
         ];
 
         let workloads = vec![
@@ -1627,7 +1675,7 @@ mod tests {
                 "headless.pod0.ns1.svc.cluster.local",
                 &NW1,
                 &[format!("{}/{}", NS1, kube_fqdn("headless", NS1)).as_str()],
-                &[ip("30.30.30.30")],
+                &[ip("30.30.30.30"), ip("2001:db8::30")],
             ),
             xds_workload(
                 "headless1",
@@ -1635,7 +1683,7 @@ mod tests {
                 "headless.pod1.ns1.svc.cluster.local",
                 &NW1,
                 &[format!("{}/{}", NS1, kube_fqdn("headless", NS1)).as_str()],
-                &[ip("31.31.31.31")],
+                &[ip("31.31.31.31"), ip("2001:db8::31")],
             ),
             xds_workload(
                 "headless-external",
@@ -1643,7 +1691,15 @@ mod tests {
                 "",
                 &NW1,
                 &[format!("{}/{}", NS1, "headless.example.com").as_str()],
-                &[ip("32.32.32.32")],
+                &[ip("32.32.32.32"), ip("2001:db8::32")],
+            ),
+            xds_workload(
+                "headless2",
+                NS1,
+                "headless2.pod2.ns1.svc.cluster.local",
+                &NW1,
+                &[format!("{}/{}", NS1, kube_fqdn("headless-ipv6", NS1)).as_str()],
+                &[ip("33.33.33.33"), ip("2001:db8::33")],
             ),
         ];
 

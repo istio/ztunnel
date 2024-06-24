@@ -685,6 +685,7 @@ mod tests {
                 routing_preference: vec![1, 2],
                 mode: 1,
             }), // ..Default::default() // intentionally don't default. we want all fields populated
+            ip_families: 0,
         };
 
         let auth = XdsAuthorization {

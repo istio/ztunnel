@@ -187,6 +187,7 @@ pub fn mock_default_service() -> Service {
         subject_alt_names: vec![],
         waypoint: None,
         load_balancer: None,
+        ip_families: None,
     }
 }
 
@@ -292,6 +293,7 @@ fn test_custom_svc(
         subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".into()],
         waypoint: None,
         load_balancer: None,
+        ip_families: None,
     })
 }
 

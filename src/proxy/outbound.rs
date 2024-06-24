@@ -562,13 +562,13 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::proxy::connection_manager::ConnectionManager;
-    use crate::test_helpers::helpers::test_proxy_metrics;
+    use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::address::Type as XdsAddressType;
-    use crate::xds::istio::workload::Port;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::xds::istio::workload::{IpFamilies, Port};
     use crate::xds::istio::workload::{NetworkAddress as XdsNetworkAddress, PortList};
     use crate::{identity, xds};
 
@@ -595,7 +595,10 @@ mod tests {
             uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),
-            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
+            addresses: vec![
+                Bytes::copy_from_slice(&[127, 0, 0, 1]),
+                Bytes::copy_from_slice("::1".parse::<Ipv6Addr>().unwrap().octets().as_slice()),
+            ],
             node: "local-node".to_string(),
             ..Default::default()
         };
@@ -1004,6 +1007,94 @@ mod tests {
                 protocol: Protocol::TCP,
                 hbone_destination: "",
                 destination: "[ff06::c3]:80",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn service_ip_families() {
+        initialize_telemetry();
+        let workload = XdsAddressType::Workload(XdsWorkload {
+            uid: "cluster1//v1/Pod/default/dual".to_string(),
+            addresses: vec![
+                Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                Bytes::copy_from_slice("ff06::c3".parse::<Ipv6Addr>().unwrap().octets().as_slice()),
+            ],
+            tunnel_protocol: 1,
+            services: std::collections::HashMap::from([(
+                "/example.com".to_string(),
+                PortList { ports: vec![] },
+            )]),
+            ..Default::default()
+        });
+        let svc = |f: IpFamilies| {
+            let mut s = XdsService {
+                hostname: "example.com".to_string(),
+                addresses: vec![
+                    XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vec![127, 0, 0, 3],
+                    },
+                    XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: "::3".parse::<Ipv6Addr>().unwrap().octets().into(),
+                    },
+                ],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 80,
+                }],
+                ..Default::default()
+            };
+            s.set_ip_families(f);
+            XdsAddressType::Service(s)
+        };
+        // V6 only should always use V6 IP
+        run_build_request_multi(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            vec![svc(IpFamilies::Ipv6Only), workload.clone()],
+            Some(ExpectedRequest {
+                protocol: Protocol::HBONE,
+                hbone_destination: "[ff06::c3]:80",
+                destination: "[ff06::c3]:15008",
+            }),
+        )
+        .await;
+        // V4 only should always use V4 IP
+        run_build_request_multi(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            vec![svc(IpFamilies::Ipv4Only), workload.clone()],
+            Some(ExpectedRequest {
+                protocol: Protocol::HBONE,
+                hbone_destination: "127.0.0.2:80",
+                destination: "127.0.0.2:15008",
+            }),
+        )
+        .await;
+        // Dual stack should always prefer the original family (here ipv4)
+        run_build_request_multi(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            vec![svc(IpFamilies::Dual), workload.clone()],
+            Some(ExpectedRequest {
+                protocol: Protocol::HBONE,
+                hbone_destination: "127.0.0.2:80",
+                destination: "127.0.0.2:15008",
+            }),
+        )
+        .await;
+        // Dual stack should always prefer the original family (here ipv6)
+        run_build_request_multi(
+            "::1",
+            "[::3]:80",
+            vec![svc(IpFamilies::Dual), workload.clone()],
+            Some(ExpectedRequest {
+                protocol: Protocol::HBONE,
+                hbone_destination: "[ff06::c3]:80",
+                destination: "[ff06::c3]:15008",
             }),
         )
         .await;

@@ -822,6 +822,7 @@ mod tests {
             subject_alt_names: vec![],
             waypoint: None,
             load_balancer: None,
+            ip_families: None,
         }
     }
 
