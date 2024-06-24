@@ -56,7 +56,7 @@ const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 const CONNECTION_TERMINATION_DEADLINE: &str = "CONNECTION_TERMINATION_DEADLINE";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
-const IPV6_DISABLED: &str = "IPV6_DISABLED";
+const IPV6_ENABLED: &str = "IPV6_ENABLED";
 
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
@@ -273,7 +273,7 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
 }
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
-    let ipv6_enabled = !parse::<bool>(IPV6_DISABLED)?.unwrap_or_default();
+    let ipv6_enabled = parse::<bool>(IPV6_ENABLED)?.unwrap_or(true);
     let bind_wildcard = if ipv6_enabled {
         IpAddr::V6(Ipv6Addr::UNSPECIFIED)
     } else {
