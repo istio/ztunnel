@@ -35,6 +35,7 @@ use tracing::info;
 
 use crate::app::Bound;
 use crate::identity::SecretManager;
+use crate::signal::ShutdownTrigger;
 use crate::test_helpers::localhost_error_message;
 use crate::*;
 
@@ -51,6 +52,7 @@ pub struct TestApp {
     pub cert_manager: Arc<SecretManager>,
 
     pub namespace: Option<super::netns::Namespace>,
+    pub shutdown: ShutdownTrigger,
 }
 
 impl From<(&Bound, Arc<SecretManager>)> for TestApp {
@@ -64,6 +66,7 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
             udp_dns_proxy_address: app.udp_dns_proxy_address,
             cert_manager,
             namespace: None,
+            shutdown: app.shutdown.trigger(),
         }
     }
 }

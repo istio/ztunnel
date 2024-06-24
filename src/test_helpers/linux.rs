@@ -27,8 +27,10 @@ use nix::unistd::mkdtemp;
 use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
 
+use crate::signal::ShutdownTrigger;
 use crate::test_helpers::inpod::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::InPod;
 use tokio::sync::Mutex;
@@ -50,6 +52,7 @@ pub struct WorkloadManager {
     policies: Vec<Authorization>,
     mode: TestMode,
     tmp_dir: PathBuf,
+    drops: Vec<ShutdownTrigger>,
 }
 
 pub struct LocalZtunnel {
@@ -61,7 +64,17 @@ pub struct LocalZtunnel {
 
 impl Drop for WorkloadManager {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.tmp_dir).unwrap()
+        std::fs::remove_dir_all(&self.tmp_dir).unwrap();
+        for d in &self.drops {
+            let d = d.clone();
+            thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async move { d.shutdown_now().await });
+            });
+        }
     }
 }
 
@@ -85,6 +98,7 @@ impl WorkloadManager {
             workloads: vec![],
             services: HashMap::new(),
             policies: vec![],
+            drops: vec![],
         })
     }
 
@@ -138,6 +152,7 @@ impl WorkloadManager {
             }
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
+            let shutdown = app.shutdown.trigger();
 
             // inpod mode doesn't have ore need these, so just put bogus values.
             let proxy_addresses = app.proxy_addresses.unwrap_or(proxy::Addresses {
@@ -167,6 +182,7 @@ impl WorkloadManager {
                 cert_manager,
 
                 namespace: Some(cloned_ns),
+                shutdown,
             };
             ta.ready().await;
             info!("ready");
@@ -175,6 +191,7 @@ impl WorkloadManager {
 
             app.wait_termination().await
         })?;
+
         // Make sure our initial config is ACKed
         tx_cfg.wait().await?;
         let zt_info = LocalZtunnel {
@@ -184,7 +201,9 @@ impl WorkloadManager {
             veth: veth.clone(),
         };
         self.ztunnels.insert(node.to_string(), zt_info);
-        Ok(rx.recv()?)
+        let ta = rx.recv()?;
+        self.drops.push(ta.shutdown.clone());
+        Ok(ta)
     }
 
     async fn refresh_config(&mut self) -> anyhow::Result<()> {
