@@ -26,7 +26,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
 use tokio_rustls::client::TlsStream;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace, warn, Instrument};
 
 #[derive(Debug, Clone)]
 // H2ConnectClient is a wrapper abstracting h2
@@ -139,9 +139,12 @@ pub async fn spawn_connection(
     // spawn a task to poll the connection and drive the HTTP state
     // if we got a drain for that connection, respect it in a race
     // it is important to have a drain here, or this connection will never terminate
-    tokio::spawn(async move {
-        drive_connection(connection, driver_drain).await;
-    });
+    tokio::spawn(
+        async move {
+            drive_connection(connection, driver_drain).await;
+        }
+        .in_current_span(),
+    );
 
     let c = H2ConnectClient {
         sender: send_req,
@@ -163,11 +166,9 @@ where
     let (ping_drop_tx, ping_drop_rx) = oneshot::channel::<()>();
     // for this fn to inform ping to give up when it is already dropped
     let dropped = Arc::new(AtomicBool::new(false));
-    tokio::task::spawn(super::do_ping_pong(
-        ping_pong,
-        ping_drop_tx,
-        dropped.clone(),
-    ));
+    tokio::task::spawn(
+        super::do_ping_pong(ping_pong, ping_drop_tx, dropped.clone()).in_current_span(),
+    );
 
     tokio::select! {
         _ = driver_drain.changed() => {

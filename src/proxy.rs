@@ -293,9 +293,13 @@ pub enum Error {
 
     #[error("destination disconnected before all data was written")]
     BackendDisconnected,
+    #[error("receive: {0}")]
+    ReceiveError(Box<Error>),
 
     #[error("client disconnected before all data was written")]
     ClientDisconnected,
+    #[error("send: {0}")]
+    SendError(Box<Error>),
 
     #[error("connection failed: {0}")]
     ConnectionFailed(io::Error),

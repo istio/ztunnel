@@ -259,8 +259,14 @@ impl WorkloadProxyManagerState {
 
         let metrics = self.metrics.clone();
         let admin_handler = self.admin_handler.clone();
+
         metrics.proxies_started.get_or_create(&()).inc();
         if let Some(proxy) = proxies.proxy {
+            let span = if let Some(wl) = workload_info {
+                tracing::info_span!("proxy", wl=%format!("{}/{}", wl.namespace, wl.name))
+            } else {
+                tracing::info_span!("proxy", uid=%workload_uid.clone().into_string())
+            };
             tokio::spawn(
                 async move {
                     proxy.run().await;
@@ -268,13 +274,16 @@ impl WorkloadProxyManagerState {
                     metrics.proxies_stopped.get_or_create(&()).inc();
                     admin_handler.proxy_down(&uid);
                 }
-                .instrument(tracing::info_span!("proxy", uid=%workload_uid.clone().into_string())),
+                .instrument(span),
             );
         }
         if let Some(proxy) = proxies.dns_proxy {
-            tokio::spawn(proxy.run().instrument(
-                tracing::info_span!("dns_proxy", uid=%workload_uid.clone().into_string()),
-            ));
+            let span = if let Some(wl) = workload_info {
+                tracing::info_span!("dns_proxy", wl=%format!("{}/{}", wl.namespace, wl.name))
+            } else {
+                tracing::info_span!("dns_proxy", uid=%workload_uid.clone().into_string())
+            };
+            tokio::spawn(proxy.run().instrument(span));
         }
 
         self.workload_states.insert(
