@@ -400,9 +400,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncWriteExt};
-    use tokio::io::{AsyncReadExt};
     use crate::test_helpers::helpers::initialize_telemetry;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
     async fn copy() {
@@ -413,8 +413,9 @@ mod tests {
         // Spawn copy
         tokio::task::spawn(async move {
             let mut registry = prometheus_client::registry::Registry::default();
-            let metrics =
-                std::sync::Arc::new(crate::proxy::Metrics::new(crate::metrics::sub_registry(&mut registry)));
+            let metrics = std::sync::Arc::new(crate::proxy::Metrics::new(
+                crate::metrics::sub_registry(&mut registry),
+            ));
             let source_addr = "127.0.0.1:12345".parse().unwrap();
             let dest_addr = "127.0.0.1:34567".parse().unwrap();
             let cr = ConnectionResult::new(
@@ -437,9 +438,11 @@ mod tests {
         const ITERS: usize = 1000;
         const REPEATS: usize = 6400;
         // Make sure we write enough to trigger the resize
-        assert!(ITERS*REPEATS > JUMBO_BUFFER_SIZE);
+        if ITERS * REPEATS < JUMBO_BUFFER_SIZE {
+            panic!("not enough writing to test")
+        }
         for i in 0..ITERS {
-            let body = [1,2,3,4, i as u8].repeat(REPEATS);
+            let body = [1, 2, 3, 4, i as u8].repeat(REPEATS);
             let mut res = vec![0; body.len()];
             tokio::try_join!(client.write_all(&body), server.read_exact(&mut res)).unwrap();
             assert_eq!(res.as_slice(), body);
