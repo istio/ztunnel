@@ -149,9 +149,9 @@ pub struct Config {
     pub pool_unused_release_timeout: Duration,
 
     pub socks5_addr: Option<SocketAddr>,
-    pub admin_addr: SocketAddr,
-    pub stats_addr: SocketAddr,
-    pub readiness_addr: SocketAddr,
+    pub admin_addr: Address,
+    pub stats_addr: Address,
+    pub readiness_addr: Address,
     pub inbound_addr: SocketAddr,
     pub inbound_plaintext_addr: SocketAddr,
     pub outbound_addr: SocketAddr,
@@ -398,16 +398,18 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         },
 
         // admin API should only be accessible over localhost
-        // TODO: use Address::Localhost for dual stack binding
-        admin_addr: SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        admin_addr: Address::Localhost(
+            ipv6_enabled,
             pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
         ),
-        stats_addr: SocketAddr::new(bind_wildcard, pc.stats_port.unwrap_or(DEFAULT_STATS_PORT)),
-        readiness_addr: SocketAddr::new(
+        stats_addr: Address::SocketAddr(SocketAddr::new(
+            bind_wildcard,
+            pc.stats_port.unwrap_or(DEFAULT_STATS_PORT),
+        )),
+        readiness_addr: Address::SocketAddr(SocketAddr::new(
             bind_wildcard,
             DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
-        ),
+        )),
 
         socks5_addr,
         inbound_addr,
@@ -638,6 +640,13 @@ impl Address {
             Ok(Address::Localhost(ipv6_enabled, port))
         } else {
             Ok(Address::SocketAddr(s.parse()?))
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        match self {
+            Address::Localhost(_, port) => *port,
+            Address::SocketAddr(s) => s.port(),
         }
     }
 }
