@@ -14,10 +14,11 @@
 
 use crate::proxy::ConnectionResult;
 use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
+use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
-use std::cmp;
 use std::future::Future;
-use std::io::IoSlice;
+use std::io::{Error, IoSlice};
+use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 use tokio::io;
@@ -29,7 +30,7 @@ use tracing::trace;
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
 pub trait BufferedSplitter: Unpin {
     type R: ResizeBufRead + Unpin;
-    type W: AsyncWrite + Unpin;
+    type W: AsyncWriteBuf + Unpin;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W);
 }
 
@@ -39,11 +40,11 @@ where
     I: AsyncRead + AsyncWrite + Unpin,
 {
     type R = BufReader<io::ReadHalf<I>>;
-    type W = io::WriteHalf<I>;
+    type W = WriteAdapter<io::WriteHalf<I>>;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
         let (rh, wh) = tokio::io::split(self);
         let rb = BufReader::new(rh);
-        (rb, wh)
+        (rb, WriteAdapter(wh))
     }
 }
 
@@ -53,20 +54,73 @@ pub struct TcpStreamSplitter(pub TcpStream);
 
 impl BufferedSplitter for TcpStreamSplitter {
     type R = BufReader<OwnedReadHalf>;
-    type W = OwnedWriteHalf;
+    type W = WriteAdapter<OwnedWriteHalf>;
 
     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
         let (rh, wh) = self.0.into_split();
         let rb = BufReader::new(rh);
-        (rb, wh)
+        (rb, WriteAdapter(wh))
+    }
+}
+
+// AsyncWriteBuf is like AsyncWrite, but writes a Bytes instead of &[u8]. This allows avoiding copies.
+pub trait AsyncWriteBuf {
+    fn poll_write_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: Bytes,
+    ) -> Poll<std::io::Result<usize>>;
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>>;
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>>;
+}
+
+// Allow &T to be AsyncWriteBuf
+impl<T: ?Sized + AsyncWriteBuf + Unpin> AsyncWriteBuf for &mut T {
+    fn poll_write_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: Bytes,
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut **self).poll_write_buf(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut **self).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut **self).poll_shutdown(cx)
+    }
+}
+
+// Allow anything that is AsyncWrite to be AsyncWriteBuf.
+pub struct WriteAdapter<T>(T);
+
+impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
+    fn poll_write_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        mut buf: Bytes,
+    ) -> Poll<std::io::Result<usize>> {
+        tokio_util::io::poll_write_buf(Pin::new(&mut self.0), cx, &mut buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
     }
 }
 
 // ResizeBufRead is like AsyncBufRead, but allows triggering a resize.
 pub trait ResizeBufRead {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>>;
-    fn consume(self: Pin<&mut Self>, amt: usize);
-    fn resize(self: Pin<&mut Self>);
+    fn poll_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>>;
+    fn resize(self: Pin<&mut Self>, new_size: usize);
 }
 
 // Initially we create a 1k buffer for each connection. Note currently there are 3 buffers per connection.
@@ -76,9 +130,13 @@ const INITIAL_BUFFER_SIZE: usize = 1024;
 // We increase up to 16k for high traffic connections.
 // TLS record size max is 16k. But we also have an H2 frame header, so leave a bit of room for that.
 const LARGE_BUFFER_SIZE: usize = 16_384 - 64;
+// For ultra-high bandwidth connections, increase up to 256Kb
+const JUMBO_BUFFER_SIZE: usize = (16 * 16_384) - 64;
 // After 128k of data we will trigger a resize from INITIAL to LARGE
 // Loosely inspired by https://github.com/golang/go/blame/5122a6796ef98e3453c994c95abd640596540bea/src/crypto/tls/conn.go#L873
-const RESIZE_THRESHOLD: u64 = 128 * 1024;
+const RESIZE_THRESHOLD_LARGE: u64 = 128 * 1024;
+// After 10Mb of data we will trigger a resize from LARGE to JUMBO
+const RESIZE_THRESHOLD_JUMBO: u64 = 10 * 1024 * 1024;
 
 pub async fn copy_bidirectional<A, B>(
     downstream: A,
@@ -89,21 +147,20 @@ where
     A: BufferedSplitter,
     B: BufferedSplitter,
 {
-    use tokio::io::AsyncWriteExt;
     let (mut rd, mut wd) = downstream.split_into_buffered_reader();
     let (mut ru, mut wu) = upstream.split_into_buffered_reader();
 
     let downstream_to_upstream = async {
         let res = copy_buf(&mut rd, &mut wu, stats, false).await;
         trace!(?res, "send");
-        ignore_shutdown_errors(wu.shutdown().await)?;
+        ignore_shutdown_errors(shutdown(&mut wu).await)?;
         res
     };
 
     let upstream_to_downstream = async {
         let res = copy_buf(&mut ru, &mut wd, stats, true).await;
         trace!(?res, "receive");
-        ignore_shutdown_errors(wd.shutdown().await)?;
+        ignore_shutdown_errors(shutdown(&mut wd).await)?;
         res
     };
 
@@ -149,6 +206,7 @@ struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     send: bool,
     reader: &'a mut R,
     writer: &'a mut W,
+    buf: Option<Bytes>,
     metrics: &'a ConnectionResult,
     amt: u64,
 }
@@ -161,12 +219,13 @@ async fn copy_buf<'a, R, W>(
 ) -> std::io::Result<u64>
 where
     R: ResizeBufRead + Unpin + ?Sized,
-    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+    W: AsyncWriteBuf + Unpin + ?Sized,
 {
     CopyBuf {
         send: is_send,
         reader,
         writer,
+        buf: None,
         metrics,
         amt: 0,
     }
@@ -176,22 +235,35 @@ where
 impl<R, W> Future for CopyBuf<'_, R, W>
 where
     R: ResizeBufRead + Unpin + ?Sized,
-    W: AsyncWrite + Unpin + ?Sized,
+    W: AsyncWriteBuf + Unpin + ?Sized,
 {
     type Output = std::io::Result<u64>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             let me = &mut *self;
-            let buffer = ready!(Pin::new(&mut *me.reader).poll_fill_buf(cx))?;
+
+            // Get our stored buffer if there is any remaining, or fetch some more.
+            let buffer = if let Some(buffer) = me.buf.take() {
+                buffer
+            } else {
+                ready!(Pin::new(&mut *me.reader).poll_bytes(cx))?
+            };
             if buffer.is_empty() {
-                ready!(Pin::new(&mut self.writer).poll_flush(cx))?;
+                ready!(AsyncWriteBuf::poll_flush(Pin::new(&mut self.writer), cx))?;
                 return Poll::Ready(Ok(self.amt));
             }
 
-            let i = ready!(Pin::new(&mut *me.writer).poll_write(cx, buffer))?;
+            // This is just a reference counter. Hold onto it in case the write() is not complete.
+            let mut our_copy = buffer.clone();
+            let i = ready!(Pin::new(&mut *me.writer).poll_write_buf(cx, buffer))?;
             if i == 0 {
                 return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+            }
+            if our_copy.len() < i {
+                // We only partially consumed it; store it back for a future call, skipping the number of bytes we did read.
+                our_copy.advance(i);
+                me.buf = Some(our_copy);
             }
             if me.send {
                 me.metrics.increment_send(i as u64);
@@ -202,10 +274,12 @@ where
             self.amt += i as u64;
 
             // If we were below the resize threshold before but are now above it, trigger the buffer to resize
-            if old < RESIZE_THRESHOLD && RESIZE_THRESHOLD <= self.amt {
-                Pin::new(&mut *self.reader).resize();
+            if old < RESIZE_THRESHOLD_LARGE && RESIZE_THRESHOLD_LARGE <= self.amt {
+                Pin::new(&mut *self.reader).resize(LARGE_BUFFER_SIZE);
             }
-            Pin::new(&mut *self.reader).consume(i);
+            if old < RESIZE_THRESHOLD_JUMBO && RESIZE_THRESHOLD_JUMBO <= self.amt {
+                Pin::new(&mut *self.reader).resize(JUMBO_BUFFER_SIZE);
+            }
         }
     }
 }
@@ -215,21 +289,18 @@ pin_project! {
     pub struct BufReader<R> {
         #[pin]
         inner: R,
-        buf: Box<[u8]>,
-        pos: usize,
-        cap: usize,
+        buf: BytesMut,
+        buffer_size: usize
     }
 }
 
 impl<R: AsyncRead> BufReader<R> {
     /// Creates a new `BufReader` with a default buffer capacity. The default is currently INITIAL_BUFFER_SIZE
     pub fn new(inner: R) -> Self {
-        let buffer = vec![0; INITIAL_BUFFER_SIZE];
         Self {
             inner,
-            buf: buffer.into_boxed_slice(),
-            pos: 0,
-            cap: 0,
+            buf: BytesMut::with_capacity(INITIAL_BUFFER_SIZE),
+            buffer_size: INITIAL_BUFFER_SIZE,
         }
     }
 
@@ -243,38 +314,18 @@ impl<R: AsyncRead> BufReader<R> {
 }
 
 impl<R: AsyncRead> ResizeBufRead for BufReader<R> {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+    fn poll_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<Bytes>> {
         let me = self.project();
 
-        // If we've reached the end of our internal buffer then we need to fetch
-        // some more data from the underlying reader.
-        // Branch using `>=` instead of the more correct `==`
-        // to tell the compiler that the pos..cap slice is always valid.
-        if *me.pos >= *me.cap {
-            debug_assert!(*me.pos == *me.cap);
-            let mut buf = tokio::io::ReadBuf::new(me.buf);
-            ready!(me.inner.poll_read(cx, &mut buf))?;
-            *me.cap = buf.filled().len();
-            *me.pos = 0;
-        }
-        Poll::Ready(Ok(&me.buf[*me.pos..*me.cap]))
+        // Give us enough space to read a full chunk
+        me.buf.reserve(*me.buffer_size);
+        ready!(tokio_util::io::poll_read_buf(me.inner, cx, me.buf))?;
+        Poll::Ready(Ok(me.buf.split().freeze()))
     }
 
-    fn consume(self: Pin<&mut Self>, amt: usize) {
+    fn resize(self: Pin<&mut Self>, new_size: usize) {
         let me = self.project();
-        *me.pos = cmp::min(*me.pos + amt, *me.cap);
-    }
-
-    fn resize(self: Pin<&mut Self>) {
-        let me = self.project();
-        // If we don't hit this, we somehow called resize twice unexpectedly
-        debug_assert_eq!(me.buf.len(), INITIAL_BUFFER_SIZE);
-        // Make a new buffer of the large size, and swap it into place
-        let mut now = vec![0u8; LARGE_BUFFER_SIZE].into_boxed_slice();
-        std::mem::swap(me.buf, &mut now);
-        // Now copy over any data from the old buffer.
-        me.buf[0..now.len()].copy_from_slice(&now);
-        trace!("resized buffer to {}", LARGE_BUFFER_SIZE)
+        *me.buffer_size = new_size;
     }
 }
 
@@ -305,5 +356,96 @@ impl<R: AsyncRead + AsyncWrite> AsyncWrite for BufReader<R> {
 
     fn is_write_vectored(&self) -> bool {
         self.get_ref().is_write_vectored()
+    }
+}
+
+pin_project! {
+    /// A future used to shutdown an I/O object.
+    ///
+    /// Created by the [`AsyncWriteExt::shutdown`][shutdown] function.
+    /// [shutdown]: [`crate::io::AsyncWriteExt::shutdown`]
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
+    #[derive(Debug)]
+    pub struct Shutdown<'a, A: ?Sized> {
+        a: &'a mut A,
+        // Make this future `!Unpin` for compatibility with async trait methods.
+        #[pin]
+        _pin: PhantomPinned,
+    }
+}
+
+/// Creates a future which will shutdown an I/O object.
+pub(super) fn shutdown<A>(a: &mut A) -> Shutdown<'_, A>
+where
+    A: AsyncWriteBuf + Unpin + ?Sized,
+{
+    Shutdown {
+        a,
+        _pin: PhantomPinned,
+    }
+}
+
+impl<A> Future for Shutdown<'_, A>
+where
+    A: AsyncWriteBuf + Unpin + ?Sized,
+{
+    type Output = std::io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let me = self.project();
+        AsyncWriteBuf::poll_shutdown(Pin::new(me.a), cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::helpers::initialize_telemetry;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn copy() {
+        initialize_telemetry();
+        let (mut client, ztunnel_downsteam) = tokio::io::duplex(32000);
+        let (mut server, ztunnel_upsteam) = tokio::io::duplex(32000);
+
+        // Spawn copy
+        tokio::task::spawn(async move {
+            let mut registry = prometheus_client::registry::Registry::default();
+            let metrics = std::sync::Arc::new(crate::proxy::Metrics::new(
+                crate::metrics::sub_registry(&mut registry),
+            ));
+            let source_addr = "127.0.0.1:12345".parse().unwrap();
+            let dest_addr = "127.0.0.1:34567".parse().unwrap();
+            let cr = ConnectionResult::new(
+                source_addr,
+                dest_addr,
+                None,
+                std::time::Instant::now(),
+                crate::proxy::metrics::ConnectionOpen {
+                    reporter: crate::proxy::Reporter::destination,
+                    source: None,
+                    derived_source: None,
+                    destination: None,
+                    connection_security_policy: crate::proxy::metrics::SecurityPolicy::unknown,
+                    destination_service: None,
+                },
+                metrics.clone(),
+            );
+            copy_bidirectional(ztunnel_downsteam, ztunnel_upsteam, &cr).await
+        });
+        const ITERS: usize = 1000;
+        const REPEATS: usize = 6400;
+        // Make sure we write enough to trigger the resize
+        if ITERS * REPEATS < JUMBO_BUFFER_SIZE {
+            panic!("not enough writing to test")
+        }
+        for i in 0..ITERS {
+            let body = [1, 2, 3, 4, i as u8].repeat(REPEATS);
+            let mut res = vec![0; body.len()];
+            tokio::try_join!(client.write_all(&body), server.read_exact(&mut res)).unwrap();
+            assert_eq!(res.as_slice(), body);
+        }
     }
 }

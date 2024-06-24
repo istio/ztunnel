@@ -14,6 +14,7 @@
 
 use crate::config;
 use crate::proxy::Error;
+use bytes::Bytes;
 use futures_util::FutureExt;
 use http::request::Parts;
 use http::Response;
@@ -28,7 +29,7 @@ use tracing::{debug, warn};
 pub struct H2Request {
     request: Parts,
     recv: h2::RecvStream,
-    send: h2::server::SendResponse<crate::proxy::h2::SendBuf>,
+    send: h2::server::SendResponse<Bytes>,
 }
 
 impl H2Request {
@@ -60,7 +61,6 @@ impl H2Request {
         let send = send.send_response(resp, false)?;
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
-            buf: Default::default(),
             _dropped: None, // We do not need to track on the server
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {

@@ -14,7 +14,7 @@
 
 use crate::config;
 use crate::proxy::Error;
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use h2::client::{Connection, SendRequest};
 use h2::SendStream;
 use http::Request;
@@ -31,7 +31,7 @@ use tracing::{debug, error, trace, warn, Instrument};
 #[derive(Debug, Clone)]
 // H2ConnectClient is a wrapper abstracting h2
 pub struct H2ConnectClient {
-    sender: SendRequest<crate::proxy::h2::SendBuf>,
+    sender: SendRequest<Bytes>,
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
 }
@@ -80,7 +80,6 @@ impl H2ConnectClient {
         let (dropped1, dropped2) = crate::proxy::h2::DropCounter::new(self.stream_count.clone());
         let read = crate::proxy::h2::H2StreamReadHalf {
             recv_stream: recv,
-            buf: Default::default(),
             _dropped: dropped1,
         };
         let write = crate::proxy::h2::H2StreamWriteHalf {
@@ -95,7 +94,7 @@ impl H2ConnectClient {
     async fn internal_send(
         &mut self,
         req: Request<()>,
-    ) -> Result<(SendStream<crate::proxy::h2::SendBuf>, h2::RecvStream), Error> {
+    ) -> Result<(SendStream<Bytes>, h2::RecvStream), Error> {
         // "This function must return `Ready` before `send_request` is called"
         // We should always be ready though, because we make sure we don't go over the max stream limit out of band.
         futures::future::poll_fn(|cx| self.sender.poll_ready(cx)).await?;
@@ -120,11 +119,12 @@ pub async fn spawn_connection(
         .max_frame_size(cfg.frame_size)
         .initial_max_send_streams(cfg.pool_max_streams_per_conn as usize)
         .max_header_list_size(1024 * 16)
-        .max_send_buffer_size(1024 * 1024)
+        // 256kb. Aligned with copy.rs to avoid fragmentation
+        .max_send_buffer_size(16_384 * 16_384)
         .enable_push(false);
 
     let (send_req, connection) = builder
-        .handshake::<_, crate::proxy::h2::SendBuf>(s)
+        .handshake::<_, Bytes>(s)
         .await
         .map_err(Error::Http2Handshake)?;
 
