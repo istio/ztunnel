@@ -103,9 +103,9 @@ impl<T: AsyncWrite + Unpin> AsyncWriteBuf for WriteAdapter<T> {
     fn poll_write_buf(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: Bytes,
+        mut buf: Bytes,
     ) -> Poll<std::io::Result<usize>> {
-        AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf.chunk())
+        tokio_util::io::poll_write_buf(Pin::new(&mut self.0), cx, &mut buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -134,7 +134,7 @@ const LARGE_BUFFER_SIZE: usize = 16_384 - 64;
 const JUMBO_BUFFER_SIZE: usize = (16 * 16_384) - 64;
 // After 128k of data we will trigger a resize from INITIAL to LARGE
 // Loosely inspired by https://github.com/golang/go/blame/5122a6796ef98e3453c994c95abd640596540bea/src/crypto/tls/conn.go#L873
-const RESIZE_THRESHOLD: u64 = 128 * 1024;
+const RESIZE_THRESHOLD_LARGE: u64 = 128 * 1024;
 // After 10Mb of data we will trigger a resize from LARGE to JUMBO
 const RESIZE_THRESHOLD_JUMBO: u64 = 10 * 1024 * 1024;
 
@@ -274,7 +274,7 @@ where
             self.amt += i as u64;
 
             // If we were below the resize threshold before but are now above it, trigger the buffer to resize
-            if old < RESIZE_THRESHOLD && RESIZE_THRESHOLD <= self.amt {
+            if old < RESIZE_THRESHOLD_LARGE && RESIZE_THRESHOLD_LARGE <= self.amt {
                 Pin::new(&mut *self.reader).resize(LARGE_BUFFER_SIZE);
             }
             if old < RESIZE_THRESHOLD_JUMBO && RESIZE_THRESHOLD_JUMBO <= self.amt {
