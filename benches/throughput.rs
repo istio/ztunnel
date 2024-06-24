@@ -14,11 +14,12 @@
 
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::future::Future;
-use std::io;
+use std::io::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use std::{io, thread};
 
 use bytes::BufMut;
 use criterion::measurement::Measurement;
@@ -129,13 +130,14 @@ fn initialize_environment(
     ztunnel_mode: WorkloadMode,
     traffic_mode: TestTrafficMode,
     echo_mode: Mode,
+    clients: usize,
 ) -> anyhow::Result<(
     WorkloadManager,
     SyncSender<usize>,
     Receiver<Result<(), io::Error>>,
 )> {
     let mut manager = setup_netns_test!(TestMode::InPod);
-    let (client, server, manager) = run_async_blocking(async move {
+    let (server, mut manager) = run_async_blocking(async move {
         if ztunnel_mode != WorkloadMode::Direct {
             // we need a client ztunnel
             manager.deploy_ztunnel("LOCAL").await.unwrap();
@@ -150,12 +152,7 @@ fn initialize_environment(
             .register()
             .await
             .unwrap();
-        let client = manager
-            .workload_builder("client", "LOCAL")
-            .register()
-            .await
-            .unwrap();
-        (client, server, manager)
+        (server, manager)
     });
     server
         .run_ready(move |ready| async move {
@@ -177,6 +174,47 @@ fn initialize_environment(
         Mode::Forward(_) => todo!("not implemented for benchmark"),
         Mode::ForwardProxyProtocol => todo!("not implemented for benchmark"),
     };
+    let clients: Vec<_> = (0..clients)
+        .map(|id| spawn_client(id, &mut manager, traffic_mode, echo_addr, client_mode))
+        .collect();
+    thread::spawn(move || {
+        while let Ok(size) = rx.recv() {
+            // Send request to all clients
+            for c in &clients {
+                c.tx.send(size).unwrap()
+            }
+            // Then wait for all completions -- this must be done in a separate loop to allow parallel processing.
+            for c in &clients {
+                if let Err(e) = c.ack.recv().unwrap() {
+                    // Failed
+                    ack_tx.send(Err(e)).unwrap();
+                    return;
+                }
+            }
+            // Success
+            ack_tx.send(Ok(())).unwrap();
+        }
+    });
+    Ok((manager, tx, ack_rx))
+}
+
+fn spawn_client(
+    i: usize,
+    manager: &mut WorkloadManager,
+    traffic_mode: TestTrafficMode,
+    echo_addr: SocketAddr,
+    client_mode: Mode,
+) -> TestClient {
+    let client = run_async_blocking(async move {
+        manager
+            .workload_builder(&format!("client-{i}"), "LOCAL")
+            .register()
+            .await
+            .unwrap()
+    });
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<usize>(0);
+    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<Result<(), io::Error>>(0);
     if traffic_mode == TestTrafficMode::Request {
         client
             .run_ready(move |ready| async move {
@@ -217,17 +255,29 @@ fn initialize_environment(
             })
             .unwrap();
     }
-    Ok((manager, tx, ack_rx))
+
+    TestClient { tx, ack: ack_rx }
+}
+
+struct TestClient {
+    tx: SyncSender<usize>,
+    ack: Receiver<Result<(), Error>>,
 }
 
 pub fn throughput(c: &mut Criterion) {
     const THROUGHPUT_SEND_SIZE: usize = GB;
-    fn run_throughput<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
+    fn run_throughput<T: Measurement>(
+        c: &mut BenchmarkGroup<T>,
+        name: &str,
+        mode: WorkloadMode,
+        clients: usize,
+    ) {
         let (_manager, tx, ack) =
-            initialize_environment(mode, TestTrafficMode::Request, Mode::Read).unwrap();
+            initialize_environment(mode, TestTrafficMode::Request, Mode::Read, clients).unwrap();
+        let size = THROUGHPUT_SEND_SIZE / clients;
         c.bench_function(name, |b| {
             b.iter(|| {
-                tx.send(THROUGHPUT_SEND_SIZE).unwrap();
+                tx.send(size).unwrap();
                 ack.recv().unwrap().unwrap();
             })
         });
@@ -243,16 +293,33 @@ pub fn throughput(c: &mut Criterion) {
     c.measurement_time(Duration::from_secs(5));
     // Send request in various modes.
     // Each test will use a pre-existing connection and send 1GB for multiple iterations
-    run_throughput(&mut c, "direct", WorkloadMode::Direct);
-    run_throughput(&mut c, "tcp", WorkloadMode::TcpClient);
-    run_throughput(&mut c, "hbone", WorkloadMode::HBONE);
+    for clients in [1, 2, 8] {
+        run_throughput(
+            &mut c,
+            &format!("direct{clients}"),
+            WorkloadMode::Direct,
+            clients,
+        );
+        run_throughput(
+            &mut c,
+            &format!("tcp{clients}"),
+            WorkloadMode::TcpClient,
+            clients,
+        );
+        run_throughput(
+            &mut c,
+            &format!("hbone{clients}"),
+            WorkloadMode::HBONE,
+            clients,
+        );
+    }
 }
 
 pub fn latency(c: &mut Criterion) {
     const LATENCY_SEND_SIZE: usize = KB;
     fn run_latency<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
         let (_manager, tx, ack) =
-            initialize_environment(mode, TestTrafficMode::Request, Mode::Read).unwrap();
+            initialize_environment(mode, TestTrafficMode::Request, Mode::Read, 1).unwrap();
         c.bench_function(name, |b| {
             b.iter(|| {
                 tx.send(LATENCY_SEND_SIZE).unwrap();
@@ -276,7 +343,7 @@ pub fn latency(c: &mut Criterion) {
 pub fn connections(c: &mut Criterion) {
     fn run_connections<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
         let (_manager, tx, ack) =
-            initialize_environment(mode, TestTrafficMode::Connection, Mode::ReadWrite).unwrap();
+            initialize_environment(mode, TestTrafficMode::Connection, Mode::ReadWrite, 1).unwrap();
         c.bench_function(name, |b| {
             b.iter(|| {
                 tx.send(1).unwrap();
