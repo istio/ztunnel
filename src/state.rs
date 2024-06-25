@@ -645,21 +645,19 @@ impl DemandProxyState {
         // loop until the subscriber wakes us on new workload,
         // or we hit the deadline timeout and give up
         let timeout = tokio::time::sleep(deadline);
-        let subscriber = wl_sub.changed();
         tokio::pin!(timeout);
-        tokio::pin!(subscriber);
         loop {
             tokio::select! {
                 _ = &mut timeout => {
                     warn!("timed out waiting for workload from xds");
                     break None;
                 },
-                _ = &mut subscriber => {
+                _ = wl_sub.changed() => {
                     if let Some(wl) = self.fetch_workload(addr).await {
                         break Some(wl);
                     }
                 }
-            };
+            }
         }
     }
 
@@ -983,8 +981,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_wait_for_workload_eventually() {
+        initialize_telemetry();
         let state = ProxyState::default();
         let wrap_state = Arc::new(RwLock::new(state));
+        let not_delayed_wl = Arc::new(Workload {
+            workload_ips: vec!["1.2.3.4".parse().unwrap()],
+            uid: "uid".into(),
+            name: "n".into(),
+            namespace: "ns".into(),
+            ..test_helpers::test_default_workload()
+        });
         let delayed_wl = Arc::new(test_helpers::test_default_workload());
 
         let mut registry = Registry::default();
@@ -1012,6 +1018,14 @@ mod tests {
             )
             .await;
         });
+        // Send the wrong workload through
+        wrap_state
+            .write()
+            .unwrap()
+            .workloads
+            .insert(not_delayed_wl, true);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Send the correct workload through
         wrap_state
             .write()
             .unwrap()
