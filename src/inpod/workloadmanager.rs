@@ -214,14 +214,13 @@ impl WorkloadProxyManager {
                 // non-legit disconnections, we can't tell.
                 Err(Error::AnnounceError(e)) => {
                     self.readiness.not_ready();
-
                     // This will retry infinitely for as long as the socket doesn't EOF, but not immediately.
                     let wait = self
                         .readiness
                         .backoff
                         .next_backoff()
                         .unwrap_or(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL);
-                    warn!("node agent connect failed ({e}), retrying in {wait:?}");
+                    error!("node agent announcement failed ({e}), retrying in {wait:?}");
                     tokio::time::sleep(wait).await;
                     continue;
                 }
