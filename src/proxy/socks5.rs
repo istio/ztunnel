@@ -23,16 +23,19 @@ use hickory_server::authority::MessageRequest;
 use hickory_server::server::{Protocol, Request};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::dns::resolver::Resolver;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tracing::{debug, error, info};
+use tokio::sync::watch;
+use tracing::{debug, error, info, info_span, Instrument};
 
 use crate::proxy::outbound::OutboundConnection;
+use crate::proxy::util::run_with_drain;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent};
-use crate::socket;
+use crate::{assertions, socket};
 
 pub(super) struct Socks5 {
     pi: Arc<ProxyInputs>,
@@ -72,54 +75,60 @@ impl Socks5 {
     }
 
     pub async fn run(self) {
-        let inner_drain = self.drain.clone();
-        let inpod = self.pi.cfg.inpod_enabled;
-        let accept = async move {
-            loop {
-                // Asynchronously wait for an inbound socket.
-                let socket = self.listener.accept().await;
-                let stream_drain = inner_drain.clone();
-                // TODO creating a new HBONE pool for SOCKS5 here may not be ideal,
-                // but ProxyInfo is overloaded and only `outbound` should ever use the pool.
-                let pool = crate::proxy::pool::WorkloadHBONEPool::new(
-                    self.pi.cfg.clone(),
-                    self.enable_orig_src,
-                    self.pi.socket_factory.clone(),
-                    self.pi.cert_manager.clone(),
-                );
-                match socket {
-                    Ok((stream, remote)) => {
-                        debug!("accepted outbound connection from {}", remote);
-                        let oc = OutboundConnection {
-                            pi: self.pi.clone(),
-                            id: TraceParent::new(),
-                            pool,
-                            enable_orig_src: self.enable_orig_src,
-                            hbone_port: self.pi.cfg.inbound_addr.port(),
-                        };
-                        tokio::spawn(async move {
-                            if let Err(err) = handle(oc, stream, stream_drain, inpod).await {
-                                log::error!("handshake error: {}", err);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        if util::is_runtime_shutdown(&e) {
-                            return;
+        let pi = self.pi.clone();
+        let pool = crate::proxy::pool::WorkloadHBONEPool::new(
+            self.pi.cfg.clone(),
+            self.enable_orig_src,
+            self.pi.socket_factory.clone(),
+            self.pi.cert_manager.clone(),
+        );
+        let accept = |drain: Watch, force_shutdown: watch::Receiver<()>| {
+            async move {
+                loop {
+                    // Asynchronously wait for an inbound socket.
+                    let socket = self.listener.accept().await;
+                    let start = Instant::now();
+                    let drain = drain.clone();
+                    let mut force_shutdown = force_shutdown.clone();
+                    match socket {
+                        Ok((stream, _remote)) => {
+                            let oc = OutboundConnection {
+                                pi: self.pi.clone(),
+                                id: TraceParent::new(),
+                                pool: pool.clone(),
+                                enable_orig_src: self.enable_orig_src,
+                                hbone_port: self.pi.cfg.inbound_addr.port(),
+                            };
+                            let span = info_span!("socks5", id=%oc.id);
+                            let serve = (async move {
+                                debug!(component="socks5", "connection started");
+                                // Since this task is spawned, make sure we are guaranteed to terminate
+                                tokio::select! {
+                                    _ = force_shutdown.changed() => {
+                                        debug!(component="socks5", "connection forcefully terminated");
+                                    }
+                                    _ = handle(oc, stream) => {}
+                                }
+                                // Mark we are done with the connection, so drain can complete
+                                drop(drain);
+                                debug!(component="socks5", dur=?start.elapsed(), "connection completed");
+                            }).instrument(span);
+
+                            assertions::size_between_ref(1000, 2000, &serve);
+                            tokio::spawn(serve);
                         }
-                        error!("Failed TCP handshake {}", e);
+                        Err(e) => {
+                            if util::is_runtime_shutdown(&e) {
+                                return;
+                            }
+                            error!("Failed TCP handshake {}", e);
+                        }
                     }
                 }
             }
         };
 
-        tokio::select! {
-            res = accept => { res }
-            _ = self.drain.signaled() => {
-                // out_drain_signal.drain().await;
-                info!("socks5 drained");
-            }
-        }
+        run_with_drain("socks5".to_string(), self.drain, &pi, accept).await
     }
 }
 
@@ -127,12 +136,7 @@ impl Socks5 {
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
-async fn handle(
-    mut oc: OutboundConnection,
-    mut stream: TcpStream,
-    out_drain: Watch,
-    is_inpod: bool,
-) -> Result<(), anyhow::Error> {
+async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
     let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
     // Version(5), Number of auth methods
@@ -238,17 +242,7 @@ async fn handle(
     stream.write_all(&buf).await?;
 
     debug!("accepted connection from {remote_addr} to {host}");
-    // For inpod, we want this `spawn` to guaranteed-terminate when we drain - the workload is gone.
-    // For non-inpod (shared instance for all workloads), let the spawned task run until the proxy process
-    // itself is killed, or the connection terminates normally.
-    tokio::spawn(async move {
-        let drain = match is_inpod {
-            true => Some(out_drain),
-            false => None,
-        };
-        oc.proxy_to_cancellable(stream, remote_addr, host, drain)
-            .await;
-    });
+    oc.proxy_to(stream, remote_addr, host).await;
     Ok(())
 }
 

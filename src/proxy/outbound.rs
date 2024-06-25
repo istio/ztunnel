@@ -23,9 +23,8 @@ use hyper::header::FORWARDED;
 
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tokio::time::timeout;
 
-use tracing::{debug, error, info, info_span, trace_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace_span, Instrument};
 
 use crate::config::ProxyMode;
 use crate::identity::Identity;
@@ -35,6 +34,7 @@ use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult, DerivedWorkl
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
 use crate::proxy::h2::H2Stream;
+use crate::proxy::util::run_with_drain;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::state::ServiceResolutionMode;
@@ -76,86 +76,61 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
-        // Since we are spawning autonomous tasks to handle outbound connections for a single workload,
-        // we can have situations where the workload is deleted, but a task is still "stuck"
-        // waiting for a server response stream on a HTTP/2 connection or whatnot.
-        //
-        // So use a drain to nuke tasks that might be stuck sending.
-        let (sub_drain_signal, sub_drain) = drain::channel();
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
             self.enable_orig_src,
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );
-        let deadline = self.pi.cfg.self_termination_deadline;
-        let (trigger_force_shutdown, force_shutdown) = watch::channel(());
-        let accept = async move {
-            loop {
-                // Asynchronously wait for an inbound socket.
-                let socket = self.listener.accept().await;
-                let start_outbound_instant = Instant::now();
-                let drain = sub_drain.clone();
-                let mut force_shutdown = force_shutdown.clone();
-                match socket {
-                    Ok((stream, _remote)) => {
-                        let mut oc = OutboundConnection {
-                            pi: self.pi.clone(),
-                            id: TraceParent::new(),
-                            pool: pool.clone(),
-                            enable_orig_src: self.enable_orig_src,
-                            hbone_port: self.pi.cfg.inbound_addr.port(),
-                        };
-                        stream.set_nodelay(true).unwrap();
-                        let span = info_span!("outbound", id=%oc.id);
-                        let serve_outbound_connection = (async move {
-                            debug!(dur=?start_outbound_instant.elapsed(), "outbound connection started");
-                            // Since this task is spawned, make sure we are guaranteed to terminate
-                            tokio::select! {
-                                _ = force_shutdown.changed() => {
-                                    debug!("outbound connection forcefully terminated signaled");
+        let pi = self.pi.clone();
+        let accept = |drain: Watch, force_shutdown: watch::Receiver<()>| {
+            async move {
+                loop {
+                    // Asynchronously wait for an inbound socket.
+                    let socket = self.listener.accept().await;
+                    let start = Instant::now();
+                    let drain = drain.clone();
+                    let mut force_shutdown = force_shutdown.clone();
+                    match socket {
+                        Ok((stream, _remote)) => {
+                            let mut oc = OutboundConnection {
+                                pi: self.pi.clone(),
+                                id: TraceParent::new(),
+                                pool: pool.clone(),
+                                enable_orig_src: self.enable_orig_src,
+                                hbone_port: self.pi.cfg.inbound_addr.port(),
+                            };
+                            let span = info_span!("outbound", id=%oc.id);
+                            let serve_outbound_connection = (async move {
+                                debug!(component="outbound", "connection started");
+                                // Since this task is spawned, make sure we are guaranteed to terminate
+                                tokio::select! {
+                                    _ = force_shutdown.changed() => {
+                                        debug!(component="outbound", "connection forcefully terminated");
+                                    }
+                                    _ = oc.proxy(stream) => {}
                                 }
-                                _ = oc.proxy(stream) => {}
-                            }
-                            // Mark we are done with the connection, so drain can complete
-                            drop(drain);
-                            debug!(dur=?start_outbound_instant.elapsed(), "outbound connection completed");
-                        })
-                        .instrument(span);
+                                // Mark we are done with the connection, so drain can complete
+                                drop(drain);
+                                debug!(component="outbound", dur=?start.elapsed(), "connection completed");
+                            }).instrument(span);
 
-                        assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
-                        tokio::spawn(serve_outbound_connection);
-                    }
-                    Err(e) => {
-                        if util::is_runtime_shutdown(&e) {
-                            return;
+                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                            tokio::spawn(serve_outbound_connection);
                         }
-                        error!("Failed TCP handshake {}", e);
+                        Err(e) => {
+                            if util::is_runtime_shutdown(&e) {
+                                return;
+                            }
+                            error!("Failed TCP handshake {}", e);
+                        }
                     }
                 }
             }
-        }
-        .in_current_span();
+            .in_current_span()
+        };
 
-        // Stop accepting once we drain.
-        // We will then allow connections up to `deadline` to terminate on their own.
-        // After that, they will be forcefully terminated.
-        tokio::select! {
-            res = accept => { res }
-            res = self.drain.signaled() => {
-                debug!("outbound drained, waiting {:?} for any outbound connections to close", deadline);
-                if let Err(e) = timeout(deadline, sub_drain_signal.drain()).await {
-                    // Not all connections completed within time, we will force shut them down
-                    warn!("drain duration expired with pending connections, forcefully shutting down: {e:?}");
-                }
-                // Trigger force shutdown. In theory, this is only needed in the timeout case. However,
-                // it doesn't hurt to always trigger it.
-                let _ = trigger_force_shutdown.send(());
-
-                info!("outbound drain complete");
-                drop(res);
-            }
-        }
+        run_with_drain("outbound".to_string(), self.drain, &pi, accept).await
     }
 }
 
@@ -175,36 +150,7 @@ impl OutboundConnection {
         self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
 
-    // this is a cancellable outbound proxy. If `out_drain` is a Watch drain, will resolve
-    // when the drain is signaled, or the outbound stream is completed, no matter what.
-    //
-    // If `out_drain` is none, will only resolve when the outbound stream is terminated.
-    //
-    // If using `proxy_to` in `tokio::spawn` tasks, it is recommended to use a drain, to guarantee termination
-    // and prevent "zombie" outbound tasks.
-    pub async fn proxy_to_cancellable(
-        &mut self,
-        stream: TcpStream,
-        remote_addr: SocketAddr,
-        orig_dst_addr: SocketAddr,
-        out_drain: Option<Watch>,
-    ) {
-        match out_drain {
-            Some(drain) => {
-                tokio::select! {
-                        _ = drain.signaled() => {
-                            info!("drain signaled");
-                        }
-                        res = self.proxy_to(stream, remote_addr, orig_dst_addr) => res
-                }
-            }
-            None => {
-                self.proxy_to(stream, remote_addr, orig_dst_addr).await;
-            }
-        }
-    }
-
-    async fn proxy_to(
+    pub async fn proxy_to(
         &mut self,
         source_stream: TcpStream,
         source_addr: SocketAddr,
