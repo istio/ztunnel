@@ -50,8 +50,8 @@ pub enum Error {
     SendAckError(String),
     #[error("error sending nack: {0}")]
     SendNackError(String),
-    #[error("protocol error")]
-    ProtocolError,
+    #[error("protocol error: {0}")]
+    ProtocolError(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]

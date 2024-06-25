@@ -184,10 +184,10 @@ impl WorkloadProxyManager {
                 Ok(()) => {
                     info!("process stream ended with eof");
                 }
-                Err(Error::ProtocolError) => {
+                Err(Error::ProtocolError(e)) => {
                     error!("protocol mismatch error while processing stream, shutting down");
                     self.readiness.not_ready();
-                    return Err(anyhow::anyhow!("protocol error"));
+                    return Err(anyhow::anyhow!("protocol error {:?}", e));
                 }
                 Err(e) => {
                     // for other errors, just retry
@@ -263,7 +263,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
         processor
             .send_hello()
             .await
-            .map_err(|_| Error::ProtocolError)?;
+            .map_err(|_| Error::ProtocolError("could not announce to node agent".into()))?;
 
         loop {
             let msg = match self.read_message_and_retry_proxies(&mut processor).await {
