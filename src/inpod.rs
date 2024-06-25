@@ -52,6 +52,8 @@ pub enum Error {
     SendNackError(String),
     #[error("protocol error: {0}")]
     ProtocolError(String),
+    #[error("announce error: {0}")]
+    AnnounceError(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]

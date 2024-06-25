@@ -31,6 +31,7 @@ pub struct WorkloadStreamProcessor {
     drain: Watch,
 }
 
+
 #[allow(dead_code)]
 impl WorkloadStreamProcessor {
     pub fn new(stream: UnixStream, drain: Watch) -> Self {
@@ -41,7 +42,7 @@ impl WorkloadStreamProcessor {
         let r = ZdsHello {
             version: Version::V1 as i32,
         };
-        self.send_msg(r).await
+        self.send_msg(r.clone()).await
     }
 
     pub async fn send_ack(&mut self) -> std::io::Result<()> {

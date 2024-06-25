@@ -14,7 +14,7 @@
 
 use drain::Signal;
 use std::sync::Arc;
-use tracing::{debug, info, error, Instrument};
+use tracing::{debug, info, Instrument};
 
 use super::{metrics::Metrics, Error, WorkloadMessage};
 
@@ -130,7 +130,9 @@ impl WorkloadProxyManagerState {
                 info!("pod keep received. will not delete it when snapshot is sent");
                 if self.snapshot_received {
                     // this can only happen before snapshot is received.
-                    return Err(Error::ProtocolError("pod keep received after snapshot".into()));
+                    return Err(Error::ProtocolError(
+                        "pod keep received after snapshot".into(),
+                    ));
                 }
                 self.snapshot_names.insert(workload_uid);
                 Ok(())
@@ -141,7 +143,9 @@ impl WorkloadProxyManagerState {
                     // TODO: consider if this is an error. if not, do this instead:
                     // self.snapshot_names.remove(&workload_uid)
                     // self.pending_workloads.remove(&workload_uid)
-                    return Err(Error::ProtocolError("pod delete received before snapshot".into()));
+                    return Err(Error::ProtocolError(
+                        "pod delete received before snapshot".into(),
+                    ));
                 }
                 self.del_workload(&workload_uid);
                 Ok(())
