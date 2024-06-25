@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::readiness;
+use backoff::{backoff::Backoff, ExponentialBackoff};
 use drain::Watch;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -26,6 +27,8 @@ use super::protocol::WorkloadStreamProcessor;
 
 const RETRY_DURATION: Duration = Duration::from_secs(5);
 
+const CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(15);
+
 struct WorkloadProxyNetworkHandler {
     uds: PathBuf,
 }
@@ -35,6 +38,7 @@ struct WorkloadProxyReadinessHandler {
     // Manually drop as we don't want to mark ready if we are dropped.
     // This can happen when the server drains.
     block_ready: Option<std::mem::ManuallyDrop<readiness::BlockReady>>,
+    backoff: ExponentialBackoff,
 }
 
 pub struct WorkloadProxyManager {
@@ -52,10 +56,19 @@ struct WorkloadProxyManagerProcessor<'a> {
 }
 
 impl WorkloadProxyReadinessHandler {
-    fn new(ready: readiness::Ready) -> Self {
+    fn new(ready: readiness::Ready, reconnect_backoff: Option<ExponentialBackoff>) -> Self {
+        let backoff = reconnect_backoff.unwrap_or(ExponentialBackoff {
+            initial_interval: Duration::from_millis(5),
+            max_interval: CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL,
+            multiplier: 2.0,
+            randomization_factor: 0.2,
+            ..Default::default()
+        });
+
         let mut r = Self {
             ready,
             block_ready: None,
+            backoff,
         };
         r.not_ready();
         r
@@ -71,9 +84,12 @@ impl WorkloadProxyReadinessHandler {
 
             std::mem::drop(block_ready);
         }
+
+        self.backoff.reset()
     }
 
     fn not_ready(&mut self) {
+        debug!("workload proxy manager is NOT ready");
         if self.block_ready.is_none() {
             self.block_ready = Some(std::mem::ManuallyDrop::new(
                 self.ready.register_task("workload proxy manager"),
@@ -88,7 +104,6 @@ impl WorkloadProxyNetworkHandler {
     }
 
     async fn connect(&self) -> UnixStream {
-        const MAX_BACKOFF: Duration = Duration::from_secs(15);
         let mut backoff = Duration::from_millis(10);
 
         debug!("connecting to server: {:?}", self.uds);
@@ -96,7 +111,8 @@ impl WorkloadProxyNetworkHandler {
         loop {
             match super::packet::connect(&self.uds).await {
                 Err(e) => {
-                    backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
+                    backoff =
+                        std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
                     warn!(
                         "failed to connect to server {:?}: {:?}. retrying in {:?}",
                         &self.uds, e, backoff
@@ -137,7 +153,7 @@ impl WorkloadProxyManager {
         let mgr = WorkloadProxyManager {
             state,
             networking,
-            readiness: WorkloadProxyReadinessHandler::new(ready),
+            readiness: WorkloadProxyReadinessHandler::new(ready, None),
         };
         Ok(mgr)
     }
@@ -162,6 +178,7 @@ impl WorkloadProxyManager {
         // for now just drop block_ready, until we support knowing that our state is in sync.
         debug!("workload proxy manager is running");
         // hold the  release shutdown until we are done with `state.drain` below.
+
         let _rs = loop {
             // Accept a connection
             let stream = tokio::select! {
@@ -184,17 +201,42 @@ impl WorkloadProxyManager {
                 Ok(()) => {
                     info!("process stream ended with eof");
                 }
-                Err(Error::ProtocolError) => {
+                // If we successfully accepted a connection, but the first thing we try (announce)
+                // fails, it can mean 2 things:
+                // 1. The connection was killed because the node agent happened to restart at a bad time
+                // 2. The connection was killed because we have a protocol mismatch with the node agent.
+                //
+                // For case 1, we must keep retrying. For case 2 we shouldn't retry, as we will spam
+                // an incompatible server with messages and connections it can't understand.
+                //
+                // We also cannot easily tell these cases apart due to the simplistic protocol in use here,
+                // so a happy medium is to backoff if we get announce errors - they could be legit or
+                // non-legit disconnections, we can't tell.
+                Err(Error::AnnounceError(e)) => {
+                    error!("could not announce to node agent, retrying with backoff");
+                    self.readiness.not_ready();
+
+                    // This will retry infinitely for as long as the socket doesn't EOF, but not immediately.
+                    let wait = self
+                        .readiness
+                        .backoff
+                        .next_backoff()
+                        .unwrap_or(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                    warn!("node agent connect failed ({e}), retrying in {wait:?}");
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                Err(Error::ProtocolError(e)) => {
                     error!("protocol mismatch error while processing stream, shutting down");
                     self.readiness.not_ready();
-                    return Err(anyhow::anyhow!("protocol error"));
+                    return Err(anyhow::anyhow!("protocol error {:?}", e));
                 }
                 Err(e) => {
                     // for other errors, just retry
                     warn!("process stream ended: {:?}", e);
                 }
             };
-            debug!("workload proxy manager is NOT ready");
+
             self.readiness.not_ready();
         };
 
@@ -263,7 +305,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
         processor
             .send_hello()
             .await
-            .map_err(|_| Error::ProtocolError)?;
+            .map_err(|_| Error::AnnounceError("could not announce to node agent".into()))?;
 
         loop {
             let msg = match self.read_message_and_retry_proxies(&mut processor).await {
@@ -341,6 +383,8 @@ pub(crate) mod tests {
 
     use super::super::protocol::WorkloadStreamProcessor;
 
+    use tokio::io::AsyncWriteExt;
+
     use super::*;
 
     use crate::inpod::test_helpers::{
@@ -357,6 +401,13 @@ pub(crate) mod tests {
             }
             Ok(()) => {}
             Err(e) => panic!("expected error due to EOF {:?}", e),
+        }
+    }
+
+    fn assert_announce_error(res: Result<(), Error>) {
+        match res {
+            Err(Error::AnnounceError(_)) => {}
+            _ => panic!("expected announce error"),
         }
     }
 
@@ -402,12 +453,35 @@ pub(crate) mod tests {
             read_msg(&mut s2).await;
         });
 
-        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
+        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new(), None);
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
 
         let res = processor_helper.process(processor).await;
         // make sure that the error is due to eof:
         assert_end_stream(res);
+        assert!(!readiness.ready.pending().is_empty());
+        state.drain().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_failed_announce() {
+        let f = fixture!();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
+        let mut state = f.state;
+
+        // fake server that simply slams the socket shut and bails
+        let server = tokio::spawn(async move {
+            let _ = s2.shutdown().await;
+        });
+
+        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new(), None);
+        let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
+
+        let res = processor_helper.process(processor).await;
+        // make sure that the error is due to announce fail:
+        assert_announce_error(res);
         assert!(!readiness.ready.pending().is_empty());
         state.drain().await;
         server.await.unwrap();
@@ -432,7 +506,7 @@ pub(crate) mod tests {
             read_msg(&mut s2).await;
         });
 
-        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
+        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new(), None);
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
 
         let res = processor_helper.process(processor).await;
@@ -473,7 +547,7 @@ pub(crate) mod tests {
             read_msg(&mut s2).await;
         });
 
-        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
+        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new(), None);
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
 
         let res = processor_helper.process(processor).await;
@@ -506,7 +580,7 @@ pub(crate) mod tests {
             read_msg(&mut s2).await;
         });
 
-        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new());
+        let mut readiness = WorkloadProxyReadinessHandler::new(readiness::Ready::new(), None);
 
         let mut processor_helper = WorkloadProxyManagerProcessor::new(&mut state, &mut readiness);
         let res = processor_helper.process(processor).await;
