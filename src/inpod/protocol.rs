@@ -31,7 +31,6 @@ pub struct WorkloadStreamProcessor {
     drain: Watch,
 }
 
-
 #[allow(dead_code)]
 impl WorkloadStreamProcessor {
     pub fn new(stream: UnixStream, drain: Watch) -> Self {

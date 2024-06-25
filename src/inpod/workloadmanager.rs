@@ -57,8 +57,7 @@ struct WorkloadProxyManagerProcessor<'a> {
 
 impl WorkloadProxyReadinessHandler {
     fn new(ready: readiness::Ready, reconnect_backoff: Option<ExponentialBackoff>) -> Self {
-
-        let backoff = reconnect_backoff.unwrap_or(ExponentialBackoff{
+        let backoff = reconnect_backoff.unwrap_or(ExponentialBackoff {
             initial_interval: Duration::from_millis(5),
             max_interval: CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL,
             multiplier: 2.0,
@@ -112,7 +111,8 @@ impl WorkloadProxyNetworkHandler {
         loop {
             match super::packet::connect(&self.uds).await {
                 Err(e) => {
-                    backoff = std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
+                    backoff =
+                        std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
                     warn!(
                         "failed to connect to server {:?}: {:?}. retrying in {:?}",
                         &self.uds, e, backoff
@@ -217,7 +217,11 @@ impl WorkloadProxyManager {
                     self.readiness.not_ready();
 
                     // This will retry infinitely for as long as the socket doesn't EOF, but not immediately.
-                    let wait = self.readiness.backoff.next_backoff().unwrap_or(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                    let wait = self
+                        .readiness
+                        .backoff
+                        .next_backoff()
+                        .unwrap_or(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL);
                     warn!("node agent connect failed ({e}), retrying in {wait:?}");
                     tokio::time::sleep(wait).await;
                     continue;
@@ -225,7 +229,7 @@ impl WorkloadProxyManager {
                 Err(Error::ProtocolError(e)) => {
                     error!("protocol mismatch error while processing stream, shutting down");
                     self.readiness.not_ready();
-                    return Err(anyhow::anyhow!("protocol error {:?}", e))
+                    return Err(anyhow::anyhow!("protocol error {:?}", e));
                 }
                 Err(e) => {
                     // for other errors, just retry
@@ -378,7 +382,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
 pub(crate) mod tests {
 
     use super::super::protocol::WorkloadStreamProcessor;
-    
+
     use tokio::io::AsyncWriteExt;
 
     use super::*;
@@ -402,8 +406,8 @@ pub(crate) mod tests {
 
     fn assert_announce_error(res: Result<(), Error>) {
         match res {
-            Err(Error::AnnounceError(_)) => {},
-            _ => panic!("expected announce error")
+            Err(Error::AnnounceError(_)) => {}
+            _ => panic!("expected announce error"),
         }
     }
 
