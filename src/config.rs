@@ -14,12 +14,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+use std::fs::File;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, fs};
+use std::{env, fs, io};
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -272,8 +274,29 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
     construct_proxy_config(mesh_config_path, pc_env).map_err(Error::ProxyConfig)
 }
 
+const IPV6_DISABLED_LO: &str = "/proc/sys/net/ipv6/conf/lo/disable_ipv6";
+
+fn read_sysctl(key: &str) -> io::Result<String> {
+    let mut file = File::open(key)?;
+    let mut data = String::new();
+    file.read_to_string(&mut data)?;
+    Ok(data.trim().to_string())
+}
+
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let ipv6_enabled = parse::<bool>(IPV6_ENABLED)?.unwrap_or(true);
+    let ipv6_localhost_enabled = if ipv6_enabled {
+        // IPv6 may be generally enabled, but not on localhost. In that case, we do not want to bind on IPv6.
+        match read_sysctl(IPV6_DISABLED_LO) {
+            Ok(v) => v != "1",
+            Err(e) => {
+                tracing::warn!(err=?e, "failed to read {IPV6_DISABLED_LO}; continuing anyways, but this may fail");
+                true
+            }
+        }
+    } else {
+        false
+    };
     let bind_wildcard = if ipv6_enabled {
         IpAddr::V6(Ipv6Addr::UNSPECIFIED)
     } else {
@@ -341,9 +364,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     // TODO: should we override server_ordering_strategy based on our IP support?
 
     let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
-        Some(dns_addr) => Address::new(ipv6_enabled, dns_addr)
+        Some(dns_addr) => Address::new(ipv6_localhost_enabled, dns_addr)
             .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
-        None => Address::Localhost(ipv6_enabled, DEFAULT_DNS_PORT),
+        None => Address::Localhost(ipv6_localhost_enabled, DEFAULT_DNS_PORT),
     };
 
     let socks5_addr = if let Some(true) = parse(UNSTABLE_ENABLE_SOCKS5)? {
@@ -399,7 +422,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         // admin API should only be accessible over localhost
         admin_addr: Address::Localhost(
-            ipv6_enabled,
+            ipv6_localhost_enabled,
             pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
         ),
         stats_addr: Address::SocketAddr(SocketAddr::new(
