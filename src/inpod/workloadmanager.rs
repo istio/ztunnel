@@ -213,7 +213,6 @@ impl WorkloadProxyManager {
                 // so a happy medium is to backoff if we get announce errors - they could be legit or
                 // non-legit disconnections, we can't tell.
                 Err(Error::AnnounceError(e)) => {
-                    error!("could not announce to node agent, retrying with backoff");
                     self.readiness.not_ready();
 
                     // This will retry infinitely for as long as the socket doesn't EOF, but not immediately.
