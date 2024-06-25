@@ -89,6 +89,10 @@ impl Server {
         socket_factory: &(dyn SocketFactory + Send + Sync),
         allow_unknown_source: bool,
     ) -> Result<Self, Error> {
+        let address = address.with_ipv6(socket_factory.ipv6_enabled_localhost().unwrap_or_else(|e| {
+            warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
+            true
+        }));
         // Create the DNS server, backed by ztunnel data structures.
         let mut store = Store::new(
             domain,

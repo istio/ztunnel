@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+use std::fs::File;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,6 +65,8 @@ pub trait SocketFactory {
     fn tcp_bind(&self, addr: SocketAddr) -> std::io::Result<socket::Listener>;
 
     fn udp_bind(&self, addr: SocketAddr) -> std::io::Result<tokio::net::UdpSocket>;
+
+    fn ipv6_enabled_localhost(&self) -> std::io::Result<bool>;
 }
 
 #[derive(Clone, Copy, Default)]
@@ -93,6 +97,10 @@ impl SocketFactory for DefaultSocketFactory {
         let std_sock = std::net::UdpSocket::bind(addr)?;
         std_sock.set_nonblocking(true)?;
         tokio::net::UdpSocket::from_std(std_sock)
+    }
+
+    fn ipv6_enabled_localhost(&self) -> io::Result<bool> {
+        ipv6_disabled_on_localhost()
     }
 }
 
@@ -665,6 +673,19 @@ where
     };
 
     false
+}
+
+const IPV6_DISABLED_LO: &str = "/proc/sys/net/ipv6/conf/lo/disable_ipv6";
+
+fn read_sysctl(key: &str) -> io::Result<String> {
+    let mut file = File::open(key)?;
+    let mut data = String::new();
+    file.read_to_string(&mut data)?;
+    Ok(data.trim().to_string())
+}
+
+pub fn ipv6_disabled_on_localhost() -> io::Result<bool> {
+    read_sysctl(IPV6_DISABLED_LO).map(|s| s != "1")
 }
 
 #[cfg(test)]

@@ -14,14 +14,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, fs, io};
+use std::{env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -274,26 +272,14 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
     construct_proxy_config(mesh_config_path, pc_env).map_err(Error::ProxyConfig)
 }
 
-const IPV6_DISABLED_LO: &str = "/proc/sys/net/ipv6/conf/lo/disable_ipv6";
-
-fn read_sysctl(key: &str) -> io::Result<String> {
-    let mut file = File::open(key)?;
-    let mut data = String::new();
-    file.read_to_string(&mut data)?;
-    Ok(data.trim().to_string())
-}
-
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let ipv6_enabled = parse::<bool>(IPV6_ENABLED)?.unwrap_or(true);
     let ipv6_localhost_enabled = if ipv6_enabled {
         // IPv6 may be generally enabled, but not on localhost. In that case, we do not want to bind on IPv6.
-        match read_sysctl(IPV6_DISABLED_LO) {
-            Ok(v) => v != "1",
-            Err(e) => {
-                tracing::warn!(err=?e, "failed to read {IPV6_DISABLED_LO}; continuing anyways, but this may fail");
-                true
-            }
-        }
+        crate::proxy::ipv6_disabled_on_localhost().unwrap_or_else(|e| {
+            warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
+            true
+        })
     } else {
         false
     };
@@ -357,12 +343,15 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     };
 
     use hickory_resolver::system_conf::read_system_conf;
+    use tracing::warn;
     let (dns_resolver_cfg, mut dns_resolver_opts) = read_system_conf().unwrap();
     // Increase some defaults. Note these are NOT coming from /etc/resolv.conf (only some fields do, we don't override those),
     // but rather hickory's hardcoded defaults
     dns_resolver_opts.cache_size = 4096;
     // TODO: should we override server_ordering_strategy based on our IP support?
 
+    // Note: since DNS proxy runs in the pod network namespace, we will recompute IPv6 enablement
+    // on a pod-by-pod basis.
     let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
         Some(dns_addr) => Address::new(ipv6_localhost_enabled, dns_addr)
             .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
@@ -670,6 +659,14 @@ impl Address {
         match self {
             Address::Localhost(_, port) => *port,
             Address::SocketAddr(s) => s.port(),
+        }
+    }
+
+    // with_ipv6 overrides the IPv6 setting for the address
+    pub fn with_ipv6(self, ipv6: bool) -> Self {
+        match self {
+            Address::Localhost(_, port) => Address::Localhost(ipv6, port),
+            x => x,
         }
     }
 }
