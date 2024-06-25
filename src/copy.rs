@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::proxy;
 use crate::proxy::ConnectionResult;
 use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError, SendError};
 use bytes::{Buf, Bytes, BytesMut};
@@ -149,18 +150,38 @@ where
 {
     let (mut rd, mut wd) = downstream.split_into_buffered_reader();
     let (mut ru, mut wu) = upstream.split_into_buffered_reader();
-
     let downstream_to_upstream = async {
-        let res = copy_buf(&mut rd, &mut wu, stats, false).await;
+        let translate_error = |e: io::Error| {
+            SendError(Box::new(match e.kind() {
+                io::ErrorKind::NotConnected => BackendDisconnected,
+                io::ErrorKind::WriteZero => BackendDisconnected,
+                io::ErrorKind::UnexpectedEof => ClientDisconnected,
+                _ => e.into(),
+            }))
+        };
+        let res = ignore_io_errors(copy_buf(&mut rd, &mut wu, stats, false).await)
+            .map_err(translate_error);
         trace!(?res, "send");
-        ignore_shutdown_errors(shutdown(&mut wu).await)?;
+        ignore_shutdown_errors(shutdown(&mut wu).await)
+            .map_err(translate_error)
+            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
         res
     };
 
     let upstream_to_downstream = async {
-        let res = copy_buf(&mut ru, &mut wd, stats, true).await;
+        let translate_error = |e: io::Error| {
+            ReceiveError(Box::new(match e.kind() {
+                io::ErrorKind::NotConnected => ClientDisconnected,
+                io::ErrorKind::WriteZero => ClientDisconnected,
+                _ => e.into(),
+            }))
+        };
+        let res = ignore_io_errors(copy_buf(&mut ru, &mut wd, stats, true).await)
+            .map_err(translate_error);
         trace!(?res, "receive");
-        ignore_shutdown_errors(shutdown(&mut wd).await)?;
+        ignore_shutdown_errors(shutdown(&mut wd).await)
+            .map_err(translate_error)
+            .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
         res
     };
 
@@ -168,21 +189,31 @@ where
     let (sent, received) = tokio::join!(downstream_to_upstream, upstream_to_downstream);
 
     // Convert some error messages to easier to understand
-    let sent = sent
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotConnected => BackendDisconnected,
-            io::ErrorKind::UnexpectedEof => ClientDisconnected,
-            _ => e.into(),
-        })
-        .map_err(|e| SendError(Box::new(e)))?;
-    let received = received
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotConnected => ClientDisconnected,
-            _ => e.into(),
-        })
-        .map_err(|e| ReceiveError(Box::new(e)))?;
+    let sent = sent?;
+    let received = received?;
     trace!(sent, received, "copy complete");
     Ok(())
+}
+
+// During copying, we may encounter errors from either side closing their connection. Typically, we
+// get a fully graceful shutdown with no errors on either end, but can if one end sends a RST directly,
+// or if we have other non-graceful behavior, we may see errors. This is generally ok - a TCP connection
+// can close at any time, really. Avoid reporting these as errors, as generally users expect errors to
+// occur only when we cannot connect to the backend at all.
+fn ignore_io_errors<T: Default>(res: Result<T, io::Error>) -> Result<T, io::Error> {
+    use io::ErrorKind::*;
+    match &res {
+        Err(e) => match e.kind() {
+            NotConnected | UnexpectedEof | ConnectionReset | BrokenPipe => {
+                trace!(err=%e, "io terminated ungracefully");
+                // Returning Default here is very hacky, but the data we are returning isn't critical so its no so bad to lose it.
+                // Changing this would require refactoring all the interfaces to always return the bytes written even on error.
+                Ok(Default::default())
+            }
+            _ => res,
+        },
+        _ => res,
+    }
 }
 
 // During shutdown, the other end may have already disconnected. That is fine, they shutdown for us.
