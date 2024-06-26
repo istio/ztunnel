@@ -16,7 +16,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use drain::Watch;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -24,8 +23,9 @@ use tracing::{debug, error, info, trace, Instrument};
 
 use crate::config::ProxyMode;
 
+use crate::drain::run_with_drain;
+use crate::drain::DrainWatcher;
 use crate::proxy::metrics::Reporter;
-use crate::proxy::util::run_with_drain;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
 use crate::state::workload::NetworkAddress;
@@ -35,14 +35,14 @@ use crate::{proxy, socket};
 pub(super) struct InboundPassthrough {
     listener: socket::Listener,
     pi: Arc<ProxyInputs>,
-    drain: Watch,
+    drain: DrainWatcher,
     enable_orig_src: bool,
 }
 
 impl InboundPassthrough {
     pub(super) async fn new(
         pi: Arc<ProxyInputs>,
-        drain: Watch,
+        drain: DrainWatcher,
     ) -> Result<InboundPassthrough, Error> {
         let listener = pi
             .socket_factory
@@ -67,7 +67,7 @@ impl InboundPassthrough {
 
     pub(super) async fn run(self) {
         let pi = self.pi.clone();
-        let accept = |drain: Watch, force_shutdown: watch::Receiver<()>| {
+        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {
             loop {
                 // Asynchronously wait for an inbound socket.
@@ -109,7 +109,13 @@ impl InboundPassthrough {
         .in_current_span()
         };
 
-        run_with_drain("inbound passthrough".to_string(), self.drain, &pi, accept).await
+        run_with_drain(
+            "inbound passthrough".to_string(),
+            self.drain,
+            pi.cfg.self_termination_deadline,
+            accept,
+        )
+        .await
     }
 
     async fn proxy_inbound_plaintext(

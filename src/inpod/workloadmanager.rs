@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::drain::DrainWatcher;
 use crate::readiness;
 use backoff::{backoff::Backoff, ExponentialBackoff};
-use drain::Watch;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -158,7 +158,7 @@ impl WorkloadProxyManager {
         Ok(mgr)
     }
 
-    pub async fn run(mut self, drain: Watch) -> Result<(), anyhow::Error> {
+    pub async fn run(mut self, drain: DrainWatcher) -> Result<(), anyhow::Error> {
         self.run_internal(drain).await?;
 
         // We broke the loop, this can only happen when drain was signaled
@@ -174,7 +174,7 @@ impl WorkloadProxyManager {
     // - we have a ProtocolError (we have a serious version mismatch)
     // We should never _have_ a protocol error as the gRPC proto should be forwards+backwards compatible,
     // so this is mostly a safeguard
-    async fn run_internal(&mut self, drain: Watch) -> Result<(), anyhow::Error> {
+    async fn run_internal(&mut self, drain: DrainWatcher) -> Result<(), anyhow::Error> {
         // for now just drop block_ready, until we support knowing that our state is in sync.
         debug!("workload proxy manager is running");
         // hold the  release shutdown until we are done with `state.drain` below.
@@ -183,7 +183,7 @@ impl WorkloadProxyManager {
             // Accept a connection
             let stream = tokio::select! {
                 biased; // check the drain first
-                rs = drain.clone().signaled() => {
+                rs = drain.clone().wait_for_drain() => {
                     info!("drain requested");
                     break rs;
                 }
@@ -390,6 +390,7 @@ pub(crate) mod tests {
         send_workload_added, send_workload_del, uid,
     };
 
+    use crate::drain::DrainTrigger;
     use std::{collections::HashSet, sync::Arc};
 
     fn assert_end_stream(res: Result<(), Error>) {
@@ -412,8 +413,8 @@ pub(crate) mod tests {
     struct Fixture {
         state: WorkloadProxyManagerState,
         inpod_metrics: Arc<crate::inpod::Metrics>,
-        drain_rx: drain::Watch,
-        _drain_tx: drain::Signal,
+        drain_rx: DrainWatcher,
+        _drain_tx: DrainTrigger,
     }
 
     macro_rules! fixture {

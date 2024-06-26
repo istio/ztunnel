@@ -30,6 +30,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::istio::zds::{WorkloadRequest, WorkloadResponse, ZdsHello};
 
+use crate::drain;
+use crate::drain::{DrainTrigger, DrainWatcher};
 use once_cell::sync::Lazy;
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
@@ -42,8 +44,8 @@ pub struct Fixture {
     pub proxy_factory: ProxyFactory,
     pub ipc: InPodConfig,
     pub inpod_metrics: Arc<crate::inpod::Metrics>,
-    pub drain_tx: drain::Signal,
-    pub drain_rx: drain::Watch,
+    pub drain_tx: DrainTrigger,
+    pub drain_rx: DrainWatcher,
 }
 // Ensure that the `tracing` stack is only initialised once using `once_cell`
 static UNSHARE: Lazy<()> = Lazy::new(|| {
@@ -70,7 +72,7 @@ impl Default for Fixture {
         let cert_manager: Arc<crate::identity::SecretManager> =
             crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10));
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let (drain_tx, drain_rx) = drain::channel();
+        let (drain_tx, drain_rx) = drain::new();
 
         let dstate = DemandProxyState::new(
             state.clone(),

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
 
-use drain::Watch;
 use hickory_proto::error::ProtoError;
 
 use rand::Rng;
@@ -33,6 +32,7 @@ pub use metrics::*;
 use crate::identity::{Identity, SecretManager};
 
 use crate::dns::resolver::Resolver;
+use crate::drain::DrainWatcher;
 use crate::proxy::connection_manager::{ConnectionManager, PolicyWatcher};
 use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
@@ -53,7 +53,7 @@ pub mod metrics;
 mod outbound;
 pub mod pool;
 mod socks5;
-mod util;
+pub mod util;
 
 pub trait SocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<TcpSocket>;
@@ -196,7 +196,7 @@ impl Proxy {
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
         metrics: Metrics,
-        drain: Watch,
+        drain: DrainWatcher,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Result<Proxy, Error> {
         let metrics = Arc::new(metrics);
@@ -216,7 +216,10 @@ impl Proxy {
     }
 
     #[allow(unused_mut)]
-    pub(super) async fn from_inputs(mut pi: Arc<ProxyInputs>, drain: Watch) -> Result<Self, Error> {
+    pub(super) async fn from_inputs(
+        mut pi: Arc<ProxyInputs>,
+        drain: DrainWatcher,
+    ) -> Result<Self, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
 

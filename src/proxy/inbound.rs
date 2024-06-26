@@ -16,7 +16,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use drain::Watch;
 use futures::stream::StreamExt;
 
 use http::{Method, Response, StatusCode};
@@ -30,6 +29,7 @@ use super::{Error, ScopedSecretManager};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
+use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
@@ -40,8 +40,8 @@ use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{assertions, copy, proxy, socket, strng, tls};
 
+use crate::drain::run_with_drain;
 use crate::proxy::h2;
-use crate::proxy::util::run_with_drain;
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::strng::Strng;
@@ -49,13 +49,13 @@ use crate::tls::TlsError;
 
 pub(super) struct Inbound {
     listener: socket::Listener,
-    drain: Watch,
+    drain: DrainWatcher,
     pi: Arc<ProxyInputs>,
     enable_orig_src: bool,
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Inbound, Error> {
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -92,7 +92,7 @@ impl Inbound {
         // Although, that is *after* the TLS handshake; in theory we may get some benefits to setting it earlier.
         let mut stream = crate::hyper_util::tls_server(acceptor, self.listener.inner());
 
-        let accept = |drain: Watch, force_shutdown: watch::Receiver<()>| {
+        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {
                 while let Some(tls) = stream.next().await {
                     let pi = self.pi.clone();
@@ -130,7 +130,13 @@ impl Inbound {
             }
         };
 
-        run_with_drain("inbound".to_string(), self.drain, &pi, accept).await
+        run_with_drain(
+            "inbound".to_string(),
+            self.drain,
+            pi.cfg.self_termination_deadline,
+            accept,
+        )
+        .await
     }
 
     fn extract_traceparent(req: &H2Request) -> TraceParent {
