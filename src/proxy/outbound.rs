@@ -17,8 +17,6 @@ use std::sync::Arc;
 
 use std::time::{Duration, Instant};
 
-use drain::Watch;
-
 use hyper::header::FORWARDED;
 
 use tokio::net::TcpStream;
@@ -33,8 +31,9 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult, DerivedWorkload};
 use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
 
+use crate::drain::run_with_drain;
+use crate::drain::DrainWatcher;
 use crate::proxy::h2::H2Stream;
-use crate::proxy::util::run_with_drain;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::state::ServiceResolutionMode;
@@ -42,13 +41,13 @@ use crate::{assertions, copy, proxy, socket};
 
 pub struct Outbound {
     pi: Arc<ProxyInputs>,
-    drain: Watch,
+    drain: DrainWatcher,
     listener: socket::Listener,
     enable_orig_src: bool,
 }
 
 impl Outbound {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Outbound, Error> {
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Outbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
@@ -83,7 +82,7 @@ impl Outbound {
             self.pi.cert_manager.clone(),
         );
         let pi = self.pi.clone();
-        let accept = |drain: Watch, force_shutdown: watch::Receiver<()>| {
+        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {
                 loop {
                     // Asynchronously wait for an inbound socket.
@@ -130,7 +129,13 @@ impl Outbound {
             .in_current_span()
         };
 
-        run_with_drain("outbound".to_string(), self.drain, &pi, accept).await
+        run_with_drain(
+            "outbound".to_string(),
+            self.drain,
+            pi.cfg.self_termination_deadline,
+            accept,
+        )
+        .await
     }
 }
 

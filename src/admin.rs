@@ -23,7 +23,6 @@ use crate::{signal, telemetry};
 
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use drain::Watch;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
@@ -36,6 +35,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::{net::SocketAddr, time::Duration};
 
+use crate::drain::DrainWatcher;
 use tokio::time;
 use tracing::{error, info, warn};
 use tracing_subscriber::filter;
@@ -106,7 +106,7 @@ impl Service {
         config: Arc<Config>,
         proxy_state: DemandProxyState,
         shutdown_trigger: signal::ShutdownTrigger,
-        drain_rx: Watch,
+        drain_rx: DrainWatcher,
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<Self> {
         Server::<State>::bind(

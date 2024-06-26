@@ -16,7 +16,6 @@ use bytes::Bytes;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
 
-use drain::Watch;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
@@ -24,6 +23,7 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
 
 use crate::config::Config;
+use crate::drain::DrainWatcher;
 use crate::hyper_util;
 
 pub struct Server {
@@ -33,7 +33,7 @@ pub struct Server {
 impl Server {
     pub async fn new(
         config: Arc<Config>,
-        drain_rx: Watch,
+        drain_rx: DrainWatcher,
         registry: Registry,
     ) -> anyhow::Result<Self> {
         hyper_util::Server::<Mutex<Registry>>::bind(

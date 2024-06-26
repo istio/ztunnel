@@ -14,7 +14,6 @@
 
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
-use drain::Watch;
 
 use hickory_proto::op::{Message, MessageType, Query};
 use hickory_proto::rr::{Name, RecordType};
@@ -32,20 +31,21 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, error, info, info_span, Instrument};
 
+use crate::drain::run_with_drain;
+use crate::drain::DrainWatcher;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::util::run_with_drain;
 use crate::proxy::{util, Error, ProxyInputs, TraceParent};
 use crate::{assertions, socket};
 
 pub(super) struct Socks5 {
     pi: Arc<ProxyInputs>,
     listener: socket::Listener,
-    drain: Watch,
+    drain: DrainWatcher,
     enable_orig_src: bool,
 }
 
 impl Socks5 {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Socks5, Error> {
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Socks5, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.socks5_addr.unwrap())
@@ -82,7 +82,7 @@ impl Socks5 {
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );
-        let accept = |drain: Watch, force_shutdown: watch::Receiver<()>| {
+        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {
                 loop {
                     // Asynchronously wait for an inbound socket.
@@ -128,7 +128,13 @@ impl Socks5 {
             }
         };
 
-        run_with_drain("socks5".to_string(), self.drain, &pi, accept).await
+        run_with_drain(
+            "socks5".to_string(),
+            self.drain,
+            pi.cfg.self_termination_deadline,
+            accept,
+        )
+        .await
     }
 }
 

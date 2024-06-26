@@ -22,9 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::config;
+use crate::drain::DrainWatcher;
+use crate::{config, proxy};
 use bytes::Bytes;
-use drain::Watch;
 use futures_util::TryFutureExt;
 use http_body_util::Full;
 use hyper::client;
@@ -46,6 +46,9 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
 
     tls_listener::builder(crate::tls::InboundAcceptor::new(cert_provider))
         .listen(listener)
+        .take_while(|item| {
+            !matches!(item, Err(tls_listener::Error::ListenerError(e)) if proxy::util::is_runtime_shutdown(e))
+        })
         .filter_map(|conn| {
             // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
             match conn {
@@ -181,7 +184,7 @@ pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Ful
 pub struct Server<S> {
     name: String,
     binds: Vec<TcpListener>,
-    drain_rx: Watch,
+    drain_rx: DrainWatcher,
     state: S,
 }
 
@@ -189,7 +192,7 @@ impl<S> Server<S> {
     pub async fn bind(
         name: &str,
         addrs: config::Address,
-        drain_rx: Watch,
+        drain_rx: DrainWatcher,
         s: S,
     ) -> anyhow::Result<Self> {
         let mut binds = vec![];
@@ -240,7 +243,7 @@ impl<S> Server<S> {
             let f = f.clone();
             tokio::spawn(async move {
                 let stream = tokio_stream::wrappers::TcpListenerStream::new(bind);
-                let mut stream = stream.take_until(Box::pin(drain_stream.signaled()));
+                let mut stream = stream.take_until(Box::pin(drain_stream.wait_for_drain()));
                 while let Some(Ok(socket)) = stream.next().await {
                     socket.set_nodelay(true).unwrap();
                     let drain = drain_connections.clone();
@@ -267,7 +270,8 @@ impl<S> Server<S> {
                                     }),
                                 );
                         // Wait for drain to signal or connection serving to complete
-                        match futures_util::future::select(Box::pin(drain.signaled()), serve).await
+                        match futures_util::future::select(Box::pin(drain.wait_for_drain()), serve)
+                            .await
                         {
                             // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
                             futures_util::future::Either::Left((_shutdown, mut serve)) => {

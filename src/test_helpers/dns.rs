@@ -15,10 +15,11 @@
 use crate::config::Address;
 use crate::dns::resolver::{Answer, Resolver};
 use crate::dns::Metrics;
+use crate::drain::DrainTrigger;
 use crate::proxy::Error;
 use crate::state::workload::Workload;
 use crate::test_helpers::new_proxy_state;
-use crate::{dns, metrics};
+use crate::{dns, drain, metrics};
 use futures_util::ready;
 use futures_util::stream::{Stream, StreamExt};
 use hickory_client::client::{AsyncClient, ClientHandle};
@@ -213,7 +214,7 @@ pub struct TestDnsServer {
     tcp: SocketAddr,
     udp: SocketAddr,
     resolver: Arc<dyn Resolver>,
-    _drain: drain::Signal,
+    _drain: DrainTrigger,
 }
 
 impl TestDnsServer {
@@ -249,7 +250,7 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
         let istio_registry = metrics::sub_registry(&mut registry);
         Arc::new(Metrics::new(istio_registry))
     };
-    let (signal, drain) = drain::channel();
+    let (signal, drain) = drain::new();
     let factory = crate::proxy::DefaultSocketFactory {};
 
     let state = new_proxy_state(&[], &[], &[]);

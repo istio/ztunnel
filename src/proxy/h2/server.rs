@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::config;
+use crate::drain::DrainWatcher;
 use crate::proxy::Error;
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -74,7 +75,7 @@ impl H2Request {
 pub async fn serve_connection<F, Fut>(
     cfg: Arc<config::Config>,
     s: tokio_rustls::server::TlsStream<TcpStream>,
-    drain: drain::Watch,
+    drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
     handler: F,
 ) -> Result<(), Error>
@@ -137,7 +138,7 @@ where
                 conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                 break
             }
-            _shutdown = drain.signaled() => {
+            _shutdown = drain.wait_for_drain() => {
                 debug!("starting graceful drain...");
                 conn.graceful_shutdown();
                 break;
