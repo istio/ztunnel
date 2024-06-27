@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, fs};
+use std::{cmp, env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -53,7 +53,12 @@ const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
+// CONNECTION_TERMINATION_DEADLINE configures an explicit deadline
 const CONNECTION_TERMINATION_DEADLINE: &str = "CONNECTION_TERMINATION_DEADLINE";
+// TERMINATION_GRACE_PERIOD_SECONDS configures the Kubernetes terminationGracePeriodSeconds configuration.
+// This is not used exactly as the grace period, as we want to have some period before Kubenetes sends us a SIGKILL to forceful shutdown.
+// (Our forceful shutdown is more graceful than a SIGKILL, as we can close connections cleanly).
+const TERMINATION_GRACE_PERIOD_SECONDS: &str = "TERMINATION_GRACE_PERIOD_SECONDS";
 const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 const IPV6_ENABLED: &str = "IPV6_ENABLED";
@@ -382,7 +387,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         )?,
 
         pool_unused_release_timeout: match parse::<String>(POOL_UNUSED_RELEASE_TIMEOUT)? {
-            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT),
+            Some(ttl) => duration_str::parse(&ttl)
+                .map_err(|_| Error::EnvVar(POOL_UNUSED_RELEASE_TIMEOUT.to_string(), ttl))?,
             None => DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
         },
 
@@ -391,10 +397,25 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         frame_size: 1024 * 1024,
 
         self_termination_deadline: match parse::<String>(CONNECTION_TERMINATION_DEADLINE)? {
-            Some(ttl) => {
-                duration_str::parse(ttl).unwrap_or(DEFAULT_CONNECTION_TERMINATION_DEADLINE)
-            }
-            None => DEFAULT_CONNECTION_TERMINATION_DEADLINE,
+            Some(period) => duration_str::parse(&period)
+                .map_err(|_| Error::EnvVar(POOL_UNUSED_RELEASE_TIMEOUT.to_string(), period))?,
+            None => match parse::<u64>(TERMINATION_GRACE_PERIOD_SECONDS)? {
+                // We want our drain period to be less than Kubernetes, so we can use the last few seconds
+                // to abruptly terminate anything remaining before Kubernetes SIGKILLs us.
+                // We could just take the SIGKILL, but it is even more abrupt (TCP RST vs RST_STREAM/TLS close, etc)
+                // Note: we do this in code instead of in configuration so that we can use downward API to expose this variable
+                // if it is added to Kubernetes (https://github.com/kubernetes/kubernetes/pull/125746).
+                Some(secs) => Duration::from_secs(cmp::max(
+                    if secs > 10 {
+                        secs - 5
+                    } else {
+                        // If the grace period is really low give less buffer
+                        secs - 1
+                    },
+                    1,
+                )),
+                None => DEFAULT_CONNECTION_TERMINATION_DEADLINE,
+            },
         },
 
         // admin API should only be accessible over localhost
@@ -506,7 +527,6 @@ pub struct ProxyConfig {
     pub proxy_admin_port: Option<u16>,
     pub stats_port: Option<u16>,
     pub concurrency: Option<u16>,
-    pub termination_drain_duration: Option<Duration>,
     pub proxy_metadata: HashMap<String, String>,
 }
 
@@ -517,9 +537,6 @@ impl ProxyConfig {
         self.stats_port = other.stats_port.or(self.stats_port);
         self.concurrency = other.concurrency.or(self.concurrency);
         self.proxy_metadata.extend(other.proxy_metadata);
-        self.termination_drain_duration = other
-            .termination_drain_duration
-            .or(self.termination_drain_duration);
         self
     }
 }
