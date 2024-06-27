@@ -28,6 +28,7 @@ use tracing_core::field::Value;
 
 use crate::identity::Identity;
 use crate::metrics::DefaultedUnknown;
+use crate::proxy;
 
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
@@ -313,6 +314,8 @@ pub struct ConnectionResult {
     recv: AtomicU64,
     // recv_metric records the number of bytes received on this connection to the aggregated metric counter
     recv_metric: Counter,
+    // Have we recorded yet?
+    recorded: bool,
 }
 
 // log_early_deny allows logging a connection is denied before we have enough information to emit proper
@@ -439,6 +442,7 @@ impl ConnectionResult {
             sent_metric,
             recv,
             recv_metric,
+            recorded: false,
         }
     }
 
@@ -452,6 +456,7 @@ impl ConnectionResult {
         self.recv_metric.inc_by(res);
     }
 
+    // Record our final result, with more details as a response flag.
     pub fn record_with_flag<E: std::error::Error>(
         mut self,
         res: Result<(), E>,
@@ -462,8 +467,17 @@ impl ConnectionResult {
     }
 
     // Record our final result.
-    // Ideally, we would save and report from the increment_ functions instead of requiring a report here.
-    pub fn record<E: std::error::Error>(&self, res: Result<(), E>) {
+    pub fn record<E: std::error::Error>(mut self, res: Result<(), E>) {
+        self.record_internal(res)
+    }
+
+    // Internal-only function that takes `&mut` to facilitate Drop. Public consumers must use consuming functions.
+    fn record_internal<E: std::error::Error>(&mut self, res: Result<(), E>) {
+        debug_assert!(!self.recorded, "record called multiple times");
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
         let tl = &self.tl;
 
         // Unconditionally record the connection was closed
@@ -505,6 +519,14 @@ impl ConnectionResult {
             bytes_recv = if tl.reporter == Reporter::source {bytes.1} else {bytes.0},
             duration = dur,
         );
+    }
+}
+
+impl Drop for ConnectionResult {
+    fn drop(&mut self) {
+        if !self.recorded {
+            self.record_internal(Err(proxy::Error::ClosedFromDrain))
+        }
     }
 }
 

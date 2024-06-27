@@ -386,6 +386,8 @@ pub enum Error {
 
     #[error("connection failed to drain within the timeout")]
     DrainTimeOut,
+    #[error("connection closed due to connection drain")]
+    ClosedFromDrain,
 
     #[error("dns: {0}")]
     Dns(#[from] ProtoError),

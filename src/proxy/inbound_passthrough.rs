@@ -205,7 +205,7 @@ impl InboundPassthrough {
             ..Default::default()
         };
         let ds = proxy::guess_inbound_service(&rbac_ctx.conn, &None, upstream_service, &upstream);
-        let result_tracker = Arc::new(metrics::ConnectionResult::new(
+        let result_tracker = Box::new(metrics::ConnectionResult::new(
             source_addr,
             dest_addr,
             None,
@@ -228,8 +228,7 @@ impl InboundPassthrough {
         {
             Ok(cg) => cg,
             Err(e) => {
-                Arc::into_inner(result_tracker)
-                    .expect("arc is not shared yet")
+                result_tracker
                     .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
                 return;
             }
@@ -242,7 +241,6 @@ impl InboundPassthrough {
         };
 
         let send = async {
-            let result_tracker = result_tracker.clone();
             trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
 
             let outbound = super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref())
