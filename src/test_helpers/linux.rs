@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use crate::signal::ShutdownTrigger;
 use crate::test_helpers::inpod::start_ztunnel_server;
-use crate::test_helpers::linux::TestMode::InPod;
+use crate::test_helpers::linux::TestMode::Shared;
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -80,7 +80,8 @@ impl Drop for WorkloadManager {
 
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
 pub enum TestMode {
-    InPod,
+    Shared,
+    Dedicated,
 }
 
 impl WorkloadManager {
@@ -107,7 +108,7 @@ impl WorkloadManager {
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
     pub async fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
         let mut inpod_uds: PathBuf = "/dev/null".into();
-        let ztunnel_server = if self.mode == InPod {
+        let ztunnel_server = if self.mode == Shared {
             inpod_uds = self.tmp_dir.join(node);
             Some(start_ztunnel_server(inpod_uds.clone()))
         } else {
@@ -148,6 +149,11 @@ impl WorkloadManager {
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
         ns.run_ready(move |ready| async move {
+            if proxy_mode != ProxyMode::Shared {
+                // not needed in inpod mode. In in pod mode we run `ztunnel-redirect-inpod.sh`
+                // inside the pod's netns
+                helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
+            }
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
             let shutdown = app.shutdown.trigger();
@@ -459,7 +465,7 @@ impl<'a> TestWorkloadBuilder<'a> {
         if self.captured {
             // Setup redirection
             let zt_info = self.manager.ztunnels.get_mut(node.as_str()).unwrap();
-            if self.manager.mode == InPod {
+            if self.manager.mode == Shared {
                 // In the new pod network
                 network_namespace
                     .netns()
