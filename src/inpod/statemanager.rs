@@ -109,8 +109,18 @@ impl WorkloadProxyManagerState {
         match msg {
             WorkloadMessage::AddWorkload(poddata) => {
                 info!(
-                    "pod {:?} received netns, starting proxy",
-                    poddata.workload_uid
+                    uid = poddata.workload_uid.0,
+                    name = poddata
+                        .workload_info
+                        .as_ref()
+                        .map(|w| w.name.as_str())
+                        .unwrap_or_default(),
+                    namespace = poddata
+                        .workload_info
+                        .as_ref()
+                        .map(|w| w.namespace.as_str())
+                        .unwrap_or_default(),
+                    "pod received, starting proxy",
                 );
                 if !self.snapshot_received {
                     self.snapshot_names.insert(poddata.workload_uid.clone());
@@ -127,7 +137,10 @@ impl WorkloadProxyManagerState {
                     .map_err(Error::ProxyError)
             }
             WorkloadMessage::KeepWorkload(workload_uid) => {
-                info!("pod keep received. will not delete it when snapshot is sent");
+                info!(
+                    uid = workload_uid.0,
+                    "pod keep received. will not delete it when snapshot is sent"
+                );
                 if self.snapshot_received {
                     // this can only happen before snapshot is received.
                     return Err(Error::ProtocolError(
@@ -138,7 +151,7 @@ impl WorkloadProxyManagerState {
                 Ok(())
             }
             WorkloadMessage::DelWorkload(workload_uid) => {
-                info!("pod delete request, draining proxy");
+                info!(uid = workload_uid.0, "pod delete request, draining proxy");
                 if !self.snapshot_received {
                     // TODO: consider if this is an error. if not, do this instead:
                     // self.snapshot_names.remove(&workload_uid)
