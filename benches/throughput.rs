@@ -136,7 +136,7 @@ fn initialize_environment(
     SyncSender<usize>,
     Receiver<Result<(), io::Error>>,
 )> {
-    let mut manager = setup_netns_test!(TestMode::InPod);
+    let mut manager = setup_netns_test!(TestMode::Shared);
     let (server, mut manager) = run_async_blocking(async move {
         if ztunnel_mode != WorkloadMode::Direct {
             // we need a client ztunnel
