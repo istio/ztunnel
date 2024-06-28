@@ -149,7 +149,7 @@ impl WorkloadManager {
         let cloned_ns = ns.clone();
         ns.run_ready(move |ready| async move {
             if proxy_mode != ProxyMode::Shared {
-                // not needed in inpod mode. In in pod mode we run `ztunnel-redirect-inpod.sh`
+                // not needed in "inpod" (shared proxy) mode. In shared mode we run `ztunnel-redirect-inpod.sh`
                 // inside the pod's netns
                 helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
             }
