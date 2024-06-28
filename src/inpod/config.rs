@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
 use std::sync::Arc;
-use tokio::net::TcpSocket;
 
 use super::netns::InpodNetns;
 
@@ -65,6 +65,10 @@ impl InPodSocketFactory {
         Self { netns, mark }
     }
 
+    fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
+        self.netns.run(f)?
+    }
+
     fn configure<S: std::os::unix::io::AsFd, F: FnOnce() -> std::io::Result<S>>(
         &self,
         f: F,
@@ -80,21 +84,11 @@ impl InPodSocketFactory {
 
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| {
-            TcpSocket::new_v4().and_then(|s| {
-                s.set_nodelay(true)?;
-                Ok(s)
-            })
-        })
+        self.configure(|| DefaultSocketFactory.new_tcp_v4())
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| {
-            TcpSocket::new_v6().and_then(|s| {
-                s.set_nodelay(true)?;
-                Ok(s)
-            })
-        })
+        self.configure(|| DefaultSocketFactory.new_tcp_v6())
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
@@ -107,6 +101,10 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
         let std_sock = self.configure(|| std::net::UdpSocket::bind(addr))?;
         std_sock.set_nonblocking(true)?;
         tokio::net::UdpSocket::from_std(std_sock)
+    }
+
+    fn ipv6_enabled_localhost(&self) -> std::io::Result<bool> {
+        self.run_in_ns(|| DefaultSocketFactory.ipv6_enabled_localhost())
     }
 }
 
@@ -176,6 +174,10 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
 
         std_sock.set_nonblocking(true)?;
         tokio::net::UdpSocket::from_std(std_sock)
+    }
+
+    fn ipv6_enabled_localhost(&self) -> std::io::Result<bool> {
+        self.sf.ipv6_enabled_localhost()
     }
 }
 

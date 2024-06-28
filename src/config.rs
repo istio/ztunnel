@@ -279,6 +279,15 @@ fn parse_proxy_config() -> Result<ProxyConfig, Error> {
 
 pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let ipv6_enabled = parse::<bool>(IPV6_ENABLED)?.unwrap_or(true);
+    let ipv6_localhost_enabled = if ipv6_enabled {
+        // IPv6 may be generally enabled, but not on localhost. In that case, we do not want to bind on IPv6.
+        crate::proxy::ipv6_disabled_on_localhost().unwrap_or_else(|e| {
+            warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
+            true
+        })
+    } else {
+        false
+    };
     let bind_wildcard = if ipv6_enabled {
         IpAddr::V6(Ipv6Addr::UNSPECIFIED)
     } else {
@@ -339,16 +348,19 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     };
 
     use hickory_resolver::system_conf::read_system_conf;
+    use tracing::warn;
     let (dns_resolver_cfg, mut dns_resolver_opts) = read_system_conf().unwrap();
     // Increase some defaults. Note these are NOT coming from /etc/resolv.conf (only some fields do, we don't override those),
     // but rather hickory's hardcoded defaults
     dns_resolver_opts.cache_size = 4096;
     // TODO: should we override server_ordering_strategy based on our IP support?
 
+    // Note: since DNS proxy runs in the pod network namespace, we will recompute IPv6 enablement
+    // on a pod-by-pod basis.
     let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
-        Some(dns_addr) => Address::new(ipv6_enabled, dns_addr)
+        Some(dns_addr) => Address::new(ipv6_localhost_enabled, dns_addr)
             .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
-        None => Address::Localhost(ipv6_enabled, DEFAULT_DNS_PORT),
+        None => Address::Localhost(ipv6_localhost_enabled, DEFAULT_DNS_PORT),
     };
 
     let socks5_addr = if let Some(true) = parse(UNSTABLE_ENABLE_SOCKS5)? {
@@ -420,7 +432,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         // admin API should only be accessible over localhost
         admin_addr: Address::Localhost(
-            ipv6_enabled,
+            ipv6_localhost_enabled,
             pc.proxy_admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
         ),
         stats_addr: Address::SocketAddr(SocketAddr::new(
@@ -664,6 +676,14 @@ impl Address {
         match self {
             Address::Localhost(_, port) => *port,
             Address::SocketAddr(s) => s.port(),
+        }
+    }
+
+    // with_ipv6 overrides the IPv6 setting for the address
+    pub fn with_ipv6(self, ipv6: bool) -> Self {
+        match self {
+            Address::Localhost(_, port) => Address::Localhost(ipv6, port),
+            x => x,
         }
     }
 }
