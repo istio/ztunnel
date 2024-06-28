@@ -131,7 +131,8 @@ impl InboundPassthrough {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
             // OR
             // User sent a request to the ztunnel directly. This isn't allowed
-            pi.cfg.illegal_ports.contains(&dest_addr.port()) || Some(dest_addr.ip()) == pi.cfg.local_ip
+            pi.cfg.illegal_ports.contains(&dest_addr.port())
+                || Some(dest_addr.ip()) == pi.cfg.local_ip
         } else {
             false
         };
