@@ -129,10 +129,11 @@ impl InboundPassthrough {
         // lead to infinite loops
         let illegal_call = if pi.cfg.proxy_mode == ProxyMode::Shared {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
-            pi.cfg.illegal_ports.contains(&dest_addr.port())
-        } else {
+            // OR
             // User sent a request to the ztunnel directly. This isn't allowed
-            Some(dest_addr.ip()) == pi.cfg.local_ip
+            pi.cfg.illegal_ports.contains(&dest_addr.port()) || Some(dest_addr.ip()) == pi.cfg.local_ip
+        } else {
+            false
         };
         if illegal_call {
             metrics::log_early_deny(
