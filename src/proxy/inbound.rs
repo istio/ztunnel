@@ -241,7 +241,7 @@ impl Inbound {
         };
         let ds =
             proxy::guess_inbound_service(&rbac_ctx.conn, &for_host, upstream_service, &upstream);
-        let result_tracker = Arc::new(metrics::ConnectionResult::new(
+        let result_tracker = Box::new(metrics::ConnectionResult::new(
             rbac_ctx.conn.src,
             rbac_ctx.conn.dst,
             Some(hbone_addr),
@@ -264,8 +264,7 @@ impl Inbound {
         {
             Ok(cg) => cg,
             Err(e) => {
-                Arc::into_inner(result_tracker)
-                    .expect("arc is not shared yet")
+                result_tracker
                     .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
                 return req.send_error(build_response(StatusCode::UNAUTHORIZED));
             }
@@ -287,7 +286,6 @@ impl Inbound {
         let h2_stream = req.send_response(build_response(StatusCode::OK)).await?;
 
         let send = async {
-            let result_tracker = result_tracker.clone();
             if inbound_protocol == AppProtocol::PROXY {
                 let Connection {
                     src, src_identity, ..
