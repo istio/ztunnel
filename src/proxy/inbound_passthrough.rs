@@ -99,7 +99,7 @@ impl InboundPassthrough {
                         }
                         .in_current_span();
 
-                        assertions::size_between_ref(1500, 2750, &serve_client);
+                        assertions::size_between_ref(1500, 3000, &serve_client);
                         tokio::spawn(serve_client);
                     }
                     Err(e) => {

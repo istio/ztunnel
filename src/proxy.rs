@@ -299,6 +299,9 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 
+    #[error("while closing connection: {0}")]
+    ShutdownError(Box<Error>),
+
     #[error("destination disconnected before all data was written")]
     BackendDisconnected,
     #[error("receive: {0}")]
