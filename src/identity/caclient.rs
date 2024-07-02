@@ -43,9 +43,7 @@ impl CaClient {
         secret_ttl: i64,
     ) -> Result<CaClient, Error> {
         let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?)?;
-        // let client = IstioCertificateServiceClient::new(svc);
-        // let svc =
-        //     tower_hyper_http_body_compat::Hyper1HttpServiceAsTowerService03HttpService::new(svc);
+
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
         Ok(CaClient {
             client,
