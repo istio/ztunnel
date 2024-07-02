@@ -16,12 +16,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use drain::Watch;
 use futures::stream::StreamExt;
 
 use http::{Method, Response, StatusCode};
 
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
 
@@ -29,6 +29,7 @@ use super::{Error, ScopedSecretManager};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
+use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
 use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
@@ -39,6 +40,7 @@ use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{assertions, copy, proxy, socket, strng, tls};
 
+use crate::drain::run_with_drain;
 use crate::proxy::h2;
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -47,13 +49,13 @@ use crate::tls::TlsError;
 
 pub(super) struct Inbound {
     listener: socket::Listener,
-    drain: Watch,
+    drain: DrainWatcher,
     pi: Arc<ProxyInputs>,
     enable_orig_src: bool,
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: Watch) -> Result<Inbound, Error> {
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -79,6 +81,7 @@ impl Inbound {
     }
 
     pub(super) async fn run(self) {
+        let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
             state: self.pi.state.clone(),
             cert_manager: self.pi.cert_manager.clone(),
@@ -87,46 +90,53 @@ impl Inbound {
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
         // Although, that is *after* the TLS handshake; in theory we may get some benefits to setting it earlier.
-        let stream = crate::hyper_util::tls_server(acceptor, self.listener.inner());
-        let mut stream = stream.take_until(Box::pin(self.drain.signaled()));
+        let mut stream = crate::hyper_util::tls_server(acceptor, self.listener.inner());
 
-        let (sub_drain_signal, sub_drain) = drain::channel();
+        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            async move {
+                while let Some(tls) = stream.next().await {
+                    let pi = self.pi.clone();
+                    let (raw_socket, ssl) = tls.get_ref();
+                    let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
+                    let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
+                    let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
+                    let drain = drain.clone();
+                    let force_shutdown = force_shutdown.clone();
+                    let network = pi.cfg.network.clone();
+                    let serve_client = async move {
+                        let conn = Connection {
+                            src_identity,
+                            src,
+                            dst_network: strng::new(&network), // inbound request must be on our network
+                            dst,
+                        };
+                        debug!(%conn, "accepted connection");
+                        let cfg = pi.cfg.clone();
+                        let request_handler = move |req| {
+                            Self::serve_connect(pi.clone(), conn.clone(), self.enable_orig_src, req)
+                        };
+                        let serve = Box::pin(h2::server::serve_connection(
+                            cfg,
+                            tls,
+                            drain,
+                            force_shutdown,
+                            request_handler,
+                        ));
+                        serve.await
+                    };
+                    assertions::size_between_ref(1000, 1500, &serve_client);
+                    tokio::task::spawn(serve_client.in_current_span());
+                }
+            }
+        };
 
-        while let Some(tls) = stream.next().await {
-            let pi = self.pi.clone();
-            let (raw_socket, ssl) = tls.get_ref();
-            let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
-            let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
-            let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
-            let drain = sub_drain.clone();
-            let network = pi.cfg.network.clone();
-            let serve_client = async move {
-                let conn = Connection {
-                    src_identity,
-                    src,
-                    dst_network: strng::new(&network), // inbound request must be on our network
-                    dst,
-                };
-                debug!(%conn, "accepted connection");
-                let cfg = pi.cfg.clone();
-                let request_handler = move |req| {
-                    Self::serve_connect(pi.clone(), conn.clone(), self.enable_orig_src, req)
-                };
-                let serve = Box::pin(h2::server::serve_connection(
-                    cfg,
-                    tls,
-                    drain,
-                    request_handler,
-                ));
-                serve.await
-            };
-            assertions::size_between_ref(1000, 1500, &serve_client);
-            tokio::task::spawn(serve_client.in_current_span());
-        }
-        info!("draining connections");
-        drop(sub_drain); // sub_drain_signal.drain() will never resolve while sub_drain is valid, will deadlock if not dropped
-        sub_drain_signal.drain().await;
-        info!("all inbound connections drained");
+        run_with_drain(
+            "inbound".to_string(),
+            self.drain,
+            pi.cfg.self_termination_deadline,
+            accept,
+        )
+        .await
     }
 
     fn extract_traceparent(req: &H2Request) -> TraceParent {

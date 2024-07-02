@@ -14,7 +14,7 @@
 
 use super::istio::zds::{self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello};
 use super::{WorkloadData, WorkloadMessage};
-use drain::Watch;
+use crate::drain::DrainWatcher;
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessageOwned, MsgFlags};
 use prost::Message;
 use std::io::{IoSlice, IoSliceMut};
@@ -28,12 +28,12 @@ use zds::workload_request::Payload;
 #[allow(dead_code)]
 pub struct WorkloadStreamProcessor {
     stream: UnixStream,
-    drain: Watch,
+    drain: DrainWatcher,
 }
 
 #[allow(dead_code)]
 impl WorkloadStreamProcessor {
-    pub fn new(stream: UnixStream, drain: Watch) -> Self {
+    pub fn new(stream: UnixStream, drain: DrainWatcher) -> Self {
         WorkloadStreamProcessor { stream, drain }
     }
 
@@ -91,7 +91,7 @@ impl WorkloadStreamProcessor {
             let res = loop {
                 tokio::select! {
                     biased; // check drain first, so we don't read from the socket if we are draining.
-                    _ =   self.drain.clone().signaled() => {
+                    _ =   self.drain.clone().wait_for_drain() => {
                         info!("workload proxy manager: drain requested");
                         return Ok(None);
                     }

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use drain::Watch;
 use hickory_proto::error::ProtoErrorKind;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
@@ -43,6 +42,7 @@ use crate::dns::metrics::{
 };
 use crate::dns::name_util::{has_domain, trim_domain};
 use crate::dns::resolver::{Answer, Resolver};
+use crate::drain::DrainWatcher;
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::socket::to_canonical;
@@ -65,7 +65,7 @@ pub struct Server {
     tcp_addr: SocketAddr,
     udp_addr: SocketAddr,
     server: ServerFuture<dns::handler::Handler>,
-    drain: Watch,
+    drain: DrainWatcher,
 }
 
 impl Server {
@@ -85,7 +85,7 @@ impl Server {
         state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
         metrics: Arc<Metrics>,
-        drain: Watch,
+        drain: DrainWatcher,
         socket_factory: &(dyn SocketFactory + Send + Sync),
         allow_unknown_source: bool,
     ) -> Result<Self, Error> {
@@ -171,7 +171,7 @@ impl Server {
                     }
                 }
             }
-            _ = self.drain.signaled() => {
+            _ = self.drain.wait_for_drain() => {
                 info!("shutting down the DNS server");
                 let _ = self.server.shutdown_gracefully().await;
             }
@@ -875,7 +875,6 @@ mod tests {
     use prometheus_client::registry::Registry;
 
     use super::*;
-    use crate::strng;
     use crate::test_helpers::dns::{
         a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client, run_dns,
         send_request, server_request,
@@ -887,6 +886,7 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::{IpFamilies, NetworkAddress as XdsNetworkAddress};
+    use crate::{drain, strng};
     use crate::{metrics, test_helpers};
 
     const NS1: &str = "ns1";
@@ -1308,7 +1308,7 @@ mod tests {
         let domain = "cluster.local".to_string();
         let state = state();
         let forwarder = forwarder();
-        let (_signal, drain) = drain::channel();
+        let (_signal, drain) = drain::new();
         let factory = crate::proxy::DefaultSocketFactory;
         let proxy = Server::new(
             domain,
@@ -1426,7 +1426,7 @@ mod tests {
             .await
             .unwrap(),
         );
-        let (_signal, drain) = drain::channel();
+        let (_signal, drain) = drain::new();
         let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
             domain,
@@ -1503,7 +1503,7 @@ mod tests {
             ips: HashMap::from([(n("large.com."), new_large_response())]),
         });
         let domain = "cluster.local".to_string();
-        let (_signal, drain) = drain::channel();
+        let (_signal, drain) = drain::new();
         let factory = crate::proxy::DefaultSocketFactory;
         let server = Server::new(
             domain,

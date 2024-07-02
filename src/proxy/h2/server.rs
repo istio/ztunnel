@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::config;
+use crate::drain::DrainWatcher;
 use crate::proxy::Error;
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -22,8 +23,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
-use tokio::time::timeout;
+use tokio::sync::{oneshot, watch};
 use tracing::{debug, warn};
 
 pub struct H2Request {
@@ -75,7 +75,8 @@ impl H2Request {
 pub async fn serve_connection<F, Fut>(
     cfg: Arc<config::Config>,
     s: tokio_rustls::server::TlsStream<TcpStream>,
-    drain: drain::Watch,
+    drain: DrainWatcher,
+    mut force_shutdown: watch::Receiver<()>,
     handler: F,
 ) -> Result<(), Error>
 where
@@ -83,7 +84,6 @@ where
     Fut: Future + Send + 'static,
 {
     let mut builder = h2::server::Builder::new();
-    let drain_deadline = cfg.self_termination_deadline;
     let mut conn = builder
         .initial_window_size(cfg.window_size)
         .initial_connection_window_size(cfg.connection_window_size)
@@ -138,7 +138,7 @@ where
                 conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                 break
             }
-            _shutdown = drain.signaled() => {
+            _shutdown = drain.wait_for_drain() => {
                 debug!("starting graceful drain...");
                 conn.graceful_shutdown();
                 break;
@@ -148,9 +148,13 @@ where
     // Signal to the ping_pong it should also stop.
     dropped.store(true, Ordering::Relaxed);
     let poll_closed = futures_util::future::poll_fn(move |cx| conn.poll_closed(cx));
-    timeout(drain_deadline, poll_closed)
-        .await
-        .map_err(|_| Error::DrainTimeOut)??;
+    tokio::select! {
+        _ = force_shutdown.changed() => {
+            return Err(Error::DrainTimeOut)
+        }
+        _ = poll_closed => {}
+    }
+    // Mark we are done with the connection
     drop(drain);
     Ok(())
 }
