@@ -39,6 +39,7 @@ use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{assertions, copy, proxy, socket, strng, tls};
 
+use crate::config::ProxyMode;
 use crate::proxy::h2;
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
@@ -177,7 +178,7 @@ impl Inbound {
                     return req.send_error(build_response(StatusCode::BAD_REQUEST));
                 }
             };
-        let illegal_call = if pi.cfg.inpod_enabled {
+        let illegal_call = if pi.cfg.proxy_mode == ProxyMode::Shared {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
             // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
             // sends to 15008.
