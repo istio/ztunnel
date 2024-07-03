@@ -22,6 +22,9 @@ use crate::test_helpers::*;
 use crate::xds::{LocalConfig, LocalWorkload};
 use crate::{config, identity, proxy, strng};
 
+use crate::signal::ShutdownTrigger;
+use crate::test_helpers::inpod::start_ztunnel_server;
+use crate::test_helpers::linux::TestMode::InPod;
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
 use std::net::IpAddr;
@@ -29,10 +32,6 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
-
-use crate::signal::ShutdownTrigger;
-use crate::test_helpers::inpod::start_ztunnel_server;
-use crate::test_helpers::linux::TestMode::InPod;
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -219,7 +218,20 @@ impl WorkloadManager {
     }
 
     pub async fn delete_workload(&mut self, name: &str) -> anyhow::Result<()> {
-        self.workloads.retain(|w| w.workload.name != name);
+        let mut workloads = vec![];
+        std::mem::swap(&mut self.workloads, &mut workloads);
+        let (keep, drop) = workloads.into_iter().partition(|w| w.workload.name != name);
+        self.workloads = keep;
+        for d in drop {
+            if let Some(zt) = self.ztunnels.get_mut(&d.workload.node.to_string()).as_mut() {
+                zt.fd_sender
+                    .as_mut()
+                    .unwrap()
+                    .send_and_wait((d.workload.uid.to_string(), -1)) // Test server handles -1 as del
+                    .await
+                    .unwrap();
+            }
+        }
         self.refresh_config().await?;
         Ok(())
     }
