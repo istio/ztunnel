@@ -48,8 +48,10 @@ impl ConnectionDrain {
     // always inline, this is for convenience so that we don't forget to drop the rx but there's really no reason it needs to grow the stack
     #[inline(always)]
     async fn drain(self) {
-        drop(self.rx); // very important, drain cannont complete if there are outstand rx
-        self.tx.start_drain_and_wait().await;
+        drop(self.rx); // very important, drain cannot complete if there are outstand rx
+        self.tx
+            .start_drain_and_wait(drain::DrainMode::Immediate)
+            .await;
     }
 }
 
@@ -622,7 +624,7 @@ mod tests {
         } // release lock
 
         // send the signal which stops policy watcher
-        tx.start_drain_and_wait().await;
+        tx.start_drain_and_wait(drain::DrainMode::Immediate).await;
     }
 
     // small helper to assert that the Watches are working in a timely manner

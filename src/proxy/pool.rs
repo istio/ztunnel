@@ -776,7 +776,9 @@ mod test {
         assert_opens_drops!(srv, 2, 1);
 
         // Trigger the persistent client to stop, we should evict that connection as well
-        client_stop_signal.start_drain_and_wait().await;
+        client_stop_signal
+            .start_drain_and_wait(drain::DrainMode::Immediate)
+            .await;
         assert_opens_drops!(srv, 2, 1);
     }
 

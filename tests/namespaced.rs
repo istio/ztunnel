@@ -490,7 +490,7 @@ mod namespaced {
         let srv = resolve_target(manager.resolver(), "server");
 
         // Run a client which will send some traffic when signaled to do so
-        let cjh = run_long_running_tcp_client(&client, rx, srv)?;
+        let cjh = run_long_running_tcp_client(&client, rx, srv).unwrap();
 
         // First, send the initial request and wait for it
         tx.send_and_wait(()).await?;
@@ -526,7 +526,7 @@ mod namespaced {
         let srv = resolve_target(manager.resolver(), "server");
 
         // Run a client which will send some traffic when signaled to do so
-        let cjh = run_long_running_tcp_client(&client, rx, srv)?;
+        let cjh = run_long_running_tcp_client(&client, rx, srv).unwrap();
 
         // First, send the initial request and wait for it
         tx.send_and_wait(()).await?;
@@ -534,12 +534,15 @@ mod namespaced {
         // In this test, we will leave the server app running, but shutdown ztunnel.
         manager.delete_workload("server").await.unwrap();
         // Requests should still succeed...
-        // TODO: requests here should actually immediately fail
-        tx.send_and_wait(()).await?;
+        assert!(
+            tx.send_and_wait(()).await.is_err(),
+            "request after server shutdown should fail"
+        );
         // Close the connection
         drop(tx);
 
-        cjh.join().unwrap()?;
+        // Should fail as the last request fails
+        assert!(cjh.join().unwrap().is_err());
 
         // Now try to connect and make sure it fails
         client
@@ -563,18 +566,22 @@ mod namespaced {
         mut rx: MpscAckReceiver<()>,
         srv: SocketAddr,
     ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+        async fn double_read_write_stream(stream: &mut TcpStream) -> anyhow::Result<usize> {
+            const BODY: &[u8] = b"hello world";
+            stream.write_all(BODY).await?;
+            let mut buf = [0; BODY.len() * 2];
+            stream.read_exact(&mut buf).await?;
+            assert_eq!(b"hello worldhello world", &buf);
+            Ok(BODY.len() * 2)
+        }
         client.run(move || async move {
-            let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
-                .await
-                .unwrap()
-                .unwrap();
+            let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv)).await??;
             while let Some(()) = rx.recv().await {
                 timeout(
                     Duration::from_secs(5),
                     double_read_write_stream(&mut stream),
                 )
-                .await
-                .unwrap();
+                .await??;
                 rx.ack().await.unwrap();
             }
             Ok(())

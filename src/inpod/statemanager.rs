@@ -40,7 +40,12 @@ struct DrainingTasks {
 
 impl DrainingTasks {
     fn drain_workload(&mut self, workload_state: WorkloadState) {
-        let handle = tokio::spawn(workload_state.drain.start_drain_and_wait());
+        // Workload is gone, so no need to gracefully clean it up
+        let handle = tokio::spawn(
+            workload_state
+                .drain
+                .start_drain_and_wait(drain::DrainMode::Immediate),
+        );
         // before we push to draining, try to clear done entries, so the vector doesn't grow too much
         self.draining.retain(|x| !x.is_finished());
         // add deleted pod to draining. we do this so we make sure to wait for it incase we
@@ -191,9 +196,10 @@ impl WorkloadProxyManagerState {
     }
 
     pub async fn drain(self) {
-        let drain_futures = self.workload_states.into_iter().map(
-            |(_, v)| v.drain.start_drain_and_wait(), /* do not .await here!!! */
-        );
+        let drain_futures =
+            self.workload_states.into_iter().map(|(_, v)| {
+                v.drain.start_drain_and_wait(drain::DrainMode::Graceful)
+            } /* do not .await here!!! */);
         // join these first, as we need to drive these to completion
         futures::future::join_all(drain_futures).await;
         // these are join handles that are driven by tokio, we just need to wait for them, so join these

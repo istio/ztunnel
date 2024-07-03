@@ -724,15 +724,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "drain"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d105028bd2b5dfcb33318fd79a445001ead36004dd8dffef1bdd7e493d8bc1e"
-dependencies = [
- "tokio",
-]
-
-[[package]]
 name = "dtoa"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3769,7 +3760,6 @@ dependencies = [
  "criterion",
  "ctor",
  "diff",
- "drain",
  "duration-str",
  "flurry",
  "futures",

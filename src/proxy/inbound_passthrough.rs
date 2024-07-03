@@ -69,44 +69,43 @@ impl InboundPassthrough {
         let pi = self.pi.clone();
         let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {
-            loop {
-                // Asynchronously wait for an inbound socket.
-                let socket = self.listener.accept().await;
-                let start = Instant::now();
-                let mut force_shutdown = force_shutdown.clone();
-                let drain = drain.clone();
-                let pi = self.pi.clone();
-                match socket {
-                    Ok((stream, remote)) => {
-                        let serve_client = async move {
-                            debug!(component="inbound passthrough", "connection started");
-                            // Since this task is spawned, make sure we are guaranteed to terminate
-                            tokio::select! {
-                                _ = force_shutdown.changed() => {
-                                    debug!(component="inbound passthrough", "connection forcefully terminated");
+                loop {
+                    // Asynchronously wait for an inbound socket.
+                    let socket = self.listener.accept().await;
+                    let start = Instant::now();
+                    let mut force_shutdown = force_shutdown.clone();
+                    let drain = drain.clone();
+                    let pi = self.pi.clone();
+                    match socket {
+                        Ok((stream, remote)) => {
+                            let serve_client = async move {
+                                debug!(component="inbound passthrough", "connection started");
+                                // Since this task is spawned, make sure we are guaranteed to terminate
+                                tokio::select! {
+                                    _ = force_shutdown.changed() => {
+                                        debug!(component="inbound passthrough", "connection forcefully terminated");
+                                    }
+                                    _ = Self::proxy_inbound_plaintext(pi, socket::to_canonical(remote), stream, self.enable_orig_src) => {
+                                    }
                                 }
-                                _ = Self::proxy_inbound_plaintext(pi, socket::to_canonical(remote), stream, self.enable_orig_src) => {
-                                }
+                                // Mark we are done with the connection, so drain can complete
+                                drop(drain);
+                                debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
                             }
-                            // Mark we are done with the connection, so drain can complete
-                            drop(drain);
-                            debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
-                        }
-                        .in_current_span();
+                                .in_current_span();
 
-                        assertions::size_between_ref(1500, 3000, &serve_client);
-                        tokio::spawn(serve_client);
-                    }
-                    Err(e) => {
-                        if util::is_runtime_shutdown(&e) {
-                            return;
+                            assertions::size_between_ref(1500, 3000, &serve_client);
+                            tokio::spawn(serve_client);
                         }
-                        error!("Failed TCP handshake {}", e);
+                        Err(e) => {
+                            if util::is_runtime_shutdown(&e) {
+                                return;
+                            }
+                            error!("Failed TCP handshake {}", e);
+                        }
                     }
                 }
-            }
-        }
-        .in_current_span()
+            }.in_current_span()
         };
 
         run_with_drain(

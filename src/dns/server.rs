@@ -42,7 +42,7 @@ use crate::dns::metrics::{
 };
 use crate::dns::name_util::{has_domain, trim_domain};
 use crate::dns::resolver::{Answer, Resolver};
-use crate::drain::DrainWatcher;
+use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::socket::to_canonical;
@@ -171,9 +171,11 @@ impl Server {
                     }
                 }
             }
-            _ = self.drain.wait_for_drain() => {
+            res = self.drain.wait_for_drain() => {
                 info!("shutting down the DNS server");
-                let _ = self.server.shutdown_gracefully().await;
+                if res.mode() == DrainMode::Graceful {
+                    let _ = self.server.shutdown_gracefully().await;
+                }
             }
         }
         info!("dns server drained");

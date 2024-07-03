@@ -359,7 +359,9 @@ impl Bound {
 
         // Start a drain; this will attempt to end all connections
         // or itself be interrupted by a stronger TERM signal, whichever comes first.
-        self.drain_tx.start_drain_and_wait().await;
+        self.drain_tx
+            .start_drain_and_wait(drain::DrainMode::Graceful)
+            .await;
 
         Ok(())
     }
