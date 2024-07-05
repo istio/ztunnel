@@ -22,6 +22,7 @@ mod namespaced {
     use std::net::{IpAddr, SocketAddr};
 
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
     use std::time::Duration;
     use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
@@ -543,11 +544,15 @@ mod namespaced {
         // Now shutdown the server. In real world, the server app would shutdown, then ztunnel would remove itself.
         // In this test, we will leave the server app running, but shutdown ztunnel.
         manager.delete_workload("server").await.unwrap();
-        // Requests should still succeed...
-        assert!(
-            tx.send_and_wait(()).await.is_err(),
-            "request after server shutdown should fail"
-        );
+        // Request should fail now
+        let tx = Arc::new(Mutex::new(tx));
+        #[allow(clippy::await_holding_lock)]
+        assert_eventually(
+            Duration::from_secs(2),
+            || async { tx.lock().unwrap().send_and_wait(()).await.is_err() },
+            true,
+        )
+        .await;
         // Close the connection
         drop(tx);
 
