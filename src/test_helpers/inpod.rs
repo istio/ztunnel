@@ -75,6 +75,7 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             info!("ack received, len {}", read_amount);
             // Now await for FDs
             while let Some((uid, fd)) = rx.recv().await {
+                let orig_uid = uid.clone();
                 let uid = crate::inpod::WorkloadUid::new(uid);
                 if fd >= 0 {
                     send_workload_added(&mut ztun_sock, uid, fd).await;
@@ -83,8 +84,8 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
                 };
 
                 // receive ack from ztunnel
-                let ack = read_msg(&mut ztun_sock).await;
-                info!("ack received, len {:?}", ack);
+                let _ = read_msg(&mut ztun_sock).await;
+                info!(uid=orig_uid, %fd, "ack received");
                 rx.ack().await.expect("ack failed");
             }
         });

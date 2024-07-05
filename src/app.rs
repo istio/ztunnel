@@ -16,14 +16,14 @@ use std::future::Future;
 
 use crate::proxyfactory::ProxyFactory;
 
+use crate::drain;
+use anyhow::Context;
+use prometheus_client::registry::Registry;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-
-use anyhow::Context;
-use prometheus_client::registry::Registry;
 use tokio::task::JoinSet;
 use tracing::{warn, Instrument};
 
@@ -45,7 +45,7 @@ pub async fn build_with_cert(
     // Any component which wants time to gracefully exit should take in a drain_rx clone,
     // await drain_rx.signaled(), then cleanup.
     // Note: there is still a hard timeout if the draining takes too long
-    let (drain_tx, drain_rx) = drain::channel();
+    let (drain_tx, drain_rx) = drain::new();
 
     // Register readiness tasks.
     let ready = readiness::Ready::new();
@@ -320,7 +320,7 @@ fn init_inpod_proxy_mgr(
     config: &config::Config,
     proxy_gen: ProxyFactory,
     ready: readiness::Ready,
-    drain_rx: drain::Watch,
+    drain_rx: drain::DrainWatcher,
 ) -> anyhow::Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
     let metrics = Arc::new(crate::inpod::metrics::Metrics::new(
         registry.sub_registry_with_prefix("workload_manager"),
@@ -349,7 +349,7 @@ pub struct Bound {
     pub udp_dns_proxy_address: Option<SocketAddr>,
 
     pub shutdown: signal::Shutdown,
-    drain_tx: drain::Signal,
+    drain_tx: drain::DrainTrigger,
 }
 
 impl Bound {
@@ -359,7 +359,9 @@ impl Bound {
 
         // Start a drain; this will attempt to end all connections
         // or itself be interrupted by a stronger TERM signal, whichever comes first.
-        self.drain_tx.drain().await;
+        self.drain_tx
+            .start_drain_and_wait(drain::DrainMode::Graceful)
+            .await;
 
         Ok(())
     }

@@ -16,7 +16,6 @@ use crate::proxy::Error;
 
 use crate::state::DemandProxyState;
 use crate::state::ProxyRbacContext;
-use drain;
 use serde::{Serialize, Serializer};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +23,8 @@ use std::fmt::Formatter;
 use std::future::Future;
 use std::net::SocketAddr;
 
+use crate::drain;
+use crate::drain::{DrainTrigger, DrainWatcher};
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -32,14 +33,14 @@ struct ConnectionDrain {
     // TODO: this should almost certainly be changed to a type which has counted references exposed.
     // tokio::sync::watch can be subscribed without taking a write lock and exposes references
     // and also a receiver_count method
-    tx: drain::Signal,
-    rx: drain::Watch,
+    tx: DrainTrigger,
+    rx: DrainWatcher,
     count: usize,
 }
 
 impl ConnectionDrain {
     fn new() -> Self {
-        let (tx, rx) = drain::channel();
+        let (tx, rx) = drain::new();
         ConnectionDrain { tx, rx, count: 1 }
     }
 
@@ -47,8 +48,10 @@ impl ConnectionDrain {
     // always inline, this is for convenience so that we don't forget to drop the rx but there's really no reason it needs to grow the stack
     #[inline(always)]
     async fn drain(self) {
-        drop(self.rx); // very important, drain cannont complete if there are outstand rx
-        self.tx.drain().await;
+        drop(self.rx); // very important, drain cannot complete if there are outstand rx
+        self.tx
+            .start_drain_and_wait(drain::DrainMode::Immediate)
+            .await;
     }
 }
 
@@ -76,7 +79,7 @@ impl Default for ConnectionManager {
 pub struct ConnectionGuard {
     cm: ConnectionManager,
     conn: InboundConnection,
-    watch: Option<drain::Watch>,
+    watch: Option<DrainWatcher>,
 }
 
 impl ConnectionGuard {
@@ -90,7 +93,7 @@ impl ConnectionGuard {
                 self.cm.release(&self.conn);
                 res
             }
-            _signaled = watch.signaled() => Err(Error::AuthorizationPolicyLateRejection)
+            _signaled = watch.wait_for_drain() => Err(Error::AuthorizationPolicyLateRejection)
         }
     }
 }
@@ -194,7 +197,7 @@ impl ConnectionManager {
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
     // even no tasks have a receiver channel yet
-    fn register(&self, c: &InboundConnection) -> Option<drain::Watch> {
+    fn register(&self, c: &InboundConnection) -> Option<DrainWatcher> {
         match self.drains.write().expect("mutex").entry(c.clone()) {
             Entry::Occupied(mut cd) => {
                 cd.get_mut().count += 1;
@@ -282,14 +285,14 @@ impl Serialize for ConnectionManager {
 
 pub struct PolicyWatcher {
     state: DemandProxyState,
-    stop: drain::Watch,
+    stop: DrainWatcher,
     connection_manager: ConnectionManager,
 }
 
 impl PolicyWatcher {
     pub fn new(
         state: DemandProxyState,
-        stop: drain::Watch,
+        stop: DrainWatcher,
         connection_manager: ConnectionManager,
     ) -> Self {
         PolicyWatcher {
@@ -303,7 +306,7 @@ impl PolicyWatcher {
         let mut policies_changed = self.state.read().policies.subscribe();
         loop {
             tokio::select! {
-                _ = self.stop.clone().signaled() => {
+                _ = self.stop.clone().wait_for_drain() => {
                     break;
                 }
                 _ = policies_changed.changed() => {
@@ -322,7 +325,8 @@ impl PolicyWatcher {
 
 #[cfg(test)]
 mod tests {
-    use drain::Watch;
+    use crate::drain;
+    use crate::drain::DrainWatcher;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use prometheus_client::registry::Registry;
     use std::net::{Ipv4Addr, SocketAddrV4};
@@ -559,7 +563,7 @@ mod tests {
             metrics,
         );
         let connection_manager = ConnectionManager::default();
-        let (tx, stop) = drain::channel();
+        let (tx, stop) = drain::new();
         let state_mutator = ProxyStateUpdateMutator::new_no_fetch();
 
         // clones to move into spawned task
@@ -620,12 +624,12 @@ mod tests {
         } // release lock
 
         // send the signal which stops policy watcher
-        tx.drain().await;
+        tx.start_drain_and_wait(drain::DrainMode::Immediate).await;
     }
 
     // small helper to assert that the Watches are working in a timely manner
-    async fn assert_close(c: Watch) {
-        let result = tokio::time::timeout(Duration::from_secs(1), c.signaled()).await;
+    async fn assert_close(c: DrainWatcher) {
+        let result = tokio::time::timeout(Duration::from_secs(1), c.wait_for_drain()).await;
         assert!(result.is_ok())
     }
 }

@@ -16,12 +16,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use drain::Watch;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 use itertools::Itertools;
 
+use crate::drain::DrainWatcher;
 use crate::hyper_util;
 use crate::{config, readiness};
 
@@ -33,7 +33,7 @@ pub struct Server {
 impl Server {
     pub async fn new(
         config: Arc<config::Config>,
-        drain_rx: Watch,
+        drain_rx: DrainWatcher,
         ready: readiness::Ready,
     ) -> anyhow::Result<Self> {
         hyper_util::Server::<readiness::Ready>::bind(

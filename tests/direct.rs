@@ -213,7 +213,6 @@ async fn run_requests_test(
     // Test a round trip outbound call (via socks5)
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
-    let dns_drain: Option<drain::Signal> = None;
     let mut cfg = config::Config {
         local_node: (!node.is_empty()).then(|| node.to_string()),
         ..test_config_with_port(echo_addr.port())
@@ -247,7 +246,6 @@ async fn run_requests_test(
         }
     })
     .await;
-    drop(dns_drain);
 }
 
 #[tokio::test]

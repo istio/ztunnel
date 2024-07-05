@@ -15,11 +15,11 @@
 use crate::config;
 use crate::identity::SecretManager;
 use crate::state::{DemandProxyState, WorkloadInfo};
-use drain::Watch;
 use std::sync::Arc;
 use tracing::error;
 
 use crate::dns;
+use crate::drain::DrainWatcher;
 
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::{Error, Metrics};
@@ -34,7 +34,7 @@ pub struct ProxyFactory {
     cert_manager: Arc<SecretManager>,
     proxy_metrics: Arc<Metrics>,
     dns_metrics: Option<Arc<dns::Metrics>>,
-    drain: Watch,
+    drain: DrainWatcher,
 }
 
 impl ProxyFactory {
@@ -44,7 +44,7 @@ impl ProxyFactory {
         cert_manager: Arc<SecretManager>,
         proxy_metrics: Arc<Metrics>,
         dns_metrics: Option<dns::Metrics>,
-        drain: Watch,
+        drain: DrainWatcher,
     ) -> std::io::Result<Self> {
         let dns_metrics = match dns_metrics {
             Some(metrics) => Some(Arc::new(metrics)),
@@ -73,7 +73,7 @@ impl ProxyFactory {
 
     pub async fn new_proxies_from_factory(
         &self,
-        proxy_drain: Option<Watch>,
+        proxy_drain: Option<DrainWatcher>,
         proxy_workload_info: Option<WorkloadInfo>,
         socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
     ) -> Result<ProxyResult, Error> {

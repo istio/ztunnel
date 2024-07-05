@@ -22,6 +22,8 @@ mod namespaced {
     use std::net::{IpAddr, SocketAddr};
 
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
+    use std::thread::JoinHandle;
     use std::time::Duration;
     use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 
@@ -469,6 +471,136 @@ mod namespaced {
         )
         .await;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ztunnel_shutdown() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+        let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .register()
+            .await?;
+        run_tcp_server(server)?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let (mut tx, rx) = mpsc_ack(1);
+        let srv = resolve_target(manager.resolver(), "server");
+
+        // Run a client which will send some traffic when signaled to do so
+        let cjh = run_long_running_tcp_client(&client, rx, srv).unwrap();
+
+        // First, send the initial request and wait for it
+        tx.send_and_wait(()).await?;
+        // Now start shutdown. Ztunnel should keep things working since we have pending open connections
+        local.shutdown.shutdown_now().await;
+        // Requests should still succeed...
+        tx.send_and_wait(()).await?;
+        // Close the connection
+        drop(tx);
+
+        cjh.join().unwrap()?;
+
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                client
+                    .run_and_wait(move || async move { Ok(TcpStream::connect(srv).await?) })
+                    .is_err()
+            },
+            true,
+        )
+        .await;
+        // let res = client.run_and_wait(move || async move { Ok(TcpStream::connect(srv).await?) });
+        // assert!(res.is_err(), "requests should fail after shutdown");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_server_shutdown() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(InPod);
+        manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .register()
+            .await?;
+        run_tcp_server(server)?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let (mut tx, rx) = mpsc_ack(1);
+        let srv = resolve_target(manager.resolver(), "server");
+
+        // Run a client which will send some traffic when signaled to do so
+        let cjh = run_long_running_tcp_client(&client, rx, srv).unwrap();
+
+        // First, send the initial request and wait for it
+        tx.send_and_wait(()).await?;
+        // Now shutdown the server. In real world, the server app would shutdown, then ztunnel would remove itself.
+        // In this test, we will leave the server app running, but shutdown ztunnel.
+        manager.delete_workload("server").await.unwrap();
+        // Request should fail now
+        let tx = Arc::new(Mutex::new(tx));
+        #[allow(clippy::await_holding_lock)]
+        assert_eventually(
+            Duration::from_secs(2),
+            || async { tx.lock().unwrap().send_and_wait(()).await.is_err() },
+            true,
+        )
+        .await;
+        // Close the connection
+        drop(tx);
+
+        // Should fail as the last request fails
+        assert!(cjh.join().unwrap().is_err());
+
+        // Now try to connect and make sure it fails
+        client
+            .run_and_wait(move || async move {
+                let mut stream = TcpStream::connect(srv).await.unwrap();
+                // We should be able to connect (since client is running), but not send a request
+                let send = timeout(
+                    Duration::from_millis(50),
+                    double_read_write_stream(&mut stream),
+                )
+                .await;
+                assert!(send.is_err());
+                Ok(())
+            })
+            .unwrap();
+        Ok(())
+    }
+
+    fn run_long_running_tcp_client(
+        client: &Namespace,
+        mut rx: MpscAckReceiver<()>,
+        srv: SocketAddr,
+    ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+        async fn double_read_write_stream(stream: &mut TcpStream) -> anyhow::Result<usize> {
+            const BODY: &[u8] = b"hello world";
+            stream.write_all(BODY).await?;
+            let mut buf = [0; BODY.len() * 2];
+            stream.read_exact(&mut buf).await?;
+            assert_eq!(b"hello worldhello world", &buf);
+            Ok(BODY.len() * 2)
+        }
+        client.run(move || async move {
+            let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv)).await??;
+            while let Some(()) = rx.recv().await {
+                timeout(
+                    Duration::from_secs(5),
+                    double_read_write_stream(&mut stream),
+                )
+                .await??;
+                rx.ack().await.unwrap();
+            }
+            Ok(())
+        })
     }
 
     #[tokio::test]

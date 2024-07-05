@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use drain::Signal;
+use crate::drain;
+use crate::drain::DrainTrigger;
 use std::sync::Arc;
 use tracing::{debug, info, Instrument};
 
@@ -28,7 +29,7 @@ use super::WorkloadUid;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {
-    drain: Signal,
+    drain: DrainTrigger,
     workload_netns_inode: libc::ino_t,
 }
 
@@ -38,8 +39,13 @@ struct DrainingTasks {
 }
 
 impl DrainingTasks {
-    fn drain_workload(&mut self, workload_state: WorkloadState) {
-        let handle = tokio::spawn(workload_state.drain.drain());
+    fn shutdown_workload(&mut self, workload_state: WorkloadState) {
+        // Workload is gone, so no need to gracefully clean it up
+        let handle = tokio::spawn(
+            workload_state
+                .drain
+                .start_drain_and_wait(drain::DrainMode::Immediate),
+        );
         // before we push to draining, try to clear done entries, so the vector doesn't grow too much
         self.draining.retain(|x| !x.is_finished());
         // add deleted pod to draining. we do this so we make sure to wait for it incase we
@@ -151,7 +157,10 @@ impl WorkloadProxyManagerState {
                 Ok(())
             }
             WorkloadMessage::DelWorkload(workload_uid) => {
-                info!(uid = workload_uid.0, "pod delete request, draining proxy");
+                info!(
+                    uid = workload_uid.0,
+                    "pod delete request, shutting down proxy"
+                );
                 if !self.snapshot_received {
                     // TODO: consider if this is an error. if not, do this instead:
                     // self.snapshot_names.remove(&workload_uid)
@@ -183,17 +192,17 @@ impl WorkloadProxyManagerState {
             .workload_states
             .extract_if(|uid, _| !self.snapshot_names.contains(uid))
         {
-            self.draining.drain_workload(workload_state);
+            self.draining.shutdown_workload(workload_state);
         }
         self.snapshot_names.clear();
         self.update_proxy_count_metrics();
     }
 
     pub async fn drain(self) {
-        let drain_futures = self
-            .workload_states
-            .into_iter()
-            .map(|(_, v)| v.drain.drain() /* do not .await here!!! */);
+        let drain_futures =
+            self.workload_states.into_iter().map(|(_, v)| {
+                v.drain.start_drain_and_wait(drain::DrainMode::Graceful)
+            } /* do not .await here!!! */);
         // join these first, as we need to drive these to completion
         futures::future::join_all(drain_futures).await;
         // these are join handles that are driven by tokio, we just need to wait for them, so join these
@@ -258,7 +267,7 @@ impl WorkloadProxyManagerState {
         // We create a per workload drain here. If the main loop in WorkloadProxyManager::run drains,
         // we drain all these per-workload drains before exiting the loop
         let workload_netns_inode = netns.workload_inode();
-        let (drain_tx, drain_rx) = drain::channel();
+        let (drain_tx, drain_rx) = drain::new();
 
         let proxies = self
             .proxy_gen
@@ -347,7 +356,7 @@ impl WorkloadProxyManagerState {
 
         self.update_proxy_count_metrics();
 
-        self.draining.drain_workload(workload_state);
+        self.draining.shutdown_workload(workload_state);
     }
 
     fn update_proxy_count_metrics(&self) {

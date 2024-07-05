@@ -16,15 +16,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use drain::Watch;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tokio::time::timeout;
 
-use tracing::{debug, error, info, trace, warn, Instrument};
+use tracing::{debug, error, info, trace, Instrument};
 
 use crate::config::ProxyMode;
 
+use crate::drain::run_with_drain;
+use crate::drain::DrainWatcher;
 use crate::proxy::metrics::Reporter;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
@@ -35,14 +35,14 @@ use crate::{proxy, socket};
 pub(super) struct InboundPassthrough {
     listener: socket::Listener,
     pi: Arc<ProxyInputs>,
-    drain: Watch,
+    drain: DrainWatcher,
     enable_orig_src: bool,
 }
 
 impl InboundPassthrough {
     pub(super) async fn new(
         pi: Arc<ProxyInputs>,
-        drain: Watch,
+        drain: DrainWatcher,
     ) -> Result<InboundPassthrough, Error> {
         let listener = pi
             .socket_factory
@@ -66,72 +66,55 @@ impl InboundPassthrough {
     }
 
     pub(super) async fn run(self) {
-        let (sub_drain_signal, sub_drain) = drain::channel();
-        let deadline = self.pi.cfg.self_termination_deadline;
-        let (trigger_force_shutdown, force_shutdown) = watch::channel(());
-        let accept = async move {
-            loop {
-                // Asynchronously wait for an inbound socket.
-                let socket = self.listener.accept().await;
-                let start = Instant::now();
-                let mut force_shutdown = force_shutdown.clone();
-                let drain = sub_drain.clone();
-                let pi = self.pi.clone();
-                match socket {
-                    Ok((stream, remote)) => {
-                        let serve_client = async move {
-                            debug!(dur=?start.elapsed(), "inbound passthrough connection started");
-                            // Since this task is spawned, make sure we are guaranteed to terminate
-                            tokio::select! {
-                                _ = force_shutdown.changed() => {
-                                    debug!("inbound passthrough connection forcefully terminated signaled");
+        let pi = self.pi.clone();
+        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            async move {
+                loop {
+                    // Asynchronously wait for an inbound socket.
+                    let socket = self.listener.accept().await;
+                    let start = Instant::now();
+                    let mut force_shutdown = force_shutdown.clone();
+                    let drain = drain.clone();
+                    let pi = self.pi.clone();
+                    match socket {
+                        Ok((stream, remote)) => {
+                            let serve_client = async move {
+                                debug!(component="inbound passthrough", "connection started");
+                                // Since this task is spawned, make sure we are guaranteed to terminate
+                                tokio::select! {
+                                    _ = force_shutdown.changed() => {
+                                        debug!(component="inbound passthrough", "connection forcefully terminated");
+                                    }
+                                    _ = Self::proxy_inbound_plaintext(pi, socket::to_canonical(remote), stream, self.enable_orig_src) => {
+                                    }
                                 }
-                                _ = Self::proxy_inbound_plaintext(
-                            pi, // pi cloned above; OK to move
-                            socket::to_canonical(remote),
-                            stream,
-                            self.enable_orig_src,
-                        ) => {}
+                                // Mark we are done with the connection, so drain can complete
+                                drop(drain);
+                                debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
                             }
-                            // Mark we are done with the connection, so drain can complete
-                            drop(drain);
-                            debug!(dur=?start.elapsed(), "inbound passthrough connection completed");
-                        }
-                        .in_current_span();
+                                .in_current_span();
 
-                        assertions::size_between_ref(1500, 3000, &serve_client);
-                        tokio::spawn(serve_client);
-                    }
-                    Err(e) => {
-                        if util::is_runtime_shutdown(&e) {
-                            return;
+                            assertions::size_between_ref(1500, 3000, &serve_client);
+                            tokio::spawn(serve_client);
                         }
-                        error!("Failed TCP handshake {}", e);
+                        Err(e) => {
+                            if util::is_runtime_shutdown(&e) {
+                                return;
+                            }
+                            error!("Failed TCP handshake {}", e);
+                        }
                     }
                 }
-            }
-        }
-        .in_current_span();
+            }.in_current_span()
+        };
 
-        // Stop accepting once we drain.
-        // We will then allow connections up to `deadline` to terminate on their own.
-        // After that, they will be forcefully terminated.
-        tokio::select! {
-            res = accept => { res }
-            res = self.drain.signaled() => {
-                debug!("inbound passthrough drained, waiting {:?} for any outbound connections to close", deadline);
-                if let Err(e) = timeout(deadline, sub_drain_signal.drain()).await {
-                    // Not all connections completed within time, we will force shut them down
-                    warn!("drain duration expired with pending connections, forcefully shutting down: {e:?}");
-                }
-                // Trigger force shutdown. In theory, this is only needed in the timeout case. However,
-                // it doesn't hurt to always trigger it.
-                let _ = trigger_force_shutdown.send(());
-
-                info!("outbound drain complete");
-                drop(res);
-            }
-        }
+        run_with_drain(
+            "inbound passthrough".to_string(),
+            self.drain,
+            pi.cfg.self_termination_deadline,
+            accept,
+        )
+        .await
     }
 
     async fn proxy_inbound_plaintext(

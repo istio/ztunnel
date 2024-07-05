@@ -564,9 +564,8 @@ mod test {
     use std::net::SocketAddr;
     use std::time::Instant;
 
-    use crate::{identity, proxy};
+    use crate::{drain, identity, proxy};
 
-    use drain::Watch;
     use futures_util::{future, StreamExt};
     use hyper::body::Incoming;
 
@@ -584,6 +583,7 @@ mod test {
 
     use crate::test_helpers::helpers::initialize_telemetry;
 
+    use crate::drain::DrainWatcher;
     use ztunnel::test_helpers::*;
 
     use super::*;
@@ -765,7 +765,7 @@ mod test {
         let (pool, mut srv) = setup_test_with_idle(4, Duration::from_millis(100)).await;
 
         let key = key(&srv, 1);
-        let (client_stop_signal, client_stop) = drain::channel();
+        let (client_stop_signal, client_stop) = drain::new();
         // Spin up 1 connection
         spawn_persistent_client(pool.clone(), key.clone(), srv.addr, client_stop).await;
         spawn_clients_concurrently(pool.clone(), key.clone(), srv.addr, 2).await;
@@ -776,7 +776,9 @@ mod test {
         assert_opens_drops!(srv, 2, 1);
 
         // Trigger the persistent client to stop, we should evict that connection as well
-        client_stop_signal.drain().await;
+        client_stop_signal
+            .start_drain_and_wait(drain::DrainMode::Immediate)
+            .await;
         assert_opens_drops!(srv, 2, 1);
     }
 
@@ -847,7 +849,7 @@ mod test {
         mut pool: WorkloadHBONEPool,
         key: WorkloadKey,
         remote_addr: SocketAddr,
-        stop: Watch,
+        stop: DrainWatcher,
     ) {
         let req = || {
             http::Request::builder()
@@ -866,7 +868,7 @@ mod test {
             start.elapsed().as_millis()
         );
         tokio::spawn(async move {
-            let _ = stop.signaled().await;
+            let _ = stop.wait_for_drain().await;
             debug!("persistent client stop");
             // Close our connection
             drop(c1);

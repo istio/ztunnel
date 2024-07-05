@@ -59,7 +59,7 @@ pub struct ShutdownTrigger {
 
 impl ShutdownTrigger {
     pub async fn shutdown_now(&self) {
-        self.shutdown_tx.send(()).await.unwrap();
+        let _ = self.shutdown_tx.send(()).await;
     }
 }
 

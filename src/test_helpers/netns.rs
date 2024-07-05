@@ -99,6 +99,22 @@ impl Namespace {
         format!("veth{}", self.id)
     }
 
+    // A small helper around run_ready that marks as "ready" immediately and waits for completion
+    pub fn run_and_wait<F, Fut, R>(&self, f: F) -> anyhow::Result<R>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<R>>,
+        R: Send + 'static,
+    {
+        self.run_ready(|ready| async move {
+            ready.set_ready();
+            f().await
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+    }
+
     // A small helper around run_ready that marks as "ready" immediately.
     pub fn run<F, Fut, R>(&self, f: F) -> anyhow::Result<JoinHandle<anyhow::Result<R>>>
     where
