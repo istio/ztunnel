@@ -39,7 +39,7 @@ struct DrainingTasks {
 }
 
 impl DrainingTasks {
-    fn drain_workload(&mut self, workload_state: WorkloadState) {
+    fn shutdown_workload(&mut self, workload_state: WorkloadState) {
         // Workload is gone, so no need to gracefully clean it up
         let handle = tokio::spawn(
             workload_state
@@ -157,7 +157,10 @@ impl WorkloadProxyManagerState {
                 Ok(())
             }
             WorkloadMessage::DelWorkload(workload_uid) => {
-                info!(uid = workload_uid.0, "pod delete request, draining proxy");
+                info!(
+                    uid = workload_uid.0,
+                    "pod delete request, shutting down proxy"
+                );
                 if !self.snapshot_received {
                     // TODO: consider if this is an error. if not, do this instead:
                     // self.snapshot_names.remove(&workload_uid)
@@ -189,7 +192,7 @@ impl WorkloadProxyManagerState {
             .workload_states
             .extract_if(|uid, _| !self.snapshot_names.contains(uid))
         {
-            self.draining.drain_workload(workload_state);
+            self.draining.shutdown_workload(workload_state);
         }
         self.snapshot_names.clear();
         self.update_proxy_count_metrics();
@@ -353,7 +356,7 @@ impl WorkloadProxyManagerState {
 
         self.update_proxy_count_metrics();
 
-        self.draining.drain_workload(workload_state);
+        self.draining.shutdown_workload(workload_state);
     }
 
     fn update_proxy_count_metrics(&self) {
