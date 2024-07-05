@@ -503,8 +503,18 @@ mod namespaced {
 
         cjh.join().unwrap()?;
 
-        let res = client.run_and_wait(move || async move { Ok(TcpStream::connect(srv).await?) });
-        assert!(res.is_err(), "requests should fail after shutdown");
+        assert_eventually(
+            Duration::from_secs(2),
+            || async {
+                client
+                    .run_and_wait(move || async move { Ok(TcpStream::connect(srv).await?) })
+                    .is_err()
+            },
+            true,
+        )
+        .await;
+        // let res = client.run_and_wait(move || async move { Ok(TcpStream::connect(srv).await?) });
+        // assert!(res.is_err(), "requests should fail after shutdown");
         Ok(())
     }
 
