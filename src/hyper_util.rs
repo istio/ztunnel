@@ -34,7 +34,7 @@ use hyper::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 use crate::tls::ServerCertProvider;
 
@@ -77,8 +77,9 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    #[inline]
     fn execute(&self, fut: F) {
-        tokio::task::spawn(fut);
+        tokio::task::spawn(fut.in_current_span());
     }
 }
 
