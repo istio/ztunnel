@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::ConfigSource;
+use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service};
 use crate::state::workload::{gatewayaddress, Workload};
@@ -24,7 +24,7 @@ use crate::{config, identity, proxy, strng};
 
 use crate::signal::ShutdownTrigger;
 use crate::test_helpers::inpod::start_ztunnel_server;
-use crate::test_helpers::linux::TestMode::InPod;
+use crate::test_helpers::linux::TestMode::Shared;
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
 use std::net::IpAddr;
@@ -79,8 +79,8 @@ impl Drop for WorkloadManager {
 
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
 pub enum TestMode {
-    InPod,
-    SharedNode,
+    Shared,
+    Dedicated,
 }
 
 impl WorkloadManager {
@@ -107,7 +107,7 @@ impl WorkloadManager {
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
     pub async fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
         let mut inpod_uds: PathBuf = "/dev/null".into();
-        let ztunnel_server = if self.mode == InPod {
+        let ztunnel_server = if self.mode == Shared {
             inpod_uds = self.tmp_dir.join(node);
             Some(start_ztunnel_server(inpod_uds.clone()))
         } else {
@@ -125,7 +125,11 @@ impl WorkloadManager {
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
-        let inpod_enabled = ztunnel_server.is_some();
+        let proxy_mode = if ztunnel_server.is_some() {
+            ProxyMode::Shared
+        } else {
+            ProxyMode::Dedicated
+        };
         let (mut tx_cfg, rx_cfg) = mpsc_ack(1);
         tx_cfg.send(initial_config).await?;
         let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
@@ -137,15 +141,15 @@ impl WorkloadManager {
             local_node: Some(node.to_string()),
             local_ip: Some(ns.ip()),
             inpod_uds,
-            inpod_enabled,
+            proxy_mode,
             ..config::parse_config().unwrap()
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
         ns.run_ready(move |ready| async move {
-            if !inpod_enabled {
-                // not needed in inpod mode. In in pod mode we run `ztunnel-redirect-inpod.sh`
+            if proxy_mode != ProxyMode::Shared {
+                // not needed in "inpod" (shared proxy) mode. In shared mode we run `ztunnel-redirect-inpod.sh`
                 // inside the pod's netns
                 helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
             }
@@ -473,7 +477,7 @@ impl<'a> TestWorkloadBuilder<'a> {
         if self.captured {
             // Setup redirection
             let zt_info = self.manager.ztunnels.get_mut(node.as_str()).unwrap();
-            if self.manager.mode == InPod {
+            if self.manager.mode == Shared {
                 // In the new pod network
                 network_namespace
                     .netns()

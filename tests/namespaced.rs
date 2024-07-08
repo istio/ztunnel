@@ -44,7 +44,7 @@ mod namespaced {
 
     use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::setup_netns_test;
-    use ztunnel::test_helpers::linux::TestMode::{InPod, SharedNode};
+    use ztunnel::test_helpers::linux::TestMode::{Dedicated, Shared};
     use ztunnel::test_helpers::linux::WorkloadManager;
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
@@ -58,7 +58,7 @@ mod namespaced {
     #[tokio::test]
     async fn local_captured_inpod() -> anyhow::Result<()> {
         simple_client_server_test(
-            setup_netns_test!(InPod),
+            setup_netns_test!(Shared),
             Captured(DEFAULT_NODE),
             Captured(DEFAULT_NODE),
         )
@@ -67,20 +67,28 @@ mod namespaced {
 
     #[tokio::test]
     async fn server_uncaptured_inpod() -> anyhow::Result<()> {
-        simple_client_server_test(setup_netns_test!(InPod), Captured(DEFAULT_NODE), Uncaptured)
-            .await
+        simple_client_server_test(
+            setup_netns_test!(Shared),
+            Captured(DEFAULT_NODE),
+            Uncaptured,
+        )
+        .await
     }
 
     #[tokio::test]
     async fn client_uncaptured_inpod() -> anyhow::Result<()> {
-        simple_client_server_test(setup_netns_test!(InPod), Captured(DEFAULT_NODE), Uncaptured)
-            .await
+        simple_client_server_test(
+            setup_netns_test!(Shared),
+            Captured(DEFAULT_NODE),
+            Uncaptured,
+        )
+        .await
     }
 
     #[tokio::test]
     async fn cross_node_captured_inpod() -> anyhow::Result<()> {
         simple_client_server_test(
-            setup_netns_test!(InPod),
+            setup_netns_test!(Shared),
             Captured(DEFAULT_NODE),
             Captured(REMOTE_NODE),
         )
@@ -91,9 +99,9 @@ mod namespaced {
     // This is not currently supported since https://github.com/istio/ztunnel/commit/12d154cceb1d20eb1f11ae43c2310e66e93c7120
 
     #[tokio::test]
-    async fn server_uncaptured_sharednode() -> anyhow::Result<()> {
+    async fn server_uncaptured_dedicated() -> anyhow::Result<()> {
         simple_client_server_test(
-            setup_netns_test!(SharedNode),
+            setup_netns_test!(Dedicated),
             Captured(DEFAULT_NODE),
             Uncaptured,
         )
@@ -101,9 +109,9 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn client_uncaptured_sharednode() -> anyhow::Result<()> {
+    async fn client_uncaptured_dedicated() -> anyhow::Result<()> {
         simple_client_server_test(
-            setup_netns_test!(SharedNode),
+            setup_netns_test!(Dedicated),
             Captured(DEFAULT_NODE),
             Uncaptured,
         )
@@ -111,9 +119,9 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn cross_node_captured_sharednode() -> anyhow::Result<()> {
+    async fn cross_node_captured_dedicated() -> anyhow::Result<()> {
         simple_client_server_test(
-            setup_netns_test!(SharedNode),
+            setup_netns_test!(Dedicated),
             Captured(DEFAULT_NODE),
             Captured(REMOTE_NODE),
         )
@@ -122,7 +130,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn workload_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
 
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
@@ -180,7 +188,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn service_waypoint() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
 
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
@@ -243,7 +251,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn sandwich_waypoint_plain() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
 
         let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
@@ -279,7 +287,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn sandwich_waypoint_proxy_protocol() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
 
         let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
@@ -331,7 +339,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn service_loadbalancing() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let remote = manager.deploy_ztunnel(REMOTE_NODE).await?;
         manager
@@ -475,7 +483,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_ztunnel_shutdown() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let server = manager
             .workload_builder("server", DEFAULT_NODE)
@@ -521,7 +529,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_server_shutdown() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let server = manager
             .workload_builder("server", DEFAULT_NODE)
@@ -605,7 +613,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_policy() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         manager
             .add_policy(Authorization {
@@ -677,7 +685,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn hbone_ip_mismatch() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let _server = manager
             .workload_builder("server", DEFAULT_NODE)
@@ -736,7 +744,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn malicious_calls_inpod() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let _ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
@@ -799,33 +807,8 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn malicious_calls_sharednode() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(SharedNode);
-        let _ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-        let client = manager
-            .workload_builder("client", DEFAULT_NODE)
-            .register()
-            .await?;
-
-        let zt = manager.resolve("ztunnel-node")?;
-        malicious_calls_test(
-            client,
-            vec![
-                (zt, 15001, Request),    // Outbound: should be blocked due to recursive call
-                (zt, 15006, Request),    // Inbound: should be blocked due to recursive call
-                (zt, 15008, Request),    // HBONE: expected TLS, reject
-                (zt, 15080, Connection), // Socks5: only localhost
-                (zt, 15000, Connection), // Admin: only localhost
-                (zt, 15020, Http),       // Stats: accept connection and returns a HTTP error
-                (zt, 15021, Http),       // Readiness: accept connection and returns a HTTP error
-            ],
-        )
-        .await
-    }
-
-    #[tokio::test]
     async fn trust_domain_mismatch_rejected() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let id = identity::Identity::Spiffe {
             trust_domain: "clusterset.local".into(), // change to mismatched trustdomain
             service_account: "my-app".into(),
@@ -872,7 +855,7 @@ mod namespaced {
     #[tokio::test]
     async fn test_prefetch_forget_certs() -> anyhow::Result<()> {
         // TODO: this test doesn't really need namespacing, but the direct test doesn't allow dynamic config changes.
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let id1 = identity::Identity::Spiffe {
             trust_domain: "cluster.local".into(),
             service_account: "sa1".into(),
