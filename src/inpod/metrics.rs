@@ -12,16 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
-
-#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
-struct ProxyLabels {
-    uid: String,
-}
 
 #[derive(Default)]
 pub struct Metrics {
