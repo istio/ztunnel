@@ -10,8 +10,8 @@ cargo-fuzz = true
 [dependencies]
 hyper = "1.1"
 libfuzzer-sys = "0.4"
-prost = "0.12.1"
-anyhow = "1.0.65"
+prost = "0.13"
+anyhow = "1.0"
 
 [dependencies.ztunnel]
 path = ".."
