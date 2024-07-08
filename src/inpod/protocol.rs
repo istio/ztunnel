@@ -41,7 +41,7 @@ impl WorkloadStreamProcessor {
         let r = ZdsHello {
             version: Version::V1 as i32,
         };
-        self.send_msg(r.clone()).await
+        self.send_msg(r).await
     }
 
     pub async fn send_ack(&mut self) -> std::io::Result<()> {
