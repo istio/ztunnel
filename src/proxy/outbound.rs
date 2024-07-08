@@ -163,15 +163,6 @@ impl OutboundConnection {
     ) {
         let start = Instant::now();
 
-        // Block calls to ztunnel directly, unless we are in "in-pod".
-        // For in-pod, this isn't an issue and is useful: this allows things like prometheus scraping ztunnel.
-        // TODO is this actually wrong for ProxyMode::Dedicated? Seems like a valid case
-        if self.pi.cfg.proxy_mode != ProxyMode::Shared
-            && Some(dest_addr.ip()) == self.pi.cfg.local_ip
-        {
-            metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
-            return;
-        }
         let req = match Box::pin(self.build_request(source_addr.ip(), dest_addr)).await {
             Ok(req) => Box::new(req),
             Err(err) => {
