@@ -40,9 +40,9 @@ use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{assertions, copy, proxy, socket, strng, tls};
 
+use crate::config::ProxyMode;
 use crate::drain::run_with_drain;
 use crate::proxy::h2;
-use crate::config::ProxyMode;
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
 use crate::strng::Strng;

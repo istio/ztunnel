@@ -483,7 +483,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_ztunnel_shutdown() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         let local = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let server = manager
             .workload_builder("server", DEFAULT_NODE)
@@ -529,7 +529,7 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_server_shutdown() -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(InPod);
+        let mut manager = setup_netns_test!(Shared);
         manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let server = manager
             .workload_builder("server", DEFAULT_NODE)

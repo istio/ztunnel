@@ -31,6 +31,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, error, info, info_span, Instrument};
 
+use crate::config;
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
 use crate::proxy::outbound::OutboundConnection;
