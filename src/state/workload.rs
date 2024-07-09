@@ -683,6 +683,8 @@ pub enum WorkloadError {
     MissingGatewayAddress,
     #[error("decode error: {0}")]
     DecodeError(#[from] prost::DecodeError),
+    #[error("decode error: {0}")]
+    EnumError(#[from] prost::UnknownEnumValue),
 }
 
 #[cfg(test)]

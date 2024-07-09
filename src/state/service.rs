@@ -215,7 +215,7 @@ impl TryFrom<&XdsService> for Service {
                     .iter()
                     .map(|r| {
                         xds::istio::workload::load_balancing::Scope::try_from(*r)
-                            .map_err(WorkloadError::DecodeError)
+                            .map_err(WorkloadError::EnumError)
                             .and_then(|r| r.try_into())
                     })
                     .collect::<Result<Vec<LoadBalancerScopes>, WorkloadError>>()?,

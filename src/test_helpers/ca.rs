@@ -27,6 +27,7 @@ use tracing::error;
 use crate::config::RootCert;
 
 use crate::identity::{AuthSource, CaClient};
+use crate::test_helpers::hyper_tower;
 use crate::xds::istio::ca::istio_certificate_service_server::{
     IstioCertificateService, IstioCertificateServiceServer,
 };
@@ -67,7 +68,7 @@ impl CaServer {
                 if let Err(err) = crate::hyper_util::http2_server()
                     .serve_connection(
                         TokioIo::new(socket),
-                        tower_hyper_http_body_compat::TowerService03HttpServiceAsHyper1HttpService::new(srv)
+                        hyper_tower::TowerToHyperService::new(srv),
                     )
                     .await
                 {
