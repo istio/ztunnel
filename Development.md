@@ -23,8 +23,19 @@ There are a variety of config options that can be used to replace components wit
 * `FAKE_CA="true"`: this will use self-signed fake certificates, eliminating a dependency on a CA
 * `XDS_ADDRESS=""`: disables XDS client completely
 * `LOCAL_XDS_PATH=./examples/localhost.yaml`: read XDS config from a file.
+* `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E"`: have cargo run as sudo
+* `PROXY_MODE=dedicated`: Dedicated mode is better for local development as it works for 95% of cases.
 
-Together, `FAKE_CA="true" XDS_ADDRESS="" LOCAL_XDS_PATH=./examples/localhost.yaml cargo run --features testing` (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
+Together, the following command (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
+
+```bash
+FAKE_CA="true" \
+XDS_ADDRESS="" \
+LOCAL_XDS_PATH=./examples/localhost.yaml \
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E" \
+PROXY_MODE=dedicated \
+cargo run --features testing
+```
 
 ### In-pod mode setup
 
