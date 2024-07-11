@@ -26,7 +26,7 @@ There are a variety of config options that can be used to replace components wit
 * `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E"`: have cargo run as sudo
 * `PROXY_MODE=dedicated`: Dedicated mode is better for local development as it works for 95% of cases.
 
-Together, the following command (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
+The following command (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
 
 ```bash
 FAKE_CA="true" \
