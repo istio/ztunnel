@@ -28,7 +28,7 @@ There are a variety of config options that can be used to replace components wit
 
 The following command (with `--no-default-features` if you have FIPS disabled) can be used to run entirely locally, without a Kubernetes or Istiod dependency.
 
-```bash
+```shell
 FAKE_CA="true" \
 XDS_ADDRESS="" \
 LOCAL_XDS_PATH=./examples/localhost.yaml \
@@ -163,7 +163,13 @@ spec:
 EOF
 ```
 
-Now, port forward istiod, copy over the token and run ztunnel (under sudo):
+Add localhost as a verified DNS name to istiod
+
+```shell
+kubectl set env -n istio-system deploy/istiod ISTIOD_CUSTOM_HOST=localhost
+```
+
+Now, port forward istiod, copy over the token and run ztunnel:
 
 ```shell
 kubectl port-forward -n istio-system svc/istiod 15012:15012 &
@@ -181,6 +187,7 @@ POD_NAMESPACE=istio-system
 POD_NAME=ztunnel-worker1
 CA_ROOT_CA=/tmp/istio-root.pem
 XDS_ROOT_CA=/tmp/istio-root.pem
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E"
 cargo run proxy ztunnel
 EOF
 ```
