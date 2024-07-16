@@ -15,7 +15,7 @@
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
-use prometheus_client::registry::Registry;
+use prometheus_client::registry::{Registry, Unit};
 
 use crate::metrics::Recorder;
 
@@ -57,16 +57,17 @@ impl Metrics {
         let message_count = Family::default();
 
         registry.register(
-            "message_count",
+            "xds_message",
             "Total number of messages received (unstable)",
             message_count.clone(),
         );
 
         let total_messages_size = Family::default();
 
-        registry.register(
-            "total_messages_size",
+        registry.register_with_unit(
+            "xds_message",
             "Total number of bytes received (unstable)",
+            Unit::Bytes,
             total_messages_size.clone(),
         );
 
