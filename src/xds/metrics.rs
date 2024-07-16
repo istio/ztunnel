@@ -24,7 +24,7 @@ use super::service::discovery::v3::DeltaDiscoveryResponse;
 pub struct Metrics {
     pub connection_terminations: Family<ConnectionTermination, Counter>,
     pub message_types: Family<TypeUrl, Counter>,
-    pub total_messages_size: Counter,
+    pub total_messages_size: Family<TypeUrl, Counter>,
 }
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
@@ -54,15 +54,15 @@ impl Metrics {
             connection_terminations.clone(),
         );
 
-        let message_types = Family::default();
+        let message_count = Family::default();
 
         registry.register(
-            "message_types",
+            "message_count",
             "Total number of messages received (unstable)",
-            message_types.clone(),
+            message_count.clone(),
         );
 
-        let total_messages_size = Counter::default();
+        let total_messages_size = Family::default();
 
         registry.register(
             "total_messages_size",
@@ -72,7 +72,7 @@ impl Metrics {
 
         Self {
             connection_terminations,
-            message_types,
+            message_types: message_count,
             total_messages_size,
         }
     }
@@ -91,12 +91,18 @@ impl Recorder<DeltaDiscoveryResponse, ()> for Metrics {
         let type_url = TypeUrl {
             url: response.type_url.clone(),
         };
-        self.message_types.get_or_create(&type_url).inc_by(1);
+        self.message_types.get_or_create(&type_url).inc();
 
-        let mut message_size: usize = 0;
+        let mut total_message_size: u64 = 0;
         for resource in &response.resources {
-            message_size += resource.resource.as_ref().unwrap().value.len();
+            total_message_size += resource
+                .resource
+                .as_ref()
+                .map(|v| v.value.len())
+                .unwrap_or_default() as u64;
         }
-        self.total_messages_size.inc_by(message_size as u64);
+        self.total_messages_size
+            .get_or_create(&type_url)
+            .inc_by(total_message_size);
     }
 }
