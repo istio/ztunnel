@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::metrics::IncrementRecorder;
+use crate::metrics::{IncrementRecorder, Recorder};
 use crate::strng::Strng;
 use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
 use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
@@ -667,6 +667,7 @@ impl AdsClient {
         };
         let type_url = response.type_url.clone();
         let nonce = response.nonce.clone();
+        self.metrics.record(&response, ());
         info!(
             type_url = type_url, // this is a borrow, it's OK
             size = response.resources.len(),
