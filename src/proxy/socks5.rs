@@ -31,7 +31,6 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, error, info, info_span, Instrument};
 
-use crate::config;
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
 use crate::proxy::outbound::OutboundConnection;
@@ -42,7 +41,6 @@ pub(super) struct Socks5 {
     pi: Arc<ProxyInputs>,
     listener: socket::Listener,
     drain: DrainWatcher,
-    enable_orig_src: bool,
 }
 
 impl Socks5 {
@@ -61,13 +59,10 @@ impl Socks5 {
             "listener established",
         );
 
-        let mode = pi.cfg.proxy_mode;
         Ok(Socks5 {
             pi,
             listener,
             drain,
-            // Do not need to spoof with inpod mode for outbound
-            enable_orig_src: transparent && mode != config::ProxyMode::Shared,
         })
     }
 
@@ -79,7 +74,6 @@ impl Socks5 {
         let pi = self.pi.clone();
         let pool = crate::proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
-            self.enable_orig_src,
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );
@@ -97,7 +91,6 @@ impl Socks5 {
                                 pi: self.pi.clone(),
                                 id: TraceParent::new(),
                                 pool: pool.clone(),
-                                enable_orig_src: self.enable_orig_src,
                                 hbone_port: self.pi.cfg.inbound_addr.port(),
                             };
                             let span = info_span!("socks5", id=%oc.id);

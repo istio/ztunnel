@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::{sync, thread};
 
-use anyhow::anyhow;
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,7 +41,6 @@ struct Network {
 
 struct NodeNetwork {
     id: u8,
-    net: NetNs,
 }
 
 #[derive(Default)]
@@ -245,21 +243,6 @@ ip -n {prefix} addr add 172.172.0.1/16 dev br0
         self.resolver().resolve(name)
     }
 
-    pub(super) fn run_in_node(
-        &self,
-        node: &str,
-        f: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        self.state
-            .lock()
-            .unwrap()
-            .nodes
-            .get(node)
-            .ok_or_else(|| anyhow!("unknown node"))?
-            .net
-            .run(|_| f())?
-    }
-
     /// child constructs a new network namespace "inside" the root namespace.
     /// Each namespace gets a unique IP address, and is configured to be able to route to all other namespaces
     /// through the root network namespace.
@@ -279,14 +262,10 @@ ip -n {prefix} addr add 172.172.0.1/16 dev br0
             assert!(state.nodes.len() < 16, "only 16 nodes allowed");
             let node_id = state.nodes.len() as u8 + 2;
             // Setup node
-            let netns = NetNs::new(&node_net)?;
-            state.nodes.insert(
-                node.to_string(),
-                NodeNetwork {
-                    id: node_id,
-                    net: netns,
-                },
-            );
+            let _ = NetNs::new(&node_net)?;
+            state
+                .nodes
+                .insert(node.to_string(), NodeNetwork { id: node_id });
             let veth = format!("veth{node_id}");
             helpers::run_command(&format!(
                 "

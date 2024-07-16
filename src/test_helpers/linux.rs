@@ -24,7 +24,7 @@ use crate::{config, identity, proxy, strng};
 
 use crate::signal::ShutdownTrigger;
 use crate::test_helpers::inpod::start_ztunnel_server;
-use crate::test_helpers::linux::TestMode::Shared;
+use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
 use std::net::IpAddr;
@@ -54,11 +54,11 @@ pub struct WorkloadManager {
     drops: Vec<ShutdownTrigger>,
 }
 
+#[derive(Debug)]
 pub struct LocalZtunnel {
     fd_sender: Option<MpscAckSender<(String, i32)>>,
     config_sender: MpscAckSender<LocalConfig>,
-    ip: IpAddr,
-    veth: String,
+    namespace: Namespace,
 }
 
 impl Drop for WorkloadManager {
@@ -101,6 +101,10 @@ impl WorkloadManager {
         })
     }
 
+    pub fn mode(&self) -> TestMode {
+        self.mode
+    }
+
     /// deploy_ztunnel runs a ztunnel instance and configures redirection on the "node".
     ///
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
@@ -119,7 +123,6 @@ impl WorkloadManager {
             .register()
             .await?;
         let ip = ns.ip();
-        let veth = ns.interface();
         let initial_config = LocalConfig {
             workloads: self.workloads.clone(),
             policies: self.policies.clone(),
@@ -142,16 +145,26 @@ impl WorkloadManager {
             local_ip: Some(ns.ip()),
             inpod_uds,
             proxy_mode,
+            testing_dedicated_mark: if proxy_mode == ProxyMode::Dedicated {
+                1337
+            } else {
+                0
+            },
+            require_original_source: if proxy_mode == ProxyMode::Dedicated {
+                Some(false)
+            } else {
+                Some(true)
+            },
             ..config::parse_config().unwrap()
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
         ns.run_ready(move |ready| async move {
-            if proxy_mode != ProxyMode::Shared {
+            if proxy_mode == ProxyMode::Dedicated {
                 // not needed in "inpod" (shared proxy) mode. In shared mode we run `ztunnel-redirect-inpod.sh`
                 // inside the pod's netns
-                helpers::run_command(&format!("scripts/ztunnel-redirect.sh {ip}"))?;
+                helpers::run_command("scripts/ztunnel-redirect.sh")?;
             }
             let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
             let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
@@ -200,8 +213,7 @@ impl WorkloadManager {
         let zt_info = LocalZtunnel {
             fd_sender: ztunnel_server,
             config_sender: tx_cfg,
-            ip,
-            veth: veth.clone(),
+            namespace: ns,
         };
         self.ztunnels.insert(node.to_string(), zt_info);
         let ta = rx.recv()?;
@@ -437,11 +449,19 @@ impl<'a> TestWorkloadBuilder<'a> {
 
     /// Finish building the workload.
     pub async fn register(mut self) -> anyhow::Result<Namespace> {
+        let zt = self.manager.ztunnels.get(self.w.workload.node.as_str());
         let node = self.w.workload.node.clone();
-        let network_namespace = self
-            .manager
-            .namespaces
-            .child(&self.w.workload.node, &self.w.workload.name)?;
+        let network_namespace = if self.manager.mode == Dedicated && zt.is_some() {
+            // This is a bit of hack. For dedicated mode, we run the app and ztunnel in the same namespace
+            // We probably should express this more natively in the framework, but for now we just detect it
+            // and re-use the namespace.
+            tracing::info!("node already has ztunnel and dedicate mode, sharing");
+            zt.as_ref().unwrap().namespace.clone()
+        } else {
+            self.manager
+                .namespaces
+                .child(&self.w.workload.node, &self.w.workload.name)?
+        };
         self.w.workload.workload_ips = vec![network_namespace.ip()];
         self.w.workload.uid = format!(
             "cluster1//v1/Pod/{}/{}",
@@ -489,14 +509,6 @@ impl<'a> TestWorkloadBuilder<'a> {
                     .unwrap()
                     .send_and_wait((uid.to_string(), fd))
                     .await?;
-            } else {
-                let our_ip = network_namespace.ip();
-                // Setup in the ztunnel network namespace
-                let ip = zt_info.ip;
-                let veth = &zt_info.veth;
-                self.manager.namespaces.run_in_node(&node, || {
-                    helpers::run_command(&format!("scripts/node-redirect.sh {ip} {veth} {our_ip}"))
-                })?;
             }
         }
         self.manager.refresh_config().await?;

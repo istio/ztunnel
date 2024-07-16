@@ -67,8 +67,12 @@ impl ProxyFactory {
     }
 
     pub async fn new_proxies(&self) -> Result<ProxyResult, Error> {
-        self.new_proxies_from_factory(None, None, Arc::new(crate::proxy::DefaultSocketFactory))
-            .await
+        let factory = if self.config.testing_dedicated_mark != 0 {
+            new_mark_socket_factory(self.config.testing_dedicated_mark)
+        } else {
+            Arc::new(crate::proxy::DefaultSocketFactory)
+        };
+        self.new_proxies_from_factory(None, None, factory).await
     }
 
     pub async fn new_proxies_from_factory(
@@ -128,4 +132,14 @@ pub struct ProxyResult {
     pub proxy: Option<Proxy>,
     pub dns_proxy: Option<dns::Server>,
     pub connection_manager: Option<ConnectionManager>,
+}
+
+#[cfg(feature = "testing")]
+fn new_mark_socket_factory(mark: u32) -> Arc<dyn crate::proxy::SocketFactory + Send + Sync> {
+    Arc::new(crate::test_helpers::MarkSocketFactory(mark))
+}
+
+#[cfg(not(feature = "testing"))]
+fn new_mark_socket_factory(_mark: u32) -> Arc<dyn crate::proxy::SocketFactory + Send + Sync> {
+    unimplemented!("testing_dedicated_mark requires --features testing")
 }

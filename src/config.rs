@@ -226,6 +226,10 @@ pub struct Config {
     pub inpod_uds: PathBuf,
     pub inpod_port_reuse: bool,
     pub inpod_mark: u32,
+
+    // Mark to assign to all packets. Only allowed in `--feature testing` mode.
+    // This is to enable the testing of 'dedicated' mode.
+    pub testing_dedicated_mark: u32,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -492,6 +496,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         inpod_port_reuse: parse_default(INPOD_PORT_REUSE, true)?,
         inpod_mark: parse_default(INPOD_MARK, DEFAULT_INPOD_MARK)?,
         fake_self_inbound: false,
+        testing_dedicated_mark: 0,
     })
 }
 

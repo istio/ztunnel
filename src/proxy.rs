@@ -547,10 +547,6 @@ pub async fn freebind_connect(
             }
         };
 
-        // we don't need original src with inpod outbound mode.
-        // we do need it in inbound and inbound passthrough TODO: refactor so this is derived from config
-        // local = None; // commented out for now as we only want to disable this in inpod + outbound mode
-
         match local {
             None => {
                 let socket = create_socket(addr.is_ipv4())?;
