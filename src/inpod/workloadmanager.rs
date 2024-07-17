@@ -114,7 +114,7 @@ impl WorkloadProxyNetworkHandler {
                     backoff =
                         std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
                     warn!(
-                        "failed to connect to server {:?}: {:?}. retrying in {:?}",
+                        "failed to connect to Istio CNI Node Agent over {:?}, is the Istio CNI healthy? details: {:?}. retrying in {:?}",
                         &self.uds, e, backoff
                     );
                     tokio::time::sleep(backoff).await;
