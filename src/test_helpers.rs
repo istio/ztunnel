@@ -31,8 +31,7 @@ use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
 use hickory_resolver::config::*;
 
-use crate::proxy::{DefaultSocketFactory, SocketFactory};
-use crate::{socket, strng};
+use crate::strng;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
 use prometheus_client::registry::Registry;
@@ -127,6 +126,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         proxy_mode: config::ProxyMode::Dedicated,
         illegal_ports: HashSet::new(), // for "direct" tests, since the ports are latebound, we can't test illegal ports
         fake_self_inbound: true, // for "direct" tests, since the ports are latebound, we have to do this. Yes, this is test concerns leaking into prod code
+        packet_mark: None,
         ..config::parse_config().unwrap()
     };
     // Do not let tests use system defaults!
@@ -554,34 +554,4 @@ pub fn mpsc_ack<T>(buffer: usize) -> (MpscAckSender<T>, MpscAckReceiver<T>) {
     let (tx, rx) = tokio::sync::mpsc::channel::<T>(buffer);
     let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<()>(1);
     (MpscAckSender { tx, ack_rx }, MpscAckReceiver { rx, ack_tx })
-}
-
-pub struct MarkSocketFactory(pub u32);
-
-impl SocketFactory for MarkSocketFactory {
-    fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        DefaultSocketFactory.new_tcp_v4().and_then(|s| {
-            socket::set_mark(&s, self.0)?;
-            Ok(s)
-        })
-    }
-
-    fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        DefaultSocketFactory.new_tcp_v6().and_then(|s| {
-            socket::set_mark(&s, self.0)?;
-            Ok(s)
-        })
-    }
-
-    fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        DefaultSocketFactory.tcp_bind(addr)
-    }
-
-    fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
-        DefaultSocketFactory.udp_bind(addr)
-    }
-
-    fn ipv6_enabled_localhost(&self) -> std::io::Result<bool> {
-        DefaultSocketFactory.ipv6_enabled_localhost()
-    }
 }

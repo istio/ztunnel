@@ -65,7 +65,7 @@ impl Default for Fixture {
         let mut registry = Registry::default();
 
         let cfg = crate::config::Config {
-            inpod_mark: 1,
+            packet_mark: Some(1),
             ..crate::config::construct_config(Default::default()).unwrap()
         };
         let state = Arc::new(RwLock::new(ProxyState::default()));

@@ -145,11 +145,8 @@ impl WorkloadManager {
             local_ip: Some(ns.ip()),
             inpod_uds,
             proxy_mode,
-            testing_dedicated_mark: if proxy_mode == ProxyMode::Dedicated {
-                1337
-            } else {
-                0
-            },
+            // We use packet mark even in dedicated to distinguish proxy from application
+            packet_mark: Some(1337),
             require_original_source: if proxy_mode == ProxyMode::Dedicated {
                 Some(false)
             } else {
