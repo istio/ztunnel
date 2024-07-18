@@ -14,6 +14,7 @@
 
 use crate::identity::Identity;
 
+use crate::state::WorkloadInfo;
 use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
 use crate::{strng, xds};
@@ -611,9 +612,32 @@ pub fn network_addr(network: Strng, vip: IpAddr) -> NetworkAddress {
     }
 }
 
+/// WorkloadIdentity provides information about a workloads identity. This is used in place of Identity
+/// in places where we do not have the full identity (no trust domain) and know we are working with workloads specifically.
+#[derive(Debug, Hash, Eq, PartialEq)]
+struct WorkloadIdentity {
+    namespace: Strng,
+    service_account: Strng,
+}
+
+impl From<&Identity> for WorkloadIdentity {
+    fn from(value: &Identity) -> Self {
+        let Identity::Spiffe {
+            namespace,
+            service_account,
+            ..
+        } = value;
+        WorkloadIdentity {
+            namespace: namespace.clone(),
+            service_account: service_account.clone(),
+        }
+    }
+}
+
 /// A WorkloadStore encapsulates all information about workloads in the mesh
 #[derive(Debug)]
 pub struct WorkloadStore {
+    local_node: Option<Strng>,
     // TODO this could be expanded to Sender<Workload> + a full subscriber/streaming
     // model, but for now just notifying watchers to wake when _any_ insert happens
     // is simpler (and only requires a channelsize of 1)
@@ -624,21 +648,20 @@ pub struct WorkloadStore {
     /// byUid maps workload UIDs to workloads
     pub(super) by_uid: HashMap<Strng, Arc<Workload>>,
     // Identity->Set of UIDs. Only stores local nodes
-    by_identity: HashMap<Identity, HashSet<Strng>>,
-}
-
-impl Default for WorkloadStore {
-    fn default() -> Self {
-        WorkloadStore {
-            insert_notifier: Sender::new(()),
-            by_addr: Default::default(),
-            by_identity: Default::default(),
-            by_uid: Default::default(),
-        }
-    }
+    node_local_by_identity: HashMap<WorkloadIdentity, HashSet<Strng>>,
 }
 
 impl WorkloadStore {
+    pub fn new(local_node: Option<Strng>) -> Self {
+        WorkloadStore {
+            local_node,
+            insert_notifier: Sender::new(()),
+            by_addr: Default::default(),
+            node_local_by_identity: Default::default(),
+            by_uid: Default::default(),
+        }
+    }
+
     // Returns a new subscriber. Note that subscribers are only guaranteed to be notified on
     // new values sent _after_ their creation, so callers should create, check current state,
     // then sub.
@@ -646,7 +669,7 @@ impl WorkloadStore {
         self.insert_notifier.subscribe()
     }
 
-    pub fn insert(&mut self, w: Arc<Workload>, track_identity: bool) {
+    pub fn insert(&mut self, w: Arc<Workload>) {
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove(&w.uid);
 
@@ -658,9 +681,9 @@ impl WorkloadStore {
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
         // Only track local nodes to avoid overhead
-        if track_identity {
-            self.by_identity
-                .entry(w.identity())
+        if self.local_node == None || self.local_node.as_ref() == Some(&w.node) {
+            self.node_local_by_identity
+                .entry((&w.identity()).into())
                 .or_default()
                 .insert(w.uid.clone());
         }
@@ -685,14 +708,14 @@ impl WorkloadStore {
                             .remove(&network_addr(prev.network.clone(), *wip));
                     }
                 }
-
-                let id = prev.identity();
-                if let Some(set) = self.by_identity.get_mut(&id) {
+                let id = (&prev.identity()).into();
+                if let Some(set) = self.node_local_by_identity.get_mut(&id) {
                     set.remove(&prev.uid);
                     if set.is_empty() {
-                        self.by_identity.remove(&id);
+                        self.node_local_by_identity.remove(&id);
                     }
                 }
+
                 Some(prev.deref().clone())
             }
         }
@@ -703,13 +726,34 @@ impl WorkloadStore {
         self.by_addr.get(addr).cloned()
     }
 
+    /// Finds the workload by workload information, as an arc.
+    pub fn find_by_info(&self, wl: &WorkloadInfo) -> Option<Arc<Workload>> {
+        // We do not have an index directly on the full workload info, but we can narrow it down
+        // to only workloads on the same node with the same identity -- a tiny set to iterate over
+        self.node_local_by_identity
+            .get(&WorkloadIdentity {
+                namespace: strng::new(&wl.namespace),
+                service_account: strng::new(&wl.service_account),
+            })?
+            .iter()
+            .find_map(|uid| self.by_uid.get(uid).cloned())
+    }
+
     /// Finds the workload by uid.
     pub fn find_uid(&self, uid: &Strng) -> Option<Arc<Workload>> {
         self.by_uid.get(uid).cloned()
     }
 
-    pub fn has_identity(&self, identity: &Identity) -> bool {
-        self.by_identity.contains_key(identity)
+    // was_last_identity_on_node is a specialized function to help determine if we should clear a certificate.
+    // It is called when a workload is removed, with the node and identity of the workload
+    pub fn was_last_identity_on_node(&self, node_name: &Strng, identity: &Identity) -> bool {
+        if self.local_node == None || self.local_node.as_ref() == Some(node_name) {
+            // This was a workload on the node... now check if there are any remaining workloads with
+            // this identity on the node.
+            !self.node_local_by_identity.contains_key(&identity.into())
+        } else {
+            false
+        }
     }
 }
 
@@ -1591,6 +1635,7 @@ mod tests {
             cfg,
             state: state.clone(),
             cert_fetcher: Arc::new(cert_fetcher::NoCertFetcher()),
+            local_node: None,
         };
         local_client.run().await.expect("client should run");
         let wl = demand

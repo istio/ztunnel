@@ -417,7 +417,7 @@ pub fn new_proxy_state(
     xds_services: &[XdsService],
     xds_authorizations: &[XdsAuthorization],
 ) -> DemandProxyState {
-    let state = Arc::new(RwLock::new(ProxyState::default()));
+    let state = Arc::new(RwLock::new(ProxyState::new(None)));
     let updater = ProxyStateUpdater::new_no_fetch(state.clone());
 
     for w in xds_workloads {

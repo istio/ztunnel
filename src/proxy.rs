@@ -26,6 +26,7 @@ use crate::strng::Strng;
 use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::OnceCell;
 use tokio::time::timeout;
 use tracing::{debug, trace, warn, Instrument};
 
@@ -188,6 +189,34 @@ impl ScopedSecretManager {
     }
 }
 
+pub struct LocalWorkloadInformation {
+    wi: Arc<WorkloadInfo>,
+    state: DemandProxyState,
+    workload: OnceCell<Arc<Workload>>,
+}
+
+impl LocalWorkloadInformation {
+    pub fn new(wi: Arc<WorkloadInfo>, state: DemandProxyState) -> LocalWorkloadInformation {
+        LocalWorkloadInformation {
+            wi,
+            state,
+            workload: OnceCell::new(),
+        }
+    }
+
+    pub async fn get_workload(&self) -> Result<Arc<Workload>, Error> {
+        self.workload
+            .get_or_try_init(|| async {
+                self.state
+                    .wait_for_workload(&self.wi, Duration::from_secs(5))
+                    .await
+                    .ok_or_else(|| Error::UnknownSourceWorkload(self.wi.clone()))
+            })
+            .await
+            .cloned()
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ProxyInputs {
     cfg: Arc<config::Config>,
@@ -197,6 +226,7 @@ pub(super) struct ProxyInputs {
     metrics: Arc<Metrics>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     proxy_workload_info: Option<Arc<WorkloadInfo>>,
+    local_workload_information: Arc<LocalWorkloadInformation>,
     resolver: Option<Arc<dyn Resolver + Send + Sync>>,
 }
 
@@ -212,7 +242,10 @@ impl ProxyInputs {
         proxy_workload_info: Option<WorkloadInfo>,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Arc<Self> {
+        let pwi = proxy_workload_info.clone().expect("todo");
         let proxy_workload_info = proxy_workload_info.map(Arc::new);
+        let local_workload_information =
+            Arc::new(LocalWorkloadInformation::new(Arc::new(pwi), state.clone()));
         Arc::new(Self {
             cfg,
             state,
@@ -224,6 +257,7 @@ impl ProxyInputs {
             connection_manager,
             socket_factory,
             proxy_workload_info,
+            local_workload_information,
             resolver,
         })
     }
@@ -414,6 +448,9 @@ pub enum Error {
 
     #[error("unknown source: {0}")]
     UnknownSource(IpAddr),
+
+    #[error("failed to fetch information about local workload: {0}")]
+    UnknownSourceWorkload(Arc<WorkloadInfo>),
 
     #[error("invalid source: {0}, should match {1:?}")]
     MismatchedSource(IpAddr, Arc<WorkloadInfo>),
@@ -768,8 +805,8 @@ mod tests {
     async fn check_gateway() {
         let w = mock_default_gateway_workload();
         let s = mock_default_gateway_service();
-        let mut state = state::ProxyState::default();
-        state.workloads.insert(Arc::new(w), true);
+        let mut state = state::ProxyState::new(None);
+        state.workloads.insert(Arc::new(w));
         state.services.insert(s);
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));

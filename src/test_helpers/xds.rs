@@ -110,7 +110,7 @@ impl AdsServer {
         cfg.xds_on_demand = xds_on_demand;
 
         let proxy_metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
+        let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::new(None)));
         let dstate = DemandProxyState::new(
             state.clone(),
             None,

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::identity::{Identity, SecretManager};
-use crate::proxy;
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
@@ -31,6 +30,7 @@ use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, xds};
+use crate::{proxy, strng};
 use futures_util::FutureExt;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
@@ -149,7 +149,7 @@ impl fmt::Display for ProxyRbacContext {
     }
 }
 /// The current state information for this proxy.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ProxyState {
     pub workloads: WorkloadStore,
 
@@ -209,6 +209,14 @@ impl serde::Serialize for ProxyState {
 }
 
 impl ProxyState {
+    pub fn new(local_node: Option<Strng>) -> ProxyState {
+        ProxyState {
+            workloads: WorkloadStore::new(local_node),
+            services: Default::default(),
+            policies: Default::default(),
+        }
+    }
+
     /// Find either a workload or service by the destination.
     pub fn find_destination(&self, dest: &Destination) -> Option<Address> {
         match dest {
@@ -655,17 +663,17 @@ impl DemandProxyState {
     // when we get it, or nothing if the timeout is exceeded, whichever happens first
     pub async fn wait_for_workload(
         &self,
-        addr: &NetworkAddress,
+        wl: &WorkloadInfo,
         deadline: Duration,
     ) -> Option<Arc<Workload>> {
-        debug!(%addr, "wait for workload");
+        debug!(%wl, "wait for workload");
 
         // Take a watch listener *before* checking state (so we don't miss anything)
         let mut wl_sub = self.state.read().unwrap().workloads.new_subscriber();
 
-        debug!(%addr, "got sub, waiting for workload");
+        debug!(%wl, "got sub, waiting for workload");
 
-        if let Some(wl) = self.fetch_workload(addr).await {
+        if let Some(wl) = self.find_by_info(wl) {
             return Some(wl);
         }
 
@@ -681,12 +689,18 @@ impl DemandProxyState {
                     break None;
                 },
                 _ = wl_sub.changed() => {
-                    if let Some(wl) = self.fetch_workload(addr).await {
+                    if let Some(wl) = self.find_by_info(wl) {
                         break Some(wl);
                     }
                 }
             }
         }
+    }
+
+    /// Finds the workload by workload information, as an arc.
+    /// Note: this does not currently support on-demand.
+    pub fn find_by_info(&self, wl: &WorkloadInfo) -> Option<Arc<Workload>> {
+        self.state.read().unwrap().workloads.find_by_info(wl)
     }
 
     // only support workload
@@ -938,7 +952,9 @@ impl ProxyStateManager {
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<ProxyStateManager> {
         let cert_fetcher = cert_fetcher::new(&config, cert_manager);
-        let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::default()));
+        let state: Arc<RwLock<ProxyState>> = Arc::new(RwLock::new(ProxyState::new(
+            config.local_node.as_ref().map(strng::new),
+        )));
         let xds_client = if config.xds_address.is_some() {
             let updater = ProxyStateUpdater::new(state.clone(), cert_fetcher.clone());
             let tls_client_fetcher = Box::new(tls::ControlPlaneAuthentication::RootCert(
@@ -955,6 +971,7 @@ impl ProxyStateManager {
         };
         if let Some(cfg) = &config.local_xds_config {
             let local_client = LocalClient {
+                local_node: config.local_node.as_ref().map(strng::new),
                 cfg: cfg.clone(),
                 state: state.clone(),
                 cert_fetcher,
@@ -1004,9 +1021,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_workload() {
-        let mut state = ProxyState::default();
+        let mut state = ProxyState::new(None);
         let delayed_wl = Arc::new(test_helpers::test_default_workload());
-        state.workloads.insert(delayed_wl.clone(), true);
+        state.workloads.insert(delayed_wl.clone());
 
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
@@ -1018,15 +1035,15 @@ mod tests {
             metrics,
         );
 
-        // Some from Address
-        let dst = NetworkAddress {
-            network: strng::EMPTY,
-            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        let want = WorkloadInfo {
+            name: delayed_wl.name.to_string(),
+            namespace: delayed_wl.namespace.to_string(),
+            service_account: delayed_wl.service_account.to_string(),
         };
 
         test_helpers::assert_eventually(
             Duration::from_secs(1),
-            || mock_proxy_state.wait_for_workload(&dst, Duration::from_millis(50)),
+            || mock_proxy_state.wait_for_workload(&want, Duration::from_millis(50)),
             Some(delayed_wl),
         )
         .await;
@@ -1034,7 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_workload_delay_fails() {
-        let state = ProxyState::default();
+        let state = ProxyState::new(None);
 
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
@@ -1046,15 +1063,15 @@ mod tests {
             metrics,
         );
 
-        // Some from Address
-        let dst = NetworkAddress {
-            network: strng::EMPTY,
-            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        let want = WorkloadInfo {
+            name: "fake".to_string(),
+            namespace: "fake".to_string(),
+            service_account: "fake".to_string(),
         };
 
         test_helpers::assert_eventually(
             Duration::from_millis(10),
-            || mock_proxy_state.wait_for_workload(&dst, Duration::from_millis(5)),
+            || mock_proxy_state.wait_for_workload(&want, Duration::from_millis(5)),
             None,
         )
         .await;
@@ -1063,7 +1080,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_wait_for_workload_eventually() {
         initialize_telemetry();
-        let state = ProxyState::default();
+        let state = ProxyState::new(None);
         let wrap_state = Arc::new(RwLock::new(state));
         let not_delayed_wl = Arc::new(Workload {
             workload_ips: vec!["1.2.3.4".parse().unwrap()],
@@ -1085,16 +1102,17 @@ mod tests {
         );
 
         // Some from Address
-        let dst = NetworkAddress {
-            network: strng::EMPTY,
-            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        let want = WorkloadInfo {
+            name: delayed_wl.name.to_string(),
+            namespace: delayed_wl.namespace.to_string(),
+            service_account: delayed_wl.service_account.to_string(),
         };
 
         let expected_wl = delayed_wl.clone();
         let t = tokio::spawn(async move {
             test_helpers::assert_eventually(
                 Duration::from_millis(500),
-                || mock_proxy_state.wait_for_workload(&dst, Duration::from_millis(250)),
+                || mock_proxy_state.wait_for_workload(&want, Duration::from_millis(250)),
                 Some(expected_wl),
             )
             .await;
@@ -1104,23 +1122,23 @@ mod tests {
             .write()
             .unwrap()
             .workloads
-            .insert(not_delayed_wl, true);
+            .insert(not_delayed_wl);
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Send the correct workload through
         wrap_state
             .write()
             .unwrap()
             .workloads
-            .insert(delayed_wl, true);
+            .insert(delayed_wl);
         t.await.expect("should not fail");
     }
 
     #[tokio::test]
     async fn lookup_address() {
-        let mut state = ProxyState::default();
+        let mut state = ProxyState::new(None);
         state
             .workloads
-            .insert(Arc::new(test_helpers::test_default_workload()), true);
+            .insert(Arc::new(test_helpers::test_default_workload()));
         state.services.insert(test_helpers::mock_default_service());
 
         let mut registry = Registry::default();
@@ -1257,8 +1275,8 @@ mod tests {
             ..test_helpers::mock_default_service()
         };
 
-        let mut state = ProxyState::default();
-        state.workloads.insert(wl.clone().into(), true);
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(wl.clone().into());
         state.services.insert(svc);
 
         let mode = match tc {
@@ -1473,7 +1491,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_balance() {
         initialize_telemetry();
-        let mut state = ProxyState::default();
+        let mut state = ProxyState::new(None);
         let wl_no_locality = Workload {
             uid: "cluster1//v1/Pod/default/wl_no_locality".into(),
             name: "wl_no_locality".into(),
@@ -1590,9 +1608,9 @@ mod tests {
         };
         state
             .workloads
-            .insert(Arc::new(wl_no_locality.clone()), true);
-        state.workloads.insert(Arc::new(wl_match.clone()), true);
-        state.workloads.insert(Arc::new(wl_almost.clone()), true);
+            .insert(Arc::new(wl_no_locality.clone()));
+        state.workloads.insert(Arc::new(wl_match.clone()));
+        state.workloads.insert(Arc::new(wl_almost.clone()));
         state.services.insert(strict_svc.clone());
         state.services.insert(failover_svc.clone());
 
