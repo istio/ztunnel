@@ -28,7 +28,7 @@ impl InPodConfig {
     pub fn new(cfg: &config::Config) -> std::io::Result<Self> {
         Ok(InPodConfig {
             cur_netns: Arc::new(InpodNetns::current()?),
-            mark: std::num::NonZeroU32::new(cfg.inpod_mark),
+            mark: std::num::NonZeroU32::new(cfg.packet_mark.expect("in pod requires packet mark")),
             reuse_port: cfg.inpod_port_reuse,
         })
     }
@@ -195,7 +195,7 @@ mod test {
             }
 
             crate::config::Config {
-                inpod_mark: 123,
+                packet_mark: Some(123),
                 ..crate::config::parse_config().unwrap()
             }
         }};

@@ -104,6 +104,36 @@ impl SocketFactory for DefaultSocketFactory {
     }
 }
 
+pub struct MarkSocketFactory(pub u32);
+
+impl SocketFactory for MarkSocketFactory {
+    fn new_tcp_v4(&self) -> io::Result<TcpSocket> {
+        DefaultSocketFactory.new_tcp_v4().and_then(|s| {
+            socket::set_mark(&s, self.0)?;
+            Ok(s)
+        })
+    }
+
+    fn new_tcp_v6(&self) -> io::Result<TcpSocket> {
+        DefaultSocketFactory.new_tcp_v6().and_then(|s| {
+            socket::set_mark(&s, self.0)?;
+            Ok(s)
+        })
+    }
+
+    fn tcp_bind(&self, addr: SocketAddr) -> io::Result<socket::Listener> {
+        DefaultSocketFactory.tcp_bind(addr)
+    }
+
+    fn udp_bind(&self, addr: SocketAddr) -> io::Result<tokio::net::UdpSocket> {
+        DefaultSocketFactory.udp_bind(addr)
+    }
+
+    fn ipv6_enabled_localhost(&self) -> io::Result<bool> {
+        DefaultSocketFactory.ipv6_enabled_localhost()
+    }
+}
+
 pub struct Proxy {
     inbound: Inbound,
     inbound_passthrough: InboundPassthrough,
@@ -546,10 +576,6 @@ pub async fn freebind_connect(
                 socket_factory.new_tcp_v6()
             }
         };
-
-        // we don't need original src with inpod outbound mode.
-        // we do need it in inbound and inbound passthrough TODO: refactor so this is derived from config
-        // local = None; // commented out for now as we only want to disable this in inpod + outbound mode
 
         match local {
             None => {

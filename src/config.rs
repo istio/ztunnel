@@ -37,7 +37,7 @@ const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
-const INPOD_MARK: &str = "INPOD_MARK";
+const PACKET_MARK: &str = "PACKET_MARK";
 const INPOD_UDS: &str = "INPOD_UDS";
 const INPOD_PORT_REUSE: &str = "INPOD_PORT_REUSE";
 const INSTANCE_IP: &str = "INSTANCE_IP";
@@ -225,7 +225,12 @@ pub struct Config {
 
     pub inpod_uds: PathBuf,
     pub inpod_port_reuse: bool,
-    pub inpod_mark: u32,
+
+    // Mark to assign to all packets.
+    // This is required for in-pod mode.
+    // For dedicated mode, it is not strictly required, but can be useful in some environments to
+    // distinguish proxy traffic from application traffic.
+    pub packet_mark: Option<u32>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -384,6 +389,15 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         illegal_ports.insert(addr.port());
     }
 
+    let proxy_mode = match parse::<String>(PROXY_MODE)? {
+        Some(proxy_mode) => match proxy_mode.as_str() {
+            PROXY_MODE_DEDICATED => ProxyMode::Dedicated,
+            PROXY_MODE_SHARED => ProxyMode::Shared,
+            _ => return Err(Error::EnvVar(PROXY_MODE.to_string(), proxy_mode)),
+        },
+        None => ProxyMode::Shared,
+    };
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         dns_proxy: pc
@@ -452,14 +466,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
-        proxy_mode: match parse::<String>(PROXY_MODE)? {
-            Some(proxy_mode) => match proxy_mode.as_str() {
-                PROXY_MODE_DEDICATED => ProxyMode::Dedicated,
-                PROXY_MODE_SHARED => ProxyMode::Shared,
-                _ => return Err(Error::EnvVar(PROXY_MODE.to_string(), proxy_mode)),
-            },
-            None => ProxyMode::Shared,
-        },
+        proxy_mode,
         local_ip: parse(INSTANCE_IP)?,
         cluster_id,
         cluster_domain,
@@ -490,7 +497,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         dns_resolver_opts,
         inpod_uds: parse_default(INPOD_UDS, PathBuf::from("/var/run/ztunnel/ztunnel.sock"))?,
         inpod_port_reuse: parse_default(INPOD_PORT_REUSE, true)?,
-        inpod_mark: parse_default(INPOD_MARK, DEFAULT_INPOD_MARK)?,
+        packet_mark: parse(PACKET_MARK)?.or_else(|| {
+            if proxy_mode == ProxyMode::Shared {
+                // For inpod, mark is required so default it
+                Some(DEFAULT_INPOD_MARK)
+            } else {
+                None
+            }
+        }),
         fake_self_inbound: false,
     })
 }

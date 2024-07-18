@@ -126,6 +126,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         proxy_mode: config::ProxyMode::Dedicated,
         illegal_ports: HashSet::new(), // for "direct" tests, since the ports are latebound, we can't test illegal ports
         fake_self_inbound: true, // for "direct" tests, since the ports are latebound, we have to do this. Yes, this is test concerns leaking into prod code
+        packet_mark: None,
         ..config::parse_config().unwrap()
     };
     // Do not let tests use system defaults!
