@@ -581,7 +581,7 @@ mod tests {
     }
 
     fn test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
-        let mut state = state::ProxyState::default();
+        let mut state = state::ProxyState::new(None);
 
         let services = vec![
             ("waypoint", WAYPOINT_SVC_IP, WAYPOINT_POD_IP, Waypoint::None),
@@ -657,7 +657,7 @@ mod tests {
             state.services.insert(svc);
         }
         for wl in workloads {
-            state.workloads.insert(Arc::new(wl), true);
+            state.workloads.insert(Arc::new(wl));
         }
 
         let mut registry = Registry::default();

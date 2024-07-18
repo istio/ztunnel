@@ -552,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn test_policy_watcher_lifecycle() {
         // preamble: setup an environment
-        let state = Arc::new(RwLock::new(ProxyState::default()));
+        let state = Arc::new(RwLock::new(ProxyState::new(None)));
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let dstate = DemandProxyState::new(

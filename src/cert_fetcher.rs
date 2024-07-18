@@ -25,7 +25,6 @@ use tracing::{debug, error, info};
 pub trait CertFetcher: Send + Sync {
     fn prefetch_cert(&self, w: &Workload);
     fn clear_cert(&self, id: &Identity);
-    fn should_track_certificates_for_removal(&self, w: &Workload) -> bool;
 }
 
 /// A no-op implementation of [CertFetcher].
@@ -34,9 +33,6 @@ pub struct NoCertFetcher();
 impl CertFetcher for NoCertFetcher {
     fn prefetch_cert(&self, _: &Workload) {}
     fn clear_cert(&self, _: &Identity) {}
-    fn should_track_certificates_for_removal(&self, _w: &Workload) -> bool {
-        false
-    }
 }
 
 /// Constructs an appropriate [CertFetcher] for the proxy config.
@@ -117,12 +113,5 @@ impl CertFetcher for CertFetcherImpl {
         if let Err(e) = self.tx.try_send(Request::Forget(id.clone())) {
             info!("couldn't clear identity: {:?}", e)
         }
-    }
-
-    fn should_track_certificates_for_removal(&self, w: &Workload) -> bool {
-        // Only shared mode fetches other workloads's certs
-        self.proxy_mode == ProxyMode::Shared &&
-            // We only get certs for our own node
-            Some(w.node.as_str()) == self.local_node.as_deref()
     }
 }
