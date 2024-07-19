@@ -18,6 +18,7 @@ use std::fmt;
 use std::fmt::Formatter;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use tracing::Level;
 
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -120,8 +121,14 @@ impl ProxyStateUpdateMutator {
         }
     }
 
+    #[instrument(
+        level = Level::TRACE,
+        name="insert_workload",
+        skip_all,
+        fields(uid=%w.uid),
+    )]
     pub fn insert_workload(&self, state: &mut ProxyState, w: XdsWorkload) -> anyhow::Result<()> {
-        debug!("handling insert {}", w.uid);
+        debug!("handling insert");
 
         // Clone services, so we can pass full ownership of the rest of XdsWorkload to build our Workload
         // object, which doesn't include Services.
@@ -159,6 +166,12 @@ impl ProxyStateUpdateMutator {
         self.remove_internal(state, xds_name, true);
     }
 
+    #[instrument(
+        level = Level::TRACE,
+        name="remove",
+        skip_all,
+        fields(name=%xds_name, for_insert=%for_insert),
+    )]
     fn remove_internal(&self, state: &mut ProxyState, xds_name: &Strng, for_insert: bool) {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
@@ -193,8 +206,7 @@ impl ProxyStateUpdateMutator {
             // we don't have namespace/hostname xds primary key for service
             if !for_insert {
                 warn!(
-                    "tried to remove service keyed by {} but it did not have the expected namespace/hostname format",
-                    xds_name
+                    "tried to remove service but it did not have the expected namespace/hostname format",
                 );
             }
             return;
@@ -206,14 +218,11 @@ impl ProxyStateUpdateMutator {
             // (we remove then add workloads on initial update)
             //
             // we can make this assumption because namespaces and hostnames cannot have `/` in them
-            trace!(
-                "xds_name {} is obviously not a service, not attempting to delete as such",
-                xds_name
-            );
+            trace!("not a service, not attempting to delete as such",);
             return;
         }
         if state.services.remove(&name).is_none() && !for_insert {
-            warn!("tried to remove service keyed by {name}, but it was not found");
+            warn!("tried to remove service, but it was not found");
         }
     }
 
@@ -225,6 +234,12 @@ impl ProxyStateUpdateMutator {
         }
     }
 
+    #[instrument(
+        level = Level::TRACE,
+        name="insert_service",
+        skip_all,
+        fields(name=%service.name),
+    )]
     pub fn insert_service(
         &self,
         state: &mut ProxyState,
