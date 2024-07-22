@@ -76,7 +76,6 @@ struct PoolState {
 
 struct ConnSpawner {
     cfg: Arc<config::Config>,
-    original_source: bool,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     cert_manager: ScopedSecretManager,
     timeout_rx: watch::Receiver<bool>,
@@ -87,11 +86,10 @@ impl ConnSpawner {
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
-        let local = self.original_source.then_some(key.src);
         let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
         let connector = cert.outbound_connector(key.dst_id.clone())?;
         let tcp_stream =
-            super::freebind_connect(local, key.dst, self.socket_factory.as_ref()).await?;
+            super::freebind_connect(None, key.dst, self.socket_factory.as_ref()).await?;
 
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
@@ -338,7 +336,6 @@ impl WorkloadHBONEPool {
     // Callers should then be safe to drop() the pool instance.
     pub fn new(
         cfg: Arc<crate::config::Config>,
-        original_source: bool,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         cert_manager: ScopedSecretManager,
     ) -> WorkloadHBONEPool {
@@ -348,7 +345,6 @@ impl WorkloadHBONEPool {
 
         let spawner = ConnSpawner {
             cfg,
-            original_source,
             socket_factory,
             cert_manager,
             timeout_rx: timeout_recv.clone(),
@@ -999,8 +995,7 @@ mod test {
         let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
             Duration::from_secs(10),
         ));
-        let original_src = false; // for testing, not needed
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), original_src, sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
         let server = TestServer {
             conn_counter,
             drop_rx,

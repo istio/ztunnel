@@ -985,7 +985,12 @@ mod namespaced {
             .workload_builder("client", client_node.node())
             .register()
             .await?;
-        run_tcp_client(client, manager.resolver(), "server")?;
+        let target = if manager.mode() == Dedicated && !matches!(server_node, Uncaptured) {
+            "ztunnel-remote-node"
+        } else {
+            "server"
+        };
+        run_tcp_client(client, manager.resolver(), target)?;
 
         let metrics = [
             (CONNECTIONS_OPENED, 1),

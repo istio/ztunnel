@@ -24,7 +24,6 @@ use tokio::sync::watch;
 
 use tracing::{debug, error, info, info_span, trace_span, Instrument};
 
-use crate::config::ProxyMode;
 use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
@@ -43,7 +42,6 @@ pub struct Outbound {
     pi: Arc<ProxyInputs>,
     drain: DrainWatcher,
     listener: socket::Listener,
-    enable_orig_src: bool,
 }
 
 impl Outbound {
@@ -60,13 +58,10 @@ impl Outbound {
             transparent,
             "listener established",
         );
-        let mode = pi.cfg.proxy_mode;
         Ok(Outbound {
             pi,
             listener,
             drain,
-            // Do not need to spoof with inpod mode for outbound
-            enable_orig_src: transparent && mode != ProxyMode::Shared,
         })
     }
 
@@ -77,7 +72,6 @@ impl Outbound {
     pub(super) async fn run(self) {
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
-            self.enable_orig_src,
             self.pi.socket_factory.clone(),
             self.pi.cert_manager.clone(),
         );
@@ -96,7 +90,6 @@ impl Outbound {
                                 pi: self.pi.clone(),
                                 id: TraceParent::new(),
                                 pool: pool.clone(),
-                                enable_orig_src: self.enable_orig_src,
                                 hbone_port: self.pi.cfg.inbound_addr.port(),
                             };
                             let span = info_span!("outbound", id=%oc.id);
@@ -143,7 +136,6 @@ pub(super) struct OutboundConnection {
     pub(super) pi: Arc<ProxyInputs>,
     pub(super) id: TraceParent,
     pub(super) pool: proxy::pool::WorkloadHBONEPool,
-    pub(super) enable_orig_src: bool,
     pub(super) hbone_port: u16,
 }
 
@@ -257,15 +249,8 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        // Create a TCP connection to upstream
-        // We do not need spoofing for inbound
-        let local = if self.enable_orig_src && self.pi.cfg.proxy_mode != ProxyMode::Shared {
-            super::get_original_src_from_stream(&stream)
-        } else {
-            None
-        };
         let outbound = super::freebind_connect(
-            local,
+            None, // No need to spoof source IP on outbound
             req.actual_destination,
             self.pi.socket_factory.as_ref(),
         )
@@ -567,7 +552,6 @@ mod tests {
         let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
             Duration::from_secs(10),
         ));
-        let original_src = false; // for testing, not needed
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {
                 cert_manager: cert_mgr.clone(),
@@ -580,13 +564,7 @@ mod tests {
                 resolver: None,
             }),
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(
-                cfg.clone(),
-                original_src,
-                sock_fact,
-                cert_mgr.clone(),
-            ),
-            enable_orig_src: cfg.require_original_source.unwrap_or_default(),
+            pool: pool::WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr.clone()),
             hbone_port: cfg.inbound_addr.port(),
         };
 

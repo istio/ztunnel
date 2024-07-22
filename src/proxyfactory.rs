@@ -67,8 +67,13 @@ impl ProxyFactory {
     }
 
     pub async fn new_proxies(&self) -> Result<ProxyResult, Error> {
-        self.new_proxies_from_factory(None, None, Arc::new(crate::proxy::DefaultSocketFactory))
-            .await
+        let factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync> =
+            if let Some(mark) = self.config.packet_mark {
+                Arc::new(crate::proxy::MarkSocketFactory(mark))
+            } else {
+                Arc::new(crate::proxy::DefaultSocketFactory)
+            };
+        self.new_proxies_from_factory(None, None, factory).await
     }
 
     pub async fn new_proxies_from_factory(
