@@ -745,7 +745,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn build_request_unknown_source() {
         run_build_request(
             "1.2.3.4",
