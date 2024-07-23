@@ -312,7 +312,7 @@ impl OutboundConnection {
         {
             // if we have a waypoint for this svc, use it; otherwise route traffic normally
             if let Some(waypoint) = state
-                .fetch_service_waypoint(&target_service, &source_workload)
+                .fetch_service_waypoint(&target_service, &source_workload, target)
                 .await?
             {
                 let upstream_sans = waypoint.workload_and_services_san();
@@ -373,7 +373,7 @@ impl OutboundConnection {
         if !from_waypoint && !svc_addressed {
             // For case upstream server has enabled waypoint
             let waypoint = state
-                .fetch_workload_waypoint(&us.workload, &source_workload)
+                .fetch_workload_waypoint(&us.workload, &source_workload, target)
                 .await?;
             if let Some(waypoint) = waypoint {
                 let actual_destination = waypoint.workload_socket_addr();
