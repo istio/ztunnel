@@ -455,6 +455,7 @@ fn baggage(r: &Request, cluster: String) -> String {
     )
 }
 
+#[derive(Debug)]
 struct Request {
     protocol: Protocol,
     // Source workload sending the request
@@ -492,11 +493,11 @@ mod tests {
     use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::address::Type as XdsAddressType;
-    use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::{IpFamilies, Port};
     use crate::xds::istio::workload::{NetworkAddress as XdsNetworkAddress, PortList};
+    use crate::xds::istio::workload::{NetworkMode, Service as XdsService};
     use crate::{identity, xds};
 
     async fn run_build_request(
@@ -513,7 +514,7 @@ mod tests {
         to: &str,
         xds: Vec<XdsAddressType>,
         expect: Option<ExpectedRequest<'_>>,
-    ) {
+    ) -> Option<Request> {
         let cfg = Arc::new(Config {
             local_node: Some("local-node".to_string()),
             ..crate::config::parse_config().unwrap()
@@ -572,7 +573,7 @@ mod tests {
             .build_request(from.parse().unwrap(), to.parse().unwrap())
             .await
             .ok();
-        if let Some(r) = req {
+        if let Some(ref r) = req {
             assert_eq!(
                 expect,
                 Some(ExpectedRequest {
@@ -587,6 +588,7 @@ mod tests {
         } else {
             assert_eq!(expect, None);
         }
+        req
     }
 
     #[tokio::test]
@@ -890,6 +892,85 @@ mod tests {
             }),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_host_network() {
+        let xds = vec![
+            // Normal service
+            XdsAddressType::Service(XdsService {
+                hostname: "example.com".to_string(),
+                addresses: vec![XdsNetworkAddress {
+                    network: "".to_string(),
+                    address: vec![127, 0, 0, 3],
+                }],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 80,
+                }],
+                ..Default::default()
+            }),
+            // Workload is host network, so it's going to have the same IP as another workload
+            XdsAddressType::Workload(XdsWorkload {
+                uid: "cluster1//v1/Pod/default/pod1".to_string(),
+                name: "pod1".to_string(),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
+                services: std::collections::HashMap::from([(
+                    "/example.com".to_string(),
+                    PortList {
+                        ports: vec![Port {
+                            service_port: 80,
+                            target_port: 80,
+                        }],
+                    },
+                )]),
+                network_mode: NetworkMode::HostNetwork as i32,
+                ..Default::default()
+            }),
+            XdsAddressType::Workload(XdsWorkload {
+                uid: "cluster1//v1/Pod/default/pod2".to_string(),
+                name: "pod2".to_string(),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
+                network_mode: NetworkMode::HostNetwork as i32,
+                ..Default::default()
+            }),
+        ];
+        let res = run_build_request_multi(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            xds.clone(),
+            // Traffic to the service should go to the pod in the service
+            Some(ExpectedRequest {
+                destination: "127.0.0.2:80",
+                protocol: Protocol::TCP,
+                hbone_destination: "",
+            }),
+        )
+        .await
+        .expect("must resolve");
+        // Ensure it actually went to pod1, not the other pod with the same IP
+        assert_eq!(
+            res.actual_destination_workload.expect("found a dest").name,
+            "pod1"
+        );
+
+        // Traffic to the node directly. We should forward the request, but as passthrough, rather than
+        // associating it with a random pod.
+        let res = run_build_request_multi(
+            "127.0.0.1",
+            "127.0.0.2:80",
+            xds.clone(),
+            // Traffic to the service should go to the pod in the service
+            Some(ExpectedRequest {
+                destination: "127.0.0.2:80",
+                protocol: Protocol::TCP,
+                hbone_destination: "",
+            }),
+        )
+        .await
+        .expect("must resolve");
+        // Ensure it actually went to pod1, not the other pod with the same IP
+        assert_eq!(res.actual_destination_workload, None);
     }
 
     #[tokio::test]

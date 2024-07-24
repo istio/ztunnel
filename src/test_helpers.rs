@@ -200,6 +200,7 @@ pub fn test_default_workload() -> Workload {
         waypoint: None,
         network_gateway: None,
         protocol: Default::default(),
+        network_mode: Default::default(),
         uid: "".into(),
         name: "".into(),
         namespace: "".into(),

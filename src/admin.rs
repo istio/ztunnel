@@ -634,6 +634,7 @@ mod tests {
                 hbone_mtls_port: 15008,
             }),
             tunnel_protocol: Default::default(),
+            network_mode: Default::default(),
             uid: "uid".to_string(),
             name: "name".to_string(),
             namespace: "namespace".to_string(),

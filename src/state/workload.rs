@@ -60,6 +60,24 @@ impl From<xds::istio::workload::TunnelProtocol> for Protocol {
 #[derive(
     Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
 )]
+pub enum NetworkMode {
+    #[default]
+    Standard,
+    HostNetwork,
+}
+
+impl From<xds::istio::workload::NetworkMode> for NetworkMode {
+    fn from(value: xds::istio::workload::NetworkMode) -> Self {
+        match value {
+            xds::istio::workload::NetworkMode::Standard => NetworkMode::Standard,
+            xds::istio::workload::NetworkMode::HostNetwork => NetworkMode::HostNetwork,
+        }
+    }
+}
+
+#[derive(
+    Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
+)]
 pub enum HealthStatus {
     #[default]
     Healthy,
@@ -160,6 +178,8 @@ pub struct Workload {
 
     #[serde(default)]
     pub protocol: Protocol,
+    #[serde(default)]
+    pub network_mode: NetworkMode,
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub uid: Strng,
@@ -367,6 +387,9 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
 
             protocol: Protocol::from(xds::istio::workload::TunnelProtocol::try_from(
                 resource.tunnel_protocol,
+            )?),
+            network_mode: NetworkMode::from(xds::istio::workload::NetworkMode::try_from(
+                resource.network_mode,
             )?),
 
             uid: resource.uid.into(),
@@ -609,9 +632,11 @@ impl WorkloadStore {
         // First, remove the entry entirely to make sure things are cleaned up properly.
         self.remove(&w.uid);
 
-        for ip in &w.workload_ips {
-            self.by_addr
-                .insert(network_addr(w.network.clone(), *ip), w.clone());
+        if w.network_mode != NetworkMode::HostNetwork {
+            for ip in &w.workload_ips {
+                self.by_addr
+                    .insert(network_addr(w.network.clone(), *ip), w.clone());
+            }
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
         // Only track local nodes to avoid overhead
@@ -630,13 +655,17 @@ impl WorkloadStore {
     pub fn remove(&mut self, uid: &Strng) -> Option<Workload> {
         match self.by_uid.remove(uid) {
             None => {
-                trace!("tried to remove workload keyed by {} but it was not found; presumably it was a service", uid);
+                trace!(
+                    "tried to remove workload but it was not found; presumably it was a service"
+                );
                 None
             }
             Some(prev) => {
-                for wip in prev.workload_ips.iter() {
-                    self.by_addr
-                        .remove(&network_addr(prev.network.clone(), *wip));
+                if prev.network_mode != NetworkMode::HostNetwork {
+                    for wip in prev.workload_ips.iter() {
+                        self.by_addr
+                            .remove(&network_addr(prev.network.clone(), *wip));
+                    }
                 }
 
                 let id = prev.identity();
