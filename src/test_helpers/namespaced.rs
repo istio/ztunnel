@@ -57,7 +57,7 @@ macro_rules! setup_netns_test {
 /// * Have a few shared files re-mounted to not impact the host
 ///
 /// This should be called like
-/// ```
+/// ```ignore
 /// #[ctor::ctor]
 //  fn initialize_namespace_tests() {
 //      ztunnel::test_helpers::namespaced::initialize_namespace_tests();
