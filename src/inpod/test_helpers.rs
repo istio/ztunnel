@@ -30,8 +30,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::istio::zds::{WorkloadRequest, WorkloadResponse, ZdsHello};
 
-use crate::drain;
 use crate::drain::{DrainTrigger, DrainWatcher};
+use crate::{dns, drain};
 use once_cell::sync::Lazy;
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
@@ -73,6 +73,7 @@ impl Default for Fixture {
             crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10));
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let (drain_tx, drain_rx) = drain::new();
+        let dns_metrics = Some(dns::Metrics::new(&mut registry));
 
         let dstate = DemandProxyState::new(
             state.clone(),
@@ -88,7 +89,7 @@ impl Default for Fixture {
             dstate,
             cert_manager,
             metrics,
-            None,
+            dns_metrics,
             drain_rx.clone(),
         )
         .unwrap();
