@@ -15,11 +15,11 @@
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, Service};
-use crate::state::workload::Protocol;
 use crate::state::workload::Protocol::{HBONE, TCP};
 use crate::state::workload::{
     gatewayaddress, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
 };
+use crate::state::workload::{HealthStatus, Protocol};
 use crate::state::{DemandProxyState, ProxyState};
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::address;
@@ -292,6 +292,7 @@ fn test_custom_svc(
                 },
                 address: addr,
                 port: HashMap::from([(80u16, echo_port)]),
+                status: HealthStatus::Healthy,
             },
         )]),
         subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".into()],

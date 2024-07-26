@@ -349,8 +349,7 @@ impl ProxyState {
         });
 
         match svc.load_balancer {
-            None => endpoints.choose(&mut rand::thread_rng()),
-            Some(ref lb) => {
+            Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
                 let ranks = endpoints
                     .filter_map(|(ep, wl)| {
                         // Load balancer will define N targets we want to match
@@ -394,6 +393,7 @@ impl ProxyState {
                     .map(|(_, ep, wl)| (ep, wl))
                     .choose(&mut rand::thread_rng())
             }
+            _ => endpoints.choose(&mut rand::thread_rng()),
         }
     }
 }
@@ -908,8 +908,8 @@ impl ProxyStateManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::service::LoadBalancer;
-    use crate::state::workload::Locality;
+    use crate::state::service::{LoadBalancer, LoadBalancerHealthPolicy};
+    use crate::state::workload::{HealthStatus, Locality};
     use prometheus_client::registry::Registry;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
@@ -1180,6 +1180,7 @@ mod tests {
                         network: "".into(),
                     }),
                     port: tc.endpoint_mapping(),
+                    status: HealthStatus::Healthy,
                 },
             )]),
             ports: tc.service_mapping(),
@@ -1355,6 +1356,7 @@ mod tests {
                         network: "".into(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
+                    status: HealthStatus::Healthy,
                 },
             ),
             (
@@ -1370,6 +1372,7 @@ mod tests {
                         network: "".into(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
+                    status: HealthStatus::Healthy,
                 },
             ),
             (
@@ -1385,6 +1388,7 @@ mod tests {
                         network: "".into(),
                     }),
                     port: HashMap::from([(80u16, 80u16)]),
+                    status: HealthStatus::Healthy,
                 },
             ),
         ]);
@@ -1397,6 +1401,7 @@ mod tests {
                     LoadBalancerScopes::Region,
                     LoadBalancerScopes::Zone,
                 ],
+                health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
@@ -1410,6 +1415,7 @@ mod tests {
                     LoadBalancerScopes::Region,
                     LoadBalancerScopes::Zone,
                 ],
+                health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()

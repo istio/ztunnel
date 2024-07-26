@@ -22,11 +22,11 @@ use tracing::trace;
 
 use xds::istio::workload::Service as XdsService;
 
-use crate::state::workload::is_default;
 use crate::state::workload::{
     byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
     WorkloadError,
 };
+use crate::state::workload::{is_default, HealthStatus};
 use crate::strng::Strng;
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::{IpFamilies, PortList};
@@ -59,7 +59,11 @@ pub struct Service {
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LoadBalancerMode {
+    // Do not consider LoadBalancerScopes when picking endpoints
+    Standard,
+    // Only select endpoints matching all LoadBalancerScopes when picking endpoints; otherwise, fail.
     Strict,
+    // Prefer select endpoints matching all LoadBalancerScopes when picking endpoints but allow mismatches
     Failover,
 }
 
@@ -67,10 +71,30 @@ impl From<xds::istio::workload::load_balancing::Mode> for LoadBalancerMode {
     fn from(value: xds::istio::workload::load_balancing::Mode) -> Self {
         match value {
             xds::istio::workload::load_balancing::Mode::Strict => LoadBalancerMode::Strict,
-            xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
-                LoadBalancerMode::Failover
-            }
             xds::istio::workload::load_balancing::Mode::Failover => LoadBalancerMode::Failover,
+            xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
+                LoadBalancerMode::Standard
+            }
+        }
+    }
+}
+
+#[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub enum LoadBalancerHealthPolicy {
+    #[default]
+    OnlyHealthy,
+    AllowAll,
+}
+
+impl From<xds::istio::workload::load_balancing::HealthPolicy> for LoadBalancerHealthPolicy {
+    fn from(value: xds::istio::workload::load_balancing::HealthPolicy) -> Self {
+        match value {
+            xds::istio::workload::load_balancing::HealthPolicy::OnlyHealthy => {
+                LoadBalancerHealthPolicy::OnlyHealthy
+            }
+            xds::istio::workload::load_balancing::HealthPolicy::AllowAll => {
+                LoadBalancerHealthPolicy::AllowAll
+            }
         }
     }
 }
@@ -105,6 +129,7 @@ impl TryFrom<XdsScope> for LoadBalancerScopes {
 pub struct LoadBalancer {
     pub routing_preferences: Vec<LoadBalancerScopes>,
     pub mode: LoadBalancerMode,
+    pub health_policy: LoadBalancerHealthPolicy,
 }
 
 impl From<xds::istio::workload::IpFamilies> for Option<IpFamily> {
@@ -147,6 +172,15 @@ impl Service {
     pub fn contains_endpoint(&self, wl: &Workload, addr: Option<&NetworkAddress>) -> bool {
         self.endpoints.contains_key(&endpoint_uid(&wl.uid, addr))
     }
+
+    pub fn accepts_endpoint_health(&self, ep_health: HealthStatus) -> bool {
+        ep_health == HealthStatus::Healthy
+            || self
+                .load_balancer
+                .as_ref()
+                .map(|lb| lb.health_policy == LoadBalancerHealthPolicy::AllowAll)
+                .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize)]
@@ -181,6 +215,9 @@ pub struct Endpoint {
 
     /// The port mapping.
     pub port: HashMap<u16, u16>,
+
+    /// Health status for the endpoint
+    pub status: HealthStatus,
 }
 
 pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> Strng {
@@ -220,6 +257,10 @@ impl TryFrom<&XdsService> for Service {
                     })
                     .collect::<Result<Vec<LoadBalancerScopes>, WorkloadError>>()?,
                 mode: xds::istio::workload::load_balancing::Mode::try_from(lb.mode)?.into(),
+                health_policy: xds::istio::workload::load_balancing::HealthPolicy::try_from(
+                    lb.health_policy,
+                )?
+                .into(),
             })
         } else {
             None
@@ -324,7 +365,12 @@ impl ServiceStore {
     pub fn insert_endpoint(&mut self, ep: Endpoint) {
         let ep_uid = endpoint_uid(&ep.workload_uid, ep.address.as_ref());
         if let Some(svc) = self.get_by_namespaced_host(&ep.service) {
+            // We may or may not accept the endpoint based on it's health
+            if !svc.accepts_endpoint_health(ep.status) {
+                return;
+            }
             let mut svc = Arc::unwrap_or_clone(svc);
+
             // Clone the service and add the endpoint.
             svc.endpoints.insert(ep_uid, ep);
 
@@ -386,7 +432,9 @@ impl ServiceStore {
         let namespaced_hostname = service.namespaced_hostname();
         if let Some(endpoints) = self.staged_services.remove(&namespaced_hostname) {
             for (wip, ep) in endpoints {
-                service.endpoints.insert(wip.clone(), ep);
+                if service.accepts_endpoint_health(ep.status) {
+                    service.endpoints.insert(wip.clone(), ep);
+                }
             }
         }
 

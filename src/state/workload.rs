@@ -722,10 +722,12 @@ mod tests {
     use crate::config::ConfigSource;
     use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode};
     use crate::test_helpers::helpers::initialize_telemetry;
-    use crate::xds::istio::workload::Port as XdsPort;
+    use crate::xds::istio::workload::load_balancing::HealthPolicy;
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::WorkloadStatus as XdsStatus;
+    use crate::xds::istio::workload::WorkloadStatus;
+    use crate::xds::istio::workload::{LoadBalancing, Port as XdsPort};
     use crate::xds::{LocalClient, ProxyStateUpdateMutator};
     use crate::{cert_fetcher, test_helpers};
     use bytes::Bytes;
@@ -817,19 +819,7 @@ mod tests {
 
     #[test]
     fn workload_information() {
-        initialize_telemetry();
-        let state = Arc::new(RwLock::new(ProxyState::default()));
-
-        let mut registry = Registry::default();
-        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let demand = DemandProxyState::new(
-            state.clone(),
-            None,
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-            metrics,
-        );
-        let updater = ProxyStateUpdateMutator::new_no_fetch();
+        let (state, demand, updater) = setup_test();
 
         let ip1 = Ipv4Addr::new(127, 0, 0, 1);
         let ip2 = Ipv4Addr::new(127, 0, 0, 2);
@@ -1182,19 +1172,274 @@ mod tests {
     }
 
     #[test]
+    fn unhealthy_workloads_staged() {
+        let (state, _, updater) = setup_test();
+        let services = HashMap::from([
+            (
+                "ns/svc-normal".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            ),
+            (
+                "ns/svc-allow-unhealthy".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            ),
+        ]);
+        updater
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: "uid1".to_owned(),
+                    name: "unhealthy".to_string(),
+                    addresses: vec![],
+                    services: services.clone(),
+                    status: WorkloadStatus::Unhealthy as i32,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        updater
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: "uid2".to_owned(),
+                    name: "healthy".to_string(),
+                    addresses: vec![],
+                    services: services.clone(),
+                    status: WorkloadStatus::Healthy as i32,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(state.read().unwrap().services.num_staged_services(), 2);
+
+        let vip2 = Ipv4Addr::new(127, 0, 1, 2);
+        let vip1 = Ipv4Addr::new(127, 0, 1, 1);
+        updater
+            .insert_service(
+                &mut state.write().unwrap(),
+                XdsService {
+                    name: "svc1".to_string(),
+                    namespace: "ns".to_string(),
+                    hostname: "svc-normal".to_string(),
+                    addresses: vec![XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vip1.octets().to_vec(),
+                    }],
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 80,
+                    }],
+                    subject_alt_names: vec![],
+                    waypoint: None,
+                    load_balancing: None,
+                    ip_families: 0,
+                },
+            )
+            .unwrap();
+        updater
+            .insert_service(
+                &mut state.write().unwrap(),
+                XdsService {
+                    name: "svc1".to_string(),
+                    namespace: "ns".to_string(),
+                    hostname: "svc-allow-unhealthy".to_string(),
+                    addresses: vec![XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vip2.octets().to_vec(),
+                    }],
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 80,
+                    }],
+                    subject_alt_names: vec![],
+                    waypoint: None,
+                    load_balancing: Some(LoadBalancing {
+                        routing_preference: vec![],
+                        mode: 0,
+                        health_policy: HealthPolicy::AllowAll as i32,
+                    }),
+                    ip_families: 0,
+                },
+            )
+            .unwrap();
+
+        let svc = state
+            .read()
+            .unwrap()
+            .services
+            .get_by_namespaced_host(&NamespacedHostname {
+                namespace: "ns".into(),
+                hostname: "svc-allow-unhealthy".into(),
+            });
+        assert_eq!(svc.unwrap().endpoints.len(), 2);
+        let svc = state
+            .read()
+            .unwrap()
+            .services
+            .get_by_namespaced_host(&NamespacedHostname {
+                namespace: "ns".into(),
+                hostname: "svc-normal".into(),
+            });
+        assert_eq!(svc.unwrap().endpoints.len(), 1);
+    }
+
+    #[test]
+    fn unhealthy_workloads() {
+        let (state, _, updater) = setup_test();
+
+        let vip2 = Ipv4Addr::new(127, 0, 1, 2);
+        let vip1 = Ipv4Addr::new(127, 0, 1, 1);
+        let svc = XdsService {
+            name: "svc1".to_string(),
+            namespace: "ns".to_string(),
+            hostname: "svc-allow-unhealthy".to_string(),
+            addresses: vec![XdsNetworkAddress {
+                network: "".to_string(),
+                address: vip2.octets().to_vec(),
+            }],
+            ports: vec![XdsPort {
+                service_port: 80,
+                target_port: 80,
+            }],
+            subject_alt_names: vec![],
+            waypoint: None,
+            load_balancing: Some(LoadBalancing {
+                routing_preference: vec![],
+                mode: 0,
+                health_policy: HealthPolicy::AllowAll as i32,
+            }),
+            ip_families: 0,
+        };
+        updater
+            .insert_service(
+                &mut state.write().unwrap(),
+                XdsService {
+                    name: "svc1".to_string(),
+                    namespace: "ns".to_string(),
+                    hostname: "svc-normal".to_string(),
+                    addresses: vec![XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vip1.octets().to_vec(),
+                    }],
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 80,
+                    }],
+                    subject_alt_names: vec![],
+                    waypoint: None,
+                    load_balancing: None,
+                    ip_families: 0,
+                },
+            )
+            .unwrap();
+        updater
+            .insert_service(&mut state.write().unwrap(), svc.clone())
+            .unwrap();
+
+        let services = HashMap::from([
+            (
+                "ns/svc-normal".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            ),
+            (
+                "ns/svc-allow-unhealthy".to_string(),
+                XdsPortList {
+                    ports: vec![XdsPort {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                },
+            ),
+        ]);
+        updater
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: "uid1".to_owned(),
+                    name: "unhealthy".to_string(),
+                    addresses: vec![],
+                    services: services.clone(),
+                    status: WorkloadStatus::Unhealthy as i32,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        updater
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: "uid2".to_owned(),
+                    name: "healthy".to_string(),
+                    addresses: vec![],
+                    services: services.clone(),
+                    status: WorkloadStatus::Healthy as i32,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let assert = |host: &str, want: usize| {
+            let s = state
+                .read()
+                .unwrap()
+                .services
+                .get_by_namespaced_host(&NamespacedHostname {
+                    namespace: "ns".into(),
+                    hostname: host.into(),
+                });
+            assert_eq!(
+                s.unwrap().endpoints.len(),
+                want,
+                "host {host} wanted {want}"
+            );
+        };
+        assert("svc-allow-unhealthy", 2);
+        assert("svc-normal", 1);
+
+        // Switch the service to not allow unhealthy
+        let mut swapped = svc.clone();
+        swapped.load_balancing = None;
+        updater
+            .insert_service(&mut state.write().unwrap(), swapped)
+            .unwrap();
+        assert("svc-allow-unhealthy", 1);
+        assert("svc-normal", 1);
+
+        // Switch the service to allow unhealthy again
+        let mut swapped = svc.clone();
+        swapped.load_balancing = Some(LoadBalancing {
+            routing_preference: vec![],
+            mode: 0,
+            health_policy: HealthPolicy::AllowAll as i32,
+        });
+        updater
+            .insert_service(&mut state.write().unwrap(), swapped)
+            .unwrap();
+        // TODO: this is not currently supported. The endpoints set on services is not reconcile, but rather
+        // incrementally updated on adds/updates/removes. Since we don't store unhealthy endpoints,
+        // we cannot add them back.
+        // A fix for this would be to always store endpoints and make sure we filter them out where needed.
+        assert("svc-allow-unhealthy", 1);
+        assert("svc-normal", 1);
+    }
+    #[test]
     fn staged_services_cleanup() {
-        initialize_telemetry();
-        let state = Arc::new(RwLock::new(ProxyState::default()));
-        let mut registry = Registry::default();
-        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let demand = DemandProxyState::new(
-            state.clone(),
-            None,
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-            metrics,
-        );
-        let updater = ProxyStateUpdateMutator::new_no_fetch();
+        let (state, demand, updater) = setup_test();
         assert_eq!((state.read().unwrap().workloads.by_addr.len()), 0);
         assert_eq!((state.read().unwrap().workloads.by_uid.len()), 0);
         assert_eq!((state.read().unwrap().services.num_vips()), 0);
@@ -1264,6 +1509,26 @@ mod tests {
         assert_eq!((state.read().unwrap().services.num_staged_services()), 0); // should remove the VIP if no longer needed
     }
 
+    fn setup_test() -> (
+        Arc<RwLock<ProxyState>>,
+        DemandProxyState,
+        ProxyStateUpdateMutator,
+    ) {
+        initialize_telemetry();
+        let state = Arc::new(RwLock::new(ProxyState::default()));
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+        let demand = DemandProxyState::new(
+            state.clone(),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            metrics,
+        );
+        let updater = ProxyStateUpdateMutator::new_no_fetch();
+        (state, demand, updater)
+    }
+
     #[track_caller]
     fn assert_vips(state: &DemandProxyState, want: Vec<&str>) {
         let mut wants: HashSet<String> = HashSet::from_iter(want.iter().map(|x| x.to_string()));
@@ -1303,17 +1568,7 @@ mod tests {
                 .join("examples")
                 .join("localhost.yaml"),
         );
-        let state = Arc::new(RwLock::new(ProxyState::default()));
-
-        let mut registry = Registry::default();
-        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let demand = DemandProxyState::new(
-            state.clone(),
-            None,
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-            metrics,
-        );
+        let (state, demand, _) = setup_test();
         let local_client = LocalClient {
             cfg,
             state: state.clone(),

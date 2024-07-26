@@ -37,7 +37,7 @@ use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service, ServiceStore};
-use crate::state::workload::{network_addr, HealthStatus, NamespacedHostname, Workload};
+use crate::state::workload::{network_addr, NamespacedHostname, Workload};
 use crate::state::ProxyState;
 use crate::strng::Strng;
 use crate::{rbac, strng};
@@ -160,11 +160,7 @@ impl ProxyStateUpdateMutator {
             .cert_fetcher
             .should_track_certificates_for_removal(&workload);
         state.workloads.insert(workload.clone(), track);
-        // Unhealthy workloads are always inserted, as we may get or receive traffic to them.
-        // But we shouldn't include them in load balancing we do to Services.
-        if workload.status == HealthStatus::Healthy {
-            insert_service_endpoints(&workload, &services, &mut state.services)?;
-        }
+        insert_service_endpoints(&workload, &services, &mut state.services)?;
 
         Ok(())
     }
@@ -264,7 +260,9 @@ impl ProxyStateUpdateMutator {
             .get_by_namespaced_host(&service.namespaced_hostname())
         {
             for (wip, ep) in prev.endpoints.iter() {
-                service.endpoints.insert(wip.clone(), ep.clone());
+                if service.accepts_endpoint_health(ep.status) {
+                    service.endpoints.insert(wip.clone(), ep.clone());
+                }
             }
         }
 
@@ -358,6 +356,7 @@ fn insert_service_endpoints(
                 service: namespaced_host.clone(),
                 address: Some(network_addr(workload.network.clone(), *wip)),
                 port: ports.into(),
+                status: workload.status,
             })
         }
         if workload.workload_ips.is_empty() {
@@ -366,6 +365,7 @@ fn insert_service_endpoints(
                 service: namespaced_host.clone(),
                 address: None,
                 port: ports.into(),
+                status: workload.status,
             })
         }
     }
