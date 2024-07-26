@@ -205,6 +205,7 @@ impl Inbound {
             );
             return req.send_error(build_response(StatusCode::BAD_REQUEST));
         }
+        let original_dst = conn.dst;
         // Connection has 15008, swap with the real port
         let conn = Connection {
             dst: upstream_addr,
@@ -254,7 +255,9 @@ impl Inbound {
             proxy::guess_inbound_service(&rbac_ctx.conn, &for_host, upstream_service, &upstream);
         let result_tracker = Box::new(metrics::ConnectionResult::new(
             rbac_ctx.conn.src,
-            rbac_ctx.conn.dst,
+            // For consistency with outbound logs, report the original destination (with 15008 port)
+            // as dst.addr, and the target address as dst.hbone_addr
+            original_dst,
             Some(hbone_addr),
             start,
             ConnectionOpen {
