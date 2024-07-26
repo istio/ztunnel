@@ -245,6 +245,9 @@ pub enum Error {
     #[error("while closing connection: {0}")]
     ShutdownError(Box<Error>),
 
+    #[error("connection timed out, maybe a NetworkPolicy is blocking HBONE port 15008: {0}")]
+    MaybeHBONENetworkPolicyError(io::Error),
+
     #[error("destination disconnected before all data was written")]
     BackendDisconnected,
     #[error("receive: {0}")]
