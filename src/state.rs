@@ -349,8 +349,7 @@ impl ProxyState {
         });
 
         match svc.load_balancer {
-            None => endpoints.choose(&mut rand::thread_rng()),
-            Some(ref lb) => {
+            Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
                 let ranks = endpoints
                     .filter_map(|(ep, wl)| {
                         // Load balancer will define N targets we want to match
@@ -394,6 +393,7 @@ impl ProxyState {
                     .map(|(_, ep, wl)| (ep, wl))
                     .choose(&mut rand::thread_rng())
             }
+            _ => endpoints.choose(&mut rand::thread_rng()),
         }
     }
 }

@@ -59,7 +59,11 @@ pub struct Service {
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LoadBalancerMode {
+    // Do not consider LoadBalancerScopes when picking endpoints
+    Standard,
+    // Only select endpoints matching all LoadBalancerScopes when picking endpoints; otherwise, fail.
     Strict,
+    // Prefer select endpoints matching all LoadBalancerScopes when picking endpoints but allow mismatches
     Failover,
 }
 
@@ -67,10 +71,10 @@ impl From<xds::istio::workload::load_balancing::Mode> for LoadBalancerMode {
     fn from(value: xds::istio::workload::load_balancing::Mode) -> Self {
         match value {
             xds::istio::workload::load_balancing::Mode::Strict => LoadBalancerMode::Strict,
-            xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
-                LoadBalancerMode::Failover
-            }
             xds::istio::workload::load_balancing::Mode::Failover => LoadBalancerMode::Failover,
+            xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
+                LoadBalancerMode::Standard
+            }
         }
     }
 }
