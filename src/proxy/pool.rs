@@ -39,10 +39,10 @@ use crate::identity::Identity;
 
 use flurry;
 
-use pingora_pool;
-
 use crate::proxy::h2::client::H2ConnectClient;
 use crate::proxy::h2::H2Stream;
+use pingora_pool;
+use tokio::io;
 
 // A relatively nonstandard HTTP/2 connection pool designed to allow multiplexing proxied workload connections
 // over a (smaller) number of HTTP/2 mTLS tunnels.
@@ -88,8 +88,12 @@ impl ConnSpawner {
 
         let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
         let connector = cert.outbound_connector(key.dst_id.clone())?;
-        let tcp_stream =
-            super::freebind_connect(None, key.dst, self.socket_factory.as_ref()).await?;
+        let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
+            .await
+            .map_err(|e: io::Error| match e.kind() {
+                io::ErrorKind::TimedOut => Error::MaybeHBONENetworkPolicyError(e),
+                _ => e.into(),
+            })?;
 
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
