@@ -55,6 +55,13 @@ impl<'a> fmt::Display for DisplayStatus<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let s = &self.0;
         write!(f, "status: {:?}, message: {:?}", s.code(), s.message())?;
+
+        if s.message().to_string().contains("authentication failure") {
+            write!(
+                f,
+                " (hint: check the control plane logs for more information)"
+            )?;
+        }
         if !s.details().is_empty() {
             if let Ok(st) = std::str::from_utf8(s.details()) {
                 write!(f, ", details: {st}")?;
@@ -62,6 +69,10 @@ impl<'a> fmt::Display for DisplayStatus<'a> {
         }
         if let Some(src) = s.source().and_then(|s| s.source()) {
             write!(f, ", source: {src}")?;
+            // Error is not public to explicitly match on, so do a fuzzy match
+            if format!("{src}").contains("Temporary failure in name resolution") {
+                write!(f, " (hint: is the DNS server reachable?)")?;
+            }
         }
         Ok(())
     }
@@ -71,8 +82,8 @@ impl<'a> fmt::Display for DisplayStatus<'a> {
 pub enum Error {
     #[error("gRPC error {}", DisplayStatus(.0))]
     GrpcStatus(#[from] tonic::Status),
-    #[error("gRPC connection error:{}", DisplayStatus(.0))]
-    Connection(#[source] tonic::Status),
+    #[error("gRPC connection error connecting to {0}: {}", DisplayStatus(.1))]
+    Connection(String, #[source] tonic::Status),
     /// Attempted to send on a MPSC channel which has been canceled
     #[error(transparent)]
     RequestFailure(#[from] Box<mpsc::error::SendError<DeltaDiscoveryRequest>>),
