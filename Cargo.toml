@@ -144,3 +144,10 @@ test-case = "3.3"
 oid-registry = "0.7"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 ctor = "0.2"
+
+[lints.clippy]
+# This rule makes code more confusing
+assigning_clones = "allow"
+# This doesn't understand `strng` which we use everywhere
+borrow_interior_mutable_const = "allow"
+declare_interior_mutable_const = "allow"
