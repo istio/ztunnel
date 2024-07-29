@@ -509,7 +509,7 @@ impl AdsClient {
 
     async fn run_loop(&mut self, backoff: Duration) -> Duration {
         match self.run_internal().await {
-            Err(e @ Error::Connection(_)) => {
+            Err(e @ Error::Connection(_, _)) => {
                 // For connection errors, we add backoff
                 let backoff = std::cmp::min(MAX_BACKOFF, backoff * 2);
                 warn!(
@@ -616,6 +616,7 @@ impl AdsClient {
             warn!("outbound stream complete");
         };
 
+        let addr = self.config.address.clone();
         let tls_grpc_channel = tls::grpc_connector(
             self.config.address.clone(),
             self.config.tls_builder.fetch_cert().await?,
@@ -629,7 +630,9 @@ impl AdsClient {
         .delta_aggregated_resources(tonic::Request::new(outbound))
         .await;
 
-        let mut response_stream = ads_connection.map_err(Error::Connection)?.into_inner();
+        let mut response_stream = ads_connection
+            .map_err(|src| Error::Connection(addr, src))?
+            .into_inner();
         debug!("connected established");
 
         info!("Stream established");
