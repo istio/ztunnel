@@ -22,6 +22,7 @@ use prometheus_client::encoding::LabelValueEncoder;
 /// * Cheap cloning (ref counting)
 /// * Efficient storage (8 bytes vs 24 bytes)
 /// * Immutable
+///
 /// This is mostly provided by a library, ArcStr, we just provide a very thin wrapper around it
 /// for some flexibility.
 pub type Strng = ArcStr;
