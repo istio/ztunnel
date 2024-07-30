@@ -241,7 +241,6 @@ impl WorkloadProxyManagerState {
         // check if we have a proxy already
         let maybe_existing = self.workload_states.get(workload_uid);
         if let Some(existing) = maybe_existing {
-            // TODO this should compare DEV + INO to guarantee uniqueness
             if existing.netns_id != netns.workload_netns_id() {
                 // inodes are different, we have a new netns.
                 // this can happen when there's a CNI failure (that's unrelated to us) which triggers
