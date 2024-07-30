@@ -24,13 +24,13 @@ use crate::state::WorkloadInfo;
 
 use super::config::InPodConfig;
 
-use super::netns::InpodNetns;
+use super::netns::{InpodNetns, NetnsID};
 use super::WorkloadUid;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {
     drain: DrainTrigger,
-    workload_netns_inode: libc::ino_t,
+    netns_id: NetnsID,
 }
 
 #[derive(Default)]
@@ -241,7 +241,7 @@ impl WorkloadProxyManagerState {
         // check if we have a proxy already
         let maybe_existing = self.workload_states.get(workload_uid);
         if let Some(existing) = maybe_existing {
-            if existing.workload_netns_inode != netns.workload_inode() {
+            if existing.netns_id != netns.workload_netns_id() {
                 // inodes are different, we have a new netns.
                 // this can happen when there's a CNI failure (that's unrelated to us) which triggers
                 // pod sandobx to be re-created with a fresh new netns.
@@ -257,16 +257,17 @@ impl WorkloadProxyManagerState {
         self.admin_handler
             .proxy_pending(workload_uid, workload_info);
 
+        let workload_netns_id = netns.workload_netns_id();
+
         debug!(
             workload=?workload_uid,
             workload_info=?workload_info,
-            inode=?netns.workload_inode(),
+            netns_id=?workload_netns_id,
             "starting proxy",
         );
 
         // We create a per workload drain here. If the main loop in WorkloadProxyManager::run drains,
         // we drain all these per-workload drains before exiting the loop
-        let workload_netns_inode = netns.workload_inode();
         let (drain_tx, drain_rx) = drain::new();
 
         let proxies = self
@@ -316,7 +317,7 @@ impl WorkloadProxyManagerState {
             workload_uid.clone(),
             WorkloadState {
                 drain: drain_tx,
-                workload_netns_inode,
+                netns_id: workload_netns_id,
             },
         );
 
