@@ -17,6 +17,12 @@ use std::os::fd::OwnedFd;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub struct NetnsID {
+    pub inode: libc::ino_t,
+    pub dev: libc::dev_t,
+}
+
 // This is similar to netns_rs, but because we know we always have the same netns to revert to,
 // we can make it more efficient with less chances of errors.
 
@@ -28,7 +34,7 @@ pub struct InpodNetns {
 struct NetnsInner {
     cur_netns: Arc<OwnedFd>,
     netns: OwnedFd,
-    netns_inode: libc::ino_t,
+    netns_id: NetnsID,
 }
 
 impl InpodNetns {
@@ -49,12 +55,13 @@ impl InpodNetns {
     pub fn new(cur_netns: Arc<OwnedFd>, workload_netns: OwnedFd) -> std::io::Result<Self> {
         let res = nix::sys::stat::fstat(workload_netns.as_raw_fd())
             .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-        let netns_inode = res.st_ino;
+        let inode = res.st_ino;
+        let dev = res.st_dev;
         Ok(InpodNetns {
             inner: Arc::new(NetnsInner {
                 cur_netns,
                 netns: workload_netns,
-                netns_inode,
+                netns_id: NetnsID { inode, dev },
             }),
         })
     }
@@ -62,9 +69,10 @@ impl InpodNetns {
         use std::os::fd::AsFd;
         self.inner.netns.as_fd()
     }
+
     // useful for logging / debugging
-    pub fn workload_inode(&self) -> libc::ino_t {
-        self.inner.netns_inode
+    pub fn workload_netns_id(&self) -> NetnsID {
+        self.inner.netns_id.clone()
     }
 
     pub fn run<F, T>(&self, f: F) -> std::io::Result<T>
@@ -84,6 +92,16 @@ impl std::os::unix::io::AsRawFd for InpodNetns {
         self.inner.netns.as_raw_fd()
     }
 }
+
+impl PartialEq for InpodNetns {
+    fn eq(&self, other: &Self) -> bool {
+        // Two netnses can be considered the same if the ino and dev they point to are the same
+        // (see - cilium, vishvananda/netns, others)
+        self.inner.netns_id == other.inner.netns_id
+    }
+}
+
+impl Eq for InpodNetns {}
 
 #[cfg(test)]
 mod tests {
