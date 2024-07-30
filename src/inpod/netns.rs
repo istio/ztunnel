@@ -17,7 +17,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct NetnsID {
     pub inode: libc::ino_t,
     pub dev: libc::dev_t,
@@ -72,7 +72,7 @@ impl InpodNetns {
 
     // useful for logging / debugging
     pub fn workload_netns_id(&self) -> NetnsID {
-        self.inner.netns_id.clone()
+        self.inner.netns_id
     }
 
     pub fn run<F, T>(&self, f: F) -> std::io::Result<T>
