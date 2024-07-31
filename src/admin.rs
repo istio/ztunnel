@@ -685,6 +685,7 @@ mod tests {
             load_balancing: Some(XdsLoadBalancing {
                 routing_preference: vec![1, 2],
                 mode: 1,
+                health_policy: 1,
             }), // ..Default::default() // intentionally don't default. we want all fields populated
             ip_families: 0,
         };

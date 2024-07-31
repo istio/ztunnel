@@ -15,7 +15,7 @@
 use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
 use crate::state::service::{endpoint_uid, Endpoint, Service};
-use crate::state::workload::{gatewayaddress, Workload};
+use crate::state::workload::{gatewayaddress, HealthStatus, Workload};
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
@@ -482,6 +482,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                     service: service_name.clone(),
                     address: Some(ep_network_addr.clone()),
                     port: ports.to_owned(),
+                    status: HealthStatus::Healthy,
                 };
                 let mut svc = self.manager.services.get(&service_name).unwrap().clone();
                 let ep_uid = endpoint_uid(&self.w.workload.uid, Some(&ep_network_addr));

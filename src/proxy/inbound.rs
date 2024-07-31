@@ -515,6 +515,7 @@ mod tests {
         test_helpers,
     };
 
+    use crate::state::workload::HealthStatus;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use prometheus_client::registry::Registry;
     use test_case::test_case;
@@ -621,6 +622,7 @@ mod tests {
                         },
                         address: ep_addr,
                         port: std::collections::HashMap::new(),
+                        status: HealthStatus::Healthy,
                     },
                 )]
                 .into_iter()

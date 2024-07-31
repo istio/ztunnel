@@ -874,6 +874,7 @@ mod tests {
                 },
                 address: addr,
                 port: ports.clone(),
+                status: state::workload::HealthStatus::Healthy,
             },
         );
         Service {
