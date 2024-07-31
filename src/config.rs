@@ -400,10 +400,12 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
+        // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
+        // DNS requests to Ztunnel.
         dns_proxy: pc
             .proxy_metadata
             .get(DNS_CAPTURE_METADATA)
-            .map_or(false, |value| value.to_lowercase() == "true"),
+            .map_or(true, |value| value.to_lowercase() == "true"),
 
         pool_max_streams_per_conn: parse_default(
             POOL_MAX_STREAMS_PER_CONNECTION,
