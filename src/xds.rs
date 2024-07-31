@@ -260,7 +260,7 @@ impl ProxyStateUpdateMutator {
             .get_by_namespaced_host(&service.namespaced_hostname())
         {
             for (wip, ep) in prev.endpoints.iter() {
-                if service.accepts_endpoint_health(ep.status) {
+                if service.should_include_endpoint(ep.status) {
                     service.endpoints.insert(wip.clone(), ep.clone());
                 }
             }

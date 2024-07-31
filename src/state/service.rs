@@ -173,7 +173,7 @@ impl Service {
         self.endpoints.contains_key(&endpoint_uid(&wl.uid, addr))
     }
 
-    pub fn accepts_endpoint_health(&self, ep_health: HealthStatus) -> bool {
+    pub fn should_include_endpoint(&self, ep_health: HealthStatus) -> bool {
         ep_health == HealthStatus::Healthy
             || self
                 .load_balancer
@@ -366,7 +366,7 @@ impl ServiceStore {
         let ep_uid = endpoint_uid(&ep.workload_uid, ep.address.as_ref());
         if let Some(svc) = self.get_by_namespaced_host(&ep.service) {
             // We may or may not accept the endpoint based on it's health
-            if !svc.accepts_endpoint_health(ep.status) {
+            if !svc.should_include_endpoint(ep.status) {
                 return;
             }
             let mut svc = Arc::unwrap_or_clone(svc);
@@ -432,7 +432,7 @@ impl ServiceStore {
         let namespaced_hostname = service.namespaced_hostname();
         if let Some(endpoints) = self.staged_services.remove(&namespaced_hostname) {
             for (wip, ep) in endpoints {
-                if service.accepts_endpoint_health(ep.status) {
+                if service.should_include_endpoint(ep.status) {
                     service.endpoints.insert(wip.clone(), ep);
                 }
             }
