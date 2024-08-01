@@ -344,6 +344,18 @@ impl<'a> TestServiceBuilder<'a> {
         self
     }
 
+    /// Set the service waypoint by hostname
+    pub fn waypoint_hostname(mut self, hostname: &str) -> Self {
+        self.s.waypoint = Some(GatewayAddress {
+            destination: gatewayaddress::Destination::Hostname(NamespacedHostname {
+                namespace: strng::literal!("default"),
+                hostname: hostname.into(),
+            }),
+            hbone_mtls_port: 15008,
+        });
+        self
+    }
+
     /// Finish building the service.
     pub async fn register(self) -> anyhow::Result<()> {
         self.manager
@@ -405,6 +417,18 @@ impl<'a> TestWorkloadBuilder<'a> {
             destination: gatewayaddress::Destination::Address(NetworkAddress {
                 network: strng::EMPTY,
                 address: waypoint,
+            }),
+            hbone_mtls_port: 15008,
+        });
+        self
+    }
+
+    /// Set the service waypoint by hostname
+    pub fn waypoint_hostname(mut self, hostname: &str) -> Self {
+        self.w.workload.waypoint = Some(GatewayAddress {
+            destination: gatewayaddress::Destination::Hostname(NamespacedHostname {
+                namespace: strng::literal!("default"),
+                hostname: hostname.into(),
             }),
             hbone_mtls_port: 15008,
         });
