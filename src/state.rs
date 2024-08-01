@@ -694,7 +694,7 @@ impl DemandProxyState {
             return None;
         }
         self.fetch_on_demand(uid.clone()).await;
-        self.state.read().unwrap().workloads.find_uid(uid)
+        self.read().workloads.find_uid(uid)
     }
 
     pub async fn fetch_upstream(
@@ -707,12 +707,8 @@ impl DemandProxyState {
         self.fetch_address(&network_addr(network.clone(), addr.ip()))
             .await;
         let upstream = {
-            self.state.read().unwrap().find_upstream(
-                network,
-                source_workload,
-                addr,
-                resolution_mode,
-            )
+            self.read()
+                .find_upstream(network, source_workload, addr, resolution_mode)
             // Drop the lock
         };
         self.finalize_upstream(source_workload, addr, upstream)
@@ -766,7 +762,7 @@ impl DemandProxyState {
                 )
             }
             Destination::Hostname(host) => {
-                let state = self.state.read().unwrap();
+                let state = self.read();
                 match state.find_hostname(host) {
                     Some(Address::Service(s)) => state.find_upstream_from_service(
                         source_workload,
