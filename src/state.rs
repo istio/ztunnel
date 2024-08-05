@@ -45,6 +45,7 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
 use tracing::{debug, error, trace, warn};
+use workload::ApplicationTunnel;
 
 pub mod policy;
 pub mod service;
@@ -254,12 +255,16 @@ impl ProxyState {
             };
 
             let svc_port = svc.ports.get(&addr.port()).copied().unwrap_or_default();
+
             let target_port = if let Some(&port) = ep.port.get(&addr.port()) {
                 // prefer endpoint port mapping
                 port
             } else if svc_port > 0 {
                 // otherwise, see if the service has this port
                 svc_port
+            } else if let Some(ApplicationTunnel { port: Some(_), .. }) = &wl.application_tunnel {
+                // when using app tunnel, we don't require the port to be found on the service
+                addr.port()
             } else {
                 // no app tunnel or port mapping, error
                 debug!(
@@ -979,10 +984,13 @@ mod tests {
     use prometheus_client::registry::Registry;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
+    use self::workload::{application_tunnel::Protocol as AppProtocol, ApplicationTunnel};
+
     use super::*;
     use crate::test_helpers::helpers::initialize_telemetry;
     use crate::test_helpers::TEST_SERVICE_NAMESPACE;
     use crate::{strng, test_helpers};
+    use test_case::test_case;
 
     #[tokio::test]
     async fn test_wait_for_workload() {
@@ -1166,6 +1174,108 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    enum PortMappingTestCase {
+        EndpointMapping,
+        ServiceMapping,
+        AppTunnel,
+    }
+
+    impl PortMappingTestCase {
+        fn resolution_mode(&self) -> ServiceResolutionMode {
+            match self {
+                PortMappingTestCase::AppTunnel => ServiceResolutionMode::Waypoint,
+                _ => ServiceResolutionMode::Standard,
+            }
+        }
+
+        fn service_mapping(&self) -> HashMap<u16, u16> {
+            if let PortMappingTestCase::ServiceMapping = self {
+                return HashMap::from([(80, 8080)]);
+            }
+            HashMap::from([(80, 80)])
+        }
+
+        fn endpoint_mapping(&self) -> HashMap<u16, u16> {
+            if let PortMappingTestCase::EndpointMapping = self {
+                return HashMap::from([(80, 9090)]);
+            }
+            HashMap::from([])
+        }
+
+        fn app_tunnel(&self) -> Option<ApplicationTunnel> {
+            if let PortMappingTestCase::AppTunnel = self {
+                return Some(ApplicationTunnel {
+                    protocol: AppProtocol::PROXY,
+                    port: Some(15088),
+                });
+            }
+            None
+        }
+
+        fn expected_port(&self) -> u16 {
+            match self {
+                PortMappingTestCase::ServiceMapping => 8080,
+                PortMappingTestCase::EndpointMapping => 9090,
+                _ => 80,
+            }
+        }
+    }
+
+    #[test_case(PortMappingTestCase::EndpointMapping; "ep mapping")]
+    #[test_case(PortMappingTestCase::ServiceMapping; "svc mapping")]
+    #[test_case(PortMappingTestCase::AppTunnel; "app tunnel")]
+    #[tokio::test]
+    async fn find_upstream_port_mappings(tc: PortMappingTestCase) {
+        let wl = Workload {
+            uid: "cluster1//v1/Pod/default/ep_no_port_mapping".into(),
+            name: "ep_no_port_mapping".into(),
+            namespace: "default".into(),
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))],
+            application_tunnel: tc.app_tunnel(),
+            ..test_helpers::test_default_workload()
+        };
+        let svc = Service {
+            name: "test-svc".into(),
+            hostname: "example.com".into(),
+            namespace: "default".into(),
+            vips: vec![NetworkAddress {
+                address: "10.0.0.1".parse().unwrap(),
+                network: "".into(),
+            }],
+            endpoints: HashMap::from([(
+                "cluster1//v1/Pod/default/ep_no_port_mapping".into(),
+                Endpoint {
+                    workload_uid: "cluster1//v1/Pod/default/ep_no_port_mapping".into(),
+                    service: NamespacedHostname {
+                        namespace: "default".into(),
+                        hostname: "example.com".into(),
+                    },
+                    address: Some(NetworkAddress {
+                        address: "192.168.0.1".parse().unwrap(),
+                        network: "".into(),
+                    }),
+                    port: tc.endpoint_mapping(),
+                },
+            )]),
+            ports: tc.service_mapping(),
+            ..test_helpers::mock_default_service()
+        };
+
+        let mut state = ProxyState::default();
+        state.workloads.insert(wl.clone().into(), true);
+        state.services.insert(svc);
+
+        let (_, port, _) = state
+            .find_upstream(
+                "".into(),
+                &wl,
+                "10.0.0.1:80".parse().unwrap(),
+                tc.resolution_mode(),
+            )
+            .expect("upstream to be found");
+        assert_eq!(port, tc.expected_port());
     }
 
     #[tokio::test]
