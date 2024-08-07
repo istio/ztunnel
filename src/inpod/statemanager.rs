@@ -131,8 +131,13 @@ impl WorkloadProxyManagerState {
                 if !self.snapshot_received {
                     self.snapshot_names.insert(poddata.workload_uid.clone());
                 }
-                let netns = InpodNetns::new(self.inpod_config.cur_netns(), poddata.netns)
-                    .map_err(|e| Error::ProxyError(crate::proxy::Error::Io(e)))?;
+                let netns =
+                    InpodNetns::new(self.inpod_config.cur_netns(), poddata.netns).map_err(|e| {
+                        Error::ProxyError(
+                            poddata.workload_uid.0.clone(),
+                            crate::proxy::Error::Io(e),
+                        )
+                    })?;
                 let info = poddata.workload_info.map(|w| WorkloadInfo {
                     name: w.name,
                     namespace: w.namespace,
@@ -140,7 +145,7 @@ impl WorkloadProxyManagerState {
                 });
                 self.add_workload(&poddata.workload_uid, info, netns)
                     .await
-                    .map_err(Error::ProxyError)
+                    .map_err(|e| Error::ProxyError(poddata.workload_uid.0, e))
             }
             WorkloadMessage::KeepWorkload(workload_uid) => {
                 info!(
@@ -173,7 +178,7 @@ impl WorkloadProxyManagerState {
                 Ok(())
             }
             WorkloadMessage::WorkloadSnapshotSent => {
-                info!("pod received snapshot sent");
+                info!("received snapshot sent");
                 if self.snapshot_received {
                     return Err(Error::ProtocolError("pod snapshot received already".into()));
                 }
@@ -328,6 +333,10 @@ impl WorkloadProxyManagerState {
         !self.pending_workloads.is_empty()
     }
 
+    pub fn pending_uids(&self) -> Vec<String> {
+        self.pending_workloads.keys().map(|k| k.0.clone()).collect()
+    }
+
     pub fn ready(&self) -> bool {
         // We are ready after we received our first snapshot and don't have any proxies that failed to start.
         self.snapshot_received && !self.have_pending()
@@ -337,11 +346,11 @@ impl WorkloadProxyManagerState {
         let current_pending_workloads = std::mem::take(&mut self.pending_workloads);
 
         for (uid, (info, netns)) in current_pending_workloads {
-            info!("retrying workload {:?}", uid);
+            info!(uid = uid.0, "retrying workload");
             match self.add_workload(&uid, info, netns).await {
                 Ok(()) => {}
                 Err(e) => {
-                    info!("retrying workload {:?} failed: {}", uid, e);
+                    info!(uid = uid.0, "retrying workload failed: {}", e);
                 }
             }
         }
