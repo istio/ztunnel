@@ -539,7 +539,19 @@ mod tests {
             service_account: "waypoint-sa".to_string(),
             ..Default::default()
         };
-        let mut workloads = vec![source, waypoint];
+        let waypoint_dual = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/waypoint-workload-dual".to_string(),
+            name: "waypoint-workload-dual".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![
+                Bytes::copy_from_slice(&[127, 0, 0, 11]),
+                Bytes::copy_from_slice("ff06::c5".parse::<Ipv6Addr>().unwrap().octets().as_slice()),
+            ],
+            node: "local-node".to_string(),
+            service_account: "waypoint-sa".to_string(),
+            ..Default::default()
+        };
+        let mut workloads = vec![source, waypoint, waypoint_dual];
         let mut services = vec![];
         for x in xds {
             match x {
@@ -745,6 +757,7 @@ mod tests {
         )
         .await;
     }
+
     #[tokio::test]
     async fn build_request_destination_waypoint() {
         run_build_request(
@@ -769,6 +782,40 @@ mod tests {
                 protocol: Protocol::HBONE,
                 hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.10:15008",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_destination_waypoint_mismatch_ip() {
+        run_build_request(
+            "127.0.0.1",
+            "[ff06::c3]:80",
+            XdsAddressType::Workload(XdsWorkload {
+                uid: "cluster1//v1/Pod/default/my-pod".to_string(),
+                addresses: vec![
+                    Bytes::copy_from_slice(&[127, 0, 0, 2]),
+                    Bytes::copy_from_slice(
+                        "ff06::c3".parse::<Ipv6Addr>().unwrap().octets().as_slice(),
+                    ),
+                ],
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: [127, 0, 0, 11].to_vec(),
+                        },
+                    )),
+                    hbone_mtls_port: 15008,
+                }),
+                ..Default::default()
+            }),
+            // Should use the waypoint
+            Some(ExpectedRequest {
+                protocol: Protocol::HBONE,
+                hbone_destination: "[ff06::c3]:80",
+                destination: "127.0.0.11:15008",
             }),
         )
         .await;
