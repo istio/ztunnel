@@ -335,12 +335,12 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                         .await
                         .map_err(|e| Error::SendAckError(e.to_string()))?;
                 }
-                Err(Error::ProxyError(e)) => {
+                Err(Error::ProxyError(uid, e)) => {
+                    error!(%uid, "failed to start proxy: {:?}", e);
                     // setup the retry timer:
                     self.schedule_retry();
                     // proxy error is a transient error, so report it but don't disconnect
                     // TODO: raise metrics
-                    error!("failed to start proxy: {:?}", e);
                     processor
                         .send_nack(anyhow::anyhow!("failure to start proxy : {:?}", e))
                         .await
@@ -363,10 +363,11 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
 
     fn schedule_retry(&mut self) {
         if self.next_pending_retry.is_none() {
-            info!("scheduling retry");
+            info!(uids=?self.state.pending_uids(), "scheduling retry");
             self.next_pending_retry = Some(Box::pin(tokio::time::sleep(RETRY_DURATION)));
         }
     }
+
     fn check_ready(&mut self) {
         if self.state.ready() {
             self.readiness.mark_ready();
