@@ -56,28 +56,28 @@ impl PolicyStore {
             .collect()
     }
 
-    pub fn insert(&mut self, rbac: Authorization) {
-        let key: Strng = rbac.to_key();
+    pub fn insert(&mut self, xds_name: Strng, rbac: Authorization) {
+        self.remove(xds_name.clone());
         match rbac.scope {
             RbacScope::Global => {
                 self.by_namespace
                     .entry(strng::EMPTY)
                     .or_default()
-                    .insert(key.clone());
+                    .insert(xds_name.clone());
             }
             RbacScope::Namespace => {
                 self.by_namespace
                     .entry(strng::new(&rbac.namespace))
                     .or_default()
-                    .insert(key.clone());
+                    .insert(xds_name.clone());
             }
             RbacScope::WorkloadSelector => {}
         }
-        self.by_key.insert(key, rbac);
+        self.by_key.insert(xds_name.clone(), rbac);
     }
 
-    pub fn remove(&mut self, name: Strng) {
-        let Some(rbac) = self.by_key.remove(&name) else {
+    pub fn remove(&mut self, xds_name: Strng) {
+        let Some(rbac) = self.by_key.remove(&xds_name) else {
             return;
         };
         if let Some(key) = match rbac.scope {
@@ -86,7 +86,7 @@ impl PolicyStore {
             RbacScope::WorkloadSelector => None,
         } {
             if let Some(pl) = self.by_namespace.get_mut(&key) {
-                pl.remove(&name);
+                pl.remove(&xds_name);
                 if pl.is_empty() {
                     self.by_namespace.remove(&key);
                 }
@@ -103,4 +103,45 @@ impl PolicyStore {
         self.by_namespace.clear();
         self.by_key.clear();
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{rbac::{RbacAction, RbacMatch, StringMatch}, test_helpers::xds};
+
+    #[test]
+    fn rbac_change_scope() {
+        let mut store = PolicyStore::default();
+        let namespace = "default";
+        let name = "test_policy";
+        let mut xds_name = String::with_capacity(1 + namespace.len() + name.len());
+        xds_name.push_str(namespace.clone());
+        xds_name.push('/');
+        xds_name.push_str(name.clone());
+        let mut policy = Authorization{
+            name: "test_policy".into(),
+            namespace: namespace.into(),
+            scope: RbacScope::Namespace,
+            action: RbacAction::Allow,
+            rules: vec![vec![vec![RbacMatch {
+                namespaces: vec![StringMatch::Exact("whatever".into())],
+                ..Default::default()
+            }]]],
+        };
+        let policy_key = policy.to_key();
+        // insert this namespace-scoped policy into policystore then assert it is
+        // exists in by_namespace of policystore
+        store.insert(xds_name.clone(), policy.clone());
+        let namespace_policies = store.get_by_namespace(&namespace.into());
+        assert!(namespace_policies.contains(&policy_key));
+        // change policy scope to workload and insert it into policystore again, then
+        // assert it is not exists in by_namespace of policystore anymore
+        policy.scope = RbacScope::WorkloadSelector;
+        store.insert(xds_name.clone(), policy.clone());
+        let namespace_policies = store.get_by_namespace(&namespace.into());
+        assert!(!namespace_policies.contains(&policy_key));
+    }
+
 }
