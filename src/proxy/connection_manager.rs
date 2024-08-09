@@ -601,13 +601,19 @@ mod tests {
             .expect("should not be None");
 
         // generate policy which denies everything
+        let auth_name = "allow-nothing";
+        let auth_namespace = "default";
         let auth = Authorization {
-            name: "allow-nothing".to_string(),
+            name: auth_name.into(),
             action: Action::Deny as i32,
             scope: Scope::Global as i32,
-            namespace: "default".to_string(),
+            namespace: auth_namespace.into(),
             rules: vec![],
         };
+        let mut auth_xds_name = String::with_capacity(1 + auth_namespace.len() + auth_name.len());
+        auth_xds_name.push_str(auth_namespace);
+        auth_xds_name.push('/');
+        auth_xds_name.push_str(auth_name);
 
         // spawn an assertion that our connection close is received
         tokio::spawn(assert_close(close1));
@@ -618,7 +624,8 @@ mod tests {
             let mut s = state
                 .write()
                 .expect("test fails if we're unable to get a write lock on state");
-            let res = state_mutator.insert_authorization(&mut s, auth);
+            let res =
+                state_mutator.insert_authorization(&mut s, auth_xds_name.clone().into(), auth);
             // assert that the update was OK
             assert!(res.is_ok());
         } // release lock

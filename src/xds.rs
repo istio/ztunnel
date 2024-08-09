@@ -273,19 +273,24 @@ impl ProxyStateUpdateMutator {
     pub fn insert_authorization(
         &self,
         state: &mut ProxyState,
+        xds_name: Strng,
         r: XdsAuthorization,
     ) -> anyhow::Result<()> {
         info!("handling RBAC update {}", r.name);
 
         let rbac = rbac::Authorization::try_from(r)?;
-        trace!("insert policy {}", serde_json::to_string(&rbac)?);
-        state.policies.insert(rbac);
+        trace!(
+            "insert policy {}, {}",
+            xds_name,
+            serde_json::to_string(&rbac)?
+        );
+        state.policies.insert(xds_name, rbac);
         Ok(())
     }
 
-    pub fn remove_authorization(&self, state: &mut ProxyState, name: Strng) {
-        info!("handling RBAC delete {}", name);
-        state.policies.remove(name);
+    pub fn remove_authorization(&self, state: &mut ProxyState, xds_name: Strng) {
+        info!("handling RBAC delete {}", xds_name);
+        state.policies.remove(xds_name);
     }
 }
 
@@ -384,9 +389,9 @@ impl Handler<XdsAuthorization> for ProxyStateUpdater {
         let mut state = self.state.write().unwrap();
         let handle = |res: XdsUpdate<XdsAuthorization>| {
             match res {
-                XdsUpdate::Update(w) => {
-                    self.updater.insert_authorization(&mut state, w.resource)?
-                }
+                XdsUpdate::Update(w) => self
+                    .updater
+                    .insert_authorization(&mut state, w.name, w.resource)?,
                 XdsUpdate::Remove(name) => self.updater.remove_authorization(&mut state, name),
             }
             Ok(())
@@ -505,7 +510,8 @@ impl LocalClient {
             insert_service_endpoints(&w, &services, &mut state.services)?;
         }
         for rbac in r.policies {
-            state.policies.insert(rbac);
+            let xds_name = rbac.to_key();
+            state.policies.insert(xds_name, rbac);
         }
         for svc in r.services {
             state.services.insert(svc);

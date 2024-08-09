@@ -308,7 +308,7 @@ fn init_inpod_proxy_mgr(
     _config: &config::Config,
     _proxy_gen: ProxyFactory,
     _ready: readiness::Ready,
-    _drain_rx: drain::Watch,
+    _drain_rx: drain::DrainWatcher,
 ) -> anyhow::Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
     anyhow::bail!("in-pod mode is not supported on non-linux platforms")
 }
