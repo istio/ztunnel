@@ -367,7 +367,7 @@ pub fn rbac(c: &mut Criterion) {
     let policies = create_test_policies();
     let mut state = ProxyState::default();
     for p in policies {
-        state.policies.insert(p);
+        state.policies.insert(p.to_key(), p);
     }
 
     let mut registry = Registry::default();
