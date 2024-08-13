@@ -314,6 +314,7 @@ async fn handle_config_dump(
     let body = serde_json::to_string_pretty(&kv)?;
     Ok(Response::builder()
         .status(hyper::StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(body.into())
         .expect("builder with known status code should not fail"))
 }
