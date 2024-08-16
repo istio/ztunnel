@@ -25,7 +25,7 @@ use tokio::sync::watch;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
 
-use super::{Error, ScopedSecretManager};
+use super::{Error, LocalWorkloadInformation};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
@@ -85,7 +85,7 @@ impl Inbound {
         let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
             state: self.pi.state.clone(),
-            cert_manager: self.pi.cert_manager.clone(),
+            local_workload: self.pi.local_workload_information.clone(),
             network: strng::new(&self.pi.cfg.network),
         };
 
@@ -221,7 +221,7 @@ impl Inbound {
 
         let rbac_ctx = crate::state::ProxyRbacContext {
             conn,
-            dest_workload_info: pi.proxy_workload_info.clone(),
+            dest_workload_info: Some(pi.local_workload_information.workload_info()),
         };
 
         let source_ip = rbac_ctx.conn.src.ip();
@@ -445,7 +445,7 @@ impl Inbound {
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: ScopedSecretManager,
+    local_workload: Arc<LocalWorkloadInformation>,
     state: DemandProxyState,
     network: Strng,
 }
@@ -470,7 +470,10 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
             %identity,
             "fetching cert"
         );
-        let cert = self.cert_manager.fetch_certificate(identity.trust_domain()).await?;
+        let cert = self
+            .local_workload
+            .fetch_certificate(identity.trust_domain())
+            .await?;
         Ok(Arc::new(cert.server_config()?))
     }
 }

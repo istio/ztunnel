@@ -163,7 +163,10 @@ mod test {
             service_account: "sa".to_string(),
         };
         handler.proxy_pending(&uid1, &wli);
-        assert_eq!(data(), r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#);
+        assert_eq!(
+            data(),
+            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#
+        );
         handler.proxy_up(&uid1, &wli, None);
         assert_eq!(
             data(),

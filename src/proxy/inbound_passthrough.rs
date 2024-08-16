@@ -171,7 +171,7 @@ impl InboundPassthrough {
                 dst_network: strng::new(&pi.cfg.network),
                 dst: dest_addr,
             },
-            dest_workload_info: pi.proxy_workload_info.clone(),
+            dest_workload_info: Some(pi.local_workload_information.workload_info()),
         };
 
         // Find source info. We can lookup by XDS or from connection attributes

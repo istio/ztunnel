@@ -46,8 +46,8 @@ use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::address::Address;
 use crate::state::workload::{GatewayAddress, Workload};
 use crate::state::{DemandProxyState, WorkloadInfo};
-use crate::{config, identity, socket, tls};
 use crate::strng::Strng;
+use crate::{config, identity, socket, tls};
 
 pub mod connection_manager;
 mod h2;
@@ -156,7 +156,7 @@ pub struct ScopedSecretManager {
 
 impl ScopedSecretManager {
     #[cfg(any(test, feature = "testing"))]
-    pub fn new(cert_manager: Arc<SecretManager>, wli:  Arc<WorkloadInfo>) -> Self {
+    pub fn new(cert_manager: Arc<SecretManager>, wli: Arc<WorkloadInfo>) -> Self {
         Self {
             cert_manager,
             allowed: wli,
@@ -181,14 +181,22 @@ pub struct LocalWorkloadInformation {
     wi: Arc<WorkloadInfo>,
     state: DemandProxyState,
     workload: OnceCell<Arc<Workload>>,
+    // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
+    // access to the appropriate certificates
+    full_cert_manager: Arc<SecretManager>,
 }
 
 impl LocalWorkloadInformation {
-    pub fn new(wi: Arc<WorkloadInfo>, state: DemandProxyState) -> LocalWorkloadInformation {
+    pub fn new(
+        wi: Arc<WorkloadInfo>,
+        state: DemandProxyState,
+        cert_manager: Arc<SecretManager>,
+    ) -> LocalWorkloadInformation {
         LocalWorkloadInformation {
             wi,
             state,
             workload: OnceCell::new(),
+            full_cert_manager: cert_manager,
         }
     }
 
@@ -203,17 +211,31 @@ impl LocalWorkloadInformation {
             .await
             .cloned()
     }
+
+    pub async fn fetch_certificate(
+        &self,
+        trust_domain: Strng,
+    ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
+        let id = &Identity::Spiffe {
+            trust_domain,
+            namespace: (&self.wi.namespace).into(),
+            service_account: (&self.wi.service_account).into(),
+        };
+        self.full_cert_manager.fetch_certificate(id).await
+    }
+
+    pub fn workload_info(&self) -> Arc<WorkloadInfo> {
+        self.wi.clone()
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct ProxyInputs {
     cfg: Arc<config::Config>,
-    cert_manager: ScopedSecretManager,
     connection_manager: ConnectionManager,
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    proxy_workload_info: Option<Arc<WorkloadInfo>>,
     local_workload_information: Arc<LocalWorkloadInformation>,
     resolver: Option<Arc<dyn Resolver + Send + Sync>>,
 }
@@ -230,21 +252,17 @@ impl ProxyInputs {
         proxy_workload_info: WorkloadInfo,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Arc<Self> {
-        let pwi = proxy_workload_info.clone();
-        let proxy_workload_info = Arc::new(proxy_workload_info);
-        let local_workload_information =
-            Arc::new(LocalWorkloadInformation::new(Arc::new(pwi), state.clone()));
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(proxy_workload_info),
+            state.clone(),
+            cert_manager,
+        ));
         Arc::new(Self {
             cfg,
             state,
-            cert_manager: ScopedSecretManager {
-                cert_manager,
-                allowed: proxy_workload_info.clone(),
-            },
             metrics,
             connection_manager,
             socket_factory,
-            proxy_workload_info: Some(proxy_workload_info),
             local_workload_information,
             resolver,
         })

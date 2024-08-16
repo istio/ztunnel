@@ -73,7 +73,7 @@ impl Outbound {
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
-            self.pi.cert_manager.clone(),
+            self.pi.local_workload_information.clone(),
         );
         let pi = self.pi.clone();
         let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
@@ -549,26 +549,27 @@ mod tests {
             namespace: "ns".to_string(),
             service_account: "default".to_string(),
         };
-        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
-            Duration::from_secs(10),
-        ), Arc::new(wi.clone()));
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi.clone()),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+        ));
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {
-                cert_manager: cert_mgr.clone(),
                 state: state.clone(),
                 cfg: cfg.clone(),
                 metrics: test_proxy_metrics(),
                 socket_factory: sock_fact.clone(),
-                proxy_workload_info: Some(Arc::new(wi.clone())),
-                local_workload_information: Arc::new(LocalWorkloadInformation::new(
-                    Arc::new(wi.clone()),
-                    state,
-                )),
+                local_workload_information: local_workload_information.clone(),
                 connection_manager: ConnectionManager::default(),
                 resolver: None,
             }),
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr.clone()),
+            pool: pool::WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information.clone(),
+            ),
             hbone_port: cfg.inbound_addr.port(),
         };
 
