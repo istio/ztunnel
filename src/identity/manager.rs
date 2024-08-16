@@ -109,6 +109,7 @@ impl Identity {
             service_account: sa,
         }
     }
+
     pub fn to_strng(self: &Identity) -> Strng {
         match self {
             Identity::Spiffe {
@@ -116,6 +117,12 @@ impl Identity {
                 namespace,
                 service_account,
             } => strng::format!("spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"),
+        }
+    }
+
+    pub fn trust_domain(&self) -> Strng {
+        match self {
+            Identity::Spiffe { trust_domain, .. } => trust_domain.clone(),
         }
     }
 }

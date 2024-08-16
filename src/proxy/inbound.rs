@@ -470,7 +470,7 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
             %identity,
             "fetching cert"
         );
-        let cert = self.cert_manager.fetch_certificate(&identity).await?;
+        let cert = self.cert_manager.fetch_certificate(identity.trust_domain()).await?;
         Ok(Arc::new(cert.server_config()?))
     }
 }

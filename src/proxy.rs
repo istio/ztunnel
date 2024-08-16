@@ -47,6 +47,7 @@ use crate::state::workload::address::Address;
 use crate::state::workload::{GatewayAddress, Workload};
 use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
+use crate::strng::Strng;
 
 pub mod connection_manager;
 mod h2;
@@ -164,24 +165,14 @@ impl ScopedSecretManager {
 
     pub async fn fetch_certificate(
         &self,
-        id: &Identity,
+        trust_domain: Strng,
     ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
         let allowed = &self.allowed;
-        match &id {
-            Identity::Spiffe {
-                namespace,
-                service_account,
-                ..
-            } => {
-                // We cannot compare trust domain, since we don't get this from WorkloadInfo
-                if namespace != &allowed.namespace || service_account != &allowed.service_account {
-                    let err =
-                        identity::Error::BugInvalidIdentityRequest(id.clone(), allowed.clone());
-                    debug_assert!(false, "{err}");
-                    return Err(err);
-                }
-            }
-        }
+        let id = &Identity::Spiffe {
+            trust_domain,
+            namespace: (&allowed.namespace).into(),
+            service_account: (&allowed.service_account).into(),
+        };
         self.cert_manager.fetch_certificate(id).await
     }
 }
