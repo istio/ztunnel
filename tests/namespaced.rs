@@ -648,11 +648,11 @@ mod namespaced {
             .run_and_wait(move || async move {
                 let mut stream = TcpStream::connect(srv).await.unwrap();
                 // We should be able to connect (since client is running), but not send a request
-                let send = timeout(
-                    Duration::from_millis(50),
-                    double_read_write_stream(&mut stream),
-                )
-                .await;
+
+                const BODY: &[u8] = b"hello world";
+                stream.write_all(BODY).await.unwrap();
+                let mut buf = [0; BODY.len() * 2];
+                let send = stream.read_exact(&mut buf).await;
                 assert!(send.is_err());
                 Ok(())
             })
