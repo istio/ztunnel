@@ -583,10 +583,10 @@ mod test {
 
     use crate::test_helpers::helpers::initialize_telemetry;
 
-    use crate::drain::DrainWatcher;
-    use ztunnel::test_helpers::*;
-
     use super::*;
+    use crate::drain::DrainWatcher;
+    use crate::state::WorkloadInfo;
+    use ztunnel::test_helpers::*;
 
     macro_rules! assert_opens_drops {
         ($srv:expr, $open:expr, $drops:expr) => {
@@ -996,9 +996,14 @@ mod test {
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
-            Duration::from_secs(10),
-        ));
+        let cert_mgr = proxy::ScopedSecretManager::new(
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+            Arc::new(WorkloadInfo {
+                name: "source-workload".to_string(),
+                namespace: "ns".to_string(),
+                service_account: "default".to_string(),
+            }),
+        );
         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
         let server = TestServer {
             conn_counter,

@@ -150,15 +150,15 @@ pub struct Proxy {
 #[derive(Clone)]
 pub struct ScopedSecretManager {
     cert_manager: Arc<SecretManager>,
-    allowed: Option<Arc<WorkloadInfo>>,
+    allowed: Arc<WorkloadInfo>,
 }
 
 impl ScopedSecretManager {
     #[cfg(any(test, feature = "testing"))]
-    pub fn new(cert_manager: Arc<SecretManager>) -> Self {
+    pub fn new(cert_manager: Arc<SecretManager>, wli:  Arc<WorkloadInfo>) -> Self {
         Self {
             cert_manager,
-            allowed: None,
+            allowed: wli,
         }
     }
 
@@ -166,22 +166,19 @@ impl ScopedSecretManager {
         &self,
         id: &Identity,
     ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
-        if let Some(allowed) = &self.allowed {
-            match &id {
-                Identity::Spiffe {
-                    namespace,
-                    service_account,
-                    ..
-                } => {
-                    // We cannot compare trust domain, since we don't get this from WorkloadInfo
-                    if namespace != &allowed.namespace
-                        || service_account != &allowed.service_account
-                    {
-                        let err =
-                            identity::Error::BugInvalidIdentityRequest(id.clone(), allowed.clone());
-                        debug_assert!(false, "{err}");
-                        return Err(err);
-                    }
+        let allowed = &self.allowed;
+        match &id {
+            Identity::Spiffe {
+                namespace,
+                service_account,
+                ..
+            } => {
+                // We cannot compare trust domain, since we don't get this from WorkloadInfo
+                if namespace != &allowed.namespace || service_account != &allowed.service_account {
+                    let err =
+                        identity::Error::BugInvalidIdentityRequest(id.clone(), allowed.clone());
+                    debug_assert!(false, "{err}");
+                    return Err(err);
                 }
             }
         }
@@ -239,11 +236,11 @@ impl ProxyInputs {
         state: DemandProxyState,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-        proxy_workload_info: Option<WorkloadInfo>,
+        proxy_workload_info: WorkloadInfo,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Arc<Self> {
-        let pwi = proxy_workload_info.clone().expect("todo");
-        let proxy_workload_info = proxy_workload_info.map(Arc::new);
+        let pwi = proxy_workload_info.clone();
+        let proxy_workload_info = Arc::new(proxy_workload_info);
         let local_workload_information =
             Arc::new(LocalWorkloadInformation::new(Arc::new(pwi), state.clone()));
         Arc::new(Self {
@@ -256,7 +253,7 @@ impl ProxyInputs {
             metrics,
             connection_manager,
             socket_factory,
-            proxy_workload_info,
+            proxy_workload_info: Some(proxy_workload_info),
             local_workload_information,
             resolver,
         })
@@ -264,30 +261,6 @@ impl ProxyInputs {
 }
 
 impl Proxy {
-    pub async fn new(
-        cfg: Arc<config::Config>,
-        state: DemandProxyState,
-        cert_manager: Arc<SecretManager>,
-        metrics: Metrics,
-        drain: DrainWatcher,
-        resolver: Option<Arc<dyn Resolver + Send + Sync>>,
-    ) -> Result<Proxy, Error> {
-        let metrics = Arc::new(metrics);
-        let socket_factory = Arc::new(DefaultSocketFactory);
-
-        let pi = ProxyInputs::new(
-            cfg,
-            cert_manager,
-            ConnectionManager::default(),
-            state,
-            metrics,
-            socket_factory,
-            None,
-            resolver,
-        );
-        Self::from_inputs(pi, drain).await
-    }
-
     #[allow(unused_mut)]
     pub(super) async fn from_inputs(
         mut pi: Arc<ProxyInputs>,

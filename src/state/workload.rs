@@ -681,7 +681,7 @@ impl WorkloadStore {
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
         // Only track local nodes to avoid overhead
-        if self.local_node == None || self.local_node.as_ref() == Some(&w.node) {
+        if self.local_node.is_none() || self.local_node.as_ref() == Some(&w.node) {
             self.node_local_by_identity
                 .entry((&w.identity()).into())
                 .or_default()
@@ -747,7 +747,7 @@ impl WorkloadStore {
     // was_last_identity_on_node is a specialized function to help determine if we should clear a certificate.
     // It is called when a workload is removed, with the node and identity of the workload
     pub fn was_last_identity_on_node(&self, node_name: &Strng, identity: &Identity) -> bool {
-        if self.local_node == None || self.local_node.as_ref() == Some(node_name) {
+        if self.local_node.is_none() || self.local_node.as_ref() == Some(node_name) {
             // This was a workload on the node... now check if there are any remaining workloads with
             // this identity on the node.
             !self.node_local_by_identity.contains_key(&identity.into())
@@ -1577,7 +1577,7 @@ mod tests {
         ProxyStateUpdateMutator,
     ) {
         initialize_telemetry();
-        let state = Arc::new(RwLock::new(ProxyState::default()));
+        let state = Arc::new(RwLock::new(ProxyState::new(None)));
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let demand = DemandProxyState::new(

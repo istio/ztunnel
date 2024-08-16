@@ -1118,18 +1118,10 @@ mod tests {
             .await;
         });
         // Send the wrong workload through
-        wrap_state
-            .write()
-            .unwrap()
-            .workloads
-            .insert(not_delayed_wl);
+        wrap_state.write().unwrap().workloads.insert(not_delayed_wl);
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Send the correct workload through
-        wrap_state
-            .write()
-            .unwrap()
-            .workloads
-            .insert(delayed_wl);
+        wrap_state.write().unwrap().workloads.insert(delayed_wl);
         t.await.expect("should not fail");
     }
 
@@ -1606,9 +1598,7 @@ mod tests {
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
         };
-        state
-            .workloads
-            .insert(Arc::new(wl_no_locality.clone()));
+        state.workloads.insert(Arc::new(wl_no_locality.clone()));
         state.workloads.insert(Arc::new(wl_match.clone()));
         state.workloads.insert(Arc::new(wl_almost.clone()));
         state.services.insert(strict_svc.clone());

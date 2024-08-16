@@ -15,9 +15,9 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use std::time::Instant;
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
+use std::time::Instant;
 
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -157,7 +157,10 @@ impl OutboundConnection {
 
         // First find the source workload of this traffic. If we don't know where the request is from
         // we will reject it.
-        let build = self.pi.local_workload_information.get_workload()
+        let build = self
+            .pi
+            .local_workload_information
+            .get_workload()
             .and_then(|source| self.build_request(source, source_addr.ip(), dest_addr));
         let req = match Box::pin(build).await {
             Ok(req) => Box::new(req),
@@ -540,14 +543,15 @@ mod tests {
         let state = new_proxy_state(&workloads, &services, &[]);
 
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
-            Duration::from_secs(10),
-        ));
+
         let wi = WorkloadInfo {
             name: "source-workload".to_string(),
             namespace: "ns".to_string(),
             service_account: "default".to_string(),
         };
+        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
+            Duration::from_secs(10),
+        ), Arc::new(wi.clone()));
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {
                 cert_manager: cert_mgr.clone(),
@@ -568,7 +572,12 @@ mod tests {
             hbone_port: cfg.inbound_addr.port(),
         };
 
-        let local = outbound.pi.local_workload_information.get_workload().await.unwrap();
+        let local = outbound
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
         let req = outbound
             .build_request(local, from.parse().unwrap(), to.parse().unwrap())
             .await

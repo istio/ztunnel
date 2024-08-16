@@ -27,8 +27,8 @@ use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
 
-use crate::identity;
 use crate::strng::Strng;
+use crate::{identity, state};
 #[cfg(any(test, feature = "testing"))]
 use {crate::test_helpers::MpscAckReceiver, crate::xds::LocalConfig, tokio::sync::Mutex};
 
@@ -37,6 +37,7 @@ const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
+const PROXY_WORKLOAD_INFO: &str = "PROXY_WORKLOAD_INFO";
 const PACKET_MARK: &str = "PACKET_MARK";
 const INPOD_UDS: &str = "INPOD_UDS";
 const INPOD_PORT_REUSE: &str = "INPOD_PORT_REUSE";
@@ -170,6 +171,7 @@ pub struct Config {
     pub local_node: Option<String>,
     /// The proxy mode of ztunnel, Shared or Dedicated, default to Shared.
     pub proxy_mode: ProxyMode,
+    pub proxy_workload_information: Option<state::WorkloadInfo>,
     /// The local_ip we are running at.
     pub local_ip: Option<IpAddr>,
     /// The Cluster ID of the cluster that his ztunnel belongs to
@@ -241,6 +243,8 @@ pub enum Error {
     ProxyConfig(anyhow::Error),
     #[error("invalid uri: {0}")]
     InvalidUri(#[from] Arc<InvalidUri>),
+    #[error("invalid configuration: {0}")]
+    InvalidState(String),
 }
 
 impl From<InvalidUri> for Error {
@@ -408,6 +412,27 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         },
         None => ProxyMode::Shared,
     };
+    let proxy_workload_information = if proxy_mode == ProxyMode::Dedicated {
+        let Some(raw) = parse::<String>(PROXY_WORKLOAD_INFO)? else {
+            // TODO: in the future, we can provide a mode where we automatically detect based on IP address.
+            return Err(Error::InvalidState(format!(
+                "{PROXY_MODE}={PROXY_MODE_DEDICATED} requires {PROXY_WORKLOAD_INFO} to be set"
+            )));
+        };
+        let s: Vec<&str> = raw.splitn(2, "/").collect();
+        let &[ns, name, sa] = &s[..] else {
+            return Err(Error::InvalidState(format!(
+                "{PROXY_WORKLOAD_INFO} must match the format 'namespace/name/service-account'"
+            )));
+        };
+        Some(state::WorkloadInfo {
+            name: name.to_string(),
+            namespace: ns.to_string(),
+            service_account: sa.to_string(),
+        })
+    } else {
+        None
+    };
 
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
@@ -480,6 +505,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         network: parse(NETWORK)?.unwrap_or_default(),
         local_node: parse(NODE_NAME)?,
         proxy_mode,
+        proxy_workload_information,
         local_ip: parse(INSTANCE_IP)?,
         cluster_id,
         cluster_domain,

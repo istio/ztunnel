@@ -365,7 +365,7 @@ pub fn connections(c: &mut Criterion) {
 
 pub fn rbac(c: &mut Criterion) {
     let policies = create_test_policies();
-    let mut state = ProxyState::default();
+    let mut state = ProxyState::new(None);
     for p in policies {
         state.policies.insert(p.to_key(), p);
     }

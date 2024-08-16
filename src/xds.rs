@@ -184,7 +184,11 @@ impl ProxyStateUpdateMutator {
 
             // This is a real removal (not a removal before insertion), and nothing else references the cert
             // Clear it out
-            if !for_insert && state.workloads.was_last_identity_on_node(&prev.node, &prev.identity()) {
+            if !for_insert
+                && state
+                    .workloads
+                    .was_last_identity_on_node(&prev.node, &prev.identity())
+            {
                 self.cert_fetcher.clear_cert(&prev.identity());
             }
             // We removed a workload, no reason to attempt to remove a service with the same name
