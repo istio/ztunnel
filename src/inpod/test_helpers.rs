@@ -28,7 +28,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::istio::zds::{WorkloadRequest, WorkloadResponse, ZdsHello};
+use super::istio::zds::{WorkloadInfo, WorkloadRequest, WorkloadResponse, ZdsHello};
 
 use crate::drain::{DrainTrigger, DrainWatcher};
 use crate::{dns, drain};
@@ -164,6 +164,7 @@ pub async fn send_snap_sent(s: &mut UnixStream) {
 pub async fn send_workload_added(
     s: &mut UnixStream,
     uid: super::WorkloadUid,
+    info: Option<WorkloadInfo>,
     fd: impl std::os::fd::AsRawFd,
 ) {
     let fds = [fd.as_raw_fd()];
@@ -174,6 +175,7 @@ pub async fn send_workload_added(
         payload: Some(crate::inpod::istio::zds::workload_request::Payload::Add(
             crate::inpod::istio::zds::AddWorkload {
                 uid: uid.into_string(),
+                workload_info: info,
                 ..Default::default()
             },
         )),

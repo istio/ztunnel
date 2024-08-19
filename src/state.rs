@@ -46,7 +46,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, trace, warn};
 
 use self::workload::ApplicationTunnel;
 
@@ -127,12 +127,20 @@ impl WorkloadInfo {
     }
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[derive(derivative::Derivative, Debug, Clone, Eq, PartialEq, Hash, serde::Serialize)]
 pub struct ProxyRbacContext {
     pub conn: rbac::Connection,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dest_workload_info: Option<Arc<WorkloadInfo>>,
+    #[derivative(
+        Hash = "ignore",
+        PartialEq = "ignore",
+        Ord = "ignore",
+        PartialOrd = "ignore"
+    )]
+    pub dest_workload: Arc<Workload>,
 }
+
 impl ProxyRbacContext {
     pub fn into_conn(self) -> rbac::Connection {
         self.conn
@@ -433,6 +441,16 @@ pub struct DemandProxyState {
 }
 
 impl DemandProxyState {
+    pub(crate) fn get_services_by_workload(&self, wl: &Workload) -> Vec<Arc<Service>> {
+        self.state
+            .read()
+            .expect("mutex")
+            .services
+            .get_by_workload(wl)
+    }
+}
+
+impl DemandProxyState {
     pub fn new(
         state: Arc<RwLock<ProxyState>>,
         demand: Option<Demander>,
@@ -457,22 +475,8 @@ impl DemandProxyState {
         self.state.read().unwrap()
     }
 
-    pub async fn assert_rbac(
-        &self,
-        ctx: &ProxyRbacContext,
-    ) -> Result<(), proxy::AuthorizationRejectionError> {
-        let nw_addr = network_addr(ctx.conn.dst_network.clone(), ctx.conn.dst.ip());
-        let Some(wl) = self.fetch_workload(&nw_addr).await else {
-            debug!("destination workload not found {}", nw_addr);
-            return Err(proxy::AuthorizationRejectionError::NoWorkload);
-        };
-        if let Some(ref wl_info) = ctx.dest_workload_info {
-            // make sure that the workload we fetched matches the workload info we got over ZDS.
-            if !wl_info.matches(&wl) {
-                error!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
-                return Err(proxy::AuthorizationRejectionError::WorkloadMismatch);
-            }
-        }
+    pub async fn assert_rbac(&self, ctx: &ProxyRbacContext) -> Result<(), proxy::AuthorizationRejectionError> {
+        let wl = &ctx.dest_workload;
         let conn = &ctx.conn;
         let state = self.state.read().unwrap();
 
@@ -1294,14 +1298,9 @@ mod tests {
         }
     }
 
-    fn get_workloadinfo(state: &DemandProxyState, dest_uid: u8) -> WorkloadInfo {
+    fn get_workloadinfo(state: &DemandProxyState, dest_uid: u8) -> Arc<Workload> {
         let key: Strng = format!("{}", dest_uid).into();
-        let workload = &state.read().workloads.by_uid[&key];
-        WorkloadInfo {
-            name: workload.name.to_string(),
-            namespace: workload.namespace.to_string(),
-            service_account: workload.service_account.to_string(),
-        }
+        &state.read().workloads.by_uid[&key]
     }
 
     fn get_rbac_context(
@@ -1325,7 +1324,7 @@ mod tests {
                 dst_network: "".into(),
                 dst: SocketAddr::new(workload.workload_ips[0], 8080),
             },
-            dest_workload_info: Some(Arc::new(get_workloadinfo(state, dest_uid))),
+            dest_workload: Some(Arc::new(get_workloadinfo(state, dest_uid))),
         }
     }
     fn create_state(state: ProxyState) -> DemandProxyState {
@@ -1449,35 +1448,6 @@ mod tests {
 
         let mut ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
         assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
-
-        // now make sure it fails when we change just one property of the workload info
-        {
-            let mut wi = get_workloadinfo(&mock_proxy_state, 1);
-            wi.name = "not-test".into();
-            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
-            assert_eq!(
-                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
-                proxy::AuthorizationRejectionError::WorkloadMismatch
-            );
-        }
-        {
-            let mut wi = get_workloadinfo(&mock_proxy_state, 1);
-            wi.namespace = "not-test".into();
-            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
-            assert_eq!(
-                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
-                proxy::AuthorizationRejectionError::WorkloadMismatch
-            );
-        }
-        {
-            let mut wi = get_workloadinfo(&mock_proxy_state, 1);
-            wi.service_account = "not-test".into();
-            ctx.dest_workload_info = Some(Arc::new(wi.clone()));
-            assert_eq!(
-                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
-                proxy::AuthorizationRejectionError::WorkloadMismatch
-            );
-        }
     }
 
     #[tokio::test]

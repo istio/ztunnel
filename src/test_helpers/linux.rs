@@ -22,6 +22,7 @@ use crate::test_helpers::*;
 use crate::xds::{LocalConfig, LocalWorkload};
 use crate::{config, identity, proxy, strng};
 
+use crate::inpod::istio::zds::WorkloadInfo;
 use crate::signal::ShutdownTrigger;
 use crate::test_helpers::inpod::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
@@ -57,7 +58,7 @@ pub struct WorkloadManager {
 
 #[derive(Debug)]
 pub struct LocalZtunnel {
-    fd_sender: Option<MpscAckSender<(String, i32)>>,
+    fd_sender: Option<MpscAckSender<inpod::StartZtunnelMessage>>,
     config_sender: MpscAckSender<LocalConfig>,
     namespace: Namespace,
 }
@@ -238,10 +239,15 @@ impl WorkloadManager {
         self.workloads = keep;
         for d in drop {
             if let Some(zt) = self.ztunnels.get_mut(&d.workload.node.to_string()).as_mut() {
+                let msg = inpod::StartZtunnelMessage {
+                    uid: d.workload.uid.to_string(),
+                    workload_info: None,
+                    fd: -1, // Test server handles -1 as del
+                };
                 zt.fd_sender
                     .as_mut()
                     .unwrap()
-                    .send_and_wait((d.workload.uid.to_string(), -1)) // Test server handles -1 as del
+                    .send_and_wait(msg)
                     .await
                     .unwrap();
             }
@@ -511,6 +517,11 @@ impl<'a> TestWorkloadBuilder<'a> {
         }
 
         info!("registered {}", &self.w.workload.uid);
+        let wli = WorkloadInfo {
+            name: self.w.workload.workload_name.to_string(),
+            namespace: self.w.workload.namespace.to_string(),
+            service_account: self.w.workload.service_account.to_string(),
+        };
         self.manager.workloads.push(self.w);
         if self.captured {
             // Setup redirection
@@ -521,11 +532,16 @@ impl<'a> TestWorkloadBuilder<'a> {
                     .netns()
                     .run(|_| helpers::run_command("scripts/ztunnel-redirect-inpod.sh"))??;
                 let fd = network_namespace.netns().file().as_raw_fd();
+                let msg = inpod::StartZtunnelMessage {
+                    uid: uid.to_string(),
+                    workload_info: Some(wli),
+                    fd,
+                };
                 zt_info
                     .fd_sender
                     .as_mut()
                     .unwrap()
-                    .send_and_wait((uid.to_string(), fd))
+                    .send_and_wait(msg)
                     .await?;
             }
         }

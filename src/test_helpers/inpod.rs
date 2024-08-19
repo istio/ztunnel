@@ -16,15 +16,23 @@ use crate::inpod::test_helpers::{
     read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del,
 };
 
+use crate::inpod::istio::zds::WorkloadInfo;
 use crate::test_helpers;
 use crate::test_helpers::MpscAckSender;
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
+#[derive(Debug)]
+pub struct StartZtunnelMessage {
+    pub uid: String,
+    pub workload_info: Option<WorkloadInfo>,
+    pub fd: i32,
+}
+
 pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
     bind_path: P,
-) -> MpscAckSender<(String, i32)> {
+) -> MpscAckSender<StartZtunnelMessage> {
     info!("starting server {}", bind_path.as_ref().display());
 
     // remove file if exists
@@ -35,7 +43,7 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
         );
         std::fs::remove_file(&bind_path).expect("remove file failed");
     }
-    let (tx, mut rx) = test_helpers::mpsc_ack::<(String, i32)>(1);
+    let (tx, mut rx) = test_helpers::mpsc_ack::<StartZtunnelMessage>(1);
 
     // these tests are structured in an unusual way - async operations are done in a different thread,
     // that is joined. This blocks asyncs done here. thus the need run the servers in a different thread
@@ -74,11 +82,16 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             let read_amount = ztun_sock.read(&mut buf).await.unwrap();
             info!("ack received, len {}", read_amount);
             // Now await for FDs
-            while let Some((uid, fd)) = rx.recv().await {
+            while let Some(StartZtunnelMessage {
+                uid,
+                fd,
+                workload_info,
+            }) = rx.recv().await
+            {
                 let orig_uid = uid.clone();
                 let uid = crate::inpod::WorkloadUid::new(uid);
                 if fd >= 0 {
-                    send_workload_added(&mut ztun_sock, uid, fd).await;
+                    send_workload_added(&mut ztun_sock, uid, workload_info, fd).await;
                 } else {
                     send_workload_del(&mut ztun_sock, uid).await;
                 };

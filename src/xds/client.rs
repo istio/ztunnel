@@ -822,6 +822,7 @@ mod tests {
     use crate::state::{workload, DemandProxyState};
     use crate::test_helpers::{
         helpers::{self},
+        test_default_workload,
         xds::AdsServer,
     };
 
@@ -962,6 +963,7 @@ mod tests {
                     let rbac_ctx = crate::state::ProxyRbacContext {
                         conn: conn.clone(),
                         dest_workload_info: None,
+                        dest_workload: Arc::new(test_default_workload()),
                     };
 
                     // rbac should reject port 80
@@ -974,6 +976,7 @@ mod tests {
                     let rbac_ctx = crate::state::ProxyRbacContext {
                         conn,
                         dest_workload_info: None,
+                        dest_workload: Arc::new(test_default_workload()),
                     };
 
                     // but allow port 81

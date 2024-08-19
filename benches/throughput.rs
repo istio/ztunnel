@@ -40,7 +40,7 @@ use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
 use ztunnel::test_helpers::tcp::Mode;
-use ztunnel::test_helpers::{helpers, tcp};
+use ztunnel::test_helpers::{helpers, tcp, test_default_workload};
 use ztunnel::xds::LocalWorkload;
 use ztunnel::{app, identity, metrics, proxy, rbac, setup_netns_test, strng, test_helpers};
 
@@ -387,6 +387,7 @@ pub fn rbac(c: &mut Criterion) {
             dst_network: "".into(),
         },
         dest_workload_info: None,
+        dest_workload: Arc::new(test_default_workload()),
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

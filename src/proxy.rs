@@ -201,6 +201,7 @@ impl LocalWorkloadInformation {
     }
 
     pub async fn get_workload(&self) -> Result<Arc<Workload>, Error> {
+        // TODO: we need to refresh this!!
         self.workload
             .get_or_try_init(|| async {
                 self.state

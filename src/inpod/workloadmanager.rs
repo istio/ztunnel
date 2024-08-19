@@ -449,7 +449,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), new_netns()).await;
+            send_workload_added(&mut s2, uid(0), None, new_netns()).await;
             read_msg(&mut s2).await;
         });
 
@@ -500,7 +500,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), podns).await;
+            send_workload_added(&mut s2, uid(0), None, podns).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
@@ -539,7 +539,7 @@ pub(crate) mod tests {
         let podns = new_netns();
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), podns).await;
+            send_workload_added(&mut s2, uid(0), None, podns).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
@@ -572,9 +572,9 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), new_netns()).await;
+            send_workload_added(&mut s2, uid(0), None, new_netns()).await;
             read_msg(&mut s2).await;
-            send_workload_added(&mut s2, uid(1), new_netns()).await;
+            send_workload_added(&mut s2, uid(1), None, new_netns()).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
@@ -607,7 +607,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(1), new_netns()).await;
+            send_workload_added(&mut s2, uid(1), None, new_netns()).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;

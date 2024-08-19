@@ -124,8 +124,8 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         dns_proxy_addr: config::Address::Localhost(false, 0),
         proxy_mode: config::ProxyMode::Dedicated,
-        proxy_workload_information: Some(state::WorkloadInfo{
-            name: "local-pod".to_string(),
+        proxy_workload_information: Some(state::WorkloadInfo {
+            name: "local-source".to_string(),
             namespace: "default".to_string(),
             service_account: "default".to_string(),
         }),

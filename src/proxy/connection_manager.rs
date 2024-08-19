@@ -134,7 +134,7 @@ pub struct InboundConnectionDump {
     pub actual_dst: SocketAddr,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundConnection {
     #[serde(flatten)]
@@ -335,6 +335,7 @@ mod tests {
 
     use crate::rbac::Connection;
     use crate::state::{DemandProxyState, ProxyState};
+    use crate::test_helpers::test_default_workload;
     use crate::xds::istio::security::{Action, Authorization, Scope};
     use crate::xds::ProxyStateUpdateMutator;
 
@@ -376,6 +377,7 @@ mod tests {
                     )),
                 },
                 dest_workload_info: None,
+                dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
         };
@@ -410,6 +412,7 @@ mod tests {
                     )),
                 },
                 dest_workload_info: None,
+                dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
         };
@@ -419,7 +422,8 @@ mod tests {
         assert_eq!(cm.drains.read().unwrap().len(), 2);
         assert_eq!(cm.connections().len(), 2);
         let mut connections = cm.connections();
-        connections.sort(); // ordering cannot be guaranteed without sorting
+        // ordering cannot be guaranteed without sorting
+        connections.sort_by(|a, b| a.ctx.conn.cmp(&b.ctx.conn));
         assert_eq!(connections, vec![rbac_ctx1.clone(), rbac_ctx2.clone()]);
 
         // spawn tasks to assert that we close in a timely manner for rbac_ctx1
@@ -477,6 +481,7 @@ mod tests {
                     )),
                 },
                 dest_workload_info: None,
+                dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
         };
@@ -497,6 +502,7 @@ mod tests {
                     )),
                 },
                 dest_workload_info: None,
+                dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
         };
@@ -522,7 +528,8 @@ mod tests {
         assert_eq!(cm.drains.read().unwrap().len(), 2);
         assert_eq!(cm.connections().len(), 2);
         let mut connections = cm.connections();
-        connections.sort(); // ordering cannot be guaranteed without sorting
+        // ordering cannot be guaranteed without sorting
+        connections.sort_by(|a, b| a.ctx.conn.cmp(&b.ctx.conn));
         assert_eq!(connections, vec![conn1.clone(), conn2.clone()]);
 
         // release conn1
@@ -592,6 +599,7 @@ mod tests {
                     )),
                 },
                 dest_workload_info: None,
+                dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
         };

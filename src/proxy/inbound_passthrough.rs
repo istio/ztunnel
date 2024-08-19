@@ -145,21 +145,14 @@ impl InboundPassthrough {
             );
             return;
         }
-        let network_addr = NetworkAddress {
-            network: strng::new(&pi.cfg.network), // inbound request must be on our network
-            address: dest_addr.ip(),
+        let upstream_workload = match pi.local_workload_information.get_workload().await {
+            Ok(upstream_workload) => upstream_workload,
+            Err(e) => {
+                metrics::log_early_deny(source_addr, dest_addr, Reporter::destination, e);
+                return;
+            }
         };
-        let Some((upstream, upstream_service)) =
-            pi.state.fetch_workload_services(&network_addr).await
-        else {
-            metrics::log_early_deny(
-                source_addr,
-                dest_addr,
-                Reporter::destination,
-                Error::UnknownDestination(dest_addr.ip()),
-            );
-            return;
-        };
+        let upstream_services = pi.state.get_services_by_workload(&upstream_workload);
 
         let rbac_ctx = crate::state::ProxyRbacContext {
             conn: rbac::Connection {
@@ -172,6 +165,7 @@ impl InboundPassthrough {
                 dst: dest_addr,
             },
             dest_workload_info: Some(pi.local_workload_information.workload_info()),
+            dest_workload: upstream_workload.clone(),
         };
 
         // Find source info. We can lookup by XDS or from connection attributes
@@ -189,7 +183,12 @@ impl InboundPassthrough {
             identity: rbac_ctx.conn.src_identity.clone(),
             ..Default::default()
         };
-        let ds = proxy::guess_inbound_service(&rbac_ctx.conn, &None, upstream_service, &upstream);
+        let ds = proxy::guess_inbound_service(
+            &rbac_ctx.conn,
+            &None,
+            upstream_services,
+            &upstream_workload,
+        );
         let result_tracker = Box::new(metrics::ConnectionResult::new(
             source_addr,
             dest_addr,
@@ -199,7 +198,7 @@ impl InboundPassthrough {
                 reporter: Reporter::destination,
                 source: source_workload,
                 derived_source: Some(derived_source),
-                destination: Some(upstream),
+                destination: Some(upstream_workload),
                 connection_security_policy: metrics::SecurityPolicy::unknown,
                 destination_service: ds,
             },
