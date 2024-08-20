@@ -42,7 +42,7 @@ use crate::proxy::socks5::Socks5;
 use crate::rbac::Connection;
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::address::Address;
-use crate::state::workload::{network_addr, GatewayAddress, Workload};
+use crate::state::workload::{GatewayAddress, Workload};
 use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
@@ -634,7 +634,6 @@ pub fn guess_inbound_service(
         return Some(found);
     }
     let dport = conn.dst.port();
-    let netaddr = network_addr(dest.network.clone(), conn.dst.ip());
     upstream_service
         .iter()
         .find(|s| {
@@ -730,8 +729,8 @@ mod tests {
 
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
-    use crate::state::service::endpoint_uid;
-    use crate::state::workload::{NamespacedHostname, NetworkAddress};
+    use crate::state::service::EndpointSet;
+    use crate::state::workload::NetworkAddress;
     use crate::{
         identity::Identity,
         state::{
@@ -858,19 +857,11 @@ mod tests {
         let vips = vec![vip1];
         let mut ports = HashMap::new();
         ports.insert(8080, 80);
-        let mut endpoints = HashMap::new();
-        let addr = Some(NetworkAddress {
-            network: "".into(),
-            address: IpAddr::V4(mock_default_gateway_ipaddr()),
-        });
-        endpoints.insert(
-            endpoint_uid(&mock_default_gateway_workload().uid, addr.as_ref()),
-            Endpoint {
-                workload_uid: mock_default_gateway_workload().uid,
-                port: ports.clone(),
-                status: state::workload::HealthStatus::Healthy,
-            },
-        );
+        let endpoints = EndpointSet::from_list([Endpoint {
+            workload_uid: mock_default_gateway_workload().uid,
+            port: ports.clone(),
+            status: state::workload::HealthStatus::Healthy,
+        }]);
         Service {
             name: "gateway".into(),
             namespace: "gatewayns".into(),

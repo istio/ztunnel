@@ -443,7 +443,7 @@ impl Store {
                             };
                             wl.workload_ips
                                 .iter()
-                                .map(|a| *a)
+                                .copied()
                                 .find(|addr| is_record_type(addr, record_type))
                         })
                         .collect()

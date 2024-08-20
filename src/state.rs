@@ -968,7 +968,7 @@ impl ProxyStateManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::service::{LoadBalancer, LoadBalancerHealthPolicy};
+    use crate::state::service::{EndpointSet, LoadBalancer, LoadBalancerHealthPolicy};
     use crate::state::workload::{HealthStatus, Locality};
     use prometheus_client::registry::Registry;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
@@ -977,7 +977,7 @@ mod tests {
 
     use super::*;
     use crate::test_helpers::helpers::initialize_telemetry;
-    use crate::test_helpers::TEST_SERVICE_NAMESPACE;
+
     use crate::{strng, test_helpers};
     use test_case::test_case;
 
@@ -1227,22 +1227,11 @@ mod tests {
                 address: "10.0.0.1".parse().unwrap(),
                 network: "".into(),
             }],
-            endpoints: HashMap::from([(
-                "cluster1//v1/Pod/default/ep_no_port_mapping".into(),
-                Endpoint {
-                    workload_uid: "cluster1//v1/Pod/default/ep_no_port_mapping".into(),
-                    service: NamespacedHostname {
-                        namespace: "default".into(),
-                        hostname: "example.com".into(),
-                    },
-                    address: Some(NetworkAddress {
-                        address: "192.168.0.1".parse().unwrap(),
-                        network: "".into(),
-                    }),
-                    port: tc.endpoint_mapping(),
-                    status: HealthStatus::Healthy,
-                },
-            )]),
+            endpoints: EndpointSet::from_list([Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/ep_no_port_mapping".into(),
+                port: tc.endpoint_mapping(),
+                status: HealthStatus::Healthy,
+            }]),
             ports: tc.service_mapping(),
             ..test_helpers::mock_default_service()
         };
@@ -1402,55 +1391,22 @@ mod tests {
             },
             ..test_helpers::test_default_workload()
         };
-        let endpoints = HashMap::from([
-            (
-                "cluster1//v1/Pod/default/ep_almost".into(),
-                Endpoint {
-                    workload_uid: "cluster1//v1/Pod/default/ep_almost".into(),
-                    service: NamespacedHostname {
-                        namespace: TEST_SERVICE_NAMESPACE.into(),
-                        hostname: "example.com".into(),
-                    },
-                    address: Some(NetworkAddress {
-                        address: "192.168.0.4".parse().unwrap(),
-                        network: "".into(),
-                    }),
-                    port: HashMap::from([(80u16, 80u16)]),
-                    status: HealthStatus::Healthy,
-                },
-            ),
-            (
-                "cluster1//v1/Pod/default/ep_no_match".into(),
-                Endpoint {
-                    workload_uid: "cluster1//v1/Pod/default/ep_almost".into(),
-                    service: NamespacedHostname {
-                        namespace: TEST_SERVICE_NAMESPACE.into(),
-                        hostname: "example.com".into(),
-                    },
-                    address: Some(NetworkAddress {
-                        address: "192.168.0.5".parse().unwrap(),
-                        network: "".into(),
-                    }),
-                    port: HashMap::from([(80u16, 80u16)]),
-                    status: HealthStatus::Healthy,
-                },
-            ),
-            (
-                "cluster1//v1/Pod/default/wl_match".into(),
-                Endpoint {
-                    workload_uid: "cluster1//v1/Pod/default/wl_match".into(),
-                    service: NamespacedHostname {
-                        namespace: TEST_SERVICE_NAMESPACE.into(),
-                        hostname: "example.com".into(),
-                    },
-                    address: Some(NetworkAddress {
-                        address: "192.168.0.2".parse().unwrap(),
-                        network: "".into(),
-                    }),
-                    port: HashMap::from([(80u16, 80u16)]),
-                    status: HealthStatus::Healthy,
-                },
-            ),
+        let endpoints = EndpointSet::from_list([
+            Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/ep_almost".into(),
+                port: HashMap::from([(80u16, 80u16)]),
+                status: HealthStatus::Healthy,
+            },
+            Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/ep_no_match".into(),
+                port: HashMap::from([(80u16, 80u16)]),
+                status: HealthStatus::Healthy,
+            },
+            Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/wl_match".into(),
+                port: HashMap::from([(80u16, 80u16)]),
+                status: HealthStatus::Healthy,
+            },
         ]);
         let strict_svc = Service {
             endpoints: endpoints.clone(),
@@ -1488,15 +1444,14 @@ mod tests {
         state.services.insert(strict_svc.clone());
         state.services.insert(failover_svc.clone());
 
-        let assert_endpoint = |src: &Workload, svc: &Service, ips: Vec<&str>, desc: &str| {
+        let assert_endpoint = |src: &Workload, svc: &Service, workloads: Vec<&str>, desc: &str| {
             let got = state
                 .load_balance(src, svc, 80, ServiceResolutionMode::Standard)
-                .and_then(|(ep, _)| ep.address.clone())
-                .map(|addr| addr.address.to_string());
-            if ips.is_empty() {
+                .map(|(ep, _)| ep.workload_uid.to_string());
+            if workloads.is_empty() {
                 assert!(got.is_none(), "{}", desc);
             } else {
-                let want: Vec<String> = ips.iter().map(ToString::to_string).collect();
+                let want: Vec<String> = workloads.iter().map(ToString::to_string).collect();
                 assert!(want.contains(&got.unwrap()), "{}", desc);
             }
         };
@@ -1513,24 +1468,36 @@ mod tests {
             vec![],
             "strict no match should not select",
         );
-        assert_endpoint(&wl_match, &strict_svc, vec!["192.168.0.2"], "strict match");
+        assert_endpoint(
+            &wl_match,
+            &strict_svc,
+            vec!["cluster1//v1/Pod/default/wl_match"],
+            "strict match",
+        );
 
         assert_endpoint(
             &wl_no_locality,
             &failover_svc,
-            vec!["192.168.0.2", "192.168.0.4", "192.168.0.5"],
+            vec![
+                "cluster1//v1/Pod/default/ep_almost",
+                "cluster1//v1/Pod/default/ep_no_match",
+                "cluster1//v1/Pod/default/wl_match",
+            ],
             "failover no match can select any endpoint",
         );
         assert_endpoint(
             &wl_almost,
             &failover_svc,
-            vec!["192.168.0.2", "192.168.0.4"],
+            vec![
+                "cluster1//v1/Pod/default/ep_almost",
+                "cluster1//v1/Pod/default/wl_match",
+            ],
             "failover almost match can select any close matches",
         );
         assert_endpoint(
             &wl_match,
             &failover_svc,
-            vec!["192.168.0.2"],
+            vec!["cluster1//v1/Pod/default/wl_match"],
             "failover full match selects closest match",
         );
     }

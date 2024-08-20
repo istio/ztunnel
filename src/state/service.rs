@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arcstr::ArcStr;
 use bytes::Bytes;
-use std::collections::hash_map::Iter;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::ops::Deref;
@@ -58,41 +56,43 @@ pub struct Service {
     pub ip_families: Option<IpFamily>,
 }
 
+/// EndpointSet is an abstraction over a set of endpoints.
+/// While this is currently not very useful, merely wrapping a HashMap, the intent is to make this future
+/// proofed to future enhancements, such as keeping track of load balancing information the ability
+/// to incrementally update.
 #[derive(Debug, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EndpointSet {
-    pub endpoints: HashMap<Strng, Endpoint>,
+    pub inner: HashMap<Strng, Endpoint>,
 }
 
 impl EndpointSet {
     pub fn from_list<const N: usize>(eps: [Endpoint; N]) -> EndpointSet {
-        let mut endpoints =  HashMap::with_capacity(eps.len());
+        let mut endpoints = HashMap::with_capacity(eps.len());
         for ep in eps.into_iter() {
             endpoints.insert(ep.workload_uid.clone(), ep);
         }
-        EndpointSet{
-            endpoints
-        }
+        EndpointSet { inner: endpoints }
     }
 
     pub fn insert(&mut self, k: Strng, v: Endpoint) {
-        self.endpoints.insert(k, v);
+        self.inner.insert(k, v);
     }
 
     pub fn contains(&self, key: &Strng) -> bool {
-        self.endpoints.contains_key(key)
+        self.inner.contains_key(key)
     }
 
     pub fn get(&self, key: &Strng) -> Option<&Endpoint> {
-        self.endpoints.get(key)
+        self.inner.get(key)
     }
 
     pub fn remove(&mut self, key: &Strng) {
-        self.endpoints.remove(key);
+        self.inner.remove(key);
     }
 
-    pub fn iter(&self) -> impl Iterator<Item=&Endpoint> {
-        self.endpoints.iter().map(|(_, v)| v)
+    pub fn iter(&self) -> impl Iterator<Item = &Endpoint> {
+        self.inner.values()
     }
 }
 

@@ -37,7 +37,7 @@ use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::rbac::Authorization;
 use crate::state::service::{Endpoint, Service, ServiceStore};
-use crate::state::workload::{network_addr, NamespacedHostname, Workload};
+use crate::state::workload::{NamespacedHostname, Workload};
 use crate::state::ProxyState;
 use crate::strng::Strng;
 use crate::{rbac, strng};
@@ -251,7 +251,9 @@ impl ProxyStateUpdateMutator {
         {
             for ep in prev.endpoints.iter() {
                 if service.should_include_endpoint(ep.status) {
-                    service.endpoints.insert(ep.workload_uid.clone(), ep.clone());
+                    service
+                        .endpoints
+                        .insert(ep.workload_uid.clone(), ep.clone());
                 }
             }
         }
