@@ -228,7 +228,7 @@ impl ProxyStateUpdateMutator {
             trace!("not a service, not attempting to delete as such",);
             return;
         }
-        if state.services.remove(&name).is_none() && !for_insert {
+        if !state.services.remove(&name) && !for_insert {
             warn!("tried to remove service, but it was not found");
         }
     }

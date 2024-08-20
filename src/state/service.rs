@@ -472,10 +472,10 @@ impl ServiceStore {
         }
     }
 
-    /// Removes the service for the given host and namespace.
-    pub fn remove(&mut self, namespaced_host: &NamespacedHostname) -> Option<Service> {
+    /// Removes the service for the given host and namespace, and returns whether something was removed
+    pub fn remove(&mut self, namespaced_host: &NamespacedHostname) -> bool {
         match self.by_host.get_mut(&namespaced_host.hostname) {
-            None => None,
+            None => false,
             Some(services) => {
                 // Remove the previous service from the by_host map.
                 let Some(prev) = ({
@@ -495,7 +495,7 @@ impl ServiceStore {
                     prev
                 }) else {
                     // Not found.
-                    return None;
+                    return false;
                 };
 
                 // Remove the entries for the previous service VIPs.
@@ -520,7 +520,7 @@ impl ServiceStore {
                 }
 
                 // Remove successful.
-                Some(prev.deref().clone())
+                true
             }
         }
     }
