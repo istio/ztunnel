@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::ops::Deref;
@@ -60,10 +61,27 @@ pub struct Service {
 /// While this is currently not very useful, merely wrapping a HashMap, the intent is to make this future
 /// proofed to future enhancements, such as keeping track of load balancing information the ability
 /// to incrementally update.
-#[derive(Debug, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct EndpointSet {
     pub inner: HashMap<Strng, Endpoint>,
+}
+
+impl serde::Serialize for EndpointSet {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.inner.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EndpointSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        <HashMap<Strng, Endpoint>>::deserialize(deserializer).map(|inner| EndpointSet { inner })
+    }
 }
 
 impl EndpointSet {
