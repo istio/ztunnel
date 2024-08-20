@@ -411,7 +411,7 @@ impl Inbound {
             // Validate that the HBONE target references the Waypoint we're connecting to
             Some(match target_waypoint {
                 Address::Service(svc) => {
-                    if !svc.contains_endpoint(&conn_wl, Some(connection_dst)) {
+                    if !svc.contains_endpoint(&conn_wl) {
                         // target points to a different waypoint
                         return Some(None);
                     }
@@ -504,7 +504,7 @@ mod tests {
         rbac::Connection,
         state::{
             self,
-            service::{endpoint_uid, Endpoint, Service},
+            service::{Endpoint, Service},
             workload::{
                 application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
                 ApplicationTunnel, GatewayAddress, NamespacedHostname, NetworkAddress, Protocol,

@@ -40,7 +40,7 @@ use crate::proxy::inbound_passthrough::InboundPassthrough;
 use crate::proxy::outbound::Outbound;
 use crate::proxy::socks5::Socks5;
 use crate::rbac::Connection;
-use crate::state::service::{endpoint_uid, Service, ServiceDescription};
+use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::address::Address;
 use crate::state::workload::{network_addr, GatewayAddress, Workload};
 use crate::state::{DemandProxyState, WorkloadInfo};
@@ -635,7 +635,6 @@ pub fn guess_inbound_service(
     }
     let dport = conn.dst.port();
     let netaddr = network_addr(dest.network.clone(), conn.dst.ip());
-    let euid = endpoint_uid(&dest.uid, Some(&netaddr));
     upstream_service
         .iter()
         .find(|s| {
@@ -646,7 +645,7 @@ pub fn guess_inbound_service(
                 }
                 // The service itself didn't have a explicit TargetPort match, but an endpoint might.
                 // This happens when there is a named port (in Kubernetes, anyways).
-                if s.endpoints.get(&euid).and_then(|e| e.port.get(sport)) == Some(&dport) {
+                if s.endpoints.get(&dest.uid).and_then(|e| e.port.get(sport)) == Some(&dport) {
                     // Named port matched
                     return true;
                 }
@@ -698,7 +697,7 @@ where
     match state.fetch_destination(&gateway_address.destination).await {
         Some(Address::Workload(wl)) => return predicate(wl.as_ref()),
         Some(Address::Service(svc)) => {
-            for (_ep_uid, ep) in svc.endpoints.iter() {
+            for ep in svc.endpoints.iter() {
                 // fetch workloads by workload UID since we may not have an IP for an endpoint (e.g., endpoint is just a hostname)
                 let wl = state.fetch_workload_by_uid(&ep.workload_uid).await;
                 if wl.as_ref().is_some_and(|wl| predicate(wl.as_ref())) {
@@ -868,11 +867,6 @@ mod tests {
             endpoint_uid(&mock_default_gateway_workload().uid, addr.as_ref()),
             Endpoint {
                 workload_uid: mock_default_gateway_workload().uid,
-                service: NamespacedHostname {
-                    namespace: "gatewayns".into(),
-                    hostname: "gateway".into(),
-                },
-                address: addr,
                 port: ports.clone(),
                 status: state::workload::HealthStatus::Healthy,
             },

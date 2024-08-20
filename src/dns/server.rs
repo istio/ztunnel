@@ -436,7 +436,7 @@ impl Store {
                     service
                         .endpoints
                         .iter()
-                        .filter_map(|(_, ep)| {
+                        .filter_map(|ep| {
                             let Some(wl) = workloads.find_uid(&ep.workload_uid) else {
                                 debug!("failed to fetch workload for {}", ep.workload_uid);
                                 return None;

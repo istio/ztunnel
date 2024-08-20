@@ -14,7 +14,7 @@
 
 use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
-use crate::state::service::{endpoint_uid, Endpoint, Service};
+use crate::state::service::{Endpoint, Service};
 use crate::state::workload::{gatewayaddress, HealthStatus, Workload};
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};

@@ -14,7 +14,7 @@
 
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
-use crate::state::service::{Endpoint, Service};
+use crate::state::service::{Endpoint, EndpointSet, Service};
 use crate::state::workload::Protocol::{HBONE, TCP};
 use crate::state::workload::{
     gatewayaddress, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
@@ -179,7 +179,7 @@ pub fn mock_default_service() -> Service {
     let vips = vec![vip1];
     let mut ports = HashMap::new();
     ports.insert(8080, 80);
-    let endpoints = HashMap::new();
+    let endpoints = EndpointSet::from_list([]);
     Service {
         name: "".into(),
         namespace: "default".into(),
@@ -274,14 +274,11 @@ fn test_custom_svc(
             address: vip.parse()?,
         }],
         ports: HashMap::from([(80u16, echo_port)]),
-        endpoints: HashMap::from([(
-            format!("cluster1//v1/Pod/default/{}", workload_name).into(),
-            Endpoint {
-                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
-                port: HashMap::from([(80u16, echo_port)]),
-                status: HealthStatus::Healthy,
-            },
-        )]),
+        endpoints: EndpointSet::from_list([Endpoint {
+            workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
+            port: HashMap::from([(80u16, echo_port)]),
+            status: HealthStatus::Healthy,
+        }]),
         subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".into()],
         waypoint: None,
         load_balancer: None,

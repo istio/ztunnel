@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arcstr::ArcStr;
+use bytes::Bytes;
+use std::collections::hash_map::Iter;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
-
-use bytes::Bytes;
 use tracing::trace;
 
 use xds::istio::workload::Service as XdsService;
@@ -43,7 +44,7 @@ pub struct Service {
 
     /// Maps endpoint UIDs to service [Endpoint]s.
     #[serde(default)]
-    pub endpoints: HashMap<Strng, Endpoint>,
+    pub endpoints: EndpointSet,
     #[serde(default)]
     pub subject_alt_names: Vec<Strng>,
 
@@ -55,6 +56,44 @@ pub struct Service {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub ip_families: Option<IpFamily>,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndpointSet {
+    pub endpoints: HashMap<Strng, Endpoint>,
+}
+
+impl EndpointSet {
+    pub fn from_list<const N: usize>(eps: [Endpoint; N]) -> EndpointSet {
+        let mut endpoints =  HashMap::with_capacity(eps.len());
+        for ep in eps.into_iter() {
+            endpoints.insert(ep.workload_uid.clone(), ep);
+        }
+        EndpointSet{
+            endpoints
+        }
+    }
+
+    pub fn insert(&mut self, k: Strng, v: Endpoint) {
+        self.endpoints.insert(k, v);
+    }
+
+    pub fn contains(&self, key: &Strng) -> bool {
+        self.endpoints.contains_key(key)
+    }
+
+    pub fn get(&self, key: &Strng) -> Option<&Endpoint> {
+        self.endpoints.get(key)
+    }
+
+    pub fn remove(&mut self, key: &Strng) {
+        self.endpoints.remove(key);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item=&Endpoint> {
+        self.endpoints.iter().map(|(_, v)| v)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -169,8 +208,8 @@ impl Service {
         }
     }
 
-    pub fn contains_endpoint(&self, wl: &Workload, addr: Option<&NetworkAddress>) -> bool {
-        self.endpoints.contains_key(&endpoint_uid(&wl.uid, addr))
+    pub fn contains_endpoint(&self, wl: &Workload) -> bool {
+        self.endpoints.contains(&wl.uid)
     }
 
     pub fn should_include_endpoint(&self, ep_health: HealthStatus) -> bool {
@@ -211,15 +250,6 @@ pub struct Endpoint {
 
     /// Health status for the endpoint
     pub status: HealthStatus,
-}
-
-pub fn endpoint_uid(workload_uid: &str, address: Option<&NetworkAddress>) -> Strng {
-    let addr = address.map(|a| a.to_string()).unwrap_or_default();
-    let mut res = String::with_capacity(1 + addr.len() + workload_uid.len());
-    res.push_str(workload_uid);
-    res.push(':');
-    res.push_str(&addr);
-    res.into()
 }
 
 impl TryFrom<&XdsService> for Service {
@@ -457,7 +487,7 @@ impl ServiceStore {
         }
 
         // Map the workload address to the service.
-        for (_, ep) in service.endpoints.iter() {
+        for ep in service.endpoints.iter() {
             self.workload_to_services
                 .entry(ep.workload_uid.clone())
                 .or_default()
@@ -501,14 +531,14 @@ impl ServiceStore {
                 self.staged_services.remove(namespaced_host);
 
                 // Remove mapping from workload to the VIPs for this service.
-                for (ep_ip, _) in prev.endpoints.iter() {
+                for ep in prev.endpoints.iter() {
                     // Remove the workload IP mapping for this service.
                     self.workload_to_services
-                        .entry(ep_ip.clone())
+                        .entry(ep.workload_uid.clone())
                         .or_default()
                         .remove(namespaced_host);
-                    if self.workload_to_services[ep_ip].is_empty() {
-                        self.workload_to_services.remove(ep_ip);
+                    if self.workload_to_services[&ep.workload_uid].is_empty() {
+                        self.workload_to_services.remove(&ep.workload_uid);
                     }
                 }
 

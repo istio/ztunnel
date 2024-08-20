@@ -36,7 +36,7 @@ use xds::istio::workload::Workload as XdsWorkload;
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::rbac::Authorization;
-use crate::state::service::{endpoint_uid, Endpoint, Service, ServiceStore};
+use crate::state::service::{Endpoint, Service, ServiceStore};
 use crate::state::workload::{network_addr, NamespacedHostname, Workload};
 use crate::state::ProxyState;
 use crate::strng::Strng;
@@ -183,17 +183,7 @@ impl ProxyStateUpdateMutator {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
             // Also remove service endpoints for the workload.
-            for wip in prev.workload_ips.iter() {
-                let prev_addr = &network_addr(prev.network.clone(), *wip);
-                state
-                    .services
-                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, Some(prev_addr)));
-            }
-            if prev.workload_ips.is_empty() {
-                state
-                    .services
-                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, None));
-            }
+            state.services.remove_endpoint(&prev.uid, &prev.uid);
 
             // This is a real removal (not a removal before insertion), and nothing else references the cert
             // Clear it out
@@ -259,9 +249,9 @@ impl ProxyStateUpdateMutator {
             .services
             .get_by_namespaced_host(&service.namespaced_hostname())
         {
-            for (wip, ep) in prev.endpoints.iter() {
+            for ep in prev.endpoints.iter() {
                 if service.should_include_endpoint(ep.status) {
-                    service.endpoints.insert(wip.clone(), ep.clone());
+                    service.endpoints.insert(ep.workload_uid.clone(), ep.clone());
                 }
             }
         }
@@ -354,11 +344,14 @@ fn insert_service_endpoints(
             }
         };
 
-        services_state.insert_endpoint(namespaced_host, Endpoint {
-            workload_uid: workload.uid.clone(),
-            port: ports.into(),
-            status: workload.status,
-        })
+        services_state.insert_endpoint(
+            namespaced_host,
+            Endpoint {
+                workload_uid: workload.uid.clone(),
+                port: ports.into(),
+                status: workload.status,
+            },
+        )
     }
     Ok(())
 }
