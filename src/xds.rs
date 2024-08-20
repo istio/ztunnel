@@ -354,25 +354,11 @@ fn insert_service_endpoints(
             }
         };
 
-        // Create service endpoints for all the workload IPs.
-        for wip in &workload.workload_ips {
-            services_state.insert_endpoint(Endpoint {
-                workload_uid: workload.uid.clone(),
-                service: namespaced_host.clone(),
-                address: Some(network_addr(workload.network.clone(), *wip)),
-                port: ports.into(),
-                status: workload.status,
-            })
-        }
-        if workload.workload_ips.is_empty() {
-            services_state.insert_endpoint(Endpoint {
-                workload_uid: workload.uid.clone(),
-                service: namespaced_host.clone(),
-                address: None,
-                port: ports.into(),
-                status: workload.status,
-            })
-        }
+        services_state.insert_endpoint(namespaced_host, Endpoint {
+            workload_uid: workload.uid.clone(),
+            port: ports.into(),
+            status: workload.status,
+        })
     }
     Ok(())
 }

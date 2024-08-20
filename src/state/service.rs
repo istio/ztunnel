@@ -206,13 +206,6 @@ pub struct Endpoint {
     /// The workload UID for this endpoint.
     pub workload_uid: Strng,
 
-    /// The service for this endpoint.
-    pub service: NamespacedHostname,
-
-    /// The workload address, if any.
-    /// A workload with a hostname may have no addresses.
-    pub address: Option<NetworkAddress>,
-
     /// The port mapping.
     pub port: HashMap<u16, u16>,
 
@@ -362,9 +355,9 @@ impl ServiceStore {
     }
 
     /// Adds an endpoint for the service VIP.
-    pub fn insert_endpoint(&mut self, ep: Endpoint) {
-        let ep_uid = endpoint_uid(&ep.workload_uid, ep.address.as_ref());
-        if let Some(svc) = self.get_by_namespaced_host(&ep.service) {
+    pub fn insert_endpoint(&mut self, service_name: NamespacedHostname, ep: Endpoint) {
+        let ep_uid = ep.workload_uid.clone();
+        if let Some(svc) = self.get_by_namespaced_host(&service_name) {
             // We may or may not accept the endpoint based on it's health
             if !svc.should_include_endpoint(ep.status) {
                 return;
@@ -379,11 +372,11 @@ impl ServiceStore {
         } else {
             // We received workload endpoints, but don't have the Service yet.
             // This can happen due to ordering issues.
-            trace!("pod has service {}, but service not found", ep.service,);
+            trace!("pod has service {}, but service not found", service_name);
 
             // Add a staged entry. This will be added to the service once we receive it.
             self.staged_services
-                .entry(ep.service.clone())
+                .entry(service_name.clone())
                 .or_default()
                 .insert(ep_uid, ep.clone());
 
@@ -391,7 +384,7 @@ impl ServiceStore {
             self.workload_to_services
                 .entry(ep.workload_uid.clone())
                 .or_default()
-                .insert(ep.service.clone());
+                .insert(service_name);
         }
     }
 

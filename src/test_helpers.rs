@@ -263,16 +263,8 @@ fn test_custom_svc(
     hostname: &str,
     vip: &str,
     workload_name: &str,
-    endpoint: &str,
     echo_port: u16,
 ) -> anyhow::Result<Service> {
-    let addr = match endpoint.is_empty() {
-        true => None,
-        false => Some(NetworkAddress {
-            network: strng::EMPTY,
-            address: endpoint.parse()?,
-        }),
-    };
     Ok(Service {
         name: name.into(),
         namespace: TEST_SERVICE_NAMESPACE.into(),
@@ -286,11 +278,6 @@ fn test_custom_svc(
             format!("cluster1//v1/Pod/default/{}", workload_name).into(),
             Endpoint {
                 workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
-                service: NamespacedHostname {
-                    namespace: TEST_SERVICE_NAMESPACE.into(),
-                    hostname: hostname.into(),
-                },
-                address: addr,
                 port: HashMap::from([(80u16, echo_port)]),
                 status: HealthStatus::Healthy,
             },
@@ -312,7 +299,6 @@ pub fn local_xds_config(
         TEST_SERVICE_HOST,
         TEST_VIP,
         "local-hbone",
-        TEST_WORKLOAD_HBONE,
         echo_port,
     )?;
     let dns_svc = test_custom_svc(
@@ -320,7 +306,6 @@ pub fn local_xds_config(
         TEST_SERVICE_DNS_HBONE_HOST,
         TEST_VIP_DNS,
         "local-tcp-via-dns",
-        "",
         echo_port,
     )?;
 
