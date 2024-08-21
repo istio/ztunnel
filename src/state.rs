@@ -449,17 +449,20 @@ impl DemandProxyState {
         self.state.read().unwrap()
     }
 
-    pub async fn assert_rbac(&self, ctx: &ProxyRbacContext) -> bool {
+    pub async fn assert_rbac(
+        &self,
+        ctx: &ProxyRbacContext,
+    ) -> Result<(), proxy::AuthorizationRejectionError> {
         let nw_addr = network_addr(ctx.conn.dst_network.clone(), ctx.conn.dst.ip());
         let Some(wl) = self.fetch_workload(&nw_addr).await else {
             debug!("destination workload not found {}", nw_addr);
-            return false;
+            return Err(proxy::AuthorizationRejectionError::NoWorkload);
         };
         if let Some(ref wl_info) = ctx.dest_workload_info {
             // make sure that the workload we fetched matches the workload info we got over ZDS.
             if !wl_info.matches(&wl) {
                 error!("workload does not match proxy workload uid. this is probably a bug. please report an issue");
-                return false;
+                return Err(proxy::AuthorizationRejectionError::WorkloadMismatch);
             }
         }
         let conn = &ctx.conn;
@@ -498,7 +501,10 @@ impl DemandProxyState {
         for pol in deny.iter() {
             if pol.matches(conn) {
                 debug!(policy = pol.to_key().as_str(), "deny policy match");
-                return false;
+                return Err(proxy::AuthorizationRejectionError::ExplicitlyDenied(
+                    pol.namespace.to_owned(),
+                    pol.name.to_owned(),
+                ));
             } else {
                 trace!(policy = pol.to_key().as_str(), "deny policy does not match");
             }
@@ -506,13 +512,13 @@ impl DemandProxyState {
         // "If there are no ALLOW policies for the workload, allow the request."
         if allow.is_empty() {
             debug!("no allow policies, allow");
-            return true;
+            return Ok(());
         }
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
                 debug!(policy = pol.to_key().as_str(), "allow policy match");
-                return true;
+                return Ok(());
             } else {
                 trace!(
                     policy = pol.to_key().as_str(),
@@ -522,7 +528,7 @@ impl DemandProxyState {
         }
         // "Deny the request."
         debug!("no allow policies matched");
-        false
+        Err(proxy::AuthorizationRejectionError::NotAllowed)
     }
 
     // Select a workload IP, with DNS resolution if needed
@@ -971,6 +977,7 @@ mod tests {
     use crate::state::service::{LoadBalancer, LoadBalancerHealthPolicy};
     use crate::state::workload::{HealthStatus, Locality};
     use prometheus_client::registry::Registry;
+    use rbac::StringMatch;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
     use self::workload::{application_tunnel::Protocol as AppProtocol, ApplicationTunnel};
@@ -1262,70 +1269,201 @@ mod tests {
         assert_eq!(port, tc.expected_port());
     }
 
-    #[tokio::test]
-    async fn assert_rbac_with_dest_workload_info() {
-        let mut state = ProxyState::default();
-        let wl = Workload {
+    fn create_workload(dest_uid: u8) -> Workload {
+        Workload {
             name: "test".into(),
-            namespace: "default".into(),
+            namespace: format!("ns{}", dest_uid).into(),
             trust_domain: "cluster.local".into(),
             service_account: "defaultacct".into(),
-            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2))],
+            workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, dest_uid))],
+            uid: format!("{}", dest_uid).into(),
             ..test_helpers::test_default_workload()
-        };
-        state.workloads.insert(Arc::new(wl), true);
+        }
+    }
 
+    fn get_workloadinfo(state: &DemandProxyState, dest_uid: u8) -> WorkloadInfo {
+        let key: Strng = format!("{}", dest_uid).into();
+        let workload = &state.read().workloads.by_uid[&key];
+        WorkloadInfo {
+            name: workload.name.to_string(),
+            namespace: workload.namespace.to_string(),
+            service_account: workload.service_account.to_string(),
+        }
+    }
+
+    fn get_rbac_context(
+        state: &DemandProxyState,
+        dest_uid: u8,
+        src_svc_acct: &str,
+    ) -> crate::state::ProxyRbacContext {
+        let key: Strng = format!("{}", dest_uid).into();
+        let workload = &state.read().workloads.by_uid[&key];
+        crate::state::ProxyRbacContext {
+            conn: rbac::Connection {
+                src_identity: Some(Identity::Spiffe {
+                    trust_domain: "cluster.local".into(),
+                    namespace: "default".into(),
+                    service_account: src_svc_acct.to_string().into(),
+                }),
+                src: std::net::SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 168, 1, 1),
+                    1234,
+                )),
+                dst_network: "".into(),
+                dst: SocketAddr::new(workload.workload_ips[0].clone(), 8080),
+            },
+            dest_workload_info: Some(Arc::new(get_workloadinfo(state, dest_uid))),
+        }
+    }
+    fn create_state(state: ProxyState) -> DemandProxyState {
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let mock_proxy_state = DemandProxyState::new(
+        DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
             metrics,
+        )
+    }
+
+    // test that we confirm with https://istio.io/latest/docs/reference/config/security/authorization-policy/.
+    // We don't test #1 as ztunnel doesn't support custom policies.
+    // 1. If there are any CUSTOM policies that match the request, evaluate and deny the request if the evaluation result is deny.
+    // 2. If there are any DENY policies that match the request, deny the request.
+    // 3. If there are no ALLOW policies for the workload, allow the request.
+    // 4. If any of the ALLOW policies match the request, allow the request.
+    // 5. Deny the request.
+    #[tokio::test]
+    async fn assert_rbac_logic_deny_allow() {
+        let mut state = ProxyState::default();
+        state.workloads.insert(Arc::new(create_workload(1)), true);
+        state.workloads.insert(Arc::new(create_workload(2)), true);
+        state.policies.insert(
+            "allow".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Allow,
+                namespace: "ns1".into(),
+                name: "foo".into(),
+                rules: vec![
+                    // rule1:
+                    vec![
+                        // from:
+                        vec![rbac::RbacMatch {
+                            principals: vec![StringMatch::Exact(
+                                "cluster.local/ns/default/sa/defaultacct".into(),
+                            )],
+                            ..Default::default()
+                        }],
+                    ],
+                ],
+                scope: rbac::RbacScope::Namespace,
+            },
+        );
+        state.policies.insert(
+            "deny".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Deny,
+                namespace: "ns1".into(),
+                name: "deny".into(),
+                rules: vec![
+                    // rule1:
+                    vec![
+                        // from:
+                        vec![rbac::RbacMatch {
+                            principals: vec![StringMatch::Exact(
+                                "cluster.local/ns/default/sa/denyacct".into(),
+                            )],
+                            ..Default::default()
+                        }],
+                    ],
+                ],
+                scope: rbac::RbacScope::Namespace,
+            },
         );
 
-        let wi = WorkloadInfo {
-            name: "test".into(),
-            namespace: "default".into(),
-            service_account: "defaultacct".into(),
-        };
+        let mock_proxy_state = create_state(state);
 
-        let mut ctx = crate::state::ProxyRbacContext {
-            conn: rbac::Connection {
-                src_identity: None,
-                src: std::net::SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(192, 168, 0, 1),
-                    1234,
-                )),
-                dst_network: "".into(),
-                dst: std::net::SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(192, 168, 0, 2),
-                    8080,
-                )),
-            },
-            dest_workload_info: Some(Arc::new(wi.clone())),
-        };
-        assert!(mock_proxy_state.assert_rbac(&ctx).await);
+        // test workload in ns2. this should work as ns2 doesn't have any policies. this tests:
+        // 3. If there are no ALLOW policies for the workload, allow the request.
+        assert!(mock_proxy_state
+            .assert_rbac(&get_rbac_context(&mock_proxy_state, 2, "not-defaultacct"))
+            .await
+            .is_ok());
+
+        let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
+        // 4. if any allow policies match, allow
+        assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
+
+        {
+            // test a src workload with unknown svc account. this should fail as we have allow policies,
+            // but they don't match.
+            // 5. deny the request
+            let mut ctx = ctx.clone();
+            ctx.conn.src_identity = Some(Identity::Spiffe {
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: "not-defaultacct".into(),
+            });
+
+            assert_eq!(
+                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
+                proxy::AuthorizationRejectionError::NotAllowed
+            );
+        }
+        {
+            let mut ctx = ctx.clone();
+            ctx.conn.src_identity = Some(Identity::Spiffe {
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: "denyacct".into(),
+            });
+
+            // 2. If there are any DENY policies that match the request, deny the request.
+            assert_eq!(
+                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
+                proxy::AuthorizationRejectionError::ExplicitlyDenied("ns1".into(), "deny".into())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn assert_rbac_with_dest_workload_info() {
+        let mut state = ProxyState::default();
+        state.workloads.insert(Arc::new(create_workload(1)), true);
+
+        let mock_proxy_state = create_state(state);
+
+        let mut ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
+        assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
 
         // now make sure it fails when we change just one property of the workload info
         {
-            let mut wi = wi.clone();
+            let mut wi = get_workloadinfo(&mock_proxy_state, 1);
             wi.name = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
-            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+            assert_eq!(
+                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
+                proxy::AuthorizationRejectionError::WorkloadMismatch
+            );
         }
         {
-            let mut wi = wi.clone();
+            let mut wi = get_workloadinfo(&mock_proxy_state, 1);
             wi.namespace = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
-            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+            assert_eq!(
+                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
+                proxy::AuthorizationRejectionError::WorkloadMismatch
+            );
         }
         {
-            let mut wi = wi.clone();
+            let mut wi = get_workloadinfo(&mock_proxy_state, 1);
             wi.service_account = "not-test".into();
             ctx.dest_workload_info = Some(Arc::new(wi.clone()));
-            assert!(!mock_proxy_state.assert_rbac(&ctx).await);
+            assert_eq!(
+                mock_proxy_state.assert_rbac(&ctx).await.err().unwrap(),
+                proxy::AuthorizationRejectionError::WorkloadMismatch
+            );
         }
     }
 
