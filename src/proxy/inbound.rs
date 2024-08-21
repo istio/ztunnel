@@ -221,7 +221,6 @@ impl Inbound {
 
         let rbac_ctx = crate::state::ProxyRbacContext {
             conn,
-            dest_workload_info: Some(pi.local_workload_information.workload_info()),
             dest_workload: pi.local_workload_information.get_workload().await?,
         };
 

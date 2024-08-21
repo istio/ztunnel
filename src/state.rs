@@ -130,14 +130,7 @@ impl WorkloadInfo {
 #[derive(derivative::Derivative, Debug, Clone, Eq, PartialEq, Hash, serde::Serialize)]
 pub struct ProxyRbacContext {
     pub conn: rbac::Connection,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub dest_workload_info: Option<Arc<WorkloadInfo>>,
-    #[derivative(
-        Hash = "ignore",
-        PartialEq = "ignore",
-        Ord = "ignore",
-        PartialOrd = "ignore"
-    )]
+    #[derivative(Hash = "ignore", PartialEq = "ignore")]
     pub dest_workload: Arc<Workload>,
 }
 
@@ -149,10 +142,7 @@ impl ProxyRbacContext {
 
 impl fmt::Display for ProxyRbacContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.conn)?;
-        if let Some(ref info) = self.dest_workload_info {
-            write!(f, "({})", info)?;
-        }
+        write!(f, "{} ({})", self.conn, self.dest_workload.uid)?;
         Ok(())
     }
 }

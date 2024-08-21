@@ -164,7 +164,6 @@ impl InboundPassthrough {
                 dst_network: strng::new(&pi.cfg.network),
                 dst: dest_addr,
             },
-            dest_workload_info: Some(pi.local_workload_information.workload_info()),
             dest_workload: upstream_workload.clone(),
         };
 

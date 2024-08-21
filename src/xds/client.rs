@@ -962,7 +962,6 @@ mod tests {
                     };
                     let rbac_ctx = crate::state::ProxyRbacContext {
                         conn: conn.clone(),
-                        dest_workload_info: None,
                         dest_workload: Arc::new(test_default_workload()),
                     };
 
@@ -975,7 +974,6 @@ mod tests {
                     };
                     let rbac_ctx = crate::state::ProxyRbacContext {
                         conn,
-                        dest_workload_info: None,
                         dest_workload: Arc::new(test_default_workload()),
                     };
 

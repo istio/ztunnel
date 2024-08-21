@@ -145,38 +145,6 @@ pub struct Proxy {
     policy_watcher: PolicyWatcher,
 }
 
-/// ScopedSecretManager provides an extra check against certificate lookups to ensure only appropriate certificates
-/// are requested for a given workload.
-/// This acts as a second line of defense against *coding errors* that could cause incorrect identity assignment.
-#[derive(Clone)]
-pub struct ScopedSecretManager {
-    cert_manager: Arc<SecretManager>,
-    allowed: Arc<WorkloadInfo>,
-}
-
-impl ScopedSecretManager {
-    #[cfg(any(test, feature = "testing"))]
-    pub fn new(cert_manager: Arc<SecretManager>, wli: Arc<WorkloadInfo>) -> Self {
-        Self {
-            cert_manager,
-            allowed: wli,
-        }
-    }
-
-    pub async fn fetch_certificate(
-        &self,
-        trust_domain: Strng,
-    ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
-        let allowed = &self.allowed;
-        let id = &Identity::Spiffe {
-            trust_domain,
-            namespace: (&allowed.namespace).into(),
-            service_account: (&allowed.service_account).into(),
-        };
-        self.cert_manager.fetch_certificate(id).await
-    }
-}
-
 pub struct LocalWorkloadInformation {
     wi: Arc<WorkloadInfo>,
     state: DemandProxyState,

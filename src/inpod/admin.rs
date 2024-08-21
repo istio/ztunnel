@@ -137,7 +137,7 @@ impl WorkloadManagerAdminHandler {
     }
 }
 
-impl crate::admin::AdminHandler2 for WorkloadManagerAdminHandler {
+impl crate::admin::AdminHandler for WorkloadManagerAdminHandler {
     fn key(&self) -> &'static str {
         "workloadState"
     }

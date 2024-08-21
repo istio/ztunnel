@@ -1359,7 +1359,6 @@ mod namespaced {
         /// Can connect, but get a HTTP error
         Http,
     }
-    use ztunnel::inpod::istio::zds;
     use ztunnel::state::workload::application_tunnel::Protocol;
     use ztunnel::state::WorkloadInfo;
     use Failure::*;
