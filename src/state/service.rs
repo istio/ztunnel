@@ -437,7 +437,7 @@ impl ServiceStore {
     }
 
     /// Removes entries for the given endpoint address.
-    pub fn remove_endpoint(&mut self, workload_uid: &Strng, endpoint_uid: &Strng) {
+    pub fn remove_endpoint(&mut self, workload_uid: &Strng) {
         let mut services_to_update = HashSet::new();
         if let Some(prev_services) = self.workload_to_services.remove(workload_uid) {
             for svc in prev_services.iter() {
@@ -445,7 +445,7 @@ impl ServiceStore {
                 self.staged_services
                     .entry(svc.clone())
                     .or_default()
-                    .remove(endpoint_uid);
+                    .remove(workload_uid);
                 if self.staged_services[svc].is_empty() {
                     self.staged_services.remove(svc);
                 }
@@ -458,7 +458,7 @@ impl ServiceStore {
         for svc in &services_to_update {
             if let Some(svc) = self.get_by_namespaced_host(svc) {
                 let mut svc = Arc::unwrap_or_clone(svc);
-                svc.endpoints.remove(endpoint_uid);
+                svc.endpoints.remove(workload_uid);
 
                 // Update the service.
                 self.insert(svc);

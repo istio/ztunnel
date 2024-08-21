@@ -500,12 +500,11 @@ mod tests {
         sync::{Arc, RwLock},
     };
 
-    use crate::state::service::EndpointSet;
     use crate::{
         rbac::Connection,
         state::{
             self,
-            service::{Endpoint, Service},
+            service::{Endpoint, EndpointSet, Service},
             workload::{
                 application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
                 ApplicationTunnel, GatewayAddress, NetworkAddress, Protocol, Workload,
