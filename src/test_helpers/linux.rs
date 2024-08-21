@@ -112,6 +112,15 @@ impl WorkloadManager {
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
     pub async fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
+        self.deploy_dedicated_ztunnel(node, None).await
+    }
+
+    /// deploy_ztunnel runs a ztunnel instance for dedicated mode.
+    pub async fn deploy_dedicated_ztunnel(
+        &mut self,
+        node: &str,
+        wli: Option<state::WorkloadInfo>,
+    ) -> anyhow::Result<TestApp> {
         let mut inpod_uds: PathBuf = "/dev/null".into();
         let ztunnel_server = if self.mode == Shared {
             inpod_uds = self.tmp_dir.join(node);
@@ -145,6 +154,7 @@ impl WorkloadManager {
             local_xds_config,
             local_node: Some(node.to_string()),
             local_ip: Some(ns.ip()),
+            proxy_workload_information: wli,
             inpod_uds,
             proxy_mode,
             // We use packet mark even in dedicated to distinguish proxy from application

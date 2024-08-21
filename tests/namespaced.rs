@@ -1041,7 +1041,19 @@ mod namespaced {
     ) -> anyhow::Result<()> {
         // Simple test of client -> server, with the configured mode and nodes
         let client_ztunnel = match client_node {
-            Captured(node) => Some(manager.deploy_ztunnel(node).await?),
+            // Note: we always deploy as 'dedicated', just it will be ignored if we are shared
+            Captured(node) => Some(
+                manager
+                    .deploy_dedicated_ztunnel(
+                        node,
+                        Some(WorkloadInfo {
+                            name: "client".to_string(),
+                            namespace: "default".to_string(),
+                            service_account: "client".to_string(),
+                        }),
+                    )
+                    .await?,
+            ),
             Uncaptured => None,
         };
         let server_ztunnel = match server_node {
@@ -1049,7 +1061,18 @@ mod namespaced {
                 if node == client_node.node() {
                     client_ztunnel.clone()
                 } else {
-                    Some(manager.deploy_ztunnel(node).await?)
+                    Some(
+                        manager
+                            .deploy_dedicated_ztunnel(
+                                node,
+                                Some(WorkloadInfo {
+                                    name: "server".to_string(),
+                                    namespace: "default".to_string(),
+                                    service_account: "server".to_string(),
+                                }),
+                            )
+                            .await?,
+                    )
                 }
             }
             Uncaptured => None,
@@ -1336,7 +1359,9 @@ mod namespaced {
         /// Can connect, but get a HTTP error
         Http,
     }
+    use ztunnel::inpod::istio::zds;
     use ztunnel::state::workload::application_tunnel::Protocol;
+    use ztunnel::state::WorkloadInfo;
     use Failure::*;
 
     async fn malicious_calls_test(

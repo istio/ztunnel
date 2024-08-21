@@ -689,7 +689,7 @@ impl DemandProxyState {
         loop {
             tokio::select! {
                 _ = &mut timeout => {
-                    warn!("timed out waiting for workload from xds");
+                    warn!("timed out waiting for workload '{wl}' from xds");
                     break None;
                 },
                 _ = wl_sub.changed() => {
