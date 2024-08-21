@@ -588,7 +588,9 @@ mod test {
 
     use super::*;
     use crate::drain::DrainWatcher;
+    use crate::state::workload;
     use crate::state::{DemandProxyState, ProxyState, WorkloadInfo};
+    use crate::test_helpers::test_default_workload;
     use ztunnel::test_helpers::*;
 
     macro_rules! assert_opens_drops {
@@ -1000,7 +1002,15 @@ mod test {
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
 
-        let state = ProxyState::new(None);
+        let mut state = ProxyState::new(None);
+        let wl = Arc::new(workload::Workload {
+            uid: "uid".into(),
+            name: "source-workload".into(),
+            namespace: "ns".into(),
+            service_account: "default".into(),
+            ..test_default_workload()
+        });
+        state.workloads.insert(wl.clone());
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
         let mock_proxy_state = DemandProxyState::new(
@@ -1012,9 +1022,9 @@ mod test {
         );
         let local_workload = Arc::new(proxy::LocalWorkloadInformation::new(
             Arc::new(WorkloadInfo {
-                name: "source-workload".to_string(),
-                namespace: "ns".to_string(),
-                service_account: "default".to_string(),
+                name: wl.name.to_string(),
+                namespace: wl.namespace.to_string(),
+                service_account: wl.service_account.to_string(),
             }),
             mock_proxy_state,
             identity::mock::new_secret_manager(Duration::from_secs(10)),

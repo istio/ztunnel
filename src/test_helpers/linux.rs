@@ -528,7 +528,7 @@ impl<'a> TestWorkloadBuilder<'a> {
 
         info!("registered {}", &self.w.workload.uid);
         let wli = WorkloadInfo {
-            name: self.w.workload.workload_name.to_string(),
+            name: self.w.workload.name.to_string(),
             namespace: self.w.workload.namespace.to_string(),
             service_account: self.w.workload.service_account.to_string(),
         };

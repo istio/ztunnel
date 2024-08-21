@@ -736,7 +736,7 @@ impl WorkloadStore {
                 service_account: strng::new(&wl.service_account),
             })?
             .iter()
-            .find_map(|uid| self.by_uid.get(uid).cloned())
+            .find_map(|uid| self.by_uid.get(uid).filter(|w| wl.matches(w)).cloned())
     }
 
     /// Finds the workload by uid.

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument};
 
 pub struct H2Request {
     request: Parts,
@@ -131,7 +131,7 @@ where
                 };
                 let handle = handler(req);
                 // Serve the stream in a new task
-                tokio::task::spawn(handle);
+                tokio::task::spawn(handle.in_current_span());
             }
             _ = &mut ping_drop_rx => {
                 warn!("HBONE ping timeout/error");
