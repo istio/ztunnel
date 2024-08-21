@@ -48,6 +48,8 @@ pub enum Error {
     EmptyResponse(Identity),
     #[error("invalid spiffe identity: {0}")]
     Spiffe(String),
+    #[error("workload is unknown: {0}")]
+    UnknownWorkload(Arc<WorkloadInfo>),
     #[error("the identity is no longer needed")]
     Forgotten,
     #[error("BUG: identity requested {0}, but only allowed {1:?}")]

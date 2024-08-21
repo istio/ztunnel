@@ -25,7 +25,6 @@ use std::time::{Duration, SystemTime};
 
 use crate::tls::TLS_VERSIONS;
 use rustls::ServerConfig;
-use tokio::net::TcpStream;
 
 use super::{ServerCertProvider, TlsError, WorkloadCertificate};
 
@@ -176,7 +175,7 @@ impl MockServerCertProvider {
 
 #[async_trait::async_trait]
 impl ServerCertProvider for MockServerCertProvider {
-    async fn fetch_cert(&mut self, _: &TcpStream) -> Result<Arc<ServerConfig>, TlsError> {
+    async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(TLS_VERSIONS)
             .expect("server config must be valid")

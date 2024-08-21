@@ -46,7 +46,6 @@ use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::address::Address;
 use crate::state::workload::{GatewayAddress, Workload};
 use crate::state::{DemandProxyState, WorkloadInfo};
-use crate::strng::Strng;
 use crate::{config, identity, socket, tls};
 
 pub mod connection_manager;
@@ -183,10 +182,14 @@ impl LocalWorkloadInformation {
 
     pub async fn fetch_certificate(
         &self,
-        trust_domain: Strng,
     ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
+        // We don't know the trust domain until we get the workload from XDS, so fetch that
+        let wl = self
+            .get_workload()
+            .await
+            .map_err(|_| identity::Error::UnknownWorkload(self.workload_info()))?;
         let id = &Identity::Spiffe {
-            trust_domain,
+            trust_domain: wl.trust_domain.clone(),
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };

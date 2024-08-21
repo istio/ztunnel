@@ -386,7 +386,6 @@ pub fn rbac(c: &mut Criterion) {
             src_identity: None,
             dst_network: "".into(),
         },
-        dest_workload_info: None,
         dest_workload: Arc::new(test_default_workload()),
     };
     let rt = tokio::runtime::Builder::new_current_thread()

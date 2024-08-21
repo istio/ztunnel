@@ -86,10 +86,7 @@ impl ConnSpawner {
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
-        let cert = self
-            .local_workload
-            .fetch_certificate(key.src_id.trust_domain())
-            .await?;
+        let cert = self.local_workload.fetch_certificate().await?;
         let connector = cert.outbound_connector(key.dst_id.clone())?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await

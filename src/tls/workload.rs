@@ -146,7 +146,7 @@ where
     fn accept(&self, conn: TcpStream) -> Self::AcceptFuture {
         let mut acceptor = self.provider.clone();
         Box::pin(async move {
-            let tls = acceptor.fetch_cert(&conn).await?;
+            let tls = acceptor.fetch_cert().await?;
             tokio_rustls::TlsAcceptor::from(tls)
                 .accept(conn)
                 .map_err(TlsError::Handshake)

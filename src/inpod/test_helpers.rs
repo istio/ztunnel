@@ -176,7 +176,6 @@ pub async fn send_workload_added(
             crate::inpod::istio::zds::AddWorkload {
                 uid: uid.into_string(),
                 workload_info: info,
-                ..Default::default()
             },
         )),
     };

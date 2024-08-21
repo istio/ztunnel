@@ -20,7 +20,6 @@ use futures::stream::StreamExt;
 
 use http::{Method, Response, StatusCode};
 
-use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
@@ -45,7 +44,6 @@ use crate::drain::run_with_drain;
 use crate::proxy::h2;
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
-use crate::strng::Strng;
 use crate::tls::TlsError;
 
 pub(super) struct Inbound {
@@ -84,9 +82,7 @@ impl Inbound {
     pub(super) async fn run(self) {
         let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
-            state: self.pi.state.clone(),
             local_workload: self.pi.local_workload_information.clone(),
-            network: strng::new(&self.pi.cfg.network),
         };
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
@@ -446,34 +442,16 @@ impl Inbound {
 #[derive(Clone)]
 struct InboundCertProvider {
     local_workload: Arc<LocalWorkloadInformation>,
-    state: DemandProxyState,
-    network: Strng,
 }
 
 #[async_trait::async_trait]
 impl crate::tls::ServerCertProvider for InboundCertProvider {
-    async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<Arc<rustls::ServerConfig>, TlsError> {
-        let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
-        let identity = {
-            let wip = NetworkAddress {
-                network: self.network.clone(), // inbound cert provider gets cert for the dest, which must be on our network
-                address: orig_dst_addr.ip(),
-            };
-            self.state
-                .fetch_workload(&wip)
-                .await
-                .ok_or(TlsError::CertificateLookup(wip))?
-                .identity()
-        };
+    async fn fetch_cert(&mut self) -> Result<Arc<rustls::ServerConfig>, TlsError> {
         debug!(
-            destination=?orig_dst_addr,
-            %identity,
+            identity=%self.local_workload.workload_info(),
             "fetching cert"
         );
-        let cert = self
-            .local_workload
-            .fetch_certificate(identity.trust_domain())
-            .await?;
+        let cert = self.local_workload.fetch_certificate().await?;
         Ok(Arc::new(cert.server_config()?))
     }
 }
