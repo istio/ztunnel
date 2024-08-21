@@ -419,10 +419,10 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
                 "{PROXY_MODE}={PROXY_MODE_DEDICATED} requires {PROXY_WORKLOAD_INFO} to be set"
             )));
         };
-        let s: Vec<&str> = raw.splitn(2, "/").collect();
+        let s: Vec<&str> = raw.splitn(3, "/").collect();
         let &[ns, name, sa] = &s[..] else {
             return Err(Error::InvalidState(format!(
-                "{PROXY_WORKLOAD_INFO} must match the format 'namespace/name/service-account'"
+                "{PROXY_WORKLOAD_INFO} must match the format 'namespace/name/service-account' (got {s:?})"
             )));
         };
         Some(state::WorkloadInfo {
