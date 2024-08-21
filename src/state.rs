@@ -562,7 +562,12 @@ impl DemandProxyState {
             );
             return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
         }
-        let ip = Box::pin(self.resolve_workload_address(dst_workload, src_workload)).await?;
+        let ip = Box::pin(self.resolve_workload_address(
+            dst_workload,
+            src_workload,
+            original_target_address,
+        ))
+        .await?;
         Ok(ip)
     }
 
@@ -570,6 +575,7 @@ impl DemandProxyState {
         &self,
         workload: &Workload,
         src_workload: &Workload,
+        original_target_address: SocketAddr,
     ) -> Result<IpAddr, Error> {
         let labels = OnDemandDnsLabels::new()
             .with_destination(workload)
@@ -579,10 +585,15 @@ impl DemandProxyState {
             .on_demand_dns
             .get_or_create(&labels)
             .inc();
-        self.resolve_on_demand_dns(workload).await
+        self.resolve_on_demand_dns(workload, original_target_address)
+            .await
     }
 
-    async fn resolve_on_demand_dns(&self, workload: &Workload) -> Result<IpAddr, Error> {
+    async fn resolve_on_demand_dns(
+        &self,
+        workload: &Workload,
+        original_target_address: SocketAddr,
+    ) -> Result<IpAddr, Error> {
         let workload_uid = workload.uid.clone();
         let hostname = workload.hostname.clone();
         trace!(%hostname, "starting DNS lookup");
@@ -596,14 +607,17 @@ impl DemandProxyState {
         };
         trace!(%hostname, "dns lookup complete {resp:?}");
 
-        resp.as_lookup()
+        let (matching, unmatching): (Vec<_>, Vec<_>) = resp
+            .as_lookup()
             .record_iter()
             .filter_map(|record| record.data().and_then(|d| d.ip_addr()))
-            // TODO: add more sophisticated routing logic, perhaps based on ipv4/ipv6 support underneath us.
-            // if/when we support that, this function may need to move to get access to the necessary metadata.
-            // Randomly pick an IP
-            // TODO: do this more efficiently, and not just randomly
+            .partition(|record| record.is_ipv6() == original_target_address.is_ipv6());
+        // Randomly pick an IP, prefer to match the IP family of the downstream request.
+        // Without this, we run into trouble in pure v4 or pure v6 environments.
+        matching
+            .into_iter()
             .choose(&mut rand::thread_rng())
+            .or_else(|| unmatching.into_iter().choose(&mut rand::thread_rng()))
             .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
     }
 

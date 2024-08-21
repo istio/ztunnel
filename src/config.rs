@@ -23,7 +23,7 @@ use std::{cmp, env, fs};
 
 use anyhow::anyhow;
 use bytes::Bytes;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
 use hyper::http::uri::InvalidUri;
 use hyper::Uri;
 
@@ -356,7 +356,18 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     // Increase some defaults. Note these are NOT coming from /etc/resolv.conf (only some fields do, we don't override those),
     // but rather hickory's hardcoded defaults
     dns_resolver_opts.cache_size = 4096;
-    // TODO: should we override server_ordering_strategy based on our IP support?
+    dns_resolver_opts.ip_strategy = if ipv6_enabled {
+        // Lookup both in parallel. We will do filtering in a later stage to only appropriate IP families
+        // If we did one of the XThenY strategies we would not be able to control selection of correct IP family;
+        // for instance, could not prefer v4 for v4 requests.
+        // This can result in either incorrectly skewing towards one IP version (not so bad) or attempting
+        // to send to an unsupported IP version (results in traffic breaking).
+        // A possible alternative would be to set this per-request to prefer the correct IP family;
+        // however, this is not easy to accomplish with the current setup.
+        LookupIpStrategy::Ipv4AndIpv6
+    } else {
+        LookupIpStrategy::Ipv4Only
+    };
 
     // Note: since DNS proxy runs in the pod network namespace, we will recompute IPv6 enablement
     // on a pod-by-pod basis.
