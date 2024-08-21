@@ -432,18 +432,19 @@ impl Store {
             Address::Service(service) => {
                 if service.vips.is_empty() {
                     // Headless service. Use the endpoint IPs.
+                    let workloads = &self.state.read().workloads;
                     service
                         .endpoints
                         .iter()
-                        .filter_map(|(_, ep)| match &ep.address {
-                            Some(addr) => {
-                                if is_record_type(&addr.address, record_type) {
-                                    Some(addr.address)
-                                } else {
-                                    None
-                                }
-                            }
-                            None => None,
+                        .filter_map(|ep| {
+                            let Some(wl) = workloads.find_uid(&ep.workload_uid) else {
+                                debug!("failed to fetch workload for {}", ep.workload_uid);
+                                return None;
+                            };
+                            wl.workload_ips
+                                .iter()
+                                .copied()
+                                .find(|addr| is_record_type(addr, record_type))
                         })
                         .collect()
                 } else {

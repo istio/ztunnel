@@ -14,7 +14,7 @@
 
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
-use crate::state::service::{Endpoint, Service};
+use crate::state::service::{Endpoint, EndpointSet, Service};
 use crate::state::workload::Protocol::{HBONE, TCP};
 use crate::state::workload::{
     gatewayaddress, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
@@ -179,7 +179,7 @@ pub fn mock_default_service() -> Service {
     let vips = vec![vip1];
     let mut ports = HashMap::new();
     ports.insert(8080, 80);
-    let endpoints = HashMap::new();
+    let endpoints = EndpointSet::from_list([]);
     Service {
         name: "".into(),
         namespace: "default".into(),
@@ -263,16 +263,8 @@ fn test_custom_svc(
     hostname: &str,
     vip: &str,
     workload_name: &str,
-    endpoint: &str,
     echo_port: u16,
 ) -> anyhow::Result<Service> {
-    let addr = match endpoint.is_empty() {
-        true => None,
-        false => Some(NetworkAddress {
-            network: strng::EMPTY,
-            address: endpoint.parse()?,
-        }),
-    };
     Ok(Service {
         name: name.into(),
         namespace: TEST_SERVICE_NAMESPACE.into(),
@@ -282,19 +274,11 @@ fn test_custom_svc(
             address: vip.parse()?,
         }],
         ports: HashMap::from([(80u16, echo_port)]),
-        endpoints: HashMap::from([(
-            format!("cluster1//v1/Pod/default/{}", workload_name).into(),
-            Endpoint {
-                workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
-                service: NamespacedHostname {
-                    namespace: TEST_SERVICE_NAMESPACE.into(),
-                    hostname: hostname.into(),
-                },
-                address: addr,
-                port: HashMap::from([(80u16, echo_port)]),
-                status: HealthStatus::Healthy,
-            },
-        )]),
+        endpoints: EndpointSet::from_list([Endpoint {
+            workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
+            port: HashMap::from([(80u16, echo_port)]),
+            status: HealthStatus::Healthy,
+        }]),
         subject_alt_names: vec!["spiffe://cluster.local/ns/default/sa/default".into()],
         waypoint: None,
         load_balancer: None,
@@ -312,7 +296,6 @@ pub fn local_xds_config(
         TEST_SERVICE_HOST,
         TEST_VIP,
         "local-hbone",
-        TEST_WORKLOAD_HBONE,
         echo_port,
     )?;
     let dns_svc = test_custom_svc(
@@ -320,7 +303,6 @@ pub fn local_xds_config(
         TEST_SERVICE_DNS_HBONE_HOST,
         TEST_VIP_DNS,
         "local-tcp-via-dns",
-        "",
         echo_port,
     )?;
 

@@ -411,7 +411,7 @@ impl Inbound {
             // Validate that the HBONE target references the Waypoint we're connecting to
             Some(match target_waypoint {
                 Address::Service(svc) => {
-                    if !svc.contains_endpoint(&conn_wl, Some(connection_dst)) {
+                    if !svc.contains_endpoint(&conn_wl) {
                         // target points to a different waypoint
                         return Some(None);
                     }
@@ -504,11 +504,10 @@ mod tests {
         rbac::Connection,
         state::{
             self,
-            service::{endpoint_uid, Endpoint, Service},
+            service::{Endpoint, EndpointSet, Service},
             workload::{
                 application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
-                ApplicationTunnel, GatewayAddress, NamespacedHostname, NetworkAddress, Protocol,
-                Workload,
+                ApplicationTunnel, GatewayAddress, NetworkAddress, Protocol, Workload,
             },
             DemandProxyState,
         },
@@ -588,50 +587,28 @@ mod tests {
         let mut state = state::ProxyState::default();
 
         let services = vec![
-            ("waypoint", WAYPOINT_SVC_IP, WAYPOINT_POD_IP, Waypoint::None),
-            (
-                "server",
-                SERVER_SVC_IP,
-                SERVER_POD_IP,
-                server_waypoint.clone(),
-            ),
+            ("waypoint", WAYPOINT_SVC_IP, Waypoint::None),
+            ("server", SERVER_SVC_IP, server_waypoint.clone()),
         ]
         .into_iter()
-        .map(|(name, vip, ep_ip, waypoint)| {
-            let ep_uid = strng::format!("cluster1//v1/Pod/default/{name}");
-            let ep_addr = Some(NetworkAddress {
-                address: ep_ip.parse().unwrap(),
-                network: strng::EMPTY,
-            });
-            Service {
-                name: name.into(),
-                namespace: "default".into(),
-                hostname: strng::format!("{name}.default.svc.cluster.local"),
-                vips: vec![NetworkAddress {
-                    address: vip.parse().unwrap(),
-                    network: "".into(),
-                }],
-                ports: std::collections::HashMap::new(),
-                endpoints: vec![(
-                    endpoint_uid(&ep_uid, ep_addr.as_ref()),
-                    Endpoint {
-                        workload_uid: ep_uid,
-                        service: NamespacedHostname {
-                            hostname: strng::format!("{name}.default.svc.cluster.local"),
-                            namespace: "default".into(),
-                        },
-                        address: ep_addr,
-                        port: std::collections::HashMap::new(),
-                        status: HealthStatus::Healthy,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
-                waypoint: waypoint.service_attached(),
-                load_balancer: None,
-                ip_families: None,
-            }
+        .map(|(name, vip, waypoint)| Service {
+            name: name.into(),
+            namespace: "default".into(),
+            hostname: strng::format!("{name}.default.svc.cluster.local"),
+            vips: vec![NetworkAddress {
+                address: vip.parse().unwrap(),
+                network: "".into(),
+            }],
+            ports: std::collections::HashMap::new(),
+            endpoints: EndpointSet::from_list([Endpoint {
+                workload_uid: strng::format!("cluster1//v1/Pod/default/{name}"),
+                port: std::collections::HashMap::new(),
+                status: HealthStatus::Healthy,
+            }]),
+            subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
+            waypoint: waypoint.service_attached(),
+            load_balancer: None,
+            ip_families: None,
         });
 
         let workloads = vec![

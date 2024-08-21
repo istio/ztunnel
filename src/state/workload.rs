@@ -1281,7 +1281,7 @@ mod tests {
                 namespace: "ns".into(),
                 hostname: "svc-allow-unhealthy".into(),
             });
-        assert_eq!(svc.unwrap().endpoints.len(), 2);
+        assert_eq!(svc.unwrap().endpoints.inner.len(), 2);
         let svc = state
             .read()
             .unwrap()
@@ -1290,7 +1290,7 @@ mod tests {
                 namespace: "ns".into(),
                 hostname: "svc-normal".into(),
             });
-        assert_eq!(svc.unwrap().endpoints.len(), 1);
+        assert_eq!(svc.unwrap().endpoints.inner.len(), 1);
     }
 
     #[test]
@@ -1403,7 +1403,7 @@ mod tests {
                     hostname: host.into(),
                 });
             assert_eq!(
-                s.unwrap().endpoints.len(),
+                s.unwrap().endpoints.inner.len(),
                 want,
                 "host {host} wanted {want}"
             );

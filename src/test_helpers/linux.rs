@@ -14,7 +14,7 @@
 
 use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
-use crate::state::service::{endpoint_uid, Endpoint, Service};
+use crate::state::service::{Endpoint, Service};
 use crate::state::workload::{gatewayaddress, HealthStatus, Workload};
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
@@ -495,23 +495,14 @@ impl<'a> TestWorkloadBuilder<'a> {
         for (service, ports) in &self.w.services {
             let service_name = service.parse::<NamespacedHostname>()?;
 
-            for wip in self.w.workload.workload_ips.iter() {
-                let ep_network_addr = NetworkAddress {
-                    network: strng::EMPTY,
-                    address: *wip,
-                };
-
-                let ep = Endpoint {
-                    workload_uid: self.w.workload.uid.as_str().into(),
-                    service: service_name.clone(),
-                    address: Some(ep_network_addr.clone()),
-                    port: ports.to_owned(),
-                    status: HealthStatus::Healthy,
-                };
-                let mut svc = self.manager.services.get(&service_name).unwrap().clone();
-                let ep_uid = endpoint_uid(&self.w.workload.uid, Some(&ep_network_addr));
-                svc.endpoints.insert(ep_uid, ep.clone());
-            }
+            let ep = Endpoint {
+                workload_uid: self.w.workload.uid.as_str().into(),
+                port: ports.to_owned(),
+                status: HealthStatus::Healthy,
+            };
+            let mut svc = self.manager.services.get(&service_name).unwrap().clone();
+            svc.endpoints
+                .insert(self.w.workload.uid.clone(), ep.clone());
         }
 
         info!("registered {}", &self.w.workload.uid);

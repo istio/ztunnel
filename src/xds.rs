@@ -36,8 +36,8 @@ use xds::istio::workload::Workload as XdsWorkload;
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::rbac::Authorization;
-use crate::state::service::{endpoint_uid, Endpoint, Service, ServiceStore};
-use crate::state::workload::{network_addr, NamespacedHostname, Workload};
+use crate::state::service::{Endpoint, Service, ServiceStore};
+use crate::state::workload::{NamespacedHostname, Workload};
 use crate::state::ProxyState;
 use crate::strng::Strng;
 use crate::{rbac, strng};
@@ -183,17 +183,7 @@ impl ProxyStateUpdateMutator {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
             // Also remove service endpoints for the workload.
-            for wip in prev.workload_ips.iter() {
-                let prev_addr = &network_addr(prev.network.clone(), *wip);
-                state
-                    .services
-                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, Some(prev_addr)));
-            }
-            if prev.workload_ips.is_empty() {
-                state
-                    .services
-                    .remove_endpoint(&prev.uid, &endpoint_uid(&prev.uid, None));
-            }
+            state.services.remove_endpoint(&prev.uid);
 
             // This is a real removal (not a removal before insertion), and nothing else references the cert
             // Clear it out
@@ -228,7 +218,7 @@ impl ProxyStateUpdateMutator {
             trace!("not a service, not attempting to delete as such",);
             return;
         }
-        if state.services.remove(&name).is_none() && !for_insert {
+        if !state.services.remove(&name) && !for_insert {
             warn!("tried to remove service, but it was not found");
         }
     }
@@ -259,9 +249,11 @@ impl ProxyStateUpdateMutator {
             .services
             .get_by_namespaced_host(&service.namespaced_hostname())
         {
-            for (wip, ep) in prev.endpoints.iter() {
+            for ep in prev.endpoints.iter() {
                 if service.should_include_endpoint(ep.status) {
-                    service.endpoints.insert(wip.clone(), ep.clone());
+                    service
+                        .endpoints
+                        .insert(ep.workload_uid.clone(), ep.clone());
                 }
             }
         }
@@ -354,25 +346,14 @@ fn insert_service_endpoints(
             }
         };
 
-        // Create service endpoints for all the workload IPs.
-        for wip in &workload.workload_ips {
-            services_state.insert_endpoint(Endpoint {
+        services_state.insert_endpoint(
+            namespaced_host,
+            Endpoint {
                 workload_uid: workload.uid.clone(),
-                service: namespaced_host.clone(),
-                address: Some(network_addr(workload.network.clone(), *wip)),
                 port: ports.into(),
                 status: workload.status,
-            })
-        }
-        if workload.workload_ips.is_empty() {
-            services_state.insert_endpoint(Endpoint {
-                workload_uid: workload.uid.clone(),
-                service: namespaced_host.clone(),
-                address: None,
-                port: ports.into(),
-                status: workload.status,
-            })
-        }
+            },
+        )
     }
     Ok(())
 }
