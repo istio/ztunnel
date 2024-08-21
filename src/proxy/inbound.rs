@@ -242,7 +242,7 @@ impl Inbound {
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
-                pi.state.fetch_workload(&src_network_addr).await
+                pi.state.fetch_workload_by_address(&src_network_addr).await
             }
         };
 
@@ -536,7 +536,7 @@ mod tests {
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };
         let local_wl = state
-            .fetch_workload(&NetworkAddress {
+            .fetch_workload_by_address(&NetworkAddress {
                 network: "".into(),
                 address: conn.dst.ip(),
             })

@@ -629,29 +629,6 @@ impl DemandProxyState {
             .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
     }
 
-    pub async fn fetch_workload_services(
-        &self,
-        addr: &NetworkAddress,
-    ) -> Option<(Arc<Workload>, Vec<Arc<Service>>)> {
-        // Wait for it on-demand, *if* needed
-        debug!(%addr, "fetch workload and service");
-        let fetch = |addr: &NetworkAddress| {
-            let state = self.state.read().unwrap();
-            state.workloads.find_address(addr).map(|wl| {
-                let svc = state.services.get_by_workload(&wl);
-                (wl, svc)
-            })
-        };
-        if let Some(wl) = fetch(addr) {
-            return Some(wl);
-        }
-        if !self.supports_on_demand() {
-            return None;
-        }
-        self.fetch_on_demand(addr.to_string().into()).await;
-        fetch(addr)
-    }
-
     // same as fetch_workload, but if the caller knows the workload is enroute already,
     // will retry on cache miss for a configured amount of time - returning the workload
     // when we get it, or nothing if the timeout is exceeded, whichever happens first
@@ -693,12 +670,15 @@ impl DemandProxyState {
 
     /// Finds the workload by workload information, as an arc.
     /// Note: this does not currently support on-demand.
-    pub fn find_by_info(&self, wl: &WorkloadInfo) -> Option<Arc<Workload>> {
+    fn find_by_info(&self, wl: &WorkloadInfo) -> Option<Arc<Workload>> {
         self.state.read().unwrap().workloads.find_by_info(wl)
     }
 
-    // only support workload
-    pub async fn fetch_workload(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
+    // fetch_workload_by_address looks up a Workload by address.
+    // Note this should never be used to lookup the local workload we are running, only the peer.
+    // Since the peer connection may come through gateways, NAT, etc, this should only ever be treated
+    // as a best-effort.
+    pub async fn fetch_workload_by_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload");
         if let Some(wl) = self.state.read().unwrap().workloads.find_address(addr) {
