@@ -392,8 +392,8 @@ pub(crate) mod tests {
     };
 
     use crate::drain::DrainTrigger;
-    use std::{collections::HashSet, sync::Arc};
     use crate::inpod::istio::zds;
+    use std::{collections::HashSet, sync::Arc};
 
     fn assert_end_stream(res: Result<(), Error>) {
         match res {
@@ -413,7 +413,7 @@ pub(crate) mod tests {
     }
 
     fn workload_info() -> Option<zds::WorkloadInfo> {
-        Some(zds::WorkloadInfo{
+        Some(zds::WorkloadInfo {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),

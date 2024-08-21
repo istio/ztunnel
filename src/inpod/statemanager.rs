@@ -382,10 +382,10 @@ mod tests {
     use crate::inpod::test_helpers::{self, create_proxy_confilct, new_netns, uid};
     use crate::inpod::WorkloadData;
 
+    use crate::inpod::istio::zds;
+    use matches::assert_matches;
     use std::sync::Arc;
     use std::time::Duration;
-    use matches::assert_matches;
-    use crate::inpod::istio::zds;
 
     struct Fixture {
         state: WorkloadProxyManagerState,
@@ -393,7 +393,7 @@ mod tests {
     }
 
     fn workload_info() -> Option<zds::WorkloadInfo> {
-        Some(zds::WorkloadInfo{
+        Some(zds::WorkloadInfo {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
@@ -629,7 +629,7 @@ mod tests {
         let data = WorkloadData {
             netns: new_netns(),
             workload_uid: uid(0),
-            workload_info: None
+            workload_info: None,
         };
 
         let add = WorkloadMessage::AddWorkload(data);

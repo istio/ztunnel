@@ -367,12 +367,6 @@ pub enum Error {
     #[error("connection closed due to policy rejection: {0}")]
     AuthorizationPolicyRejection(AuthorizationRejectionError),
 
-    #[error("pool is already connecting")]
-    WorkloadHBONEPoolAlreadyConnecting,
-
-    #[error("connection streams maxed out")]
-    WorkloadHBONEPoolConnStreamsMaxed,
-
     #[error("pool draining")]
     WorkloadHBONEPoolDraining,
 
@@ -400,20 +394,11 @@ pub enum Error {
     #[error("identity error: {0}")]
     Identity(#[from] identity::Error),
 
-    #[error("unknown source: {0}")]
-    UnknownSource(IpAddr),
-
     #[error("failed to fetch information about local workload: {0}")]
     UnknownSourceWorkload(Arc<WorkloadInfo>),
 
-    #[error("invalid source: {0}, should match {1:?}")]
-    MismatchedSource(IpAddr, Arc<WorkloadInfo>),
-
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
-
-    #[error("unknown destination: {0}")]
-    UnknownDestination(IpAddr),
 
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
@@ -440,9 +425,6 @@ pub enum Error {
 
     #[error("ip mismatch: {0} != {1}")]
     IPMismatch(IpAddr, IpAddr),
-
-    #[error("bug: connection seen twice")]
-    DoubleConnection,
 
     #[error("connection failed to drain within the timeout")]
     DrainTimeOut,
