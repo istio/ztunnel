@@ -384,10 +384,20 @@ mod tests {
 
     use std::sync::Arc;
     use std::time::Duration;
+    use matches::assert_matches;
+    use crate::inpod::istio::zds;
 
     struct Fixture {
         state: WorkloadProxyManagerState,
         metrics: Arc<crate::inpod::Metrics>,
+    }
+
+    fn workload_info() -> Option<zds::WorkloadInfo> {
+        Some(zds::WorkloadInfo{
+            name: "name".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "sa".to_string(),
+        })
     }
 
     macro_rules! fixture {
@@ -417,7 +427,7 @@ mod tests {
         let data = WorkloadData {
             netns: new_netns(),
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
         state
             .process_msg(WorkloadMessage::AddWorkload(data))
@@ -434,7 +444,7 @@ mod tests {
         let data = WorkloadData {
             netns: ns.try_clone().unwrap(),
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
         state
             .process_msg(WorkloadMessage::AddWorkload(data))
@@ -443,7 +453,7 @@ mod tests {
         let data = WorkloadData {
             netns: ns,
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
         state
             .process_msg(WorkloadMessage::AddWorkload(data))
@@ -464,7 +474,7 @@ mod tests {
         let data = WorkloadData {
             netns: ns,
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
 
         let ret = state.process_msg(WorkloadMessage::AddWorkload(data)).await;
@@ -495,7 +505,7 @@ mod tests {
         let data = WorkloadData {
             netns: ns,
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
         state
             .process_msg(WorkloadMessage::WorkloadSnapshotSent)
@@ -524,7 +534,7 @@ mod tests {
         let data = WorkloadData {
             netns: ns.try_clone().unwrap(),
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
 
         let workload_uid = data.workload_uid.clone();
@@ -534,7 +544,7 @@ mod tests {
         let msg3 = WorkloadMessage::AddWorkload(WorkloadData {
             netns: ns,
             workload_uid,
-            workload_info: None,
+            workload_info: workload_info(),
         });
 
         state
@@ -558,7 +568,7 @@ mod tests {
         let data = WorkloadData {
             netns: new_netns(),
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
 
         let workload_uid = data.workload_uid.clone();
@@ -592,7 +602,7 @@ mod tests {
         let data = WorkloadData {
             netns: new_netns(),
             workload_uid: uid(0),
-            workload_info: None,
+            workload_info: workload_info(),
         };
         let workload_uid = data.workload_uid.clone();
 
@@ -600,7 +610,7 @@ mod tests {
         let add2 = WorkloadMessage::AddWorkload(WorkloadData {
             netns: new_netns(),
             workload_uid,
-            workload_info: None,
+            workload_info: workload_info(),
         });
 
         state.process_msg(add1).await.unwrap();
@@ -609,5 +619,21 @@ mod tests {
 
         assert_eq!(m.proxies_started.get_or_create(&()).get(), 2);
         assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_workload_info_rejected() {
+        let fixture = fixture!();
+        let mut state = fixture.state;
+
+        let data = WorkloadData {
+            netns: new_netns(),
+            workload_uid: uid(0),
+            workload_info: None
+        };
+
+        let add = WorkloadMessage::AddWorkload(data);
+
+        assert_matches!(state.process_msg(add).await, Err(_));
     }
 }
