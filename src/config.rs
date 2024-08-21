@@ -358,6 +358,12 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     dns_resolver_opts.cache_size = 4096;
     dns_resolver_opts.ip_strategy = if ipv6_enabled {
         // Lookup both in parallel. We will do filtering in a later stage to only appropriate IP families
+        // If we did one of the XThenY strategies we would not be able to control selection of correct IP family;
+        // for instance, could not prefer v4 for v4 requests.
+        // This can result in either incorrectly skewing towards one IP version (not so bad) or attempting
+        // to send to an unsupported IP version (results in traffic breaking).
+        // A possible alternative would be to set this per-request to prefer the correct IP family;
+        // however, this is not easy to accomplish with the current setup.
         LookupIpStrategy::Ipv4AndIpv6
     } else {
         LookupIpStrategy::Ipv4Only
