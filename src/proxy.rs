@@ -22,6 +22,7 @@ use std::{fmt, io};
 
 use hickory_proto::error::ProtoError;
 
+use crate::strng::Strng;
 use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -324,6 +325,24 @@ pub struct Addresses {
     pub socks5: Option<SocketAddr>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuthorizationRejectionError {
+    NoWorkload,
+    WorkloadMismatch,
+    ExplicitlyDenied(Strng, Strng),
+    NotAllowed,
+}
+impl fmt::Display for AuthorizationRejectionError {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoWorkload => write!(fmt, "workload not found"),
+            Self::WorkloadMismatch => write!(fmt, "workload mismatch"),
+            Self::ExplicitlyDenied(a, b) => write!(fmt, "explicitly denied by: {}/{}", a, b),
+            Self::NotAllowed => write!(fmt, "allow policies exist, but none allowed"),
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("failed to bind to address {0}: {1}")]
@@ -351,11 +370,14 @@ pub enum Error {
     #[error("connection failed: {0}")]
     ConnectionFailed(io::Error),
 
+    #[error("connection tracking failed")]
+    ConnectionTrackingFailed,
+
     #[error("connection closed due to policy change")]
     AuthorizationPolicyLateRejection,
 
-    #[error("connection closed due to policy rejection")]
-    AuthorizationPolicyRejection,
+    #[error("connection closed due to policy rejection: {0}")]
+    AuthorizationPolicyRejection(AuthorizationRejectionError),
 
     #[error("pool is already connecting")]
     WorkloadHBONEPoolAlreadyConnecting,

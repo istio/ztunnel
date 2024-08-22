@@ -394,7 +394,7 @@ pub fn rbac(c: &mut Criterion) {
         .unwrap();
     c.bench_function("rbac", |b| {
         b.to_async(&rt).iter(|| async {
-            mock_proxy_state.assert_rbac(&rc).await;
+            let _ = mock_proxy_state.assert_rbac(&rc).await;
         })
     });
 }
