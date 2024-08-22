@@ -38,6 +38,7 @@ use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 use ztunnel::state::workload::{Protocol, Workload};
 use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
+use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::{helpers, tcp, test_default_workload};
@@ -456,7 +457,7 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
             workload: Workload {
                 workload_ips: vec![hbone_connection_ip(i)],
                 protocol: Protocol::HBONE,
-                uid: strng::format!("cluster1//v1/Pod/default/local-source{}", i),
+                uid: strng::format!("cluster1//v1/Pod/default/remote{}", i),
                 name: strng::format!("workload-{}", i),
                 namespace: strng::format!("namespace-{}", i),
                 service_account: strng::format!("service-account-{}", i),
@@ -466,6 +467,19 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
         };
         workloads.push(lwl);
     }
+    let lwl = LocalWorkload {
+        workload: Workload {
+            workload_ips: vec![],
+            protocol: Protocol::HBONE,
+            uid: "cluster1//v1/Pod/default/local-source".into(),
+            name: "local-source".into(),
+            namespace: "default".into(),
+            service_account: "default".into(),
+            ..test_helpers::test_default_workload()
+        },
+        services: Default::default(),
+    };
+    workloads.push(lwl);
 
     let lc = ztunnel::xds::LocalConfig {
         workloads,
@@ -560,7 +574,7 @@ criterion_group! {
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = hbone_connections, throughput, latency, connections, metrics, rbac
+    targets = hbone_connections
 }
 
 criterion_main!(benches);
