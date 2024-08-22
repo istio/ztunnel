@@ -966,7 +966,7 @@ mod tests {
 
                     // rbac should reject port 80
                     let rbac_res = state.assert_rbac(&rbac_ctx).await;
-                    assert!(!rbac_res.is_ok());
+                    assert!(rbac_res.is_err());
                     let conn = crate::rbac::Connection{
                         dst: std::net::SocketAddr::new(std::net::Ipv4Addr::new(1, 2, 3, 4).into(), 81),
                         ..conn

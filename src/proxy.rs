@@ -22,8 +22,8 @@ use std::{fmt, io};
 
 use hickory_proto::error::ProtoError;
 
-use rand::Rng;
 use crate::strng::Strng;
+use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
@@ -333,7 +333,6 @@ pub enum AuthorizationRejectionError {
     NotAllowed,
 }
 impl fmt::Display for AuthorizationRejectionError {
-
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoWorkload => write!(fmt, "workload not found"),
@@ -343,7 +342,6 @@ impl fmt::Display for AuthorizationRejectionError {
         }
     }
 }
-
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

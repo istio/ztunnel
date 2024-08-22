@@ -312,7 +312,7 @@ impl PolicyWatcher {
                 _ = policies_changed.changed() => {
                     let connections = self.connection_manager.connections();
                     for conn in connections {
-                        if !self.state.assert_rbac(&conn.ctx).await.is_ok() {
+                        if self.state.assert_rbac(&conn.ctx).await.is_err() {
                             self.connection_manager.close(&conn).await;
                             info!("connection {} closed because it's no longer allowed after a policy update", conn.ctx);
                         }

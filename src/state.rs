@@ -1310,7 +1310,7 @@ mod tests {
                     1234,
                 )),
                 dst_network: "".into(),
-                dst: SocketAddr::new(workload.workload_ips[0].clone(), 8080),
+                dst: SocketAddr::new(workload.workload_ips[0], 8080),
             },
             dest_workload_info: Some(Arc::new(get_workloadinfo(state, dest_uid))),
         }
