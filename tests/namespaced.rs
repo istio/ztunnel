@@ -754,7 +754,7 @@ mod namespaced {
             .unwrap()?;
         telemetry::testing::assert_contains(HashMap::from([
             ("scope", "access"),
-            ("error", "connection closed due to policy rejection"),
+            ("error", "connection closed due to policy rejection: allow policies exist, but none allowed"),
         ]));
         Ok(())
     }
