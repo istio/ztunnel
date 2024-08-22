@@ -89,10 +89,21 @@ impl Server {
         socket_factory: &(dyn SocketFactory + Send + Sync),
         allow_unknown_source: bool,
     ) -> Result<Self, Error> {
-        let address = address.with_ipv6(socket_factory.ipv6_enabled_localhost().unwrap_or_else(|e| {
-            warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
-            true
-        }));
+        // if the address we got from config is supposed to be v6-enabled,
+        // actually check if the local pod context our socketfactory operates in supports V6.
+        // This is to ensure globally-enabled V6 support doesn't try to create V6 addresses in pods
+        // that do not support it, and also ensure globally-disabled V6 support doesn't create V6 address
+        // even if that's turned off.
+        let local_address = if let config::Address::Localhost(v6_global_enable, _) = address {
+            if v6_global_enable {
+                address.with_ipv6(socket_factory.ipv6_enabled_localhost().unwrap_or_else(|e| {
+                    warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
+                    true
+                }))
+            } else {
+                address
+            }
+        };
         // Create the DNS server, backed by ztunnel data structures.
         let mut store = Store::new(
             domain,
@@ -106,14 +117,14 @@ impl Server {
         let handler = dns::handler::Handler::new(store.clone());
         let mut server = ServerFuture::new(handler);
         info!(
-            address=%address,
+            address=%local_address,
             component="dns",
             "starting local DNS server",
         );
         // We may have multiple TCP/UDP addresses; we will just take one. This is only for tests, so one is sufficient.
         let mut tcp_addr = None;
         let mut udp_addr = None;
-        for addr in address.into_iter() {
+        for addr in local_address.into_iter() {
             // Bind and register the TCP socket.
             let tcp_listener = socket_factory
                 .tcp_bind(addr)
