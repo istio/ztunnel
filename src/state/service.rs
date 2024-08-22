@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use itertools::Itertools;
 use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -63,7 +64,7 @@ pub struct Service {
 /// to incrementally update.
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct EndpointSet {
-    pub inner: HashMap<Strng, Endpoint>,
+    pub inner: HashMap<Strng, Arc<Endpoint>>,
 }
 
 impl serde::Serialize for EndpointSet {
@@ -80,7 +81,8 @@ impl<'de> serde::Deserialize<'de> for EndpointSet {
     where
         D: Deserializer<'de>,
     {
-        <HashMap<Strng, Endpoint>>::deserialize(deserializer).map(|inner| EndpointSet { inner })
+        <HashMap<Strng, Arc<Endpoint>>>::deserialize(deserializer)
+            .map(|inner| EndpointSet { inner })
     }
 }
 
@@ -88,13 +90,13 @@ impl EndpointSet {
     pub fn from_list<const N: usize>(eps: [Endpoint; N]) -> EndpointSet {
         let mut endpoints = HashMap::with_capacity(eps.len());
         for ep in eps.into_iter() {
-            endpoints.insert(ep.workload_uid.clone(), ep);
+            endpoints.insert(ep.workload_uid.clone(), Arc::new(ep));
         }
         EndpointSet { inner: endpoints }
     }
 
     pub fn insert(&mut self, k: Strng, v: Endpoint) {
-        self.inner.insert(k, v);
+        self.inner.insert(k, Arc::new(v));
     }
 
     pub fn contains(&self, key: &Strng) -> bool {
@@ -102,7 +104,7 @@ impl EndpointSet {
     }
 
     pub fn get(&self, key: &Strng) -> Option<&Endpoint> {
-        self.inner.get(key)
+        self.inner.get(key).map(Arc::as_ref)
     }
 
     pub fn remove(&mut self, key: &Strng) {
@@ -110,7 +112,7 @@ impl EndpointSet {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Endpoint> {
-        self.inner.values()
+        self.inner.values().map(Arc::as_ref)
     }
 }
 
@@ -333,10 +335,6 @@ pub struct ServiceStore {
     /// this is used to handle ordering issues if workloads are received before services.
     pub(super) staged_services: HashMap<NamespacedHostname, HashMap<Strng, Endpoint>>,
 
-    /// Maintains a mapping of workload UID to service. This is used only to handle removal of
-    /// service endpoints when a workload is removed.
-    workload_to_services: HashMap<Strng, HashSet<NamespacedHostname>>,
-
     /// Allows for lookup of services by network address, the service's xds secondary key.
     pub(super) by_vip: HashMap<NetworkAddress, Arc<Service>>,
 
@@ -370,10 +368,9 @@ impl ServiceStore {
     }
 
     pub fn get_by_workload(&self, workload: &Workload) -> Vec<Arc<Service>> {
-        let Some(svc) = self.workload_to_services.get(&workload.uid) else {
-            return Vec::new();
-        };
-        svc.iter()
+        workload
+            .services
+            .iter()
             .filter_map(|s| self.get_by_namespaced_host(s))
             .collect()
     }
@@ -416,7 +413,7 @@ impl ServiceStore {
             svc.endpoints.insert(ep_uid, ep);
 
             // Update the service.
-            self.insert(svc);
+            self.insert_endpoint_update(svc);
         } else {
             // We received workload endpoints, but don't have the Service yet.
             // This can happen due to ordering issues.
@@ -427,31 +424,24 @@ impl ServiceStore {
                 .entry(service_name.clone())
                 .or_default()
                 .insert(ep_uid, ep.clone());
-
-            // Insert a reverse-mapping from the workload address to the service.
-            self.workload_to_services
-                .entry(ep.workload_uid.clone())
-                .or_default()
-                .insert(service_name);
         }
     }
 
     /// Removes entries for the given endpoint address.
-    pub fn remove_endpoint(&mut self, workload_uid: &Strng) {
+    pub fn remove_endpoint(&mut self, prev_workload: &Workload) {
         let mut services_to_update = HashSet::new();
-        if let Some(prev_services) = self.workload_to_services.remove(workload_uid) {
-            for svc in prev_services.iter() {
-                // Remove the endpoint from the staged services.
-                self.staged_services
-                    .entry(svc.clone())
-                    .or_default()
-                    .remove(workload_uid);
-                if self.staged_services[svc].is_empty() {
-                    self.staged_services.remove(svc);
-                }
-
-                services_to_update.insert(svc.clone());
+        let workload_uid = &prev_workload.uid;
+        for svc in prev_workload.services.iter() {
+            // Remove the endpoint from the staged services.
+            self.staged_services
+                .entry(svc.clone())
+                .or_default()
+                .remove(workload_uid);
+            if self.staged_services[svc].is_empty() {
+                self.staged_services.remove(svc);
             }
+
+            services_to_update.insert(svc.clone());
         }
 
         // Now remove the endpoint from all Services.
@@ -461,55 +451,64 @@ impl ServiceStore {
                 svc.endpoints.remove(workload_uid);
 
                 // Update the service.
-                self.insert(svc);
+                self.insert_endpoint_update(svc);
             }
         }
     }
 
     /// Adds the given service.
-    pub fn insert(&mut self, mut service: Service) {
-        // First add any staged service endpoints. Due to ordering issues, we may have received
-        // the workloads before their associated services.
+    pub fn insert(&mut self, service: Service) {
+        self.insert_internal(service, false)
+    }
+
+    /// insert_endpoint_update is like insert, but optimized for the case where we know only endpoints change.
+    pub fn insert_endpoint_update(&mut self, service: Service) {
+        self.insert_internal(service, true)
+    }
+
+    fn insert_internal(&mut self, mut service: Service, endpoint_update_only: bool) {
         let namespaced_hostname = service.namespaced_hostname();
-        if let Some(endpoints) = self.staged_services.remove(&namespaced_hostname) {
-            for (wip, ep) in endpoints {
-                if service.should_include_endpoint(ep.status) {
-                    service.endpoints.insert(wip.clone(), ep);
+        // If we're replacing an existing service, remove the old one from all data structures.
+        if !endpoint_update_only {
+            // First add any staged service endpoints. Due to ordering issues, we may have received
+            // the workloads before their associated services.
+            if let Some(endpoints) = self.staged_services.remove(&namespaced_hostname) {
+                for (wip, ep) in endpoints {
+                    if service.should_include_endpoint(ep.status) {
+                        service.endpoints.insert(wip.clone(), ep);
+                    }
                 }
             }
+
+            let _ = self.remove(&namespaced_hostname);
         }
-
-        // If we're replacing an existing service, remove the old one from all data structures.
-        let _ = self.remove(&namespaced_hostname);
-
-        // Save values used for the indexes.
-        let vips = service.vips.clone();
-        let hostname = service.hostname.clone();
 
         // Create the Arc.
         let service = Arc::new(service);
+        let hostname = &service.hostname;
 
         // Map the vips to the service.
-        for vip in &vips {
+        for vip in &service.vips {
             self.by_vip.insert(vip.clone(), service.clone());
         }
 
         // Map the hostname to the service.
-        match self.by_host.get_mut(&hostname) {
+        match self.by_host.get_mut(hostname) {
             None => {
                 let _ = self.by_host.insert(hostname.clone(), vec![service.clone()]);
             }
             Some(services) => {
-                services.push(service.clone());
+                if let Some((cur, _)) = services
+                    .iter()
+                    .find_position(|s| s.namespace == service.namespace)
+                {
+                    // Service already exists; replace the slot
+                    services[cur] = service.clone()
+                } else {
+                    // No service exists yet, append it
+                    services.push(service.clone());
+                }
             }
-        }
-
-        // Map the workload address to the service.
-        for ep in service.endpoints.iter() {
-            self.workload_to_services
-                .entry(ep.workload_uid.clone())
-                .or_default()
-                .insert(namespaced_hostname.clone());
         }
     }
 
@@ -547,18 +546,6 @@ impl ServiceStore {
                 // Remove the staged service.
                 // TODO(nmittler): no endpoints for this service should be staged at this point.
                 self.staged_services.remove(namespaced_host);
-
-                // Remove mapping from workload to the VIPs for this service.
-                for ep in prev.endpoints.iter() {
-                    // Remove the workload IP mapping for this service.
-                    self.workload_to_services
-                        .entry(ep.workload_uid.clone())
-                        .or_default()
-                        .remove(namespaced_host);
-                    if self.workload_to_services[&ep.workload_uid].is_empty() {
-                        self.workload_to_services.remove(&ep.workload_uid);
-                    }
-                }
 
                 // Remove successful.
                 true

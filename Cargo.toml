@@ -24,6 +24,10 @@ bench = false
 name = "throughput"
 harness = false
 
+[[bench]]
+name = "basic"
+harness = false
+
 [dependencies]
 # Enabled with 'tls-boring'
 boring-rustls-provider = { git = "https://github.com/janrueth/boring-rustls-provider", optional = true } #

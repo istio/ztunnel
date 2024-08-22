@@ -30,6 +30,7 @@ use nix::unistd::mkdtemp;
 use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -448,6 +449,10 @@ impl<'a> TestWorkloadBuilder<'a> {
             .entry(service.to_string())
             .or_default()
             .insert(server_port, target_port);
+        self.w
+            .workload
+            .services
+            .push(NamespacedHostname::from_str(service).unwrap());
         self
     }
 

@@ -224,6 +224,9 @@ pub struct Workload {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub locality: Locality,
+
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub services: Vec<NamespacedHostname>,
 }
 
 pub fn is_default<T: Default + PartialEq>(t: &T) -> bool {
@@ -380,6 +383,19 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
             .collect::<Result<Vec<_>, _>>()?;
 
         let workload_type = resource.workload_type().as_str_name().to_lowercase();
+        let services: Vec<NamespacedHostname> = resource
+            .services
+            .keys()
+            .map(|namespaced_host| match namespaced_host.split_once('/') {
+                Some((namespace, hostname)) => Ok(NamespacedHostname {
+                    namespace: namespace.into(),
+                    hostname: hostname.into(),
+                }),
+                None => Err(WorkloadError::NamespacedHostnameParse(
+                    namespaced_host.clone(),
+                )),
+            })
+            .collect::<Result<_, _>>()?;
         let wl = Workload {
             workload_ips: addresses,
             waypoint: wp,
@@ -442,6 +458,8 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
                     result.into()
                 }
             },
+
+            services,
         };
         // Return back part we did not use (service) so it can be consumed without cloning
         Ok((wl, resource.services))
