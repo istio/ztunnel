@@ -41,7 +41,7 @@ use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::{helpers, tcp};
-use ztunnel::xds::LocalWorkload;
+use ztunnel::xds::{LocalWorkload, ProxyStateUpdateMutator, ProxyStateUpdater};
 use ztunnel::{app, identity, metrics, proxy, rbac, setup_netns_test, strng, test_helpers};
 
 const KB: usize = 1024;
@@ -560,7 +560,7 @@ criterion_group! {
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = hbone_connections, throughput, latency, connections, metrics, rbac
+    targets = xds
 }
 
 criterion_main!(benches);
