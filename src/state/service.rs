@@ -64,7 +64,7 @@ pub struct Service {
 /// to incrementally update.
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct EndpointSet {
-    pub inner: im::HashMap<Strng, Arc<Endpoint>>,
+    pub inner: HashMap<Strng, Arc<Endpoint>>,
 }
 
 impl serde::Serialize for EndpointSet {
@@ -81,14 +81,14 @@ impl<'de> serde::Deserialize<'de> for EndpointSet {
     where
         D: Deserializer<'de>,
     {
-        <im::HashMap<Strng, Arc<Endpoint>>>::deserialize(deserializer)
+        <HashMap<Strng, Arc<Endpoint>>>::deserialize(deserializer)
             .map(|inner| EndpointSet { inner })
     }
 }
 
 impl EndpointSet {
     pub fn from_list<const N: usize>(eps: [Endpoint; N]) -> EndpointSet {
-        let mut endpoints = im::HashMap::new();
+        let mut endpoints = HashMap::with_capacity(eps.len());
         for ep in eps.into_iter() {
             endpoints.insert(ep.workload_uid.clone(), Arc::new(ep));
         }
