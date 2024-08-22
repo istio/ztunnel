@@ -183,7 +183,7 @@ impl ProxyStateUpdateMutator {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
             // Also remove service endpoints for the workload.
-            state.services.remove_endpoint(&prev.uid);
+            state.services.remove_endpoint(&prev);
 
             // This is a real removal (not a removal before insertion), and nothing else references the cert
             // Clear it out

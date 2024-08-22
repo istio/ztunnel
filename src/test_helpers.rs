@@ -220,6 +220,7 @@ pub fn test_default_workload() -> Workload {
         native_tunnel: false,
         application_tunnel: None,
         locality: Default::default(),
+        services: Default::default(),
     }
 }
 

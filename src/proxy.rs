@@ -817,6 +817,7 @@ mod tests {
             native_tunnel: false,
             application_tunnel: None,
             locality: Default::default(),
+            services: Default::default(),
         }
     }
 
@@ -846,6 +847,7 @@ mod tests {
             native_tunnel: false,
             application_tunnel: None,
             locality: Default::default(),
+            services: Default::default(),
         }
     }
 
