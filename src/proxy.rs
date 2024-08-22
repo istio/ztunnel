@@ -26,7 +26,6 @@ use crate::strng::Strng;
 use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::OnceCell;
 use tokio::time::timeout;
 use tracing::{debug, trace, warn, Instrument};
 
@@ -147,7 +146,6 @@ pub struct Proxy {
 pub struct LocalWorkloadInformation {
     wi: Arc<WorkloadInfo>,
     state: DemandProxyState,
-    workload: OnceCell<Arc<Workload>>,
     // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
     // access to the appropriate certificates
     full_cert_manager: Arc<SecretManager>,
@@ -162,22 +160,15 @@ impl LocalWorkloadInformation {
         LocalWorkloadInformation {
             wi,
             state,
-            workload: OnceCell::new(),
             full_cert_manager: cert_manager,
         }
     }
 
     pub async fn get_workload(&self) -> Result<Arc<Workload>, Error> {
-        // TODO: we need to refresh this!!
-        self.workload
-            .get_or_try_init(|| async {
-                self.state
-                    .wait_for_workload(&self.wi, Duration::from_secs(5))
-                    .await
-                    .ok_or_else(|| Error::UnknownSourceWorkload(self.wi.clone()))
-            })
+        self.state
+            .wait_for_workload(&self.wi, Duration::from_secs(5))
             .await
-            .cloned()
+            .ok_or_else(|| Error::UnknownSourceWorkload(self.wi.clone()))
     }
 
     pub async fn fetch_certificate(

@@ -465,7 +465,10 @@ impl DemandProxyState {
         self.state.read().unwrap()
     }
 
-    pub async fn assert_rbac(&self, ctx: &ProxyRbacContext) -> Result<(), proxy::AuthorizationRejectionError> {
+    pub async fn assert_rbac(
+        &self,
+        ctx: &ProxyRbacContext,
+    ) -> Result<(), proxy::AuthorizationRejectionError> {
         let wl = &ctx.dest_workload;
         let conn = &ctx.conn;
         let state = self.state.read().unwrap();
@@ -1268,9 +1271,9 @@ mod tests {
         }
     }
 
-    fn get_workloadinfo(state: &DemandProxyState, dest_uid: u8) -> Arc<Workload> {
+    fn get_workload(state: &DemandProxyState, dest_uid: u8) -> Arc<Workload> {
         let key: Strng = format!("{}", dest_uid).into();
-        &state.read().workloads.by_uid[&key]
+        state.read().workloads.by_uid[&key].clone()
     }
 
     fn get_rbac_context(
@@ -1294,7 +1297,7 @@ mod tests {
                 dst_network: "".into(),
                 dst: SocketAddr::new(workload.workload_ips[0], 8080),
             },
-            dest_workload: Some(Arc::new(get_workloadinfo(state, dest_uid))),
+            dest_workload: get_workload(state, dest_uid),
         }
     }
     fn create_state(state: ProxyState) -> DemandProxyState {
@@ -1318,9 +1321,9 @@ mod tests {
     // 5. Deny the request.
     #[tokio::test]
     async fn assert_rbac_logic_deny_allow() {
-        let mut state = ProxyState::default();
-        state.workloads.insert(Arc::new(create_workload(1)), true);
-        state.workloads.insert(Arc::new(create_workload(2)), true);
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
+        state.workloads.insert(Arc::new(create_workload(2)));
         state.policies.insert(
             "allow".into(),
             rbac::Authorization {
@@ -1411,12 +1414,12 @@ mod tests {
 
     #[tokio::test]
     async fn assert_rbac_with_dest_workload_info() {
-        let mut state = ProxyState::default();
-        state.workloads.insert(Arc::new(create_workload(1)), true);
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
 
         let mock_proxy_state = create_state(state);
 
-        let mut ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
+        let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
         assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
     }
 
