@@ -28,19 +28,6 @@ pub fn xds(c: &mut Criterion) {
     use ztunnel::xds::istio::workload::Workload as XdsWorkload;
     use ztunnel::xds::istio::workload::{NetworkAddress as XdsNetworkAddress, PortList};
     let mut c = c.benchmark_group("xds");
-    // let updater = ProxyStateUpdater::new(state.clone(), Arc::new(ztunnel::cert_fetcher::NoCertFetcher()));
-    let mut state = ProxyState::default();
-    let updater = ProxyStateUpdateMutator::new_no_fetch();
-    let svc = XdsService {
-        hostname: "example.com".to_string(),
-        addresses: vec![XdsNetworkAddress {
-            network: "".to_string(),
-            address: vec![127, 0, 0, 3],
-        }],
-        ..Default::default()
-    };
-    updater.insert_service(&mut state, svc).unwrap();
-
     c.measurement_time(Duration::from_secs(5));
     c.bench_function("insert-remove", |b| {
         b.iter(|| {

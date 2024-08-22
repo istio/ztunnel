@@ -104,7 +104,7 @@ impl EndpointSet {
     }
 
     pub fn get(&self, key: &Strng) -> Option<&Endpoint> {
-        self.inner.get(key).map(|e| &**e)
+        self.inner.get(key).map(Arc::as_ref)
     }
 
     pub fn remove(&mut self, key: &Strng) {
@@ -112,7 +112,7 @@ impl EndpointSet {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Endpoint> {
-        self.inner.values().map(|e| &**e)
+        self.inner.values().map(Arc::as_ref)
     }
 }
 
