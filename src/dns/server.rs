@@ -94,16 +94,10 @@ impl Server {
         // This is to ensure globally-enabled V6 support doesn't try to create V6 addresses in pods
         // that do not support it, and also ensure globally-disabled V6 support doesn't create V6 address
         // even if that's turned off.
-        let local_address = if let config::Address::Localhost(v6_global_enable, _) = address {
-            if v6_global_enable {
-                address.with_ipv6(socket_factory.ipv6_enabled_localhost().unwrap_or_else(|e| {
-                    warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
-                    true
-                }))
-            } else {
-                address
-            }
-        };
+        let local_address = address.maybe_downgrade_ipv6(socket_factory.ipv6_enabled_localhost().unwrap_or_else(|e| {
+            warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
+            true
+        }));
         // Create the DNS server, backed by ztunnel data structures.
         let mut store = Store::new(
             domain,
