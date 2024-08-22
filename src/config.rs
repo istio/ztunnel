@@ -703,10 +703,18 @@ impl Address {
         }
     }
 
-    // with_ipv6 overrides the IPv6 setting for the address
+    // with_ipv6 unconditionally overrides the IPv6 setting for the address
     pub fn with_ipv6(self, ipv6: bool) -> Self {
         match self {
             Address::Localhost(_, port) => Address::Localhost(ipv6, port),
+            x => x,
+        }
+    }
+
+    // maybe_downgrade_ipv6 updates the V6 setting, ONLY if the address was already V6
+    pub fn maybe_downgrade_ipv6(self, updated_v6: bool) -> Self {
+        match self {
+            Address::Localhost(true, port) => Address::Localhost(updated_v6, port),
             x => x,
         }
     }
