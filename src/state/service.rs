@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use itertools::Itertools;
 use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -416,7 +417,7 @@ impl ServiceStore {
             svc.endpoints.insert(ep_uid, ep);
 
             // Update the service.
-            self.insert(svc);
+            self.insert_endpoint_update(svc);
         } else {
             // We received workload endpoints, but don't have the Service yet.
             // This can happen due to ordering issues.
@@ -461,13 +462,22 @@ impl ServiceStore {
                 svc.endpoints.remove(workload_uid);
 
                 // Update the service.
-                self.insert(svc);
+                self.insert_endpoint_update(svc);
             }
         }
     }
 
     /// Adds the given service.
     pub fn insert(&mut self, mut service: Service) {
+        self.insert_internal(service, false)
+    }
+
+    /// insert_endpoint_update is like insert, but optimized for the case where we know only endpoints change.
+    pub fn insert_endpoint_update(&mut self, mut service: Service) {
+        self.insert_internal(service, true)
+    }
+
+    pub fn insert_internal(&mut self, mut service: Service, endpoint_update_only: bool) {
         // First add any staged service endpoints. Due to ordering issues, we may have received
         // the workloads before their associated services.
         let namespaced_hostname = service.namespaced_hostname();
@@ -480,7 +490,9 @@ impl ServiceStore {
         }
 
         // If we're replacing an existing service, remove the old one from all data structures.
-        let _ = self.remove(&namespaced_hostname);
+        if !endpoint_update_only {
+            let _ = self.remove(&namespaced_hostname);
+        }
 
         // Save values used for the indexes.
         let vips = service.vips.clone();
@@ -500,7 +512,16 @@ impl ServiceStore {
                 let _ = self.by_host.insert(hostname.clone(), vec![service.clone()]);
             }
             Some(services) => {
-                services.push(service.clone());
+                if let Some((cur, _)) = services
+                    .iter()
+                    .find_position(|s| s.namespace == service.namespace)
+                {
+                    // Service already exists; replace the slot
+                    services[cur] = service.clone()
+                } else {
+                    // No service exists yet, append it
+                    services.push(service.clone());
+                }
             }
         }
 
