@@ -18,6 +18,7 @@ use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::ops::Deref;
+use std::rc::Rc;
 use std::sync::Arc;
 use tracing::trace;
 
@@ -64,7 +65,7 @@ pub struct Service {
 /// to incrementally update.
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct EndpointSet {
-    pub inner: HashMap<Strng, Endpoint>,
+    pub inner: HashMap<Strng, Arc<Endpoint>>,
 }
 
 impl serde::Serialize for EndpointSet {
@@ -81,7 +82,7 @@ impl<'de> serde::Deserialize<'de> for EndpointSet {
     where
         D: Deserializer<'de>,
     {
-        <HashMap<Strng, Endpoint>>::deserialize(deserializer).map(|inner| EndpointSet { inner })
+        <HashMap<Strng, Arc<Endpoint>>>::deserialize(deserializer).map(|inner| EndpointSet { inner })
     }
 }
 
@@ -89,13 +90,13 @@ impl EndpointSet {
     pub fn from_list<const N: usize>(eps: [Endpoint; N]) -> EndpointSet {
         let mut endpoints = HashMap::with_capacity(eps.len());
         for ep in eps.into_iter() {
-            endpoints.insert(ep.workload_uid.clone(), ep);
+            endpoints.insert(ep.workload_uid.clone(), Arc::new(ep));
         }
         EndpointSet { inner: endpoints }
     }
 
     pub fn insert(&mut self, k: Strng, v: Endpoint) {
-        self.inner.insert(k, v);
+        self.inner.insert(k, Arc::new(v));
     }
 
     pub fn contains(&self, key: &Strng) -> bool {
@@ -103,7 +104,7 @@ impl EndpointSet {
     }
 
     pub fn get(&self, key: &Strng) -> Option<&Endpoint> {
-        self.inner.get(key)
+        self.inner.get(key).map(|e| &**e)
     }
 
     pub fn remove(&mut self, key: &Strng) {
@@ -111,7 +112,7 @@ impl EndpointSet {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Endpoint> {
-        self.inner.values()
+        self.inner.values().map(|e| &**e)
     }
 }
 
