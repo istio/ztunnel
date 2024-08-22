@@ -5,6 +5,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use pprof::criterion::{Output, PProfProfiler};
 
 use ztunnel::state::ProxyState;
+use ztunnel::strng;
 use ztunnel::xds::ProxyStateUpdateMutator;
 
 pub fn xds(c: &mut Criterion) {
@@ -40,7 +41,7 @@ pub fn xds(c: &mut Criterion) {
             let mut state = ProxyState::default();
             let updater = ProxyStateUpdateMutator::new_no_fetch();
             updater.insert_service(&mut state, svc).unwrap();
-            const WORKLOAD_COUNT: usize = 500;
+            const WORKLOAD_COUNT: usize = 1000;
             for i in 0..WORKLOAD_COUNT {
                 updater
                     .insert_workload(
@@ -66,6 +67,9 @@ pub fn xds(c: &mut Criterion) {
                         },
                     )
                     .unwrap();
+            }
+            for i in 0..WORKLOAD_COUNT {
+                updater.remove(&mut state, &strng::format!("cluster1//v1/Pod/default/{i}"));
             }
         })
     });
