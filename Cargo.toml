@@ -108,6 +108,7 @@ arcstr = { version = "1.1", features = ["serde"] }
 tracing-core = "0.1.32"
 tracing-appender = "0.2.3"
 tokio-util = { version = "0.7.11", features = ["io-util"] }
+im = { version = "15.1.0", features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
