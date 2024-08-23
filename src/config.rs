@@ -288,7 +288,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     let ipv6_enabled = parse::<bool>(IPV6_ENABLED)?.unwrap_or(true);
     let ipv6_localhost_enabled = if ipv6_enabled {
         // IPv6 may be generally enabled, but not on localhost. In that case, we do not want to bind on IPv6.
-        crate::proxy::ipv6_disabled_on_localhost().unwrap_or_else(|e| {
+        crate::proxy::ipv6_enabled_on_localhost().unwrap_or_else(|e| {
             warn!(err=?e, "failed to determine if IPv6 was disabled; continuing anyways, but this may fail");
             true
         })
