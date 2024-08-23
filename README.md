@@ -141,6 +141,7 @@ Ztunnel exposes a variety of logs, both operational and "access logs".
 
 Logs are controlled by the `RUST_LOG` variable.
 This can set all levels, or a specific target. For instance, `RUST_LOG=error,ztunnel::proxy=warn`.
+Logs can be emitted in JSON format with `LOG_FORMAT=json`.
 Access logs are under the `access` target.
 
 An example access log looks like (with newlines for readability; the real logs are on one line):
