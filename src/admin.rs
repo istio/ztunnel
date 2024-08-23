@@ -41,18 +41,6 @@ use tracing::{error, info, warn};
 use tracing_subscriber::filter;
 
 pub trait AdminHandler: Sync + Send {
-    fn path(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    // sadly can't use async trait because no Sync
-    // see: https://github.com/dtolnay/async-trait/issues/248, https://github.com/dtolnay/async-trait/issues/142
-    // we can't use FutureExt::shared because our result is not clonable
-    fn handle(
-        &self,
-        req: Request<Incoming>,
-    ) -> std::pin::Pin<Box<dyn futures_util::Future<Output = Response<Full<Bytes>>> + Sync + Send>>;
-}
-
-pub trait AdminHandler2: Sync + Send {
     fn key(&self) -> &'static str;
     // sadly can't use async trait because no Sync
     // see: https://github.com/dtolnay/async-trait/issues/248, https://github.com/dtolnay/async-trait/issues/142
@@ -65,7 +53,7 @@ struct State {
     config: Arc<Config>,
     shutdown_trigger: signal::ShutdownTrigger,
     cert_manager: Arc<SecretManager>,
-    handlers: Vec<Arc<dyn AdminHandler2>>,
+    handlers: Vec<Arc<dyn AdminHandler>>,
 }
 
 pub struct Service {
@@ -129,7 +117,7 @@ impl Service {
         self.s.address()
     }
 
-    pub fn add_handler(&mut self, handler: Arc<dyn AdminHandler2>) {
+    pub fn add_handler(&mut self, handler: Arc<dyn AdminHandler>) {
         self.s.state_mut().handlers.push(handler);
     }
 
@@ -284,7 +272,7 @@ async fn handle_server_shutdown(
 }
 
 async fn handle_config_dump(
-    handlers: &[Arc<dyn AdminHandler2>],
+    handlers: &[Arc<dyn AdminHandler>],
     mut dump: ConfigDump,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     if let Some(cfg) = dump.config.local_xds_config.clone() {

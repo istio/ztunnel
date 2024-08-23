@@ -143,60 +143,63 @@ pub struct Proxy {
     policy_watcher: PolicyWatcher,
 }
 
-/// ScopedSecretManager provides an extra check against certificate lookups to ensure only appropriate certificates
-/// are requested for a given workload.
-/// This acts as a second line of defense against *coding errors* that could cause incorrect identity assignment.
-#[derive(Clone)]
-pub struct ScopedSecretManager {
-    cert_manager: Arc<SecretManager>,
-    allowed: Option<Arc<WorkloadInfo>>,
+pub struct LocalWorkloadInformation {
+    wi: Arc<WorkloadInfo>,
+    state: DemandProxyState,
+    // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
+    // access to the appropriate certificates
+    full_cert_manager: Arc<SecretManager>,
 }
 
-impl ScopedSecretManager {
-    #[cfg(any(test, feature = "testing"))]
-    pub fn new(cert_manager: Arc<SecretManager>) -> Self {
-        Self {
-            cert_manager,
-            allowed: None,
+impl LocalWorkloadInformation {
+    pub fn new(
+        wi: Arc<WorkloadInfo>,
+        state: DemandProxyState,
+        cert_manager: Arc<SecretManager>,
+    ) -> LocalWorkloadInformation {
+        LocalWorkloadInformation {
+            wi,
+            state,
+            full_cert_manager: cert_manager,
         }
+    }
+
+    pub async fn get_workload(&self) -> Result<Arc<Workload>, Error> {
+        self.state
+            .wait_for_workload(&self.wi, Duration::from_secs(5))
+            .await
+            .ok_or_else(|| Error::UnknownSourceWorkload(self.wi.clone()))
     }
 
     pub async fn fetch_certificate(
         &self,
-        id: &Identity,
     ) -> Result<Arc<tls::WorkloadCertificate>, identity::Error> {
-        if let Some(allowed) = &self.allowed {
-            match &id {
-                Identity::Spiffe {
-                    namespace,
-                    service_account,
-                    ..
-                } => {
-                    // We cannot compare trust domain, since we don't get this from WorkloadInfo
-                    if namespace != &allowed.namespace
-                        || service_account != &allowed.service_account
-                    {
-                        let err =
-                            identity::Error::BugInvalidIdentityRequest(id.clone(), allowed.clone());
-                        debug_assert!(false, "{err}");
-                        return Err(err);
-                    }
-                }
-            }
-        }
-        self.cert_manager.fetch_certificate(id).await
+        // We don't know the trust domain until we get the workload from XDS, so fetch that
+        let wl = self
+            .get_workload()
+            .await
+            .map_err(|_| identity::Error::UnknownWorkload(self.workload_info()))?;
+        let id = &Identity::Spiffe {
+            trust_domain: wl.trust_domain.clone(),
+            namespace: (&self.wi.namespace).into(),
+            service_account: (&self.wi.service_account).into(),
+        };
+        self.full_cert_manager.fetch_certificate(id).await
+    }
+
+    pub fn workload_info(&self) -> Arc<WorkloadInfo> {
+        self.wi.clone()
     }
 }
 
 #[derive(Clone)]
 pub(super) struct ProxyInputs {
     cfg: Arc<config::Config>,
-    cert_manager: ScopedSecretManager,
     connection_manager: ConnectionManager,
     pub state: DemandProxyState,
     metrics: Arc<Metrics>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    proxy_workload_info: Option<Arc<WorkloadInfo>>,
+    local_workload_information: Arc<LocalWorkloadInformation>,
     resolver: Option<Arc<dyn Resolver + Send + Sync>>,
 }
 
@@ -209,51 +212,27 @@ impl ProxyInputs {
         state: DemandProxyState,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-        proxy_workload_info: Option<WorkloadInfo>,
+        proxy_workload_info: WorkloadInfo,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     ) -> Arc<Self> {
-        let proxy_workload_info = proxy_workload_info.map(Arc::new);
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(proxy_workload_info),
+            state.clone(),
+            cert_manager,
+        ));
         Arc::new(Self {
             cfg,
             state,
-            cert_manager: ScopedSecretManager {
-                cert_manager,
-                allowed: proxy_workload_info.clone(),
-            },
             metrics,
             connection_manager,
             socket_factory,
-            proxy_workload_info,
+            local_workload_information,
             resolver,
         })
     }
 }
 
 impl Proxy {
-    pub async fn new(
-        cfg: Arc<config::Config>,
-        state: DemandProxyState,
-        cert_manager: Arc<SecretManager>,
-        metrics: Metrics,
-        drain: DrainWatcher,
-        resolver: Option<Arc<dyn Resolver + Send + Sync>>,
-    ) -> Result<Proxy, Error> {
-        let metrics = Arc::new(metrics);
-        let socket_factory = Arc::new(DefaultSocketFactory);
-
-        let pi = ProxyInputs::new(
-            cfg,
-            cert_manager,
-            ConnectionManager::default(),
-            state,
-            metrics,
-            socket_factory,
-            None,
-            resolver,
-        );
-        Self::from_inputs(pi, drain).await
-    }
-
     #[allow(unused_mut)]
     pub(super) async fn from_inputs(
         mut pi: Arc<ProxyInputs>,
@@ -379,12 +358,6 @@ pub enum Error {
     #[error("connection closed due to policy rejection: {0}")]
     AuthorizationPolicyRejection(AuthorizationRejectionError),
 
-    #[error("pool is already connecting")]
-    WorkloadHBONEPoolAlreadyConnecting,
-
-    #[error("connection streams maxed out")]
-    WorkloadHBONEPoolConnStreamsMaxed,
-
     #[error("pool draining")]
     WorkloadHBONEPoolDraining,
 
@@ -412,17 +385,11 @@ pub enum Error {
     #[error("identity error: {0}")]
     Identity(#[from] identity::Error),
 
-    #[error("unknown source: {0}")]
-    UnknownSource(IpAddr),
-
-    #[error("invalid source: {0}, should match {1:?}")]
-    MismatchedSource(IpAddr, Arc<WorkloadInfo>),
+    #[error("failed to fetch information about local workload: {0}")]
+    UnknownSourceWorkload(Arc<WorkloadInfo>),
 
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
-
-    #[error("unknown destination: {0}")]
-    UnknownDestination(IpAddr),
 
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
@@ -449,9 +416,6 @@ pub enum Error {
 
     #[error("ip mismatch: {0} != {1}")]
     IPMismatch(IpAddr, IpAddr),
-
-    #[error("bug: connection seen twice")]
-    DoubleConnection,
 
     #[error("connection failed to drain within the timeout")]
     DrainTimeOut,
@@ -768,8 +732,8 @@ mod tests {
     async fn check_gateway() {
         let w = mock_default_gateway_workload();
         let s = mock_default_gateway_service();
-        let mut state = state::ProxyState::default();
-        state.workloads.insert(Arc::new(w), true);
+        let mut state = state::ProxyState::new(None);
+        state.workloads.insert(Arc::new(w));
         state.services.insert(s);
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));

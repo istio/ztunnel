@@ -34,6 +34,7 @@ XDS_ADDRESS="" \
 LOCAL_XDS_PATH=./examples/localhost.yaml \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E" \
 PROXY_MODE=dedicated \
+PROXY_WORKLOAD_INFO=default/local/default \
 cargo run --features testing
 ```
 

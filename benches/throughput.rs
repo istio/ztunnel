@@ -40,7 +40,7 @@ use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
 use ztunnel::test_helpers::tcp::Mode;
-use ztunnel::test_helpers::{helpers, tcp};
+use ztunnel::test_helpers::{helpers, tcp, test_default_workload};
 use ztunnel::xds::LocalWorkload;
 use ztunnel::{app, identity, metrics, proxy, rbac, setup_netns_test, strng, test_helpers};
 
@@ -365,7 +365,7 @@ pub fn connections(c: &mut Criterion) {
 
 pub fn rbac(c: &mut Criterion) {
     let policies = create_test_policies();
-    let mut state = ProxyState::default();
+    let mut state = ProxyState::new(None);
     for p in policies {
         state.policies.insert(p.to_key(), p);
     }
@@ -386,7 +386,7 @@ pub fn rbac(c: &mut Criterion) {
             src_identity: None,
             dst_network: "".into(),
         },
-        dest_workload_info: None,
+        dest_workload: Arc::new(test_default_workload()),
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -456,7 +456,7 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
             workload: Workload {
                 workload_ips: vec![hbone_connection_ip(i)],
                 protocol: Protocol::HBONE,
-                uid: strng::format!("cluster1//v1/Pod/default/local-source{}", i),
+                uid: strng::format!("cluster1//v1/Pod/default/remote{}", i),
                 name: strng::format!("workload-{}", i),
                 namespace: strng::format!("namespace-{}", i),
                 service_account: strng::format!("service-account-{}", i),
@@ -466,6 +466,19 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
         };
         workloads.push(lwl);
     }
+    let lwl = LocalWorkload {
+        workload: Workload {
+            workload_ips: vec![],
+            protocol: Protocol::HBONE,
+            uid: "cluster1//v1/Pod/default/local-source".into(),
+            name: "local-source".into(),
+            namespace: "default".into(),
+            service_account: "default".into(),
+            ..test_helpers::test_default_workload()
+        },
+        services: Default::default(),
+    };
+    workloads.push(lwl);
 
     let lc = ztunnel::xds::LocalConfig {
         workloads,
@@ -560,7 +573,7 @@ criterion_group! {
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(1));
-    targets = hbone_connections, throughput, latency, connections, metrics, rbac
+    targets = hbone_connections
 }
 
 criterion_main!(benches);

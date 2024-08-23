@@ -39,8 +39,7 @@ pub struct ProxyState {
     )]
     pub connections: Option<ConnectionManager>,
 
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub info: Option<WorkloadInfo>,
+    pub info: WorkloadInfo,
 
     // using reference counts to account for possible race between the proxy task that notifies us
     // that a proxy is down, and the proxy factory task that notifies us when it is up.
@@ -62,11 +61,7 @@ pub struct WorkloadManagerAdminHandler {
 }
 
 impl WorkloadManagerAdminHandler {
-    pub fn proxy_pending(
-        &self,
-        uid: &crate::inpod::WorkloadUid,
-        workload_info: &Option<WorkloadInfo>,
-    ) {
+    pub fn proxy_pending(&self, uid: &crate::inpod::WorkloadUid, workload_info: &WorkloadInfo) {
         let mut state = self.state.write().unwrap();
 
         // don't increment count here, as it is only for up and down. see comment in count.
@@ -90,7 +85,7 @@ impl WorkloadManagerAdminHandler {
     pub fn proxy_up(
         &self,
         uid: &crate::inpod::WorkloadUid,
-        workload_info: &Option<WorkloadInfo>,
+        workload_info: &WorkloadInfo,
         cm: Option<ConnectionManager>,
     ) {
         let mut state = self.state.write().unwrap();
@@ -142,7 +137,7 @@ impl WorkloadManagerAdminHandler {
     }
 }
 
-impl crate::admin::AdminHandler2 for WorkloadManagerAdminHandler {
+impl crate::admin::AdminHandler for WorkloadManagerAdminHandler {
     fn key(&self) -> &'static str {
         "workloadState"
     }
@@ -162,17 +157,17 @@ mod test {
         let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
 
         let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
-        handler.proxy_pending(&uid1, &None);
-        assert_eq!(data(), r#"{"uid1":{"state":"Pending"}}"#);
-        handler.proxy_up(
-            &uid1,
-            &Some(crate::state::WorkloadInfo {
-                name: "name".to_string(),
-                namespace: "ns".to_string(),
-                service_account: "sa".to_string(),
-            }),
-            None,
+        let wli = WorkloadInfo {
+            name: "name".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "sa".to_string(),
+        };
+        handler.proxy_pending(&uid1, &wli);
+        assert_eq!(
+            data(),
+            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#
         );
+        handler.proxy_up(&uid1, &wli, None);
         assert_eq!(
             data(),
             r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Up"}}"#

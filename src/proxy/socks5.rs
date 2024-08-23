@@ -75,7 +75,7 @@ impl Socks5 {
         let pool = crate::proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
-            self.pi.cert_manager.clone(),
+            self.pi.local_workload_information.clone(),
         );
         let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {

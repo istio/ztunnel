@@ -20,12 +20,11 @@ use futures::stream::StreamExt;
 
 use http::{Method, Response, StatusCode};
 
-use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
 
-use super::{Error, ScopedSecretManager};
+use super::{Error, LocalWorkloadInformation};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
@@ -36,16 +35,15 @@ use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPAREN
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
-use crate::state::workload::address::Address;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{assertions, copy, proxy, socket, strng, tls};
 
 use crate::config::ProxyMode;
 use crate::drain::run_with_drain;
 use crate::proxy::h2;
+use crate::state::workload::address::Address;
 use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::DemandProxyState;
-use crate::strng::Strng;
 use crate::tls::TlsError;
 
 pub(super) struct Inbound {
@@ -84,9 +82,7 @@ impl Inbound {
     pub(super) async fn run(self) {
         let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
-            state: self.pi.state.clone(),
-            cert_manager: self.pi.cert_manager.clone(),
-            network: strng::new(&self.pi.cfg.network),
+            local_workload: self.pi.local_workload_information.clone(),
         };
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
@@ -129,6 +125,7 @@ impl Inbound {
                     tokio::task::spawn(serve_client.in_current_span());
                 }
             }
+            .in_current_span()
         };
 
         run_with_drain(
@@ -179,15 +176,18 @@ impl Inbound {
             return req.send_error(build_response(StatusCode::BAD_REQUEST));
         };
 
+        let destination_workload = pi.local_workload_information.get_workload().await?;
+
+        if let Err(e) =
+            Self::validate_destination(&pi.state, &conn, &destination_workload, hbone_addr).await
+        {
+            metrics::log_early_deny(conn.src, conn.dst, Reporter::destination, e);
+            return req.send_error(build_response(StatusCode::BAD_REQUEST));
+        }
+
         // Determine the next hop.
-        let (upstream_addr, inbound_protocol, upstream, upstream_service) =
-            match Self::find_inbound_upstream(&pi.state, &conn, hbone_addr).await {
-                Ok(res) => res,
-                Err(e) => {
-                    metrics::log_early_deny(conn.src, conn.dst, Reporter::destination, e);
-                    return req.send_error(build_response(StatusCode::BAD_REQUEST));
-                }
-            };
+        let (upstream_addr, inbound_protocol, upstream_service) =
+            Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, hbone_addr);
         let illegal_call = if pi.cfg.proxy_mode == ProxyMode::Shared {
             // User sent a request to pod:15006. This would forward to pod:15006 infinitely
             // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
@@ -211,9 +211,12 @@ impl Inbound {
             dst: upstream_addr,
             ..conn
         };
-        let from_gateway =
-            proxy::check_from_network_gateway(&pi.state, &upstream, conn.src_identity.as_ref())
-                .await;
+        let from_gateway = proxy::check_from_network_gateway(
+            &pi.state,
+            &destination_workload,
+            conn.src_identity.as_ref(),
+        )
+        .await;
 
         if from_gateway {
             debug!("request from gateway");
@@ -221,7 +224,7 @@ impl Inbound {
 
         let rbac_ctx = crate::state::ProxyRbacContext {
             conn,
-            dest_workload_info: pi.proxy_workload_info.clone(),
+            dest_workload: destination_workload.clone(),
         };
 
         let source_ip = rbac_ctx.conn.src.ip();
@@ -239,7 +242,7 @@ impl Inbound {
                     address: source_ip,
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
-                pi.state.fetch_workload(&src_network_addr).await
+                pi.state.fetch_workload_by_address(&src_network_addr).await
             }
         };
 
@@ -251,8 +254,12 @@ impl Inbound {
             revision: baggage.revision,
             ..Default::default()
         };
-        let ds =
-            proxy::guess_inbound_service(&rbac_ctx.conn, &for_host, upstream_service, &upstream);
+        let ds = proxy::guess_inbound_service(
+            &rbac_ctx.conn,
+            &for_host,
+            upstream_service,
+            &destination_workload,
+        );
         let result_tracker = Box::new(metrics::ConnectionResult::new(
             rbac_ctx.conn.src,
             // For consistency with outbound logs, report the original destination (with 15008 port)
@@ -264,7 +271,7 @@ impl Inbound {
                 reporter: Reporter::destination,
                 source,
                 derived_source: Some(derived_source),
-                destination: Some(upstream),
+                destination: Some(destination_workload),
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
             },
@@ -317,160 +324,123 @@ impl Inbound {
         Ok(())
     }
 
-    async fn find_inbound_upstream(
+    /// validate_destination ensures the destination is an allowed request.
+    async fn validate_destination(
         state: &DemandProxyState,
         conn: &Connection,
+        local_workload: &Workload,
         hbone_addr: SocketAddr,
-    ) -> Result<(SocketAddr, AppProtocol, Arc<Workload>, Vec<Arc<Service>>), Error> {
-        let dst = &NetworkAddress {
-            network: conn.dst_network.clone(),
-            address: hbone_addr.ip(),
-        };
-
-        let (upstream_addr, upstream, services) = if conn.dst.ip() == hbone_addr.ip() {
-            // If the IPs match, this is not sandwich.
-            let Some((us_wl, us_svc)) = state.fetch_workload_services(dst).await else {
-                return Err(Error::UnknownDestination(hbone_addr.ip()));
-            };
-            (hbone_addr, us_wl, us_svc)
-        } else if let Some((us_wl, us_svc)) =
-            // For sandwich, we redirect the connection to target this waypoint instance
-            // and the HBONE target remains the same. Walk the WDS graph to see if they're related.
-            Self::find_sandwich_upstream(state, conn, hbone_addr).await
-        {
-            let next_hop = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
-            (next_hop, us_wl, us_svc)
-        } else {
-            return Err(Error::IPMismatch(conn.dst.ip(), hbone_addr.ip()));
-        };
-
-        // Application tunnel may override the port.
-        let (upstream_addr, inbound_protocol) = match upstream.application_tunnel.clone() {
-            Some(workload::ApplicationTunnel {
-                port: Some(port),
-                protocol,
-            }) => (SocketAddr::new(upstream_addr.ip(), port), protocol),
-            Some(workload::ApplicationTunnel {
-                port: None,
-                protocol,
-            }) => (upstream_addr, protocol),
-            None => (upstream_addr, AppProtocol::NONE),
-        };
-
-        Ok((upstream_addr, inbound_protocol, upstream, services))
-    }
-
-    async fn find_sandwich_upstream(
-        state: &DemandProxyState,
-        conn: &Connection,
-        hbone_addr: SocketAddr,
-    ) -> Option<(Arc<Workload>, Vec<Arc<Service>>)> {
-        let connection_dst = &NetworkAddress {
-            network: conn.dst_network.clone(),
-            address: conn.dst.ip(),
-        };
+    ) -> Result<(), Error> {
+        if conn.dst.ip() == hbone_addr.ip() {
+            // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
+            return Ok(());
+        }
+        if local_workload.application_tunnel.is_some() {
+            // In the case they have their own tunnel, they will get the HBONE target address in the PROXY
+            // header, and their application can decide what to do with it; we don't validate this.
+            // This is the case, for instance, with a waypoint using PROXY.
+            return Ok(());
+        }
+        // There still may be the case where we are doing a "waypoint sandwich" but not using any tunnel.
+        // Presumably, the waypoint is only matching on L7 attributes.
+        // We want to make sure in this case we don't deny the requests just because the HBONE destination
+        // mismatches (though we will, essentially, ignore the address).
+        // To do this, we do a lookup to see if the HBONE target has us as its waypoint.
         let hbone_dst = &NetworkAddress {
             network: conn.dst_network.clone(),
             address: hbone_addr.ip(),
         };
 
-        // Outer option tells us whether or not we can retry
-        // Some(None) means we have enough information to decide this isn't sandwich
-        #[allow(clippy::type_complexity)]
-        let lookup = || -> Option<Option<(Arc<Workload>, Vec<Arc<Service>>)>> {
+        // None means we need to do on-demand lookup
+        let lookup_is_destination_this_waypoint = || -> Option<bool> {
             let state = state.read();
 
             // TODO Allow HBONE address to be a hostname. We have to respect rules about
             // hostname scoping. Can we use the client's namespace here to do that?
-            let hbone_target = state.find_address(hbone_dst);
+            let hbone_target = state.find_address(hbone_dst)?;
 
-            // We can only sandwich a Workload waypoint
-            let conn_wl = state.workloads.find_address(connection_dst);
-
-            // on-demand fetch then retry
-            let (Some(hbone_target), Some(conn_wl)) = (hbone_target, conn_wl) else {
-                return None;
-            };
-
+            // HBONE target can point to some service or workload. In either case, get the waypoint
             let Some(target_waypoint) = (match hbone_target {
                 Address::Service(ref svc) => &svc.waypoint,
                 Address::Workload(ref wl) => &wl.waypoint,
             }) else {
-                // can't sandwich if the HBONE target doesn't want a Waypoint.
-                return Some(None);
+                // Target has no waypoint
+                return Some(false);
             };
 
             // Resolve the reference from our HBONE target
-            let target_waypoint = state.find_destination(&target_waypoint.destination);
-
-            let Some(target_waypoint) = target_waypoint else {
-                // don't need to fetch/retry this; we found conn_wl and this must match conn_wl.
-                return Some(None);
+            let Some(target_waypoint) = state.find_destination(&target_waypoint.destination) else {
+                return Some(false);
             };
 
             // Validate that the HBONE target references the Waypoint we're connecting to
             Some(match target_waypoint {
-                Address::Service(svc) => {
-                    if !svc.contains_endpoint(&conn_wl) {
-                        // target points to a different waypoint
-                        return Some(None);
-                    }
-                    Some((conn_wl, vec![svc]))
-                }
-                Address::Workload(wl) => {
-                    if !wl.workload_ips.contains(&conn.dst.ip()) {
-                        // target points to a different waypoint
-                        return Some(None);
-                    }
-                    let svc = state.services.get_by_workload(&wl);
-                    Some((wl, svc))
-                }
+                Address::Service(svc) => svc.contains_endpoint(local_workload),
+                Address::Workload(wl) => wl.workload_ips.contains(&conn.dst.ip()),
             })
         };
 
-        if let Some(res) = lookup() {
-            return res;
-        }
+        let res = match lookup_is_destination_this_waypoint() {
+            Some(r) => Some(r),
+            None => {
+                if !state.supports_on_demand() {
+                    None
+                } else {
+                    state
+                        .fetch_on_demand(strng::new(hbone_dst.to_string()))
+                        .await;
+                    lookup_is_destination_this_waypoint()
+                }
+            }
+        };
 
-        if !state.supports_on_demand() {
-            return None;
+        if res.is_none() || res == Some(false) {
+            return Err(Error::IPMismatch(conn.dst.ip(), hbone_addr.ip()));
         }
-        tokio::join![
-            state.fetch_on_demand(strng::new(connection_dst.to_string())),
-            state.fetch_on_demand(strng::new(hbone_dst.to_string())),
-        ];
-        lookup().flatten()
+        Ok(())
+    }
+
+    fn find_inbound_upstream(
+        state: &DemandProxyState,
+        conn: &Connection,
+        local_workload: &Workload,
+        hbone_addr: SocketAddr,
+    ) -> (SocketAddr, AppProtocol, Vec<Arc<Service>>) {
+        let upstream_addr = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
+
+        // Application tunnel may override the port.
+        let (upstream_addr, inbound_protocol) = match local_workload.application_tunnel.clone() {
+            Some(workload::ApplicationTunnel { port, protocol }) => {
+                // We may need to override the target port. For instance, we may send all PROXY
+                // traffic over a dedicated port like 15088.
+                let new_target =
+                    SocketAddr::new(upstream_addr.ip(), port.unwrap_or(upstream_addr.port()));
+                // Note: the logic to decide which destination address to set inside the PROXY headers
+                // is handled outside of this call. This just determines that location we actually send the
+                // connection to
+                (new_target, protocol)
+            }
+            None => (upstream_addr, AppProtocol::NONE),
+        };
+        let services = state.get_services_by_workload(local_workload);
+
+        (upstream_addr, inbound_protocol, services)
     }
 }
 
 #[derive(Clone)]
 struct InboundCertProvider {
-    cert_manager: ScopedSecretManager,
-    state: DemandProxyState,
-    network: Strng,
+    local_workload: Arc<LocalWorkloadInformation>,
 }
 
 #[async_trait::async_trait]
 impl crate::tls::ServerCertProvider for InboundCertProvider {
-    async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<Arc<rustls::ServerConfig>, TlsError> {
-        let orig_dst_addr = crate::socket::orig_dst_addr_or_default(fd);
-        let identity = {
-            let wip = NetworkAddress {
-                network: self.network.clone(), // inbound cert provider gets cert for the dest, which must be on our network
-                address: orig_dst_addr.ip(),
-            };
-            self.state
-                .fetch_workload(&wip)
-                .await
-                .ok_or(TlsError::CertificateLookup(wip))?
-                .identity()
-        };
+    async fn fetch_cert(&mut self) -> Result<Arc<rustls::ServerConfig>, TlsError> {
         debug!(
-            destination=?orig_dst_addr,
-            %identity,
+            identity=%self.local_workload.workload_info(),
             "fetching cert"
         );
-        let cert = self.cert_manager.fetch_certificate(&identity).await?;
+        let cert = self.local_workload.fetch_certificate().await?;
         Ok(Arc::new(cert.server_config()?))
     }
 }
@@ -495,11 +465,6 @@ mod tests {
     use super::Inbound;
     use crate::strng;
 
-    use std::{
-        net::SocketAddr,
-        sync::{Arc, RwLock},
-    };
-
     use crate::{
         rbac::Connection,
         state::{
@@ -512,6 +477,10 @@ mod tests {
             DemandProxyState,
         },
         test_helpers,
+    };
+    use std::{
+        net::SocketAddr,
+        sync::{Arc, RwLock},
     };
 
     use crate::state::workload::HealthStatus;
@@ -559,18 +528,24 @@ mod tests {
         want: Option<(&str, u16)>,
     ) {
         let state = test_state(target_waypoint).expect("state setup");
+
         let conn = Connection {
             src_identity: None,
             src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
             dst_network: "".into(),
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };
-        let res = Inbound::find_inbound_upstream(
-            &state,
-            &conn,
-            format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap(),
-        )
-        .await;
+        let local_wl = state
+            .fetch_workload_by_address(&NetworkAddress {
+                network: "".into(),
+                address: conn.dst.ip(),
+            })
+            .await
+            .unwrap();
+        let hbone_addr = format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap();
+        let res = Inbound::validate_destination(&state, &conn, &local_wl, hbone_addr)
+            .await
+            .map(|_| Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr));
 
         match want {
             Some((ip, port)) => {
@@ -584,7 +559,7 @@ mod tests {
     }
 
     fn test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
-        let mut state = state::ProxyState::default();
+        let mut state = state::ProxyState::new(None);
 
         let services = vec![
             ("waypoint", WAYPOINT_SVC_IP, Waypoint::None),
@@ -639,7 +614,7 @@ mod tests {
             state.services.insert(svc);
         }
         for wl in workloads {
-            state.workloads.insert(Arc::new(wl), true);
+            state.workloads.insert(Arc::new(wl));
         }
 
         let mut registry = Registry::default();

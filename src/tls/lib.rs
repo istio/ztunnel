@@ -27,8 +27,6 @@ use rustls::crypto::CryptoProvider;
 use rustls::ClientConfig;
 use rustls::ServerConfig;
 
-use tokio::net::TcpStream;
-
 use tracing::error;
 
 #[async_trait::async_trait]
@@ -38,7 +36,7 @@ pub trait ClientCertProvider: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait ServerCertProvider: Send + Sync + Clone {
-    async fn fetch_cert(&mut self, fd: &TcpStream) -> Result<Arc<ServerConfig>, TlsError>;
+    async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError>;
 }
 
 pub(super) static TLS_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];

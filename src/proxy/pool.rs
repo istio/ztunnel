@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::{h2, ScopedSecretManager};
+use super::{h2, LocalWorkloadInformation};
 use super::{Error, SocketFactory};
 use std::time::Duration;
 
@@ -77,7 +77,7 @@ struct PoolState {
 struct ConnSpawner {
     cfg: Arc<config::Config>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    cert_manager: ScopedSecretManager,
+    local_workload: Arc<LocalWorkloadInformation>,
     timeout_rx: watch::Receiver<bool>,
 }
 
@@ -86,7 +86,7 @@ impl ConnSpawner {
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
-        let cert = self.cert_manager.fetch_certificate(&key.src_id).await?;
+        let cert = self.local_workload.fetch_certificate().await?;
         let connector = cert.outbound_connector(key.dst_id.clone())?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await
@@ -341,7 +341,7 @@ impl WorkloadHBONEPool {
     pub fn new(
         cfg: Arc<crate::config::Config>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-        cert_manager: ScopedSecretManager,
+        local_workload: Arc<LocalWorkloadInformation>,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
         let (timeout_send, timeout_recv) = watch::channel(false);
@@ -350,7 +350,7 @@ impl WorkloadHBONEPool {
         let spawner = ConnSpawner {
             cfg,
             socket_factory,
-            cert_manager,
+            local_workload,
             timeout_rx: timeout_recv.clone(),
         };
 
@@ -569,9 +569,12 @@ mod test {
     use futures_util::{future, StreamExt};
     use hyper::body::Incoming;
 
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use hyper::service::service_fn;
     use hyper::{Request, Response};
+    use prometheus_client::registry::Registry;
     use std::sync::atomic::AtomicU32;
+    use std::sync::RwLock;
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
@@ -583,10 +586,12 @@ mod test {
 
     use crate::test_helpers::helpers::initialize_telemetry;
 
-    use crate::drain::DrainWatcher;
-    use ztunnel::test_helpers::*;
-
     use super::*;
+    use crate::drain::DrainWatcher;
+    use crate::state::workload;
+    use crate::state::{DemandProxyState, ProxyState, WorkloadInfo};
+    use crate::test_helpers::test_default_workload;
+    use ztunnel::test_helpers::*;
 
     macro_rules! assert_opens_drops {
         ($srv:expr, $open:expr, $drops:expr) => {
@@ -996,10 +1001,35 @@ mod test {
             ..crate::config::parse_config().unwrap()
         };
         let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
-            Duration::from_secs(10),
+
+        let mut state = ProxyState::new(None);
+        let wl = Arc::new(workload::Workload {
+            uid: "uid".into(),
+            name: "source-workload".into(),
+            namespace: "ns".into(),
+            service_account: "default".into(),
+            ..test_default_workload()
+        });
+        state.workloads.insert(wl.clone());
+        let mut registry = Registry::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
+        let mock_proxy_state = DemandProxyState::new(
+            Arc::new(RwLock::new(state)),
+            None,
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            metrics,
+        );
+        let local_workload = Arc::new(proxy::LocalWorkloadInformation::new(
+            Arc::new(WorkloadInfo {
+                name: wl.name.to_string(),
+                namespace: wl.namespace.to_string(),
+                service_account: wl.service_account.to_string(),
+            }),
+            mock_proxy_state,
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, cert_mgr);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload);
         let server = TestServer {
             conn_counter,
             drop_rx,

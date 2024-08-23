@@ -37,7 +37,7 @@ use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::rbac::Authorization;
 use crate::state::service::{Endpoint, Service, ServiceStore};
-use crate::state::workload::{NamespacedHostname, Workload};
+use crate::state::workload::{NamespacedHostname, Workload, WorkloadStore};
 use crate::state::ProxyState;
 use crate::strng::Strng;
 use crate::{rbac, strng};
@@ -156,10 +156,7 @@ impl ProxyStateUpdateMutator {
         self.cert_fetcher.prefetch_cert(&workload);
 
         // Lock and upstate the stores.
-        let track = self
-            .cert_fetcher
-            .should_track_certificates_for_removal(&workload);
-        state.workloads.insert(workload.clone(), track);
+        state.workloads.insert(workload.clone());
         insert_service_endpoints(&workload, &services, &mut state.services)?;
 
         Ok(())
@@ -188,10 +185,9 @@ impl ProxyStateUpdateMutator {
             // This is a real removal (not a removal before insertion), and nothing else references the cert
             // Clear it out
             if !for_insert
-                && self
-                    .cert_fetcher
-                    .should_track_certificates_for_removal(&prev)
-                && !state.workloads.has_identity(&prev.identity())
+                && state
+                    .workloads
+                    .was_last_identity_on_node(&prev.node, &prev.identity())
             {
                 self.cert_fetcher.clear_cert(&prev.identity());
             }
@@ -400,6 +396,7 @@ pub struct LocalClient {
     pub cfg: ConfigSource,
     pub state: Arc<RwLock<ProxyState>>,
     pub cert_fetcher: Arc<dyn CertFetcher>,
+    pub local_node: Option<Strng>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -467,7 +464,7 @@ impl LocalClient {
         );
         let mut state = self.state.write().unwrap();
         // Clear the state
-        state.workloads = Default::default();
+        state.workloads = WorkloadStore::new(self.local_node.clone());
         state.services = Default::default();
         // Policies have some channels, so we don't want to reset it entirely
         state.policies.clear_all_policies();
@@ -477,10 +474,7 @@ impl LocalClient {
             trace!("inserting local workload {}", &wl.workload.uid);
             self.cert_fetcher.prefetch_cert(&wl.workload);
             let w = Arc::new(wl.workload);
-            state.workloads.insert(
-                w.clone(),
-                self.cert_fetcher.should_track_certificates_for_removal(&w),
-            );
+            state.workloads.insert(w.clone());
 
             let services: HashMap<String, PortList> = wl
                 .services

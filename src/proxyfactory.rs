@@ -66,20 +66,24 @@ impl ProxyFactory {
         })
     }
 
-    pub async fn new_proxies(&self) -> Result<ProxyResult, Error> {
+    pub async fn new_proxies_for_dedicated(
+        &self,
+        proxy_workload_info: WorkloadInfo,
+    ) -> Result<ProxyResult, Error> {
         let factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync> =
             if let Some(mark) = self.config.packet_mark {
                 Arc::new(crate::proxy::MarkSocketFactory(mark))
             } else {
                 Arc::new(crate::proxy::DefaultSocketFactory)
             };
-        self.new_proxies_from_factory(None, None, factory).await
+        self.new_proxies_from_factory(None, proxy_workload_info, factory)
+            .await
     }
 
     pub async fn new_proxies_from_factory(
         &self,
         proxy_drain: Option<DrainWatcher>,
-        proxy_workload_info: Option<WorkloadInfo>,
+        proxy_workload_info: WorkloadInfo,
         socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
     ) -> Result<ProxyResult, Error> {
         let mut result: ProxyResult = Default::default();

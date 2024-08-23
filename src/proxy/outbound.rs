@@ -15,9 +15,9 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use std::time::{Duration, Instant};
-
+use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
+use std::time::Instant;
 
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -73,7 +73,7 @@ impl Outbound {
         let pool = proxy::pool::WorkloadHBONEPool::new(
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
-            self.pi.cert_manager.clone(),
+            self.pi.local_workload_information.clone(),
         );
         let pi = self.pi.clone();
         let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
@@ -155,7 +155,14 @@ impl OutboundConnection {
     ) {
         let start = Instant::now();
 
-        let req = match Box::pin(self.build_request(source_addr.ip(), dest_addr)).await {
+        // First find the source workload of this traffic. If we don't know where the request is from
+        // we will reject it.
+        let build = self
+            .pi
+            .local_workload_information
+            .get_workload()
+            .and_then(|source| self.build_request(source, source_addr.ip(), dest_addr));
+        let req = match Box::pin(build).await {
             Ok(req) => Box::new(req),
             Err(err) => {
                 metrics::log_early_deny(source_addr, dest_addr, Reporter::source, err);
@@ -293,13 +300,11 @@ impl OutboundConnection {
     // TODO: Do we want a single lock for source and upstream...?
     async fn build_request(
         &self,
+        source_workload: Arc<Workload>,
         downstream: IpAddr,
         target: SocketAddr,
     ) -> Result<Request, Error> {
         let state = &self.pi.state;
-        // First find the source workload of this traffic. If we don't know where the request is from
-        // we will reject it.
-        let source_workload = self.fetch_source_workload(downstream).await?;
 
         // If this is to-service traffic check for a service waypoint
         // Capture result of whether this is svc addressed
@@ -417,32 +422,6 @@ impl OutboundConnection {
             upstream_sans,
         })
     }
-
-    async fn fetch_source_workload(&self, downstream: IpAddr) -> Result<Arc<Workload>, Error> {
-        let downstream_network_addr = NetworkAddress {
-            network: self.pi.cfg.network.clone(),
-            address: downstream,
-        };
-
-        let source_workload = match self
-            .pi
-            .state
-            .wait_for_workload(&downstream_network_addr, Duration::from_secs(5))
-            .await
-        {
-            Some(wl) => wl,
-            None => {
-                return Err(Error::UnknownSource(downstream));
-            }
-        };
-        if let Some(ref wl_info) = self.pi.proxy_workload_info {
-            // make sure that the workload we fetched matches the workload info we got over ZDS.
-            if !wl_info.matches(&source_workload) {
-                return Err(Error::MismatchedSource(downstream, wl_info.clone()));
-            }
-        }
-        Ok(source_workload)
-    }
 }
 
 fn baggage(r: &Request, cluster: String) -> String {
@@ -490,6 +469,8 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::proxy::connection_manager::ConnectionManager;
+    use crate::proxy::LocalWorkloadInformation;
+    use crate::state::WorkloadInfo;
     use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
     use crate::xds::istio::workload::address::Type as XdsAddressType;
@@ -562,27 +543,44 @@ mod tests {
         let state = new_proxy_state(&workloads, &services, &[]);
 
         let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
-        let cert_mgr = proxy::ScopedSecretManager::new(identity::mock::new_secret_manager(
-            Duration::from_secs(10),
+
+        let wi = WorkloadInfo {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "default".to_string(),
+        };
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi.clone()),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
         let outbound = OutboundConnection {
             pi: Arc::new(ProxyInputs {
-                cert_manager: cert_mgr.clone(),
-                state,
+                state: state.clone(),
                 cfg: cfg.clone(),
                 metrics: test_proxy_metrics(),
                 socket_factory: sock_fact.clone(),
-                proxy_workload_info: None,
+                local_workload_information: local_workload_information.clone(),
                 connection_manager: ConnectionManager::default(),
                 resolver: None,
             }),
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(cfg.clone(), sock_fact, cert_mgr.clone()),
+            pool: pool::WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information.clone(),
+            ),
             hbone_port: cfg.inbound_addr.port(),
         };
 
+        let local = outbound
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
         let req = outbound
-            .build_request(from.parse().unwrap(), to.parse().unwrap())
+            .build_request(local, from.parse().unwrap(), to.parse().unwrap())
             .await
             .ok();
         if let Some(ref r) = req {
@@ -710,21 +708,6 @@ mod tests {
                 hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.2:15008",
             }),
-        )
-        .await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn build_request_unknown_source() {
-        run_build_request(
-            "1.2.3.4",
-            "127.0.0.2:80",
-            XdsAddressType::Workload(XdsWorkload {
-                uid: "cluster1//v1/Pod/default/my-pod".to_string(),
-                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
-                ..Default::default()
-            }),
-            None,
         )
         .await;
     }

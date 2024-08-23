@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ztunnel::test_helpers::inpod::StartZtunnelMessage;
+
 #[cfg(target_os = "linux")]
 fn main() {
     use std::os::fd::AsRawFd;
@@ -28,7 +30,14 @@ fn main() {
     let mut sender = start_ztunnel_server(uds);
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        sender.send(("uid-0".to_string(), fd)).await.unwrap();
+        sender
+            .send(StartZtunnelMessage {
+                uid: "uid-0".to_string(),
+                workload_info: None,
+                fd,
+            })
+            .await
+            .unwrap();
         sender.wait_forever().await.unwrap();
     });
 }

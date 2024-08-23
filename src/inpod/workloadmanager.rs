@@ -392,6 +392,7 @@ pub(crate) mod tests {
     };
 
     use crate::drain::DrainTrigger;
+    use crate::inpod::istio::zds;
     use std::{collections::HashSet, sync::Arc};
 
     fn assert_end_stream(res: Result<(), Error>) {
@@ -409,6 +410,14 @@ pub(crate) mod tests {
             Err(Error::AnnounceError(_)) => {}
             _ => panic!("expected announce error"),
         }
+    }
+
+    fn workload_info() -> Option<zds::WorkloadInfo> {
+        Some(zds::WorkloadInfo {
+            name: "name".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "sa".to_string(),
+        })
     }
 
     struct Fixture {
@@ -449,7 +458,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), new_netns()).await;
+            send_workload_added(&mut s2, uid(0), workload_info(), new_netns()).await;
             read_msg(&mut s2).await;
         });
 
@@ -500,7 +509,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), podns).await;
+            send_workload_added(&mut s2, uid(0), workload_info(), podns).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
@@ -539,7 +548,7 @@ pub(crate) mod tests {
         let podns = new_netns();
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), podns).await;
+            send_workload_added(&mut s2, uid(0), workload_info(), podns).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
@@ -572,9 +581,9 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(0), new_netns()).await;
+            send_workload_added(&mut s2, uid(0), workload_info(), new_netns()).await;
             read_msg(&mut s2).await;
-            send_workload_added(&mut s2, uid(1), new_netns()).await;
+            send_workload_added(&mut s2, uid(1), workload_info(), new_netns()).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;
@@ -607,7 +616,7 @@ pub(crate) mod tests {
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
-            send_workload_added(&mut s2, uid(1), new_netns()).await;
+            send_workload_added(&mut s2, uid(1), workload_info(), new_netns()).await;
             read_msg(&mut s2).await;
             send_snap_sent(&mut s2).await;
             read_msg(&mut s2).await;

@@ -39,7 +39,7 @@ pub fn xds(c: &mut Criterion) {
                 }],
                 ..Default::default()
             };
-            let mut state = ProxyState::default();
+            let mut state = ProxyState::new(None);
             let updater = ProxyStateUpdateMutator::new_no_fetch();
             updater.insert_service(&mut state, svc).unwrap();
             const WORKLOAD_COUNT: usize = 1000;

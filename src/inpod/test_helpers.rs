@@ -28,7 +28,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::istio::zds::{WorkloadRequest, WorkloadResponse, ZdsHello};
+use super::istio::zds::{WorkloadInfo, WorkloadRequest, WorkloadResponse, ZdsHello};
 
 use crate::drain::{DrainTrigger, DrainWatcher};
 use crate::{dns, drain};
@@ -68,7 +68,7 @@ impl Default for Fixture {
             packet_mark: Some(1),
             ..crate::config::construct_config(Default::default()).unwrap()
         };
-        let state = Arc::new(RwLock::new(ProxyState::default()));
+        let state = Arc::new(RwLock::new(ProxyState::new(None)));
         let cert_manager: Arc<crate::identity::SecretManager> =
             crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(10));
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
@@ -164,6 +164,7 @@ pub async fn send_snap_sent(s: &mut UnixStream) {
 pub async fn send_workload_added(
     s: &mut UnixStream,
     uid: super::WorkloadUid,
+    info: Option<WorkloadInfo>,
     fd: impl std::os::fd::AsRawFd,
 ) {
     let fds = [fd.as_raw_fd()];
@@ -174,7 +175,7 @@ pub async fn send_workload_added(
         payload: Some(crate::inpod::istio::zds::workload_request::Payload::Add(
             crate::inpod::istio::zds::AddWorkload {
                 uid: uid.into_string(),
-                ..Default::default()
+                workload_info: info,
             },
         )),
     };
