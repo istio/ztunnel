@@ -101,7 +101,7 @@ impl SocketFactory for DefaultSocketFactory {
     }
 
     fn ipv6_enabled_localhost(&self) -> io::Result<bool> {
-        ipv6_disabled_on_localhost()
+        ipv6_enabled_on_localhost()
     }
 }
 
@@ -705,7 +705,7 @@ fn read_sysctl(key: &str) -> io::Result<String> {
     Ok(data.trim().to_string())
 }
 
-pub fn ipv6_disabled_on_localhost() -> io::Result<bool> {
+pub fn ipv6_enabled_on_localhost() -> io::Result<bool> {
     read_sysctl(IPV6_DISABLED_LO).map(|s| s != "1")
 }
 
