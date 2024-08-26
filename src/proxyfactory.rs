@@ -106,6 +106,7 @@ impl ProxyFactory {
                 dns::forwarder_for_mode(
                     self.config.proxy_mode,
                     self.config.cluster_domain.clone(),
+                    socket_factory.clone(),
                 )?,
                 self.dns_metrics.clone().unwrap(),
                 drain.clone(),
