@@ -22,7 +22,7 @@ use crate::dns;
 use crate::drain::DrainWatcher;
 
 use crate::proxy::connection_manager::ConnectionManager;
-use crate::proxy::{Error, Metrics};
+use crate::proxy::{Error, LocalWorkloadInformation, Metrics};
 
 use crate::proxy::Proxy;
 
@@ -90,12 +90,18 @@ impl ProxyFactory {
         let drain = proxy_drain.unwrap_or_else(|| self.drain.clone());
 
         let mut resolver = None;
+
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(proxy_workload_info),
+            self.state.clone(),
+            self.cert_manager.clone(),
+        ));
+
         // Optionally create the DNS proxy.
         if self.config.dns_proxy {
             let server = dns::Server::new(
                 self.config.cluster_domain.clone(),
                 self.config.dns_proxy_addr,
-                self.config.network.clone(),
                 self.state.clone(),
                 dns::forwarder_for_mode(
                     self.config.proxy_mode,
@@ -104,7 +110,7 @@ impl ProxyFactory {
                 self.dns_metrics.clone().unwrap(),
                 drain.clone(),
                 socket_factory.as_ref(),
-                false,
+                local_workload_information.as_fetcher(),
             )
             .await?;
             resolver = Some(server.resolver());
@@ -116,13 +122,12 @@ impl ProxyFactory {
             let cm = ConnectionManager::default();
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
-                self.cert_manager.clone(),
                 cm.clone(),
                 self.state.clone(),
                 self.proxy_metrics.clone(),
                 socket_factory.clone(),
-                proxy_workload_info,
                 resolver,
+                local_workload_information,
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);

@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, instrument, trace, warn};
 
-use crate::proxy::SocketFactory;
+use crate::proxy::{LocalWorkloadFetcher, SocketFactory};
 
 use crate::config::ProxyMode;
 use crate::dns::metrics::{
@@ -45,12 +45,10 @@ use crate::dns::resolver::{Answer, Resolver};
 use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
-use crate::socket::to_canonical;
 use crate::state::service::IpFamily;
 use crate::state::workload::address::Address;
-use crate::state::workload::{NetworkAddress, Workload};
+use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
-use crate::strng::Strng;
 use crate::{config, dns};
 
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
@@ -74,20 +72,18 @@ impl Server {
     /// # Arguments
     ///
     /// * `addr` - The socket address on which to run the DNS server.
-    /// * `network` - The network of the current node.
     /// * `state` - The state of ztunnel.
     /// * `forwarder` - The forwarder to use for requests not handled by this server.
     #[allow(clippy::too_many_arguments)] // no good way of grouping arguments here..
-    pub async fn new<S: AsRef<str>>(
+    pub async fn new(
         domain: String,
         address: config::Address,
-        network: S,
         state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
         metrics: Arc<Metrics>,
         drain: DrainWatcher,
         socket_factory: &(dyn SocketFactory + Send + Sync),
-        allow_unknown_source: bool,
+        local_workload_information: Arc<LocalWorkloadFetcher>,
     ) -> Result<Self, Error> {
         // if the address we got from config is supposed to be v6-enabled,
         // actually check if the local pod context our socketfactory operates in supports V6.
@@ -99,14 +95,13 @@ impl Server {
             true
         }));
         // Create the DNS server, backed by ztunnel data structures.
-        let mut store = Store::new(
+        let store = Store::new(
             domain,
-            network.as_ref().to_string(),
             state,
             forwarder,
             metrics,
+            local_workload_information,
         );
-        store.allow_unknown_source = allow_unknown_source;
         let store = Arc::new(store);
         let handler = dns::handler::Handler::new(store.clone());
         let mut server = ServerFuture::new(handler);
@@ -189,44 +184,33 @@ impl Server {
 
 /// A DNS [Resolver] backed by the ztunnel [DemandProxyState].
 struct Store {
-    network: Strng,
     state: DemandProxyState,
     forwarder: Arc<dyn Forwarder>,
     domain: Name,
     svc_domain: Name,
     metrics: Arc<Metrics>,
-    allow_unknown_source: bool,
+    local_workload: Arc<LocalWorkloadFetcher>,
 }
 
 impl Store {
     fn new(
         domain: String,
-        network: String,
         state: DemandProxyState,
         forwarder: Arc<dyn Forwarder>,
         metrics: Arc<Metrics>,
+        local_workload_information: Arc<LocalWorkloadFetcher>,
     ) -> Self {
         let domain = as_name(domain);
         let svc_domain = append_name(as_name("svc"), &domain);
 
         Self {
-            network: network.into(),
             state,
             forwarder,
             domain,
             svc_domain,
             metrics,
-            allow_unknown_source: false,
+            local_workload: local_workload_information,
         }
-    }
-
-    /// Find the workload for the client address.
-    fn find_client(&self, client_addr: SocketAddr) -> Option<Arc<Workload>> {
-        let state = self.state.read();
-        state.workloads.find_address(&NetworkAddress {
-            network: self.network.clone(),
-            address: client_addr.ip(),
-        })
     }
 
     /// Enumerates the possible aliases for the requested hostname
@@ -534,24 +518,14 @@ impl Resolver for Store {
         ),
     )]
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
-        // Find the client workload.
-        let client = match self.find_client(to_canonical(request.src())) {
-            None => {
-                // TODO(nmittler): make forwarding optional here.
-                // Increment request counter.
-                self.metrics.increment(&DnsRequest {
-                    request,
-                    source: None,
-                });
-                debug!("unknown source");
-                #[cfg(any(test, feature = "testing"))]
-                if self.allow_unknown_source {
-                    return self.forward(None, request).await;
-                }
-                return Err(LookupError::ResponseCode(ResponseCode::ServFail));
-            }
-            Some(client) => client,
-        };
+        let client = self.local_workload.get_workload().await.map_err(|_| {
+            debug!("unknown source");
+            self.metrics.increment(&DnsRequest {
+                request,
+                source: None,
+            });
+            LookupError::ResponseCode(ResponseCode::ServFail)
+        })?;
 
         // Make sure the request is for IP records. Anything else, we forward.
         let record_type = request.query().query_type();
@@ -883,6 +857,7 @@ mod tests {
     use prometheus_client::registry::Registry;
 
     use super::*;
+    use crate::state::WorkloadInfo;
     use crate::test_helpers::dns::{
         a, aaaa, cname, ip, ipv4, ipv6, n, new_message, new_tcp_client, new_udp_client, run_dns,
         send_request, server_request,
@@ -894,6 +869,9 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::{IpFamilies, NetworkAddress as XdsNetworkAddress};
+
+    use crate::state::workload::{NetworkAddress, Workload};
+    use crate::strng::Strng;
     use crate::{drain, strng};
     use crate::{metrics, test_helpers};
 
@@ -997,16 +975,15 @@ mod tests {
             wl.namespace = c.client_namespace.into();
 
             // Create the DNS store.
-            let state = state();
+            let (state, local_workload) = state();
             let forwarder = forwarder();
             let store = Store {
                 domain: as_name("cluster.local"),
                 svc_domain: as_name("svc.cluster.local."),
-                network: NW1,
                 state,
                 forwarder,
                 metrics: test_metrics(),
-                allow_unknown_source: false,
+                local_workload,
             };
 
             let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
@@ -1314,20 +1291,19 @@ mod tests {
 
         // Create and start the proxy.
         let domain = "cluster.local".to_string();
-        let state = state();
+        let (state, local_workload) = state();
         let forwarder = forwarder();
         let (_signal, drain) = drain::new();
         let factory = crate::proxy::DefaultSocketFactory;
         let proxy = Server::new(
             domain,
             config::Address::Localhost(false, 0),
-            NW1,
             state,
             forwarder,
             test_metrics(),
             drain,
             &factory,
-            false,
+            local_workload,
         )
         .await
         .unwrap();
@@ -1369,37 +1345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_client_should_fail() {
-        initialize_telemetry();
-
-        // Create the DNS store.
-        let state = state();
-        let forwarder = forwarder();
-        let store = Store {
-            domain: as_name("cluster.local"),
-            svc_domain: as_name("svc.cluster.local."),
-            network: NW1,
-            state,
-            forwarder,
-            metrics: test_metrics(),
-            allow_unknown_source: false,
-        };
-
-        let bad_client_ip = ip("5.5.5.5");
-        let req = req(n("www.google.com"), bad_client_ip, RecordType::A);
-        match store.lookup(&req).await {
-            Ok(_) => panic!("expected error"),
-            Err(e) => {
-                if let Some(resp_code) = e.as_response_code() {
-                    assert_eq!(ResponseCode::ServFail, *resp_code);
-                } else {
-                    panic!("unexpected error: {:?}", e)
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn forward_to_server() {
         initialize_telemetry();
         // Other test use fake forwarder; here we forward to a real server (which we run locally)
@@ -1425,7 +1370,7 @@ mod tests {
 
         // Create and start the server.
         let domain = "cluster.local".to_string();
-        let state = state();
+        let (state, local_workload) = state();
         let forwarder = Arc::new(
             run_dns(HashMap::from([(
                 n("test.example.com."),
@@ -1439,13 +1384,12 @@ mod tests {
         let server = Server::new(
             domain,
             config::Address::Localhost(false, 0),
-            NW1,
             state,
             forwarder,
             test_metrics(),
             drain,
             &factory,
-            false,
+            local_workload,
         )
         .await
         .unwrap();
@@ -1482,13 +1426,19 @@ mod tests {
         let state = new_proxy_state(&fake_wls, &[], &[]);
         let forwarder = forwarder();
         let store = Store {
-            network: NW1,
-            state,
+            state: state.clone(),
             forwarder,
             domain: n("cluster.local"),
             svc_domain: n("svc.cluster.local."),
             metrics: test_metrics(),
-            allow_unknown_source: false,
+            local_workload: LocalWorkloadFetcher::new(
+                Arc::new(WorkloadInfo {
+                    name: "client-fake".to_string(),
+                    namespace: NS1.to_string(),
+                    service_account: "default".to_string(),
+                }),
+                state.clone(),
+            ),
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1505,7 +1455,7 @@ mod tests {
         initialize_telemetry();
         // Create and start the proxy with an an empty state. The forwarder is configured to
         // return a large response.
-        let state = new_proxy_state(&[], &[], &[]);
+        let (state, local_workload) = state();
         let forwarder = Arc::new(FakeForwarder {
             search_domains: vec![],
             ips: HashMap::from([(n("large.com."), new_large_response())]),
@@ -1516,13 +1466,12 @@ mod tests {
         let server = Server::new(
             domain,
             config::Address::Localhost(false, 0),
-            NW1,
             state,
             forwarder,
             test_metrics(),
             drain,
             &factory,
-            true,
+            local_workload,
         )
         .await
         .unwrap();
@@ -1631,7 +1580,7 @@ mod tests {
         })
     }
 
-    fn state() -> DemandProxyState {
+    fn state() -> (DemandProxyState, Arc<LocalWorkloadFetcher>) {
         let mut headless_ipv6 = xds_service("headless-ipv6", NS1, &[]);
         headless_ipv6.set_ip_families(IpFamilies::Ipv6Only);
         let services = vec![
@@ -1715,7 +1664,16 @@ mod tests {
             ),
         ];
 
-        new_proxy_state(&workloads, &services, &[])
+        let state = new_proxy_state(&workloads, &services, &[]);
+        let fetch = LocalWorkloadFetcher::new(
+            Arc::new(WorkloadInfo {
+                name: "client".to_string(),
+                namespace: NS1.to_string(),
+                service_account: "default".to_string(),
+            }),
+            state.clone(),
+        );
+        (state, fetch)
     }
 
     fn na<S1: AsRef<str>, S2: AsRef<str>>(network: S1, addr: S2) -> NetworkAddress {

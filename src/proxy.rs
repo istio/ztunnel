@@ -165,10 +165,7 @@ impl LocalWorkloadInformation {
     }
 
     pub async fn get_workload(&self) -> Result<Arc<Workload>, Error> {
-        self.state
-            .wait_for_workload(&self.wi, Duration::from_secs(5))
-            .await
-            .ok_or_else(|| Error::UnknownSourceWorkload(self.wi.clone()))
+        get_workload(&self.state, self.wi.clone()).await
     }
 
     pub async fn fetch_certificate(
@@ -190,6 +187,37 @@ impl LocalWorkloadInformation {
     pub fn workload_info(&self) -> Arc<WorkloadInfo> {
         self.wi.clone()
     }
+
+    pub fn as_fetcher(&self) -> Arc<LocalWorkloadFetcher> {
+        LocalWorkloadFetcher::new(self.wi.clone(), self.state.clone())
+    }
+}
+
+/// LocalWorkloadFetcher is essentially LocalWorkloadInformation without CA access.
+/// This is used to down-scope the LocalWorkloadInformation for components who should not have access
+/// to certificates.
+pub struct LocalWorkloadFetcher {
+    wi: Arc<WorkloadInfo>,
+    state: DemandProxyState,
+}
+
+impl LocalWorkloadFetcher {
+    pub fn new(wi: Arc<WorkloadInfo>, state: DemandProxyState) -> Arc<Self> {
+        Arc::new(LocalWorkloadFetcher { wi, state })
+    }
+    pub async fn get_workload(&self) -> Result<Arc<Workload>, Error> {
+        get_workload(&self.state, self.wi.clone()).await
+    }
+}
+
+async fn get_workload(
+    state: &DemandProxyState,
+    wi: Arc<WorkloadInfo>,
+) -> Result<Arc<Workload>, Error> {
+    state
+        .wait_for_workload(&wi, Duration::from_secs(5))
+        .await
+        .ok_or_else(|| Error::UnknownSourceWorkload(wi.clone()))
 }
 
 #[derive(Clone)]
@@ -207,19 +235,13 @@ pub(super) struct ProxyInputs {
 impl ProxyInputs {
     pub fn new(
         cfg: Arc<config::Config>,
-        cert_manager: Arc<SecretManager>,
         connection_manager: ConnectionManager,
         state: DemandProxyState,
         metrics: Arc<Metrics>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-        proxy_workload_info: WorkloadInfo,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
+        local_workload_information: Arc<LocalWorkloadInformation>,
     ) -> Arc<Self> {
-        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
-            Arc::new(proxy_workload_info),
-            state.clone(),
-            cert_manager,
-        ));
         Arc::new(Self {
             cfg,
             state,
