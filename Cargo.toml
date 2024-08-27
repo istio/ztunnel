@@ -111,6 +111,9 @@ educe = "0.6.0"
 netns-rs = "0.1"
 pprof = { version = "0.14", features = ["protobuf", "protobuf-codec", "criterion"] }
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion"] }
+
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
 prost-build = "0.13"
