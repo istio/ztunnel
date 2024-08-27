@@ -13,21 +13,77 @@
 // limitations under the License.
 
 use crate::dns::resolver::{Answer, Resolver};
+use crate::proxy::SocketFactory;
+use hickory_proto::iocompat::AsyncIoTokioAsStd;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::ResolveError;
-use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::name_server;
+use hickory_resolver::name_server::{GenericConnector, RuntimeProvider};
 use hickory_server::authority::LookupError;
 use hickory_server::server::Request;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::net::{TcpStream, UdpSocket};
 
 /// A forwarding [Resolver] that delegates requests to an upstream [TokioAsyncResolver].
-pub struct Forwarder(TokioAsyncResolver);
+pub struct Forwarder(hickory_resolver::AsyncResolver<GenericConnector<RuntimeProviderAdaptor>>);
 
 impl Forwarder {
     /// Creates a new [Forwarder] from the provided resolver configuration.
-    pub fn new(cfg: ResolverConfig, opts: ResolverOpts) -> Result<Self, ResolveError> {
-        let resolver = TokioAsyncResolver::new(cfg, opts, TokioConnectionProvider::default());
+    pub fn new(
+        cfg: ResolverConfig,
+        socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+        opts: ResolverOpts,
+    ) -> Result<Self, ResolveError> {
+        let provider = GenericConnector::new(RuntimeProviderAdaptor {
+            socket_factory,
+            handle: Default::default(),
+        });
+        let resolver = hickory_resolver::AsyncResolver::new(cfg, opts, provider);
         Ok(Self(resolver))
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeProviderAdaptor {
+    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    handle: name_server::TokioHandle,
+}
+
+impl RuntimeProvider for RuntimeProviderAdaptor {
+    type Handle = name_server::TokioHandle;
+    type Timer = hickory_proto::TokioTime;
+    type Udp = UdpSocket;
+    type Tcp = AsyncIoTokioAsStd<TcpStream>;
+
+    fn create_handle(&self) -> Self::Handle {
+        self.handle.clone()
+    }
+
+    fn connect_tcp(
+        &self,
+        server_addr: SocketAddr,
+    ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Tcp>>>> {
+        let sf = self.socket_factory.clone();
+        Box::pin(async move {
+            let socket = if server_addr.is_ipv4() {
+                sf.new_tcp_v4()
+            } else {
+                sf.new_tcp_v6()
+            }?;
+            socket.connect(server_addr).await.map(AsyncIoTokioAsStd)
+        })
+    }
+
+    fn bind_udp(
+        &self,
+        local_addr: SocketAddr,
+        _server_addr: SocketAddr,
+    ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Udp>>>> {
+        let sf = self.socket_factory.clone();
+        Box::pin(async move { sf.udp_bind(local_addr) })
     }
 }
 

@@ -742,14 +742,17 @@ pub trait Forwarder: Send + Sync {
 pub fn forwarder_for_mode(
     proxy_mode: ProxyMode,
     cluster_domain: String,
+    socket_factory: Arc<dyn SocketFactory + Send + Sync>,
 ) -> Result<Arc<dyn Forwarder>, Error> {
     Ok(match proxy_mode {
         ProxyMode::Shared => {
             // TODO(https://github.com/istio/ztunnel/issues/555): Use pod settings if available.
             // Today, we only support the basic namespace awareness
-            Arc::new(SystemForwarder::new(true, cluster_domain)?)
+            Arc::new(SystemForwarder::new(true, cluster_domain, socket_factory)?)
         }
-        ProxyMode::Dedicated => Arc::new(SystemForwarder::new(false, cluster_domain)?),
+        ProxyMode::Dedicated => {
+            Arc::new(SystemForwarder::new(false, cluster_domain, socket_factory)?)
+        }
     })
 }
 
@@ -768,7 +771,11 @@ enum SearchDomains {
 }
 
 impl SystemForwarder {
-    fn new(per_pod: bool, cluster_domain: String) -> Result<Self, Error> {
+    fn new(
+        per_pod: bool,
+        cluster_domain: String,
+        socket_factory: Arc<dyn SocketFactory + Send + Sync>,
+    ) -> Result<Self, Error> {
         // Get the resolver config from `ztunnel's` /etc/resolv.conf.
         let (cfg, opts) = read_system_conf().map_err(|e| Error::Generic(Box::new(e)))?;
 
@@ -780,6 +787,7 @@ impl SystemForwarder {
         Self::from_parts(
             per_pod,
             cluster_domain,
+            socket_factory,
             opts,
             domain,
             search_domains,
@@ -790,6 +798,7 @@ impl SystemForwarder {
     fn from_parts(
         per_pod: bool,
         cluster_domain: String,
+        socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         opts: ResolverOpts,
         domain: Option<Name>,
         search_domains: Vec<Name>,
@@ -802,7 +811,8 @@ impl SystemForwarder {
 
         // Create the resolver.
         let resolver = Arc::new(
-            dns::forwarder::Forwarder::new(cfg, opts).map_err(|e| Error::Generic(Box::new(e)))?,
+            dns::forwarder::Forwarder::new(cfg, socket_factory, opts)
+                .map_err(|e| Error::Generic(Box::new(e)))?,
         );
         let search_domains = if per_pod {
             // Standard Kubernetes search is 'istio-system.svc.cluster.local svc.cluster.local cluster.local'
@@ -870,6 +880,7 @@ mod tests {
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::{IpFamilies, NetworkAddress as XdsNetworkAddress};
 
+    use crate::proxy::DefaultSocketFactory;
     use crate::state::workload::{NetworkAddress, Workload};
     use crate::strng::Strng;
     use crate::{drain, strng};
@@ -1503,6 +1514,7 @@ mod tests {
         let f = SystemForwarder::from_parts(
             true,
             "cluster.local".to_string(),
+            Arc::new(DefaultSocketFactory),
             opts,
             None,
             search,
