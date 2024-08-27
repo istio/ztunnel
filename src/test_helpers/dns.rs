@@ -18,7 +18,9 @@ use crate::dns::Metrics;
 use crate::drain::DrainTrigger;
 use crate::proxy::Error;
 use crate::state::workload::Workload;
+use crate::state::WorkloadInfo;
 use crate::test_helpers::new_proxy_state;
+use crate::xds::istio::workload::Workload as XdsWorkload;
 use crate::{dns, drain, metrics};
 use futures_util::ready;
 use futures_util::stream::{Stream, StreamExt};
@@ -253,7 +255,16 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
     let (signal, drain) = drain::new();
     let factory = crate::proxy::DefaultSocketFactory {};
 
-    let state = new_proxy_state(&[], &[], &[]);
+    let state = new_proxy_state(
+        &[XdsWorkload {
+            uid: "local".to_string(),
+            name: "local".to_string(),
+            namespace: "ns".to_string(),
+            ..Default::default()
+        }],
+        &[],
+        &[],
+    );
     let forwarder = Arc::new(FakeForwarder {
         // Use the standard search domains for Kubernetes.
         search_domains: vec![
@@ -266,13 +277,19 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
     let srv = crate::dns::Server::new(
         "example.com".to_string(),
         Address::Localhost(false, 0),
-        "",
-        state,
+        state.clone(),
         forwarder,
         test_metrics,
         drain,
         &factory,
-        true,
+        crate::proxy::LocalWorkloadFetcher::new(
+            Arc::new(WorkloadInfo {
+                name: "local".to_string(),
+                namespace: "ns".to_string(),
+                service_account: "default".to_string(),
+            }),
+            state.clone(),
+        ),
     )
     .await?;
 
