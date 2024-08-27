@@ -21,7 +21,7 @@ use tokio::net::UnixStream;
 use tracing::{debug, error, info, warn};
 
 use super::statemanager::WorkloadProxyManagerState;
-use super::Error;
+use crate::inpod::Error;
 
 use super::protocol::WorkloadStreamProcessor;
 
@@ -258,7 +258,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
     async fn read_message_and_retry_proxies(
         &mut self,
         processor: &mut WorkloadStreamProcessor,
-    ) -> anyhow::Result<Option<crate::inpod_linux::WorkloadMessage>> {
+    ) -> anyhow::Result<Option<crate::inpod::linux::WorkloadMessage>> {
         let readmsg = processor.read_message();
         // Note: readmsg future is NOT cancel safe, so we want to make sure this function doesn't exit
         // return without completing it.
@@ -385,7 +385,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    use crate::inpod_linux::test_helpers::{
+    use crate::inpod::linux::test_helpers::{
         self, create_proxy_confilct, new_netns, read_hello, read_msg, send_snap_sent,
         send_workload_added, send_workload_del, uid,
     };
@@ -412,7 +412,7 @@ pub(crate) mod tests {
 
     struct Fixture {
         state: WorkloadProxyManagerState,
-        inpod_metrics: Arc<crate::inpod_linux::Metrics>,
+        inpod_metrics: Arc<crate::inpod::metrics::Metrics>,
         drain_rx: DrainWatcher,
         _drain_tx: DrainTrigger,
     }
@@ -590,12 +590,12 @@ pub(crate) mod tests {
 
         // first proxy should be here:
         assert_eq!(state.workload_states().len(), 2);
-        let key_set: HashSet<crate::inpod_linux::WorkloadUid> =
+        let key_set: HashSet<crate::inpod::linux::WorkloadUid> =
             state.workload_states().keys().cloned().collect();
-        let expected_key_set: HashSet<crate::inpod_linux::WorkloadUid> = [0, 1]
+        let expected_key_set: HashSet<crate::inpod::linux::WorkloadUid> = [0, 1]
             .into_iter()
             .map(uid)
-            .map(crate::inpod_linux::WorkloadUid::from)
+            .map(crate::inpod::linux::WorkloadUid::from)
             .collect();
         assert_eq!(key_set, expected_key_set);
         assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 2);

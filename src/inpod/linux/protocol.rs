@@ -254,7 +254,7 @@ mod tests {
 
     use super::super::istio;
     use super::*;
-    use crate::inpod_linux::test_helpers::uid;
+    use crate::inpod::linux::test_helpers::uid;
 
     use nix::sys::socket::MsgFlags;
     // Helpers to test get_workload_data_from_parts

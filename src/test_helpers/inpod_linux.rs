@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::inpod_linux::test_helpers::{
+use crate::inpod::linux::test_helpers::{
     read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del,
 };
 
@@ -47,7 +47,7 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             .build()
             .unwrap();
         rt.block_on(async move {
-            let listener = crate::inpod_linux::packet::bind(bind_path.as_ref()).expect("bind failed");
+            let listener = crate::inpod::linux::packet::bind(bind_path.as_ref()).expect("bind failed");
             info!(
                 "waiting for connection from ztunnel server {}",
                 bind_path.as_ref().display()
@@ -76,7 +76,7 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             // Now await for FDs
             while let Some((uid, fd)) = rx.recv().await {
                 let orig_uid = uid.clone();
-                let uid = crate::inpod_linux::WorkloadUid::new(uid);
+                let uid = crate::inpod::linux::WorkloadUid::new(uid);
                 if fd >= 0 {
                     send_workload_added(&mut ztun_sock, uid, fd).await;
                 } else {

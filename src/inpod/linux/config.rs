@@ -185,7 +185,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
 mod test {
     use super::*;
 
-    use crate::inpod_linux::test_helpers::new_netns;
+    use crate::inpod::linux::test_helpers::new_netns;
 
     macro_rules! fixture {
         () => {{
@@ -215,7 +215,7 @@ mod test {
 
         let sf = inpod_cfg.socket_factory(
             InpodNetns::new(
-                Arc::new(crate::inpod_linux::netns::InpodNetns::current().unwrap()),
+                Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
             .unwrap(),
@@ -262,7 +262,7 @@ mod test {
 
         let sf = inpod_cfg.socket_factory(
             InpodNetns::new(
-                Arc::new(crate::inpod_linux::netns::InpodNetns::current().unwrap()),
+                Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
             .unwrap(),
@@ -304,7 +304,7 @@ mod test {
 
         let sf = inpod_cfg.socket_factory(
             InpodNetns::new(
-                Arc::new(crate::inpod_linux::netns::InpodNetns::current().unwrap()),
+                Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
             .unwrap(),
