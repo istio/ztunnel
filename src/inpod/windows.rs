@@ -14,7 +14,8 @@
 
 use crate::config as zconfig;
 use crate::readiness;
-use metrics::Metrics;
+use super::metrics::Metrics;
+use crate::inpod::istio;
 use std::sync::Arc;
 use workloadmanager::WorkloadProxyManager;
 
@@ -24,8 +25,7 @@ use self::config::InPodConfig;
 
 pub mod admin;
 mod config;
-pub mod metrics;
-pub mod netns;
+pub mod namespace;
 pub mod packet;
 mod protocol;
 mod statemanager;
@@ -33,28 +33,6 @@ mod workloadmanager;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
-
-pub mod istio {
-    pub mod zds {
-        tonic::include_proto!("istio.workload.zds");
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("error creating proxy {0}: {1}")]
-    ProxyError(String, crate::proxy::Error),
-    #[error("error receiving message: {0}")]
-    ReceiveMessageError(String),
-    #[error("error sending ack: {0}")]
-    SendAckError(String),
-    #[error("error sending nack: {0}")]
-    SendNackError(String),
-    #[error("protocol error: {0}")]
-    ProtocolError(String),
-    #[error("announce error: {0}")]
-    AnnounceError(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct WorkloadUid(String);
@@ -70,7 +48,7 @@ impl WorkloadUid {
 
 #[derive(Debug)]
 pub struct WorkloadData {
-    netns: std::os::fd::OwnedFd,
+    namespace_id: String,
     workload_uid: WorkloadUid,
     workload_info: Option<istio::zds::WorkloadInfo>,
 }
@@ -94,7 +72,7 @@ pub fn init_and_new(
     WorkloadProxyManager::verify_syscalls()?;
     let admin_handler: Arc<admin::WorkloadManagerAdminHandler> = Default::default();
     admin_server.add_handler(admin_handler.clone());
-    let inpod_config = crate::inpod_linux::InPodConfig::new(cfg)?;
+    let inpod_config = InPodConfig::new(cfg)?;
 
     let state_mgr = statemanager::WorkloadProxyManagerState::new(
         proxy_gen,

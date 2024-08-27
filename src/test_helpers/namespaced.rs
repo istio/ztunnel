@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use nix::sched::{setns, CloneFlags};
 use libc::getpid;
 use nix::unistd::mkdtemp;
 use std::fs::File;

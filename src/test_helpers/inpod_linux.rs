@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::inpod_linux::test_helpers::{
+use crate::inpod::linux::test_helpers::{
     read_hello, read_msg, send_snap_sent, send_workload_added, send_workload_del,
 };
 
-use crate::inpod_linux::istio::zds::WorkloadInfo;
+use crate::inpod::istio::zds::WorkloadInfo;
 use crate::test_helpers;
 use crate::test_helpers::MpscAckSender;
 use std::path::PathBuf;
@@ -49,7 +49,7 @@ pub async fn start_ztunnel_server(bind_path: PathBuf) -> MpscAckSender<Message> 
 
     info!("spawning server");
     tokio::task::spawn(async move {
-        let listener = crate::inpod_linux::packet::bind(&bind_path).expect("bind failed");
+        let listener = crate::inpod::linux::packet::bind(&bind_path).expect("bind failed");
         info!("waiting for connection from ztunnel server");
         let (mut ztun_sock, _) = listener.accept().await.expect("accept failed");
         info!("accepted connection from ztunnel server");
@@ -76,14 +76,14 @@ pub async fn start_ztunnel_server(bind_path: PathBuf) -> MpscAckSender<Message> 
                 }) => {
                     let orig_uid = uid.clone();
                     debug!(uid, %fd, "sending start message");
-                    let uid = crate::inpod_linux::WorkloadUid::new(uid);
+                    let uid = crate::inpod::linux::WorkloadUid::new(uid);
                     send_workload_added(&mut ztun_sock, uid, workload_info, fd).await;
                     orig_uid
                 }
                 Message::Stop(uid) => {
                     let orig_uid = uid.clone();
                     debug!(uid, "sending delete message");
-                    let uid = crate::inpod_linux::WorkloadUid::new(uid);
+                    let uid = crate::inpod::linux::WorkloadUid::new(uid);
                     send_workload_del(&mut ztun_sock, uid).await;
                     orig_uid
                 }
