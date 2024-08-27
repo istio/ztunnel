@@ -26,6 +26,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
+#[cfg(not(target_os = "windows"))]
 use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -245,6 +246,7 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     dump
 }
 
+#[cfg(not(target_os = "windows"))]
 async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(1000)
@@ -261,6 +263,14 @@ async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<B
         .status(hyper::StatusCode::OK)
         .body(body.into())
         .expect("builder with known status code should not fail"))
+}
+
+#[cfg(target_os = "windows")]
+async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
+                            .status(hyper::StatusCode::NOT_FOUND)
+                            .body("pprof not supported on non-Linux platforms".into())
+                            .expect("builder with known status code should not fail"))
 }
 
 async fn handle_server_shutdown(

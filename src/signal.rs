@@ -97,7 +97,7 @@ mod imp {
 mod imp {
     use tokio::sync::mpsc::Receiver;
 
-    pub(super) async fn shutdown(receiver: Receiver<()>) {
+    pub(super) async fn shutdown(_receiver: &mut Receiver<()>) {
         // This isn't quite right, but close enough for windows...
         tokio::signal::windows::ctrl_c()
             .expect("Failed to register signal handler")
