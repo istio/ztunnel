@@ -116,5 +116,5 @@ pub fn initialize_namespace_tests() {
     .expect("xtables bindmount");
 
     let pid = unsafe { getpid() };
-    eprintln!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net -t {pid}`");
+    eprintln!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net --setuid=0 --preserve-credentials --user -t {pid}`");
 }
