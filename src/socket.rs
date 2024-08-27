@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::Error;
 use std::net::SocketAddr;
 
 use tokio::io;
@@ -25,6 +24,7 @@ use {
     socket2::{Domain, SockRef},
     std::io::ErrorKind,
     tracing::warn,
+    std::io::Error,
 };
 
 #[cfg(target_os = "linux")]

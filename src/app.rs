@@ -324,7 +324,7 @@ fn mock_secret_manager() -> Arc<SecretManager> {
     unimplemented!("fake_ca requires --features testing")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn init_inpod_proxy_mgr(
     _registry: &mut Registry,
     _admin_server: &mut crate::admin::Service,
@@ -334,6 +334,32 @@ fn init_inpod_proxy_mgr(
     _drain_rx: drain::DrainWatcher,
 ) -> anyhow::Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
     anyhow::bail!("in-pod mode is not supported on non-linux platforms")
+}
+
+#[cfg(target_os = "windows")]
+fn init_inpod_proxy_mgr(
+    registry: &mut Registry,
+    admin_server: &mut crate::admin::Service,
+    config: &config::Config,
+    proxy_gen: ProxyFactory,
+    ready: readiness::Ready,
+    drain_rx: drain::DrainWatcher,
+) -> anyhow::Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
+    let metrics = Arc::new(crate::inpod::metrics::Metrics::new(
+        registry.sub_registry_with_prefix("workload_manager"),
+    ));
+    let proxy_mgr = crate::inpod::windows::init_and_new(metrics, admin_server, config, proxy_gen, ready)
+        .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
+
+    Ok(Box::pin(async move {
+        match proxy_mgr.run(drain_rx).await {
+            Ok(()) => (),
+            Err(e) => {
+                tracing::error!("WorkloadProxyManager run error: {:?}", e);
+                std::process::exit(1);
+            }
+        }
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -348,7 +374,7 @@ fn init_inpod_proxy_mgr(
     let metrics = Arc::new(crate::inpod::metrics::Metrics::new(
         registry.sub_registry_with_prefix("workload_manager"),
     ));
-    let proxy_mgr = crate::inpod::init_and_new(metrics, admin_server, config, proxy_gen, ready)
+    let proxy_mgr = crate::inpod::linux::init_and_new(metrics, admin_server, config, proxy_gen, ready)
         .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
 
     Ok(Box::pin(async move {

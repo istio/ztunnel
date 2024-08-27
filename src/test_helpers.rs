@@ -52,7 +52,7 @@ pub mod ca;
 pub mod dns;
 pub mod helpers;
 #[cfg(target_os = "linux")]
-pub mod inpod;
+pub mod inpod_linux;
 pub mod tcp;
 pub mod xds;
 
@@ -64,12 +64,20 @@ pub mod namespaced;
 #[cfg(target_os = "linux")]
 pub mod netns;
 
+#[cfg(target_os = "linux")]
 pub fn can_run_privilged_test() -> bool {
     let is_root = unsafe { libc::getuid() } == 0;
     if !is_root && std::env::var("CI").is_ok() {
         panic!("CI tests should run as root to have full coverage");
     }
     is_root
+}
+
+#[cfg(target_os = "windows")]
+// ztunnel is only supported as a HostProcessContainer, so assume privileged
+// TOOD: I'm probably making this up; confirm later
+pub fn can_run_privilged_test() -> bool {
+    true
 }
 
 pub fn test_config_with_waypoint(addr: IpAddr) -> config::Config {

@@ -26,6 +26,8 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, header::CONTENT_TYPE, header::HeaderValue};
+#[cfg(not(target_os = "windows"))]
+use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
@@ -255,6 +257,14 @@ async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<B
         .status(hyper::StatusCode::OK)
         .body(body.into())
         .expect("builder with known status code should not fail"))
+}
+
+#[cfg(target_os = "windows")]
+async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
+                            .status(hyper::StatusCode::NOT_FOUND)
+                            .body("pprof not supported on non-Linux platforms".into())
+                            .expect("builder with known status code should not fail"))
 }
 
 async fn handle_server_shutdown(

@@ -50,6 +50,7 @@ pub struct TestApp {
     pub udp_dns_proxy_address: Option<SocketAddr>,
     pub cert_manager: Arc<SecretManager>,
 
+    #[cfg(target_os = "linux")]
     pub namespace: Option<super::netns::Namespace>,
     pub shutdown: ShutdownTrigger,
     pub ztunnel_identity: Option<identity::Identity>,
@@ -65,6 +66,7 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
             tcp_dns_proxy_address: app.tcp_dns_proxy_address,
             udp_dns_proxy_address: app.udp_dns_proxy_address,
             cert_manager,
+            #[cfg(target_os = "linux")]
             namespace: None,
             shutdown: app.shutdown.trigger(),
             ztunnel_identity: None,
@@ -113,6 +115,7 @@ impl TestApp {
             Ok(client.request(req).await?)
         };
 
+        #[cfg(target_os = "linux")]
         match self.namespace {
             Some(ref _ns) => {
                 // TODO: if this is needed, do something like admin_request_body.
@@ -121,6 +124,11 @@ impl TestApp {
                 panic!("cannot send admin_request in pod");
             }
             None => get_resp().await,
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            get_resp().await
         }
     }
     pub async fn admin_request_body(&self, path: &str) -> anyhow::Result<Bytes> {
@@ -139,9 +147,15 @@ impl TestApp {
             Ok::<_, anyhow::Error>(res.collect().await?.to_bytes())
         };
 
+        #[cfg(target_os = "linux")]
         match self.namespace {
             Some(ref ns) => ns.clone().run(get_resp)?.join().unwrap(),
             None => get_resp().await,
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            get_resp().await
         }
     }
 
@@ -163,13 +177,13 @@ impl TestApp {
     }
 
     #[cfg(target_os = "linux")]
-    pub async fn inpod_state(&self) -> anyhow::Result<HashMap<String, inpod::admin::ProxyState>> {
+    pub async fn inpod_state(&self) -> anyhow::Result<HashMap<String, inpod::linux::admin::ProxyState>> {
         let body = self.admin_request_body("config_dump").await?;
         let serde_json::Value::Object(mut v) = serde_json::from_slice(&body)? else {
             anyhow::bail!("not an object");
         };
 
-        let result: HashMap<String, inpod::admin::ProxyState> =
+        let result: HashMap<String, inpod::linux::admin::ProxyState> =
             serde_json::from_value(v.remove("workloadState").unwrap())?;
         Ok(result)
     }

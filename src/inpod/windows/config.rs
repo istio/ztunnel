@@ -16,30 +16,27 @@ use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
 use std::sync::Arc;
 
-use super::netns::InpodNetns;
+use crate::inpod::windows::namespace::InpodNetns;
 
 pub struct InPodConfig {
-    cur_netns: Arc<std::os::fd::OwnedFd>,
+    cur_netns: u32,
     mark: Option<std::num::NonZeroU32>,
     reuse_port: bool,
-    socket_config: config::SocketConfig,
 }
 
 impl InPodConfig {
     pub fn new(cfg: &config::Config) -> std::io::Result<Self> {
         Ok(InPodConfig {
-            cur_netns: Arc::new(InpodNetns::current()?),
+            cur_netns: InpodNetns::current()?,
             mark: std::num::NonZeroU32::new(cfg.packet_mark.expect("in pod requires packet mark")),
             reuse_port: cfg.inpod_port_reuse,
-            socket_config: cfg.socket_config,
         })
     }
     pub fn socket_factory(
         &self,
         netns: InpodNetns,
     ) -> Box<dyn crate::proxy::SocketFactory + Send + Sync> {
-        let base = crate::proxy::DefaultSocketFactory(self.socket_config);
-        let sf = InPodSocketFactory::from_cfg(base, self, netns);
+        let sf = InPodSocketFactory::from_cfg(self, netns);
         if self.reuse_port {
             Box::new(InPodSocketPortReuseFactory::new(sf))
         } else {
@@ -47,8 +44,8 @@ impl InPodConfig {
         }
     }
 
-    pub fn cur_netns(&self) -> Arc<std::os::fd::OwnedFd> {
-        self.cur_netns.clone()
+    pub fn cur_netns(&self) -> u32 {
+        self.cur_netns
     }
     fn mark(&self) -> Option<std::num::NonZeroU32> {
         self.mark
@@ -56,33 +53,23 @@ impl InPodConfig {
 }
 
 struct InPodSocketFactory {
-    inner: DefaultSocketFactory,
     netns: InpodNetns,
     mark: Option<std::num::NonZeroU32>,
 }
 
 impl InPodSocketFactory {
-    fn from_cfg(
-        inner: DefaultSocketFactory,
-        inpod_config: &InPodConfig,
-        netns: InpodNetns,
-    ) -> Self {
-        Self::new(inner, netns, inpod_config.mark())
+    fn from_cfg(inpod_config: &InPodConfig, netns: InpodNetns) -> Self {
+        Self::new(netns, inpod_config.mark())
     }
-
-    fn new(
-        inner: DefaultSocketFactory,
-        netns: InpodNetns,
-        mark: Option<std::num::NonZeroU32>,
-    ) -> Self {
-        Self { inner, netns, mark }
+    fn new(netns: InpodNetns, mark: Option<std::num::NonZeroU32>) -> Self {
+        Self { netns, mark }
     }
 
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
         self.netns.run(f)?
     }
 
-    fn configure<S: std::os::unix::io::AsFd, F: FnOnce() -> std::io::Result<S>>(
+    fn configure<S: std::os::windows::io::AsRawSocket, F: FnOnce() -> std::io::Result<S>>(
         &self,
         f: F,
     ) -> std::io::Result<S> {
@@ -97,11 +84,11 @@ impl InPodSocketFactory {
 
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| self.inner.new_tcp_v4())
+        self.configure(|| DefaultSocketFactory.new_tcp_v4())
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| self.inner.new_tcp_v6())
+        self.configure(|| DefaultSocketFactory.new_tcp_v6())
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
@@ -117,7 +104,7 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
     }
 
     fn ipv6_enabled_localhost(&self) -> std::io::Result<bool> {
-        self.run_in_ns(|| self.inner.ipv6_enabled_localhost())
+        self.run_in_ns(|| DefaultSocketFactory.ipv6_enabled_localhost())
     }
 }
 
@@ -147,9 +134,13 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
             std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
         })?;
 
+        // TODO: use setsockopt on Windows
+
+        /* // set_reuseport doesn't exist for Windows 
         if let Err(e) = sock.set_reuseport(true) {
             tracing::warn!("setting set_reuseport failed: {} addr: {}", e, addr);
         }
+        */
 
         sock.bind(addr)?;
         sock.listen(128).map(socket::Listener::new)
@@ -158,28 +149,28 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
         let sock = self.sf.configure(|| {
             let sock = match addr {
-                std::net::SocketAddr::V4(_) => nix::sys::socket::socket(
-                    nix::sys::socket::AddressFamily::Inet,
-                    nix::sys::socket::SockType::Datagram,
-                    nix::sys::socket::SockFlag::empty(),
-                    None,
-                )
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
-                std::net::SocketAddr::V6(_) => nix::sys::socket::socket(
-                    nix::sys::socket::AddressFamily::Inet6,
-                    nix::sys::socket::SockType::Datagram,
-                    nix::sys::socket::SockFlag::empty(),
-                    None,
-                )
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
+                std::net::SocketAddr::V4(_) => socket2::Socket::new(
+                    socket2::Domain::IPV4,
+                    socket2::Type::DGRAM, 
+                    None, // socket2::Protocol::UDP ??
+
+                ),
+                std::net::SocketAddr::V6(_) => socket2::Socket::new(
+                    socket2::Domain::IPV4,
+                    socket2::Type::DGRAM, 
+                    None, // socket2::Protocol::UDP ??
+                ),
             }?;
             Ok(sock)
         })?;
 
         let socket_ref = socket2::SockRef::from(&sock);
 
+        // TODO: call setsockopt on Windows to set SO_RESU
+        /*
         // important to set SO_REUSEPORT before binding!
         socket_ref.set_reuse_port(true)?;
+        */
         let addr = socket2::SockAddr::from(addr);
         socket_ref.bind(&addr)?;
 
@@ -198,7 +189,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
 mod test {
     use super::*;
 
-    use crate::inpod::test_helpers::new_netns;
+    use crate::inpod::linux::test_helpers::new_netns;
 
     macro_rules! fixture {
         () => {{
@@ -228,7 +219,7 @@ mod test {
 
         let sf = inpod_cfg.socket_factory(
             InpodNetns::new(
-                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
             .unwrap(),
@@ -275,7 +266,7 @@ mod test {
 
         let sf = inpod_cfg.socket_factory(
             InpodNetns::new(
-                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
             .unwrap(),
@@ -317,7 +308,7 @@ mod test {
 
         let sf = inpod_cfg.socket_factory(
             InpodNetns::new(
-                Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+                Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
             .unwrap(),
