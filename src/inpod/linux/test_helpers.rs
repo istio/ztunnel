@@ -36,14 +36,14 @@ use once_cell::sync::Lazy;
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
 
-pub fn uid(i: usize) -> crate::inpod::WorkloadUid {
-    crate::inpod::WorkloadUid::new(format!("uid{}", i))
+pub fn uid(i: usize) -> crate::inpod::linux::WorkloadUid {
+    crate::inpod::linux::WorkloadUid::new(format!("uid{}", i))
 }
 
 pub struct Fixture {
     pub proxy_factory: ProxyFactory,
     pub ipc: InPodConfig,
-    pub inpod_metrics: Arc<crate::inpod::Metrics>,
+    pub inpod_metrics: Arc<crate::inpod::metrics::Metrics>,
     pub drain_tx: DrainTrigger,
     pub drain_rx: DrainWatcher,
 }
@@ -96,7 +96,7 @@ impl Default for Fixture {
         Fixture {
             proxy_factory: proxy_gen,
             ipc,
-            inpod_metrics: Arc::new(crate::inpod::Metrics::new(&mut registry)),
+            inpod_metrics: Arc::new(crate::inpod::metrics::Metrics::new(&mut registry)),
             drain_tx,
             drain_rx,
         }
@@ -228,7 +228,7 @@ pub async fn send_workload_del(s: &mut UnixStream, uid: super::WorkloadUid) {
 
 pub fn create_proxy_conflict(ns: &std::os::fd::OwnedFd) -> std::os::fd::OwnedFd {
     let inpodns = InpodNetns::new(
-        Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
+        Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
         ns.try_clone().unwrap(),
     )
     .unwrap();
