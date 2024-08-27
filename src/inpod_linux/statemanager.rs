@@ -388,8 +388,8 @@ impl WorkloadProxyManagerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inpod::test_helpers::{self, create_proxy_conflict, new_netns, uid};
-    use crate::inpod::WorkloadData;
+    use crate::inpod_linux::test_helpers::{self, create_proxy_confilct, new_netns, uid};
+    use crate::inpod_linux::WorkloadData;
 
     use crate::inpod::istio::zds;
     use matches::assert_matches;
@@ -398,7 +398,7 @@ mod tests {
 
     struct Fixture {
         state: WorkloadProxyManagerState,
-        metrics: Arc<crate::inpod::Metrics>,
+        metrics: Arc<crate::inpod_linux::Metrics>,
     }
 
     fn workload_info() -> Option<zds::WorkloadInfo> {

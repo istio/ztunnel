@@ -52,7 +52,7 @@ pub mod ca;
 pub mod dns;
 pub mod helpers;
 #[cfg(target_os = "linux")]
-pub mod inpod;
+pub mod inpod_linux;
 pub mod tcp;
 pub mod xds;
 
