@@ -322,10 +322,10 @@ fn init_inpod_proxy_mgr(
     ready: readiness::Ready,
     drain_rx: drain::DrainWatcher,
 ) -> anyhow::Result<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>> {
-    let metrics = Arc::new(crate::inpod::metrics::Metrics::new(
+    let metrics = Arc::new(crate::inpod_linux::metrics::Metrics::new(
         registry.sub_registry_with_prefix("workload_manager"),
     ));
-    let proxy_mgr = crate::inpod::init_and_new(metrics, admin_server, config, proxy_gen, ready)
+    let proxy_mgr = crate::inpod_linux::init_and_new(metrics, admin_server, config, proxy_gen, ready)
         .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
 
     Ok(Box::pin(async move {

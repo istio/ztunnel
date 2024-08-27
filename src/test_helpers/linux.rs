@@ -23,7 +23,7 @@ use crate::xds::{LocalConfig, LocalWorkload};
 use crate::{config, identity, proxy, strng};
 
 use crate::signal::ShutdownTrigger;
-use crate::test_helpers::inpod::start_ztunnel_server;
+use crate::test_helpers::inpod_linux::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
 use itertools::Itertools;
 use nix::unistd::mkdtemp;

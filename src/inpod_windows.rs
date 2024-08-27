@@ -12,33 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod admin;
-pub mod app;
-pub mod assertions;
-pub mod baggage;
-pub mod cert_fetcher;
-pub mod config;
-pub mod copy;
-pub mod dns;
-pub mod drain;
-pub mod hyper_util;
-pub mod identity;
-#[cfg(target_os = "linux")]
-pub mod inpod_linux;
-pub mod metrics;
-pub mod proxy;
-pub mod proxyfactory;
-pub mod rbac;
-pub mod readiness;
-pub mod signal;
-pub mod socket;
-pub mod state;
-pub mod strng;
-pub mod telemetry;
-pub mod time;
-pub mod tls;
-pub mod version;
-pub mod xds;
+use crate::config as zconfig;
+use crate::readiness;
+use metrics::Metrics;
+use std::sync::Arc;
+use workloadmanager::WorkloadProxyManager;
 
-#[cfg(any(test, feature = "testing"))]
-pub mod test_helpers;
+use crate::proxyfactory::ProxyFactory;
+
+use self::config::InPodConfig;
+
+pub mod istio {
+  pub mod zds {
+      tonic::include_proto!("istio.workload.zds");
+  }
+}

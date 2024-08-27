@@ -15,7 +15,7 @@
 #[cfg(target_os = "linux")]
 fn main() {
     use std::os::fd::AsRawFd;
-    use ztunnel::test_helpers::inpod::start_ztunnel_server;
+    use ztunnel::test_helpers::inpod_linux::start_ztunnel_server;
 
     let uds = std::env::var("INPOD_UDS").unwrap();
     let netns = std::env::args().nth(1).unwrap();

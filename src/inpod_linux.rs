@@ -94,7 +94,7 @@ pub fn init_and_new(
     WorkloadProxyManager::verify_syscalls()?;
     let admin_handler: Arc<admin::WorkloadManagerAdminHandler> = Default::default();
     admin_server.add_handler(admin_handler.clone());
-    let inpod_config = crate::inpod::InPodConfig::new(cfg)?;
+    let inpod_config = crate::inpod_linux::InPodConfig::new(cfg)?;
 
     let state_mgr = statemanager::WorkloadProxyManagerState::new(
         proxy_gen,

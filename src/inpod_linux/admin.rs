@@ -58,13 +58,13 @@ where
 
 #[derive(Default)]
 pub struct WorkloadManagerAdminHandler {
-    state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
+    state: RwLock<HashMap<crate::inpod_linux::WorkloadUid, ProxyState>>,
 }
 
 impl WorkloadManagerAdminHandler {
     pub fn proxy_pending(
         &self,
-        uid: &crate::inpod::WorkloadUid,
+        uid: &crate::inpod_linux::WorkloadUid,
         workload_info: &Option<WorkloadInfo>,
     ) {
         let mut state = self.state.write().unwrap();
@@ -89,7 +89,7 @@ impl WorkloadManagerAdminHandler {
     }
     pub fn proxy_up(
         &self,
-        uid: &crate::inpod::WorkloadUid,
+        uid: &crate::inpod_linux::WorkloadUid,
         workload_info: &Option<WorkloadInfo>,
         cm: Option<ConnectionManager>,
     ) {
@@ -116,7 +116,7 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
-    pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
+    pub fn proxy_down(&self, uid: &crate::inpod_linux::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
@@ -161,7 +161,7 @@ mod test {
         let handler = WorkloadManagerAdminHandler::default();
         let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
 
-        let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
+        let uid1 = crate::inpod_linux::WorkloadUid::new("uid1".to_string());
         handler.proxy_pending(&uid1, &None);
         assert_eq!(data(), r#"{"uid1":{"state":"Pending"}}"#);
         handler.proxy_up(

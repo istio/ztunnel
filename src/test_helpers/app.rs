@@ -163,13 +163,13 @@ impl TestApp {
     }
 
     #[cfg(target_os = "linux")]
-    pub async fn inpod_state(&self) -> anyhow::Result<HashMap<String, inpod::admin::ProxyState>> {
+    pub async fn inpod_state(&self) -> anyhow::Result<HashMap<String, inpod_linux::admin::ProxyState>> {
         let body = self.admin_request_body("config_dump").await?;
         let serde_json::Value::Object(mut v) = serde_json::from_slice(&body)? else {
             anyhow::bail!("not an object");
         };
 
-        let result: HashMap<String, inpod::admin::ProxyState> =
+        let result: HashMap<String, inpod_linux::admin::ProxyState> =
             serde_json::from_value(v.remove("workloadState").unwrap())?;
         Ok(result)
     }
