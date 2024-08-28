@@ -226,6 +226,8 @@ impl WorkloadProxyManagerState {
             .await
         {
             Ok(()) => {
+                // If the workload is already pending, make sure we drop it, so we don't retry.
+                self.pending_workloads.remove(workload_uid);
                 self.update_proxy_count_metrics();
                 Ok(())
             }
@@ -480,6 +482,46 @@ mod tests {
         // This can lead to our retry failing due to a conflict. There doesn't seem to be a great way to reliably detect this.
         // Sleeping 10ms, however, is quite small and seems very reliable.
         tokio::time::sleep(Duration::from_millis(10)).await;
+
+        state.retry_pending().await;
+        assert!(!state.have_pending());
+        state.drain().await;
+        assert_eq!(m.proxies_started.get_or_create(&()).get(), 1);
+    }
+
+    #[tokio::test]
+    async fn workload_added_while_pending() {
+        // Regression test for https://github.com/istio/istio/issues/52858
+        // Workload is added and fails, so put on the pending queue. Then it is added and succeeds.
+        // The bug is that when we retry with the failed netns, we (1) never succeed and (2) drop the running proxy.
+        let fixture = fixture!();
+        let m = fixture.metrics.clone();
+        let mut state = fixture.state;
+        let ns1 = new_netns();
+        let ns2 = new_netns();
+        // to make the proxy fail, bind to its ports in its netns
+        let _sock = create_proxy_confilct(&ns1);
+
+        // Add the pod in netns1
+        let ret = state
+            .process_msg(WorkloadMessage::AddWorkload(WorkloadData {
+                netns: ns1,
+                workload_uid: uid(0),
+                workload_info: workload_info(),
+            }))
+            .await;
+        assert!(ret.is_err());
+        assert!(state.have_pending());
+
+        // Add it again with another netns. The original pod should still be present in the retry queue with ns1
+        state
+            .process_msg(WorkloadMessage::AddWorkload(WorkloadData {
+                netns: ns2,
+                workload_uid: uid(0),
+                workload_info: workload_info(),
+            }))
+            .await
+            .expect("should start");
 
         state.retry_pending().await;
         assert!(!state.have_pending());
