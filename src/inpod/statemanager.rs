@@ -507,7 +507,7 @@ mod tests {
             .process_msg(WorkloadMessage::AddWorkload(WorkloadData {
                 netns: ns1,
                 workload_uid: uid(0),
-                workload_info: workload_info(),
+                workload_info: None,
             }))
             .await;
         assert!(ret.is_err());
@@ -518,7 +518,7 @@ mod tests {
             .process_msg(WorkloadMessage::AddWorkload(WorkloadData {
                 netns: ns2,
                 workload_uid: uid(0),
-                workload_info: workload_info(),
+                workload_info: None,
             }))
             .await
             .expect("should start");
