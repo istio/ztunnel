@@ -23,15 +23,16 @@ use futures::Stream;
 use futures::StreamExt;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hyper::server::conn::http2;
-use hyper_util::rt::TokioIo;
+use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use itertools::Itertools;
 use prometheus_client::registry::Registry;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Status, Streaming};
+use tower::ServiceExt;
 use tracing::{debug, error, info};
 
-use super::{hyper_tower, test_config_with_port_xds_addr_and_root_cert};
+use super::test_config_with_port_xds_addr_and_root_cert;
 use crate::config::RootCert;
 use crate::hyper_util::TokioExecutor;
 use crate::metrics::sub_registry;
@@ -82,12 +83,15 @@ impl AdsServer {
             while let Some(socket) = tls_stream.next().await {
                 let srv = srv.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = http2::Builder::new(TokioExecutor)
-                        .serve_connection(
-                            TokioIo::new(socket),
-                            hyper_tower::TowerToHyperService::new(srv),
-                        )
-                        .await
+                    if let Err(err) =
+                        http2::Builder::new(TokioExecutor)
+                            .serve_connection(
+                                TokioIo::new(socket),
+                                TowerToHyperService::new(srv.map_request(
+                                    |req: http::Request<_>| req.map(tonic::body::boxed),
+                                )),
+                            )
+                            .await
                     {
                         error!("Error serving connection: {:?}", err);
                     }

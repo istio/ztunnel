@@ -17,17 +17,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use hyper_util::rt::TokioIo;
+use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use itertools::Itertools;
 
 use tokio::sync::watch;
 
+use tower::ServiceExt;
 use tracing::error;
 
 use crate::config::RootCert;
 
 use crate::identity::{AuthSource, CaClient};
-use crate::test_helpers::hyper_tower;
 use crate::xds::istio::ca::istio_certificate_service_server::{
     IstioCertificateService, IstioCertificateServiceServer,
 };
@@ -68,7 +68,9 @@ impl CaServer {
                 if let Err(err) = crate::hyper_util::http2_server()
                     .serve_connection(
                         TokioIo::new(socket),
-                        hyper_tower::TowerToHyperService::new(srv),
+                        TowerToHyperService::new(
+                            srv.map_request(|req: http::Request<_>| req.map(tonic::body::boxed)),
+                        ),
                     )
                     .await
                 {

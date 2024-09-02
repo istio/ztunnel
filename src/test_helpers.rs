@@ -56,7 +56,6 @@ pub mod inpod;
 pub mod tcp;
 pub mod xds;
 
-mod hyper_tower;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
