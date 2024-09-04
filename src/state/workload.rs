@@ -242,17 +242,6 @@ impl Workload {
             service_account: self.service_account.clone(),
         }
     }
-    pub fn waypoint_svc_ip_address(&self) -> Result<Option<IpAddr>, WaypointError> {
-        if let Some(gw_address) = self.waypoint.as_ref() {
-            return match &gw_address.destination {
-                gatewayaddress::Destination::Hostname(_) => Err(WaypointError::UnsupportedFeature(
-                    "hostname lookup not supported yet".to_string(),
-                )),
-                gatewayaddress::Destination::Address(ip) => Ok(Some(ip.address)),
-            };
-        }
-        Ok(None)
-    }
 }
 
 impl fmt::Display for Workload {
