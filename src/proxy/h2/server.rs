@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub struct H2Request {
     request: Parts,
@@ -134,7 +134,11 @@ where
                 tokio::task::spawn(handle);
             }
             _ = &mut ping_drop_rx => {
-                warn!("HBONE ping timeout/error");
+                // Ideally this would be a warning/error message. However, due to an issue during shutdown,
+                // by the time pods with in-pod know to shut down, the network namespace is destroyed.
+                // This blocks the ability to send a GOAWAY and gracefully shutdown.
+                // See https://github.com/istio/ztunnel/issues/1191.
+                debug!("HBONE ping timeout/error, peer may have shutdown");
                 conn.abrupt_shutdown(h2::Reason::NO_ERROR);
                 break
             }
