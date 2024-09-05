@@ -42,16 +42,17 @@ async fn do_ping_pong(
             return;
         }
         let ping_fut = ping_pong.ping(h2::Ping::opaque());
-        log::debug!("ping sent");
+        log::trace!("ping sent");
         match tokio::time::timeout(PING_TIMEOUT, ping_fut).await {
             Err(_) => {
-                log::error!("ping timeout");
+                // We will log this again up in drive_connection, so don't worry about a high log level
+                log::trace!("ping timeout");
                 let _ = tx.send(());
                 return;
             }
             Ok(r) => match r {
                 Ok(_) => {
-                    log::debug!("pong received");
+                    log::trace!("pong received");
                     tokio::time::sleep(PING_INTERVAL).await;
                 }
                 Err(e) => {
