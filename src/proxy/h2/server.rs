@@ -81,7 +81,7 @@ pub async fn serve_connection<F, Fut>(
 ) -> Result<(), Error>
 where
     F: Fn(H2Request) -> Fut,
-    Fut: Future + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     let mut builder = h2::server::Builder::new();
     let mut conn = builder
