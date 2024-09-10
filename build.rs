@@ -18,6 +18,9 @@ use std::process::Command;
 // This build script is used to generate the rust source files that
 // we need for XDS GRPC communication.
 fn main() -> Result<(), anyhow::Error> {
+    // Fuzzing uses custom cfg (https://rust-fuzz.github.io/book/cargo-fuzz/guide.html)
+    // Tell cargo to expect this (https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html).
+    println!("cargo::rustc-check-cfg=cfg(fuzzing)");
     let proto_files = [
         "proto/xds.proto",
         "proto/workload.proto",
