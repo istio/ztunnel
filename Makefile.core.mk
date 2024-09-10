@@ -40,10 +40,10 @@ license-check:
 
 fix: fix-copyright-banner
 	cargo clippy --fix --allow-staged --allow-dirty $(FEATURES)
-	cargo fmt $(FEATURES)
+	cargo fmt
 
 format:
-	cargo fmt $(FEATURES)
+	cargo fmt
 
 release:
 	./scripts/release.sh
