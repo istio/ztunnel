@@ -296,7 +296,7 @@ impl TryFrom<&XdsApplicationTunnel> for ApplicationTunnel {
     type Error = WorkloadError;
 
     fn try_from(value: &XdsApplicationTunnel) -> Result<Self, Self::Error> {
-        Ok(ApplicationTunnel {
+        let tunnel = ApplicationTunnel {
             protocol: application_tunnel::Protocol::from(
                 xds::istio::workload::application_tunnel::Protocol::try_from(value.protocol)?,
             ),
@@ -305,7 +305,13 @@ impl TryFrom<&XdsApplicationTunnel> for ApplicationTunnel {
             } else {
                 Some(value.port as u16)
             },
-        })
+        };
+        if tunnel.port.is_none() && tunnel.protocol == application_tunnel::Protocol::NONE {
+            return Err(Self::Error::InvalidConfiguration(
+                "application_tunnel must set port or protocol".to_string(),
+            ));
+        }
+        Ok(tunnel)
     }
 }
 
@@ -759,6 +765,8 @@ pub enum WorkloadError {
     PrefixParse(#[from] ipnet::PrefixLenError),
     #[error("unknown enum: {0}")]
     EnumParse(String),
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
     #[error("nonempty gateway address is missing address")]
     MissingGatewayAddress,
     #[error("decode error: {0}")]
