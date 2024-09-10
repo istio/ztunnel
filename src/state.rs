@@ -240,13 +240,20 @@ impl ProxyState {
 
     /// Find either a workload or a service by hostname.
     pub fn find_hostname(&self, name: &NamespacedHostname) -> Option<Address> {
-        // Hostnames for services are more common, so lookup service first and fallback
-        // to workload.
-        // We do not looking up workloads by hostname. We could, but we only allow referencing "frontends",
-        // not backends
+        // Hostnames for services are more common, so lookup service first and fallback to workload.
         self.services
             .get_by_namespaced_host(name)
             .map(Address::Service)
+            .or_else(|| {
+                // Slow path: lookup workload by O(n) lookup. This is an uncommon path, so probably not worth
+                // the memory cost to index currently
+                self.workloads
+                    .by_uid
+                    .values()
+                    .find(|w| w.hostname == name.hostname && w.namespace == name.namespace)
+                    .cloned()
+                    .map(Address::Workload)
+            })
     }
 
     fn find_upstream(
@@ -794,10 +801,9 @@ impl DemandProxyState {
                         // adapt to the callers IP family.
                         (us, original_destination_address)
                     }
-                    Some(_) => {
-                        return Err(Error::UnsupportedFeature(
-                            "waypoint must be a service, not a workload".to_string(),
-                        ))
+                    Some(Address::Workload(w)) => {
+                        let us = Some((w, gw_address.hbone_mtls_port, None));
+                        (us, original_destination_address)
                     }
                     None => {
                         return Err(Error::UnknownWaypoint(format!(
