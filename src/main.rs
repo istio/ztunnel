@@ -30,7 +30,6 @@ pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0
 
 fn main() -> anyhow::Result<()> {
     let _log_flush = telemetry::setup_logging();
-    let config = Arc::new(config::parse_config()?);
 
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
     match std::env::args().nth(1).as_deref() {
@@ -48,7 +47,10 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async move { proxy(config).await })
+        .block_on(async move {
+            let config = Arc::new(config::parse_config()?);
+            proxy(config).await
+        })
 }
 
 fn help() -> anyhow::Result<()> {
