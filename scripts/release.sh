@@ -19,21 +19,25 @@ set -ex
 WD=$(dirname "$0")
 WD=$(cd "$WD" || exit; pwd)
 
-case $(uname -m) in
-    x86_64)
-      export ARCH=amd64;;
-    aarch64)
-      export ARCH=arm64
-      # TODO(https://github.com/istio/ztunnel/issues/357) clean up this hack
-      sed -i 's/x86_64/arm64/g' .cargo/config.toml
-      ;;
-    *) echo "unsupported architecture"; exit 1 ;;
-esac
-
-cargo build --release
+if [[ "$TLS_MODE" == "boring" ]]; then
+  case $(uname -m) in
+      x86_64)
+        export ARCH=amd64;;
+      aarch64)
+        export ARCH=arm64
+        # TODO(https://github.com/istio/ztunnel/issues/357) clean up this hack
+        sed -i 's/x86_64/arm64/g' .cargo/config.toml
+        ;;
+      *) echo "unsupported architecture"; exit 1 ;;
+  esac
+  cargo build --release --no-default-features -F tls-boring
+else
+  cargo build --release
+fi
 
 SHA="$(git rev-parse --verify HEAD)"
-RELEASE_NAME="ztunnel-${SHA}-${ARCH}"
+BINARY_PREFIX=${BINARY_PREFIX:-"ztunnel"}
+RELEASE_NAME="${BINARY_PREFIX}-${SHA}-${ARCH}"
 ls -lh "${WD}/../out/rust/release/ztunnel"
 DEST="${DEST:-gs://istio-build/ztunnel}"
 if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
