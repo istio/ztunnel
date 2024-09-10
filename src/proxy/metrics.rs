@@ -66,6 +66,8 @@ pub enum ResponseFlags {
     None,
     // connection denied due to policy
     AuthorizationPolicyDenied,
+    // connection denied because we could not establish an upstream connection
+    ConnectionFailure,
 }
 
 impl EncodeLabelValue for ResponseFlags {
@@ -73,6 +75,7 @@ impl EncodeLabelValue for ResponseFlags {
         match self {
             ResponseFlags::None => writer.write_str("-"),
             ResponseFlags::AuthorizationPolicyDenied => writer.write_str("DENY"),
+            ResponseFlags::ConnectionFailure => writer.write_str("CONNECT"),
         }
     }
 }

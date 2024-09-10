@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::stream::StreamExt;
+use futures_util::TryFutureExt;
+use http::{Method, Response, StatusCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-
-use futures::stream::StreamExt;
-
-use http::{Method, Response, StatusCode};
 
 use tokio::sync::watch;
 
 use tracing::{debug, info, instrument, trace_span, Instrument};
 
-use super::{Error, LocalWorkloadInformation};
+use super::{ConnectionResult, Error, LocalWorkloadInformation, ResponseFlags};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
+use crate::config::{Config, ProxyMode};
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
@@ -38,12 +38,11 @@ use crate::state::service::Service;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
 use crate::{assertions, copy, proxy, socket, strng, tls};
 
-use crate::config::ProxyMode;
 use crate::drain::run_with_drain;
 use crate::proxy::h2;
 use crate::state::workload::address::Address;
 use crate::state::workload::{self, NetworkAddress, Workload};
-use crate::state::DemandProxyState;
+use crate::state::{DemandProxyState, ProxyRbacContext};
 use crate::tls::TlsError;
 
 pub(super) struct Inbound {
@@ -95,7 +94,7 @@ impl Inbound {
                     let pi = self.pi.clone();
                     let (raw_socket, ssl) = tls.get_ref();
                     let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
-                    let dst = crate::socket::orig_dst_addr_or_default(raw_socket);
+                    let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
                     let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
                     let drain = drain.clone();
                     let force_shutdown = force_shutdown.clone();
@@ -155,91 +154,159 @@ impl Inbound {
         conn: Connection,
         enable_original_source: bool,
         req: H2Request,
-    ) -> Result<(), Error> {
-        if req.method() != Method::CONNECT {
-            metrics::log_early_deny(
-                conn.src,
-                conn.dst,
-                Reporter::destination,
-                Error::NonConnectMethod(req.method().to_string()),
-            );
-            return req.send_error(build_response(StatusCode::NOT_FOUND));
-        }
-        let start = Instant::now();
-        let Ok(hbone_addr) = req.uri().to_string().as_str().parse::<SocketAddr>() else {
-            metrics::log_early_deny(
-                conn.src,
-                conn.dst,
-                Reporter::destination,
-                Error::ConnectAddress(req.uri().to_string()),
-            );
-            return req.send_error(build_response(StatusCode::BAD_REQUEST));
+    ) {
+        let src = conn.src;
+        let dst = conn.dst;
+
+        // In order to ensure we properly handle all errors, we split up serving inbound request into a few
+        // phases.
+
+        // Initial phase, build up context about the request.
+        let ri = match Self::build_inbound_request(&pi, conn, &req).await {
+            Ok(i) => i,
+            Err(InboundError(e, code)) => {
+                // At this point in processing, we never built up full context to log a complete access log.
+                // Instead, just log a minimal error line.
+                metrics::log_early_deny(src, dst, Reporter::destination, e);
+                if let Err(err) = req.send_error(build_response(code)) {
+                    tracing::warn!("failed to send HTTP response: {err}");
+                }
+                return;
+            }
         };
 
-        let destination_workload = pi.local_workload_information.get_workload().await?;
+        // Now we have enough context to properly report logs and metrics. Group everything else that
+        // can fail before we send the OK response here.
+        let rx = async {
+            let conn_guard = pi
+                .connection_manager
+                .assert_rbac(&pi.state, &ri.rbac_ctx, ri.for_host)
+                .await
+                .map_err(InboundFlagError::build(
+                    StatusCode::UNAUTHORIZED,
+                    ResponseFlags::AuthorizationPolicyDenied,
+                ))?;
 
-        if let Err(e) =
-            Self::validate_destination(&pi.state, &conn, &destination_workload, hbone_addr).await
-        {
-            metrics::log_early_deny(conn.src, conn.dst, Reporter::destination, e);
-            return req.send_error(build_response(StatusCode::BAD_REQUEST));
+            let orig_src = enable_original_source.then_some(ri.rbac_ctx.conn.src.ip());
+            let stream =
+                super::freebind_connect(orig_src, ri.upstream_addr, pi.socket_factory.as_ref())
+                    .await
+                    .map_err(Error::ConnectionFailed)
+                    .map_err(InboundFlagError::build(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        ResponseFlags::ConnectionFailure,
+                    ))?;
+            debug!("connected to: {}", ri.upstream_addr);
+            Ok((conn_guard, stream))
+        };
+        let (conn_guard, mut stream) = match rx.await {
+            Ok(res) => res,
+            Err(InboundFlagError(err, flag, code)) => {
+                ri.result_tracker.record_with_flag(Err(err), flag);
+                if let Err(err) = req.send_error(build_response(code)) {
+                    tracing::warn!("failed to send HTTP response: {err}");
+                }
+                return;
+            }
+        };
+
+        // At this point, we established the upstream connection and need to send a 200 back to the client.
+        // we may still have failures at this point during the proxying, but we don't need to send these
+        // at the HTTP layer.
+        let send = req
+            .send_response(build_response(StatusCode::OK))
+            .and_then(|h2_stream| async {
+                if ri.inbound_protocol == AppProtocol::PROXY {
+                    let Connection {
+                        src, src_identity, ..
+                    } = ri.rbac_ctx.conn;
+                    super::write_proxy_protocol(&mut stream, (src, ri.hbone_addr), src_identity)
+                        .instrument(trace_span!("proxy protocol"))
+                        .await?;
+                }
+                copy::copy_bidirectional(
+                    h2_stream,
+                    copy::TcpStreamSplitter(stream),
+                    &ri.result_tracker,
+                )
+                .instrument(trace_span!("hbone server"))
+                .await
+            });
+        let res = conn_guard.handle_connection(send).await;
+        ri.result_tracker.record(res);
+    }
+
+    async fn build_inbound_request(
+        pi: &Arc<ProxyInputs>,
+        conn: Connection,
+        req: &H2Request,
+    ) -> Result<InboundRequest, InboundError> {
+        if req.method() != Method::CONNECT {
+            let e = Error::NonConnectMethod(req.method().to_string());
+            return Err(InboundError(e, StatusCode::BAD_REQUEST));
         }
+
+        let start = Instant::now();
+        let hbone_addr = req
+            .uri()
+            .to_string()
+            .as_str()
+            .parse::<SocketAddr>()
+            .map_err(|_| {
+                InboundError(
+                    Error::ConnectAddress(req.uri().to_string()),
+                    StatusCode::BAD_REQUEST,
+                )
+            })?;
+
+        let destination_workload = pi
+            .local_workload_information
+            .get_workload()
+            .await
+            // At this point we already fetched the local workload for TLS, so it should be infallible.
+            .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
+
+        // Check the request is allowed
+        Self::validate_destination(&pi.cfg, &pi.state, &conn, &destination_workload, hbone_addr)
+            .await
+            .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
         // Determine the next hop.
         let (upstream_addr, inbound_protocol, upstream_service) =
             Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, hbone_addr);
-        let illegal_call = if pi.cfg.proxy_mode == ProxyMode::Shared {
-            // User sent a request to pod:15006. This would forward to pod:15006 infinitely
-            // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
-            // sends to 15008.
-            pi.cfg.illegal_ports.contains(&hbone_addr.port())
-        } else {
-            false // TODO: do we need any check here?
-        };
-        if illegal_call {
-            metrics::log_early_deny(
-                conn.src,
-                upstream_addr,
-                Reporter::destination,
-                Error::SelfCall,
-            );
-            return req.send_error(build_response(StatusCode::BAD_REQUEST));
-        }
+
         let original_dst = conn.dst;
         // Connection has 15008, swap with the real port
         let conn = Connection {
             dst: upstream_addr,
             ..conn
         };
-        let from_gateway = proxy::check_from_network_gateway(
-            &pi.state,
-            &destination_workload,
-            conn.src_identity.as_ref(),
-        )
-        .await;
 
-        if from_gateway {
-            debug!("request from gateway");
-        }
-
-        let rbac_ctx = crate::state::ProxyRbacContext {
+        let rbac_ctx = ProxyRbacContext {
             conn,
             dest_workload: destination_workload.clone(),
         };
 
-        let source_ip = rbac_ctx.conn.src.ip();
-
-        let for_host = parse_forwarded_host(&req);
+        let for_host = parse_forwarded_host(req);
         let baggage =
             parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
 
+        let from_gateway = proxy::check_from_network_gateway(
+            &pi.state,
+            &destination_workload,
+            rbac_ctx.conn.src_identity.as_ref(),
+        )
+        .await;
+        if from_gateway {
+            debug!("request from gateway");
+        }
         let source = match from_gateway {
             true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
             false => {
                 let src_network_addr = NetworkAddress {
                     // we can assume source network is our network because we did not traverse a gateway
                     network: rbac_ctx.conn.dst_network.clone(),
-                    address: source_ip,
+                    address: rbac_ctx.conn.src.ip(),
                 };
                 // Find source info. We can lookup by XDS or from connection attributes
                 pi.state.fetch_workload_by_address(&src_network_addr).await
@@ -277,60 +344,36 @@ impl Inbound {
             },
             pi.metrics.clone(),
         ));
-
-        let conn_guard = match pi
-            .connection_manager
-            .assert_rbac(&pi.state, &rbac_ctx, for_host)
-            .await
-        {
-            Ok(cg) => cg,
-            Err(e) => {
-                result_tracker
-                    .record_with_flag(Err(e), metrics::ResponseFlags::AuthorizationPolicyDenied);
-                return req.send_error(build_response(StatusCode::UNAUTHORIZED));
-            }
-        };
-
-        let orig_src = enable_original_source.then_some(source_ip);
-        let stream =
-            super::freebind_connect(orig_src, upstream_addr, pi.socket_factory.as_ref()).await;
-        let mut stream = match stream {
-            Err(err) => {
-                result_tracker.record(Err(err));
-                return req.send_error(build_response(StatusCode::SERVICE_UNAVAILABLE));
-            }
-            Ok(stream) => stream,
-        };
-
-        debug!("connected to: {upstream_addr}");
-
-        let h2_stream = req.send_response(build_response(StatusCode::OK)).await?;
-
-        let send = async {
-            if inbound_protocol == AppProtocol::PROXY {
-                let Connection {
-                    src, src_identity, ..
-                } = rbac_ctx.conn;
-                super::write_proxy_protocol(&mut stream, (src, hbone_addr), src_identity)
-                    .instrument(trace_span!("proxy protocol"))
-                    .await?;
-            }
-            copy::copy_bidirectional(h2_stream, copy::TcpStreamSplitter(stream), &result_tracker)
-                .instrument(trace_span!("hbone server"))
-                .await
-        };
-        let res = conn_guard.handle_connection(send).await;
-        result_tracker.record(res);
-        Ok(())
+        Ok(InboundRequest {
+            for_host,
+            rbac_ctx,
+            result_tracker,
+            upstream_addr,
+            inbound_protocol,
+            hbone_addr,
+        })
     }
 
     /// validate_destination ensures the destination is an allowed request.
     async fn validate_destination(
+        cfg: &Config,
         state: &DemandProxyState,
         conn: &Connection,
         local_workload: &Workload,
         hbone_addr: SocketAddr,
     ) -> Result<(), Error> {
+        let illegal_call = if cfg.proxy_mode == ProxyMode::Shared {
+            // User sent a request to pod:15006. This would forward to pod:15006 infinitely
+            // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
+            // sends to 15008.
+            cfg.illegal_ports.contains(&hbone_addr.port())
+        } else {
+            false // TODO: do we need any check here?
+        };
+        if illegal_call {
+            return Err(Error::SelfCall);
+        }
+
         if conn.dst.ip() == hbone_addr.ip() {
             // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
             return Ok(());
@@ -428,6 +471,30 @@ impl Inbound {
     }
 }
 
+struct InboundRequest {
+    for_host: Option<String>,
+    rbac_ctx: ProxyRbacContext,
+    result_tracker: Box<ConnectionResult>,
+    upstream_addr: SocketAddr,
+    hbone_addr: SocketAddr,
+    inbound_protocol: AppProtocol,
+}
+
+/// InboundError represents an error with an associated status code.
+struct InboundError(Error, StatusCode);
+impl InboundError {
+    pub fn build(code: StatusCode) -> impl Fn(Error) -> Self {
+        move |err| InboundError(err, code)
+    }
+}
+
+struct InboundFlagError(Error, ResponseFlags, StatusCode);
+impl InboundFlagError {
+    pub fn build(code: StatusCode, flag: ResponseFlags) -> impl Fn(Error) -> Self {
+        move |err| InboundFlagError(err, flag, code)
+    }
+}
+
 #[derive(Clone)]
 struct InboundCertProvider {
     local_workload: Arc<LocalWorkloadInformation>,
@@ -463,7 +530,7 @@ fn build_response(status: StatusCode) -> Response<()> {
 #[cfg(test)]
 mod tests {
     use super::Inbound;
-    use crate::strng;
+    use crate::{config, strng};
 
     use crate::{
         rbac::Connection,
@@ -528,7 +595,7 @@ mod tests {
         want: Option<(&str, u16)>,
     ) {
         let state = test_state(target_waypoint).expect("state setup");
-
+        let cfg = config::parse_config().unwrap();
         let conn = Connection {
             src_identity: None,
             src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
@@ -543,7 +610,7 @@ mod tests {
             .await
             .unwrap();
         let hbone_addr = format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap();
-        let res = Inbound::validate_destination(&state, &conn, &local_wl, hbone_addr)
+        let res = Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr)
             .await
             .map(|_| Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr));
 
