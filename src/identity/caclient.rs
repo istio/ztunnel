@@ -37,7 +37,7 @@ pub struct CaClient {
 impl CaClient {
     pub async fn new(
         address: String,
-        cert_provider: Box<dyn tls::ClientCertProvider>,
+        cert_provider: Box<dyn tls::ControlPlaneClientCertProvider>,
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,

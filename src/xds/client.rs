@@ -206,7 +206,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
 
 pub struct Config {
     address: String,
-    tls_builder: Box<dyn tls::ClientCertProvider>,
+    tls_builder: Box<dyn tls::ControlPlaneClientCertProvider>,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
     handlers: HashMap<Strng, Box<dyn RawHandler>>,
@@ -245,7 +245,7 @@ impl State {
 impl Config {
     pub fn new(
         config: Arc<crate::config::Config>,
-        tls_builder: Box<dyn tls::ClientCertProvider>,
+        tls_builder: Box<dyn tls::ControlPlaneClientCertProvider>,
     ) -> Config {
         Config {
             address: config
