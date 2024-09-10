@@ -14,7 +14,7 @@
 
 use crate::config::RootCert;
 use crate::tls::lib::provider;
-use crate::tls::{ClientCertProvider, Error, WorkloadCertificate};
+use crate::tls::{ControlPlaneClientCertProvider, Error, WorkloadCertificate};
 use bytes::Bytes;
 use http_body::{Body, Frame};
 use hyper::Uri;
@@ -67,7 +67,7 @@ pub enum ControlPlaneAuthentication {
 }
 
 #[async_trait::async_trait]
-impl ClientCertProvider for ControlPlaneAuthentication {
+impl ControlPlaneClientCertProvider for ControlPlaneAuthentication {
     async fn fetch_cert(&self) -> Result<ClientConfig, Error> {
         match self {
             ControlPlaneAuthentication::RootCert(root_cert) => {

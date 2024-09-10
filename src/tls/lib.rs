@@ -30,7 +30,7 @@ use rustls::ServerConfig;
 use tracing::error;
 
 #[async_trait::async_trait]
-pub trait ClientCertProvider: Send + Sync {
+pub trait ControlPlaneClientCertProvider: Send + Sync {
     async fn fetch_cert(&self) -> Result<ClientConfig, Error>;
 }
 
