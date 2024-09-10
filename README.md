@@ -88,6 +88,8 @@ This manual twiddling of environment vars is not ideal but given that the altern
 
 Note that the Dockerfiles used to build these vendored `boringssl` builds may be found in the respective vendor directories, and can serve as a reference for the build environment needed to generate FIPS-compliant ztunnel builds.
 
+A release build with this option can be built with `TLS_MODE=boring ./scripts/release.sh`.
+
 ## Development
 
 Please refer to [this](./Development.md).
