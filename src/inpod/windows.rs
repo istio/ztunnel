@@ -25,7 +25,7 @@ use self::config::InPodConfig;
 
 pub mod admin;
 mod config;
-pub mod netns;
+pub mod namespace;
 pub mod packet;
 mod protocol;
 mod statemanager;
@@ -48,7 +48,7 @@ impl WorkloadUid {
 
 #[derive(Debug)]
 pub struct WorkloadData {
-    netns: std::os::fd::OwnedFd,
+    namespace_id: String,
     workload_uid: WorkloadUid,
     workload_info: Option<istio::zds::WorkloadInfo>,
 }
