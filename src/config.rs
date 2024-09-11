@@ -45,6 +45,7 @@ const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
 const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
+const LOCAL_XDS: &str = "LOCAL_XDS";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
 const CA_ADDRESS: &str = "CA_ADDRESS";
@@ -87,6 +88,7 @@ const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
+const TOKEN_PROVIDER_ENV: &str = "AUTH_TOKEN";
 const DEFAULT_TOKEN_PROVIDER: &str = "./var/run/secrets/tokens/istio-token";
 const CERT_SYSTEM: &str = "SYSTEM";
 
@@ -347,11 +349,26 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         RootCert::Static(Bytes::from(ca_root_cert_provider))
     };
 
-    let auth = match std::fs::read(DEFAULT_TOKEN_PROVIDER) {
-        Ok(_) => {
-            identity::AuthSource::Token(PathBuf::from(DEFAULT_TOKEN_PROVIDER), cluster_id.clone())
+    let auth = match parse::<String>(TOKEN_PROVIDER_ENV)? {
+        None => {
+            // If nothing is set, conditionally use the default if it exists
+            if Path::new(&DEFAULT_TOKEN_PROVIDER).exists() {
+                identity::AuthSource::Token(
+                    PathBuf::from(DEFAULT_TOKEN_PROVIDER),
+                    cluster_id.clone(),
+                )
+            } else {
+                identity::AuthSource::None
+            }
         }
-        Err(_) => identity::AuthSource::None,
+        Some(p) if Path::new(&p).exists() => {
+            // This is a file
+            identity::AuthSource::Token(PathBuf::from(p), cluster_id.clone())
+        }
+        Some(p) => {
+            // This is a static
+            identity::AuthSource::StaticToken(p, cluster_id.clone())
+        }
     };
 
     use hickory_resolver::system_conf::read_system_conf;
@@ -412,7 +429,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         },
         None => ProxyMode::Shared,
     };
-    let proxy_workload_information = if proxy_mode == ProxyMode::Dedicated {
+    let proxy_workload_information = if proxy_mode != ProxyMode::Shared {
         let Some(raw) = parse::<String>(PROXY_WORKLOAD_INFO)? else {
             // TODO: in the future, we can provide a mode where we automatically detect based on IP address.
             return Err(Error::InvalidState(format!(
@@ -432,6 +449,20 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         })
     } else {
         None
+    };
+
+    let local_xds_config = match (
+        parse::<PathBuf>(LOCAL_XDS_PATH)?,
+        parse::<String>(LOCAL_XDS)?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(Error::InvalidState(format!(
+                "only one of {LOCAL_XDS_PATH} or {LOCAL_XDS} may be set"
+            )))
+        }
+        (Some(f), _) => Some(ConfigSource::File(f)),
+        (_, Some(d)) => Some(ConfigSource::Static(Bytes::from(d))),
+        _ => None,
     };
 
     validate_config(Config {
@@ -518,7 +549,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_TTL),
             None => DEFAULT_TTL,
         },
-        local_xds_config: parse::<PathBuf>(LOCAL_XDS_PATH)?.map(ConfigSource::File),
+        local_xds_config,
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
         proxy_metadata: pc.proxy_metadata,
 
