@@ -6,7 +6,7 @@ ifeq ($(TLS_MODE), boring)
 endif
 
 test:
-	FEATURES=$(FEATURES) ./scripts/test-with-coverage.sh 
+	RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
 
 build:
 	cargo build $(FEATURES)
