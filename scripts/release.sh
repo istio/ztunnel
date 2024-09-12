@@ -19,17 +19,17 @@ set -ex
 WD=$(dirname "$0")
 WD=$(cd "$WD" || exit; pwd)
 
+case $(uname -m) in
+  x86_64) export ARCH=amd64;;
+  aarch64) export ARCH=arm64 ;;
+  *) echo "unsupported architecture"; exit 1;;
+esac
+
 if [[ "$TLS_MODE" == "boring" ]]; then
-  case $(uname -m) in
-      x86_64)
-        export ARCH=amd64;;
-      aarch64)
-        export ARCH=arm64
-        # TODO(https://github.com/istio/ztunnel/issues/357) clean up this hack
-        sed -i 's/x86_64/arm64/g' .cargo/config.toml
-        ;;
-      *) echo "unsupported architecture"; exit 1 ;;
-  esac
+  if [[ "$ARCH" == "arm64" ]]; then
+    # TODO(https://github.com/istio/ztunnel/issues/357) clean up this hack
+    sed -i 's/x86_64/arm64/g' .cargo/config.toml
+  fi
   cargo build --release --no-default-features -F tls-boring
 else
   cargo build --release
