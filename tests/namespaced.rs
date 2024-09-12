@@ -326,6 +326,69 @@ mod namespaced {
     }
 
     #[tokio::test]
+    async fn service_waypoint_workload_hostname() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(Shared);
+
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        let waypoint = manager
+            .workload_builder("waypoint", DEFAULT_NODE)
+            .uncaptured()
+            .mutate_workload(|w| w.hostname = "waypoint.example.com".into())
+            .register()
+            .await?;
+        run_hbone_server(waypoint, "waypoint")?;
+
+        manager
+            .workload_builder("server", DEFAULT_NODE)
+            .waypoint_hostname("waypoint.example.com")
+            .register()
+            .await?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+
+        let server_ip = manager.resolver().resolve("server")?;
+        let waypoint_pod_ip = manager.resolver().resolve("waypoint")?;
+        run_tcp_to_hbone_client(client, manager.resolver(), "server")?;
+
+        let metrics = [
+            (CONNECTIONS_OPENED, 1),
+            (CONNECTIONS_CLOSED, 1),
+            (BYTES_RECV, REQ_SIZE),
+            (BYTES_SENT, HBONE_REQ_SIZE),
+        ];
+        verify_metrics(&zt, &metrics, &source_labels()).await;
+
+        let sent = format!("{REQ_SIZE}");
+        let recv = format!("{HBONE_REQ_SIZE}");
+        let hbone_addr = format!("{server_ip}:8080");
+        let dst_addr = format!("{waypoint_pod_ip}:15008");
+        let want = HashMap::from([
+            ("scope", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "waypoint"),
+            ("dst.hbone_addr", &hbone_addr),
+            ("dst.addr", &dst_addr),
+            ("bytes_sent", &sent),
+            ("bytes_recv", &recv),
+            ("direction", "outbound"),
+            ("message", "connection complete"),
+            (
+                "src.identity",
+                "spiffe://cluster.local/ns/default/sa/client",
+            ),
+            (
+                "dst.identity",
+                "spiffe://cluster.local/ns/default/sa/waypoint",
+            ),
+        ]);
+        telemetry::testing::assert_contains(want);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sandwich_waypoint_plain() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(Shared);
 
