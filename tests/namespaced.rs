@@ -396,6 +396,12 @@ mod namespaced {
 
         let waypoint = manager
             .workload_builder("waypoint", DEFAULT_NODE)
+            .mutate_workload(|w| {
+                w.application_tunnel = Some(ApplicationTunnel {
+                    protocol: Protocol::NONE,
+                    port: None,
+                });
+            })
             .register()
             .await?;
         let waypoint_ip = waypoint.ip();
