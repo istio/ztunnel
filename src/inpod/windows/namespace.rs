@@ -1,4 +1,3 @@
-use nix::sched::{setns, CloneFlags};
 use windows::Win32::{Foundation::NOERROR, System::HostComputeNetwork::HcnQueryNamespaceProperties};
 use std::sync::Arc;
 use uuid::Uuid;
