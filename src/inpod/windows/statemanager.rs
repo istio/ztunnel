@@ -1,8 +1,7 @@
 use crate::drain;
 use crate::drain::DrainTrigger;
-use crate::inpod::{metrics::Metrics, Error};
+use crate::inpod::metrics::Metrics;
 use std::sync::Arc;
-use tracing::{debug, info, Instrument};
 
 use crate::proxyfactory::ProxyFactory;
 use crate::state::WorkloadInfo;
@@ -10,7 +9,7 @@ use crate::state::WorkloadInfo;
 use super::config::InPodConfig;
 
 use super::WorkloadUid;
-use super::WorkloadMessage;
+use crate::inpod::windows::namespace::InpodNetns;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {
@@ -43,4 +42,22 @@ impl DrainingTasks {
   }
 }
 
+pub struct WorkloadProxyManagerState {
+  proxy_gen: ProxyFactory,
+  metrics: Arc<Metrics>,
+  admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
+  // use hashbrown for extract_if
+  workload_states: hashbrown::HashMap<WorkloadUid, WorkloadState>,
 
+  // workloads we wanted to start but couldn't because we had an error starting them.
+  // This happened to use mainly in testing when we redeploy ztunnel, and the old pod was
+  // not completely drained yet.
+  pending_workloads: hashbrown::HashMap<WorkloadUid, (Option<WorkloadInfo>, InpodNetns)>,
+  draining: DrainingTasks,
+
+  // new connection stuff
+  snapshot_received: bool,
+  snapshot_names: std::collections::HashSet<WorkloadUid>,
+
+  inpod_config: InPodConfig,
+}

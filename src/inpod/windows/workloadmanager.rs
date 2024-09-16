@@ -1,6 +1,6 @@
-// necessary imports
 use std::path::PathBuf;
-use backoff::{backoff::Backoff, ExponentialBackoff};
+use crate::readiness; 
+use backoff::ExponentialBackoff;
 
 struct WorkloadProxyNetworkHandler {
     uds: PathBuf,
