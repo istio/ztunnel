@@ -16,11 +16,14 @@ struct NetnsInner {
 }
 
 impl InpodNetns {
-    pub fn current() -> std::io::Result<Uuid> {
+    pub fn current() -> std::io::Result<u32> {
         let curns = unsafe {
-            GetCurrentThreadCompartmentId()
+            GetCurrentThreadCompartmentId().0
         };
-        curns.map(|f| f.into())
+        if curns == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        return Ok(curns)
     }
 
     pub fn capable() -> std::io::Result<()> {
@@ -30,9 +33,9 @@ impl InpodNetns {
         let ret = unsafe {
             SetCurrentThreadCompartmentId(curns)
         };
-        if ret != NOERROR {
-            return Err(std::io::Error::from_raw_os_error(ret));
+        if ret.is_err() {
+            return Err(std::io::Error::last_os_error());
         }
-        return Ok(())
+        Ok(())
     }
 }
