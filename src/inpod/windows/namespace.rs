@@ -1,8 +1,8 @@
 use nix::sched::{setns, CloneFlags};
-use windows::Win32::System::HostComputeNetwork::HcnQueryNamespaceProperties;
+use windows::Win32::{Foundation::NOERROR, System::HostComputeNetwork::HcnQueryNamespaceProperties};
 use std::sync::Arc;
 use uuid::Uuid;
-use windows::Win32::NetworkManagement::IpHelper::{SetCurrentThreadCompartmentId, GetCurrentThreadCompartmentId};
+use windows::Win32::NetworkManagement::IpHelper::{SetCurrentThreadCompartmentScope, SetCurrentThreadCompartmentId, GetCurrentThreadCompartmentId};
 
 #[derive(Clone, Debug)]
 pub struct InpodNetns {
@@ -27,8 +27,15 @@ impl InpodNetns {
         // set the netns to our current netns. This is intended to be a no-op,
         // and meant to be used as a test, so we can fail early if we can't set the netns
         let curns = Self::current()?;
-        SetCurrentThreadCompartmentScope();
-        setns(curns, CloneFlags::CLONE_NEWNET)
-            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+        let ret = unsafe {
+            SetCurrentThreadCompartmentId(curns)
+        };
+        if ret != NOERROR {
+            return Err(std::io::Error::from_raw_os_error(ret));
+        }
+        return Ok(())
+        // I think SetCurrentTHreadComparmentScope is the windows equivalent of setns.
+        // setns(curns, CloneFlags::CLONE_NEWNET)
+        //     .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
     }
 }
