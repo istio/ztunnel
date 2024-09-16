@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use libc::setsockopt;
+
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
 use std::sync::Arc;
@@ -19,7 +21,7 @@ use std::sync::Arc;
 use super::netns::InpodNetns;
 
 pub struct InPodConfig {
-    cur_netns: Arc<std::os::fd::OwnedFd>,
+    cur_netns: Arc<std::os::windows::io::RawHandle>,
     mark: Option<std::num::NonZeroU32>,
     reuse_port: bool,
 }
@@ -44,7 +46,7 @@ impl InPodConfig {
         }
     }
 
-    pub fn cur_netns(&self) -> Arc<std::os::fd::OwnedFd> {
+    pub fn cur_netns(&self) -> Arc<std::os::windows::io::RawHandle> {
         self.cur_netns.clone()
     }
     fn mark(&self) -> Option<std::num::NonZeroU32> {
@@ -69,7 +71,7 @@ impl InPodSocketFactory {
         self.netns.run(f)?
     }
 
-    fn configure<S: std::os::unix::io::AsFd, F: FnOnce() -> std::io::Result<S>>(
+    fn configure<S: std::os::windows::io::AsRawSocket, F: FnOnce() -> std::io::Result<S>>(
         &self,
         f: F,
     ) -> std::io::Result<S> {
@@ -134,9 +136,13 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
             std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
         })?;
 
+        // TODO: use setsockopt on Windows
+
+        /* // set_reuseport doesn't exist for Windows 
         if let Err(e) = sock.set_reuseport(true) {
             tracing::warn!("setting set_reuseport failed: {} addr: {}", e, addr);
         }
+        */
 
         sock.bind(addr)?;
         sock.listen(128).map(socket::Listener::new)
@@ -145,28 +151,28 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
         let sock = self.sf.configure(|| {
             let sock = match addr {
-                std::net::SocketAddr::V4(_) => nix::sys::socket::socket(
-                    nix::sys::socket::AddressFamily::Inet,
-                    nix::sys::socket::SockType::Datagram,
-                    nix::sys::socket::SockFlag::empty(),
-                    None,
-                )
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
-                std::net::SocketAddr::V6(_) => nix::sys::socket::socket(
-                    nix::sys::socket::AddressFamily::Inet6,
-                    nix::sys::socket::SockType::Datagram,
-                    nix::sys::socket::SockFlag::empty(),
-                    None,
-                )
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
+                std::net::SocketAddr::V4(_) => socket2::Socket::new(
+                    socket2::Domain::IPV4,
+                    socket2::Type::DGRAM, 
+                    None, // socket2::Protocol::UDP ??
+
+                ),
+                std::net::SocketAddr::V6(_) => socket2::Socket::new(
+                    socket2::Domain::IPV4,
+                    socket2::Type::DGRAM, 
+                    None, // socket2::Protocol::UDP ??
+                ),
             }?;
             Ok(sock)
         })?;
 
         let socket_ref = socket2::SockRef::from(&sock);
 
+        // TODO: call setsockopt on Windows to set SO_RESU
+        /*
         // important to set SO_REUSEPORT before binding!
         socket_ref.set_reuse_port(true)?;
+        */
         let addr = socket2::SockAddr::from(addr);
         socket_ref.bind(&addr)?;
 
