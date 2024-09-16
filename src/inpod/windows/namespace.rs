@@ -26,7 +26,7 @@ impl InpodNetns {
         // set the netns to our current netns. This is intended to be a no-op,
         // and meant to be used as a test, so we can fail early if we can't set the netns
         let curns = Self::current()?;
-        SetCurrentThreadCompartmentScope()
+        SetCurrentThreadCompartmentScope();
         setns(curns, CloneFlags::CLONE_NEWNET)
             .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
     }
