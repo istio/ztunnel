@@ -61,3 +61,44 @@ pub struct WorkloadProxyManagerState {
 
   inpod_config: InPodConfig,
 }
+
+impl WorkloadProxyManagerState {
+  pub fn new(
+      proxy_gen: ProxyFactory,
+      inpod_config: InPodConfig,
+      metrics: Arc<Metrics>,
+      admin_handler: Arc<super::admin::WorkloadManagerAdminHandler>,
+  ) -> Self {
+      WorkloadProxyManagerState {
+          proxy_gen,
+          metrics,
+          admin_handler,
+          workload_states: Default::default(),
+          pending_workloads: Default::default(),
+          draining: Default::default(),
+
+          snapshot_received: false,
+          snapshot_names: Default::default(),
+          inpod_config,
+    }
+  }
+  
+  // Call this on new connection
+  pub fn reset_snapshot(&mut self) {
+    self.snapshot_names.clear();
+    self.pending_workloads.clear();
+    self.snapshot_received = false;
+  }
+
+  pub async fn drain(self) {
+    let drain_futures =
+        self.workload_states.into_iter().map(|(_, v)| {
+            v.drain.start_drain_and_wait(drain::DrainMode::Graceful)
+        } /* do not .await here!!! */);
+    // join these first, as we need to drive these to completion
+    futures::future::join_all(drain_futures).await;
+    // these are join handles that are driven by tokio, we just need to wait for them, so join these
+    // last
+    self.draining.join().await;
+  }
+}
