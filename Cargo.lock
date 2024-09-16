@@ -3781,6 +3781,7 @@ dependencies = [
  "boring-sys",
  "byteorder",
  "bytes",
+ "cfg-if",
  "chrono",
  "criterion",
  "ctor",

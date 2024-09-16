@@ -118,6 +118,7 @@ tonic-build = { version = "0.12", default-features = false, features = ["prost"]
 prost-build = "0.13"
 anyhow = "1.0"
 rustc_version = "0.4"
+cfg-if = "1.0"
 
 [profile.release]
 opt-level = 3
