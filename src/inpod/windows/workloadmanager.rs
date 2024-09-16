@@ -1,6 +1,6 @@
 // necessary imports
 use std::path::PathBuf;
-use tokio::time::ExponentialBackoff;
+use backoff::{backoff::Backoff, ExponentialBackoff};
 
 struct WorkloadProxyNetworkHandler {
     uds: PathBuf,
@@ -11,7 +11,7 @@ struct WorkloadProxyReadinessHandler {
     // Manually drop as we don't want to mark ready if we are dropped.
     // This can happen when the server drains.
     block_ready: Option<std::mem::ManuallyDrop<readiness::BlockReady>>,
-    backoff: backoff::ExponentialBackoff,
+    backoff: ExponentialBackoff,
 }
 
 pub struct WorkloadProxyManager {
