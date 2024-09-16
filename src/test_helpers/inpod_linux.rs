@@ -47,7 +47,8 @@ pub fn start_ztunnel_server<P: AsRef<Path> + Send + 'static>(
             .build()
             .unwrap();
         rt.block_on(async move {
-            let listener = crate::inpod::linux::packet::bind(bind_path.as_ref()).expect("bind failed");
+            let listener =
+                crate::inpod::linux::packet::bind(bind_path.as_ref()).expect("bind failed");
             info!(
                 "waiting for connection from ztunnel server {}",
                 bind_path.as_ref().display()

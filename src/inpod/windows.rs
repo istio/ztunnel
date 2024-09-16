@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config as zconfig;
-use crate::readiness;
 use super::metrics::Metrics;
+use crate::config as zconfig;
 use crate::inpod::istio;
+use crate::readiness;
 use std::sync::Arc;
 use workloadmanager::WorkloadProxyManager;
 

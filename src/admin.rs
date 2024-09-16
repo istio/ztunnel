@@ -268,9 +268,9 @@ async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<B
 #[cfg(target_os = "windows")]
 async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
     Ok(Response::builder()
-                            .status(hyper::StatusCode::NOT_FOUND)
-                            .body("pprof not supported on non-Linux platforms".into())
-                            .expect("builder with known status code should not fail"))
+        .status(hyper::StatusCode::NOT_FOUND)
+        .body("pprof not supported on non-Linux platforms".into())
+        .expect("builder with known status code should not fail"))
 }
 
 async fn handle_server_shutdown(

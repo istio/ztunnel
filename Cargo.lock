@@ -1090,6 +1090,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hcn"
+version = "0.1.0"
+source = "git+https://github.com/jsturtevant/hcn-rs.git#28d3456c07d9cf62b7e3316c65b9433d29becdce"
+dependencies = [
+ "anyhow",
+ "log",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "windows 0.51.1",
+]
+
+[[package]]
 name = "hdrhistogram"
 version = "7.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2705,6 +2718,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_repr"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c64451ba24fc7a6a2d60fc75dd9c83c90903b19028d4eff35e88fc1e86564e9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.72",
+]
+
+[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3493,12 +3517,31 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
+version = "0.51.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca229916c5ee38c2f2bc1e9d8f04df975b4bd93f9955dc69fabb5d91270045c9"
+dependencies = [
+ "windows-core 0.51.1",
+ "windows-targets 0.48.5",
+]
+
+[[package]]
+name = "windows"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
 dependencies = [
  "windows-core 0.58.0",
  "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.51.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1f8cf84f35d2db49a46868f947758c7a1138116f7fac3bc844f43ade1292e64"
+dependencies = [
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -3792,6 +3835,7 @@ dependencies = [
  "futures-util",
  "h2",
  "hashbrown 0.14.5",
+ "hcn",
  "hickory-client",
  "hickory-proto",
  "hickory-resolver",
@@ -3854,8 +3898,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "uuid",
- "windows",
+ "windows 0.58.0",
  "x509-parser",
  "ztunnel",
 ]
