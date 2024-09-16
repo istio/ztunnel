@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::inpod::windows::namespace::InpodNetns;
 
 pub struct InPodConfig {
-    cur_netns: Arc<std::os::windows::io::RawHandle>,
+    cur_netns: u32,
     mark: Option<std::num::NonZeroU32>,
     reuse_port: bool,
 }
@@ -27,7 +27,7 @@ pub struct InPodConfig {
 impl InPodConfig {
     pub fn new(cfg: &config::Config) -> std::io::Result<Self> {
         Ok(InPodConfig {
-            cur_netns: Arc::new(InpodNetns::current()?),
+            cur_netns: InpodNetns::current()?,
             mark: std::num::NonZeroU32::new(cfg.packet_mark.expect("in pod requires packet mark")),
             reuse_port: cfg.inpod_port_reuse,
         })
@@ -44,8 +44,8 @@ impl InPodConfig {
         }
     }
 
-    pub fn cur_netns(&self) -> Arc<std::os::windows::io::RawHandle> {
-        self.cur_netns.clone()
+    pub fn cur_netns(&self) -> u32 {
+        self.cur_netns
     }
     fn mark(&self) -> Option<std::num::NonZeroU32> {
         self.mark
