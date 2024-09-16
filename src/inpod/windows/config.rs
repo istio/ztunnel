@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use libc::setsockopt;
-
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
 use std::sync::Arc;
 
-use super::netns::InpodNetns;
+use crate::inpod::windows::namespace::InpodNetns;
 
 pub struct InPodConfig {
     cur_netns: Arc<std::os::windows::io::RawHandle>,
