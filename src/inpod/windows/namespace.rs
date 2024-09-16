@@ -34,8 +34,5 @@ impl InpodNetns {
             return Err(std::io::Error::from_raw_os_error(ret));
         }
         return Ok(())
-        // I think SetCurrentTHreadComparmentScope is the windows equivalent of setns.
-        // setns(curns, CloneFlags::CLONE_NEWNET)
-        //     .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
     }
 }
