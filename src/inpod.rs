@@ -1,14 +1,13 @@
-pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod metrics;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-
 pub mod istio {
-  pub mod zds {
-      tonic::include_proto!("istio.workload.zds");
-  }
+    pub mod zds {
+        tonic::include_proto!("istio.workload.zds");
+    }
 }
 
 #[derive(thiserror::Error, Debug)]

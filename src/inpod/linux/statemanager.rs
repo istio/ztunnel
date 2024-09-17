@@ -24,8 +24,8 @@ use crate::state::WorkloadInfo;
 use super::config::InPodConfig;
 
 use super::netns::{InpodNetns, NetnsID};
-use super::WorkloadUid;
 use super::WorkloadMessage;
+use super::WorkloadUid;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {

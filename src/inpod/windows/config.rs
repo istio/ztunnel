@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::inpod::windows::namespace::InpodNetns;
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
-use tokio::net::TcpSocket;
 use std::os::windows::io::FromRawSocket;
-use crate::inpod::windows::namespace::InpodNetns;
+use tokio::net::TcpSocket;
 
 pub struct InPodConfig {
     cur_netns: u32,
@@ -68,7 +68,7 @@ impl InPodSocketFactory {
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
         self.netns.run(f)?
     }
-    
+
     pub fn configure<S: std::os::windows::io::AsRawSocket, F: FnOnce() -> std::io::Result<S>>(
         &self,
         socket_factory: F,
@@ -77,30 +77,39 @@ impl InPodSocketFactory {
         let socket = socket_factory()?;
         let raw_socket = socket.as_raw_socket();
         let tcp_socket = unsafe { TcpSocket::from_raw_socket(raw_socket) };
-    
+
         crate::socket::set_mark(&tcp_socket, mark.into())?;
         Ok(socket)
     }
 }
 
-
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| DefaultSocketFactory.new_tcp_v4(), self.mark.unwrap().get())
+        self.configure(
+            || DefaultSocketFactory.new_tcp_v4(),
+            self.mark.unwrap().get(),
+        )
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| DefaultSocketFactory.new_tcp_v6(), self.mark.unwrap().get())
+        self.configure(
+            || DefaultSocketFactory.new_tcp_v6(),
+            self.mark.unwrap().get(),
+        )
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = self.configure(|| std::net::TcpListener::bind(addr), self.mark.unwrap().get())?;
+        let std_sock = self.configure(
+            || std::net::TcpListener::bind(addr),
+            self.mark.unwrap().get(),
+        )?;
         std_sock.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
 
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
-        let std_sock = self.configure(|| std::net::UdpSocket::bind(addr), self.mark.unwrap().get())?;
+        let std_sock =
+            self.configure(|| std::net::UdpSocket::bind(addr), self.mark.unwrap().get())?;
         std_sock.set_nonblocking(true)?;
         tokio::net::UdpSocket::from_std(std_sock)
     }
@@ -131,14 +140,17 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let sock = self.sf.configure(|| match addr {
-            std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
-            std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
-        }, self.sf.mark.unwrap().get())?;
+        let sock = self.sf.configure(
+            || match addr {
+                std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+                std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+            },
+            self.sf.mark.unwrap().get(),
+        )?;
 
         // TODO: use setsockopt on Windows
 
-        /* // set_reuseport doesn't exist for Windows 
+        /* // set_reuseport doesn't exist for Windows
         if let Err(e) = sock.set_reuseport(true) {
             tracing::warn!("setting set_reuseport failed: {} addr: {}", e, addr);
         }
@@ -149,22 +161,24 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
     }
 
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
-        let sock = self.sf.configure(|| {
-            let sock = match addr {
-                std::net::SocketAddr::V4(_) => socket2::Socket::new(
-                    socket2::Domain::IPV4,
-                    socket2::Type::DGRAM, 
-                    None, // socket2::Protocol::UDP ??
-
-                ),
-                std::net::SocketAddr::V6(_) => socket2::Socket::new(
-                    socket2::Domain::IPV4,
-                    socket2::Type::DGRAM, 
-                    None, // socket2::Protocol::UDP ??
-                ),
-            }?;
-            Ok(sock)
-        }, self.sf.mark.unwrap().get())?;
+        let sock = self.sf.configure(
+            || {
+                let sock = match addr {
+                    std::net::SocketAddr::V4(_) => socket2::Socket::new(
+                        socket2::Domain::IPV4,
+                        socket2::Type::DGRAM,
+                        None, // socket2::Protocol::UDP ??
+                    ),
+                    std::net::SocketAddr::V6(_) => socket2::Socket::new(
+                        socket2::Domain::IPV4,
+                        socket2::Type::DGRAM,
+                        None, // socket2::Protocol::UDP ??
+                    ),
+                }?;
+                Ok(sock)
+            },
+            self.sf.mark.unwrap().get(),
+        )?;
 
         let socket_ref = socket2::SockRef::from(&sock);
 

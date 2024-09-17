@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config as zconfig;
-use crate::readiness;
 use super::metrics::Metrics;
-use crate::inpod::istio;
+use crate::config as zconfig;
+use crate::inpod::windows::protocol::istio::zds::WorkloadInfo;
+use crate::readiness;
 use std::sync::Arc;
 use workloadmanager::WorkloadProxyManager;
 
@@ -48,9 +48,9 @@ impl WorkloadUid {
 
 #[derive(Debug)]
 pub struct WorkloadData {
-    namespace_id: u32,
+    windows_namespace_id: u32,
     workload_uid: WorkloadUid,
-    workload_info: Option<istio::zds::WorkloadInfo>,
+    workload_info: Option<WorkloadInfo>,
 }
 
 #[derive(Debug)]

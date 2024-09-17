@@ -251,8 +251,9 @@ impl WorkloadProxyManagerState {
                 if !self.snapshot_received {
                     self.snapshot_names.insert(poddata.workload_uid.clone());
                 }
-                let netns = InpodNetns::new(self.inpod_config.cur_netns(), poddata.namespace_id)
-                    .map_err(|e| Error::ProxyError(crate::proxy::Error::Io(e)))?;
+                let netns =
+                    InpodNetns::new(self.inpod_config.cur_netns(), poddata.windows_namespace_id)
+                        .map_err(|e| Error::ProxyError(crate::proxy::Error::Io(e)))?;
                 let info = poddata.workload_info.map(|w| WorkloadInfo {
                     name: w.name,
                     namespace: w.namespace,

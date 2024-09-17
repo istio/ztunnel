@@ -23,11 +23,13 @@ message WorkloadInfo {
   string service_account = 3;
 }
 
-// Add a workload to the ztunnel. this will be accompanied by ancillary data contianing
+// Add a workload to the ztunnel. this will be accompanied by ancillary data containing
 // the workload's netns file descriptor.
 message AddWorkload {
   string uid = 1;
   WorkloadInfo workload_info = 2;
+  // The namespace/compartment id for the workload. Windows only.
+  string windows_namespace_id = 5;
 }
 
 // Keep workload that we can't find in the fd cache. This can only be sent before SnapshotSent is sent

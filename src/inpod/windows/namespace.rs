@@ -1,9 +1,10 @@
-use std::sync::Arc;
 use log::warn;
+use std::sync::Arc;
 use windows::core::GUID;
-use windows::Win32::NetworkManagement::IpHelper::{SetCurrentThreadCompartmentId, GetCurrentThreadCompartmentId};
+use windows::Win32::NetworkManagement::IpHelper::{
+    GetCurrentThreadCompartmentId, SetCurrentThreadCompartmentId,
+};
 // use windows::Win32::System::HostComputeNetwork as hcn;
-
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct Namespace {

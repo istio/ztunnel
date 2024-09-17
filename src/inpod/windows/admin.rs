@@ -1,6 +1,6 @@
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use tracing::error;
-use anyhow::anyhow;
 
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::state::WorkloadInfo;

@@ -22,9 +22,9 @@ use tokio::net::{TcpListener, TcpStream};
 #[cfg(target_os = "linux")]
 use {
     socket2::{Domain, SockRef},
+    std::io::Error,
     std::io::ErrorKind,
     tracing::warn,
-    std::io::Error,
 };
 
 #[cfg(target_os = "linux")]
