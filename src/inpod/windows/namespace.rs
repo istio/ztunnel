@@ -13,6 +13,9 @@ pub struct Namespace {
 
 #[derive(Clone, Debug)]
 pub struct InpodNetns {
+    // sjinxuan: this Arc seems unecessary.
+    // In linux, a netns is represented by a file descriptor, we have to be mindful of copies, lifetimes, ownership, etc.
+    // In windows, a netns is represented by a u32. 
     inner: Arc<NetnsInner>,
 }
 
@@ -24,6 +27,7 @@ struct NetnsInner {
 
 impl InpodNetns {
     pub fn current() -> std::io::Result<u32> {
+        // GetCurrentThreadCompartmentId returns 0 on failure, which not how WIN32_ERROR is documented.
         let curr_namespace = unsafe { GetCurrentThreadCompartmentId() };
         if curr_namespace.0 == 0 {
             warn!("GetCurrentThreadCompartmentId failed");
@@ -40,7 +44,8 @@ impl InpodNetns {
     }
 
     pub fn new(cur_namespace: u32, workload_namespace: u32) -> std::io::Result<Self> {
-        // We should check if the namespace is valid, but idk how to do that
+        // We should check if the namespace is valid, but idk how to do that, so just assume the namespace exists
+        // Maybe we can try switching in and out of it.
         // the i32 doesn't matter, but i can't give it () and i need to give it something
         // FIXME: sjinxuan (or anybody else)
         let ns: Result<u32, f32> = Ok(workload_namespace); // = Compartment(&workload_namespace);
@@ -71,6 +76,7 @@ impl InpodNetns {
     }
 
     // Useful for logging / debugging
+    // sjinxuan: maybe we can delete this since the api only seems to be using u32 ids instead of the GUIDs.
     pub fn workload_namespace_guid(&self) -> GUID {
         self.inner.workload_namespace.guid
     }
@@ -86,6 +92,7 @@ impl InpodNetns {
     }
 }
 
+/// Hop into a namespace
 fn setns(namespace: u32) -> std::io::Result<()> {
     let error = unsafe { SetCurrentThreadCompartmentId(namespace) };
     if error.0 != 0 {
