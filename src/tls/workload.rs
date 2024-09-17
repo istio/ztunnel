@@ -205,7 +205,10 @@ impl IdentityVerifier {
         }
         debug!("identity mismatch {id:?} != {:?}", self.identity);
         Err(rustls::Error::InvalidCertificate(
-            rustls::CertificateError::ApplicationVerificationFailure,
+            rustls::CertificateError::Other(rustls::OtherError(Arc::new(TlsError::SanError(
+                self.identity.clone(),
+                id,
+            )))),
         ))
     }
 }
