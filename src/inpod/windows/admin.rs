@@ -48,6 +48,32 @@ pub struct WorkloadManagerAdminHandler {
 }
 
 impl WorkloadManagerAdminHandler {
+    pub fn proxy_pending(
+        &self,
+        uid: &crate::inpod::windows::WorkloadUid,
+        workload_info: &Option<WorkloadInfo>,
+    ) {
+        let mut state = self.state.write().unwrap();
+
+        // don't increment count here, as it is only for up and down. see comment in count.
+        match state.get_mut(uid) {
+            Some(key) => {
+                key.state = State::Pending;
+            }
+            None => {
+                state.insert(
+                    uid.clone(),
+                    ProxyState {
+                        state: State::Pending,
+                        connections: None,
+                        count: 0,
+                        info: workload_info.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     pub fn proxy_down(&self, uid: &crate::inpod::windows::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 

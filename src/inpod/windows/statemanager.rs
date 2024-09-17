@@ -242,6 +242,19 @@ async fn add_workload_inner(
     }
   }
 
+  fn del_workload(&mut self, workload_uid: &WorkloadUid) {
+    // for idempotency, we ignore errors here (maybe just log / metric them)
+    self.pending_workloads.remove(workload_uid);
+    let Some(workload_state) = self.workload_states.remove(workload_uid) else {
+        // TODO: add metrics
+        return;
+    };
+
+    self.update_proxy_count_metrics();
+
+    self.draining.shutdown_workload(workload_state);
+  }
+
   fn update_proxy_count_metrics(&self) {
     self.metrics
         .active_proxy_count
