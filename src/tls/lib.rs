@@ -77,16 +77,14 @@ pub enum TlsError {
     CertificateLookup(NetworkAddress),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
-    #[error("san verification error: remote did not present the expected SAN ({0:?}), got {1:?}")]
+    #[error(
+        "identity verification error: peer did not present the expected SAN ({0:?}), got {1:?}"
+    )]
     SanError(Vec<Identity>, Vec<Identity>),
     #[error(
-        "san verification error: remote did not present the expected trustdomain ({0}), got {1:?}"
+        "identity verification error: peer did not present the expected trustdomain ({0}), got {1:?}"
     )]
     SanTrustDomainError(String, Vec<Identity>),
-    #[error("failed getting ex data")]
-    ExDataError,
-    #[error("failed getting peer cert")]
-    PeerCertError,
     #[error("ssl error: {0}")]
     SslError(#[from] Error),
 }
