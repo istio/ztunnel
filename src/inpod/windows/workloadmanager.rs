@@ -259,7 +259,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
     async fn read_message_and_retry_proxies(
         &mut self,
         processor: &mut WorkloadStreamProcessor,
-    ) -> anyhow::Result<Option<crate::inpod::linux::WorkloadMessage>> {
+    ) -> anyhow::Result<Option<crate::inpod::windows::WorkloadMessage>> {
         let readmsg = processor.read_message();
         // Note: readmsg future is NOT cancel safe, so we want to make sure this function doesn't exit
         // return without completing it.
