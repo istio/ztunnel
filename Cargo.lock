@@ -1228,6 +1228,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hcn"
+version = "0.1.0"
+source = "git+https://github.com/keithmattix/hcn-rs.git#a4b3f6ee703509694b6eb178b07cdbb637771e80"
+dependencies = [
+ "anyhow",
+ "log",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "windows",
+]
+
+[[package]]
 name = "hdrhistogram"
 version = "7.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1460,7 +1473,7 @@ dependencies = [
  "http-body",
  "hyper",
  "pin-project-lite",
- "socket2",
+ "socket2 0.5.8",
  "tokio",
  "tower-service",
  "tracing",
@@ -1653,7 +1666,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b58db92f96b720de98181bbbe63c831e87005ab460c1bf306eb2622b4707997f"
 dependencies = [
- "socket2",
+ "socket2 0.5.8",
  "widestring",
  "windows-sys 0.48.0",
  "winreg",
@@ -3065,6 +3078,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_repr"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c64451ba24fc7a6a2d60fc75dd9c83c90903b19028d4eff35e88fc1e86564e9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+]
+
+[[package]]
 name = "serde_yaml"
 version = "0.9.34+deprecated"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3115,6 +3139,15 @@ name = "smallvec"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
+
+[[package]]
+name = "socket2"
+version = "0.5.7"
+source = "git+https://github.com/keithmattix/socket2.git?branch=windows-original-dst#6c160faa061a9a8fb67f878b00218bb8597ab73d"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "socket2"
@@ -3453,7 +3486,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2",
+ "socket2 0.5.8",
  "tokio-macros",
  "windows-sys 0.52.0",
 ]
@@ -4339,6 +4372,7 @@ dependencies = [
  "futures-util",
  "h2",
  "hashbrown",
+ "hcn",
  "hickory-client",
  "hickory-proto",
  "hickory-resolver",
@@ -4383,7 +4417,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "socket2",
+ "socket2 0.5.7",
  "split-iter",
  "test-case",
  "textnonce",
@@ -4403,7 +4437,6 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "uuid",
  "windows",
  "x509-parser 0.17.0",
  "ztunnel",
