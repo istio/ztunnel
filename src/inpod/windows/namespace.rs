@@ -86,6 +86,16 @@ impl InpodNetns {
             dev: 0,
         }
     }
+
+    pub fn run<F, T>(&self, f: F) -> std::io::Result<T>
+    where
+        F: FnOnce() -> T,
+    {
+        setns(self.inner.workload_namespace.id)?;
+        let ret = f();
+        setns(self.inner.current_namespace).expect("this must never fail");
+        Ok(ret)
+    }
 }
 
 fn setns(namespace: u32) -> std::io::Result<()> {
