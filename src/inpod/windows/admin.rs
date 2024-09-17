@@ -74,6 +74,35 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
+    pub fn proxy_up(
+        &self,
+        uid: &crate::inpod::windows::WorkloadUid,
+        workload_info: &Option<WorkloadInfo>,
+        cm: Option<ConnectionManager>,
+    ) {
+        let mut state = self.state.write().unwrap();
+
+        match state.get_mut(uid) {
+            Some(key) => {
+                key.count += 1;
+                key.state = State::Up;
+                key.connections = cm;
+                key.info.clone_from(workload_info);
+            }
+            None => {
+                state.insert(
+                    uid.clone(),
+                    ProxyState {
+                        state: State::Up,
+                        connections: cm,
+                        count: 1,
+                        info: workload_info.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     pub fn proxy_down(&self, uid: &crate::inpod::windows::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
