@@ -14,7 +14,8 @@
 
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
-
+use tokio::net::TcpSocket;
+use std::os::windows::io::FromRawSocket;
 use crate::inpod::windows::namespace::InpodNetns;
 
 pub struct InPodConfig {
@@ -55,11 +56,11 @@ struct InPodSocketFactory {
     netns: InpodNetns,
     mark: Option<std::num::NonZeroU32>,
 }
-
 impl InPodSocketFactory {
     fn from_cfg(inpod_config: &InPodConfig, netns: InpodNetns) -> Self {
         Self::new(netns, inpod_config.mark())
     }
+
     fn new(netns: InpodNetns, mark: Option<std::num::NonZeroU32>) -> Self {
         Self { netns, mark }
     }
@@ -67,37 +68,39 @@ impl InPodSocketFactory {
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
         self.netns.run(f)?
     }
-
-    fn configure<S: std::os::windows::io::AsRawSocket, F: FnOnce() -> std::io::Result<S>>(
+    
+    pub fn configure<S: std::os::windows::io::AsRawSocket, F: FnOnce() -> std::io::Result<S>>(
         &self,
-        f: F,
+        socket_factory: F,
+        mark: u32,
     ) -> std::io::Result<S> {
-        let socket = self.netns.run(f)??;
-
-        if let Some(mark) = self.mark {
-            crate::socket::set_mark(&socket, mark.into())?;
-        }
+        let socket = socket_factory()?;
+        let raw_socket = socket.as_raw_socket();
+        let tcp_socket = unsafe { TcpSocket::from_raw_socket(raw_socket) };
+    
+        crate::socket::set_mark(&tcp_socket, mark.into())?;
         Ok(socket)
     }
 }
 
+
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| DefaultSocketFactory.new_tcp_v4())
+        self.configure(|| DefaultSocketFactory.new_tcp_v4(), self.mark.unwrap().get())
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| DefaultSocketFactory.new_tcp_v6())
+        self.configure(|| DefaultSocketFactory.new_tcp_v6(), self.mark.unwrap().get())
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = self.configure(|| std::net::TcpListener::bind(addr))?;
+        let std_sock = self.configure(|| std::net::TcpListener::bind(addr), self.mark.unwrap().get())?;
         std_sock.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
 
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
-        let std_sock = self.configure(|| std::net::UdpSocket::bind(addr))?;
+        let std_sock = self.configure(|| std::net::UdpSocket::bind(addr), self.mark.unwrap().get())?;
         std_sock.set_nonblocking(true)?;
         tokio::net::UdpSocket::from_std(std_sock)
     }
@@ -131,7 +134,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
         let sock = self.sf.configure(|| match addr {
             std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
             std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
-        })?;
+        }, self.sf.mark.unwrap().get())?;
 
         // TODO: use setsockopt on Windows
 
@@ -161,7 +164,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
                 ),
             }?;
             Ok(sock)
-        })?;
+        }, self.sf.mark.unwrap().get())?;
 
         let socket_ref = socket2::SockRef::from(&sock);
 
