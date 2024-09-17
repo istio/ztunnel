@@ -15,6 +15,7 @@
 use super::Error;
 
 use crate::identity::{self, Identity};
+use crate::state::workload::NetworkAddress;
 
 use std::fmt::Debug;
 
@@ -72,6 +73,8 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
 pub enum TlsError {
     #[error("tls handshake error: {0:?}")]
     Handshake(std::io::Error),
+    #[error("certificate lookup error: {0} is not a known destination")]
+    CertificateLookup(NetworkAddress),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
     #[error(
