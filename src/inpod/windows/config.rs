@@ -14,7 +14,6 @@
 
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
-use std::sync::Arc;
 
 use crate::inpod::windows::namespace::InpodNetns;
 

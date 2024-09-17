@@ -1,7 +1,12 @@
-use windows::Win32::{Foundation::NOERROR, System::HostComputeNetwork::HcnQueryNamespaceProperties};
 use std::sync::Arc;
 use uuid::Uuid;
-use windows::Win32::NetworkManagement::IpHelper::{SetCurrentThreadCompartmentScope, SetCurrentThreadCompartmentId, GetCurrentThreadCompartmentId};
+use windows::Win32::NetworkManagement::IpHelper::{SetCurrentThreadCompartmentId, GetCurrentThreadCompartmentId};
+
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub struct NetnsID {
+    pub inode: libc::ino_t,
+    pub dev: libc::dev_t,
+}
 
 #[derive(Clone, Debug)]
 pub struct InpodNetns {
@@ -36,5 +41,17 @@ impl InpodNetns {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    // useful for logging / debugging
+    pub fn workload_netns_id(&self) -> NetnsID {
+        //// from previous implementation
+        // self.inner.netns_id
+        
+        // TODO: Implement this
+        NetnsID {
+            inode: 0,
+            dev: 0,
+        }
     }
 }
