@@ -15,7 +15,6 @@
 use super::Error;
 
 use crate::identity::{self, Identity};
-use crate::state::workload::NetworkAddress;
 
 use std::fmt::Debug;
 
@@ -73,20 +72,16 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
 pub enum TlsError {
     #[error("tls handshake error: {0:?}")]
     Handshake(std::io::Error),
-    #[error("certificate lookup error: {0} is not a known destination")]
-    CertificateLookup(NetworkAddress),
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
-    #[error("san verification error: remote did not present the expected SAN ({0:?}), got {1:?}")]
+    #[error(
+        "identity verification error: peer did not present the expected SAN ({0:?}), got {1:?}"
+    )]
     SanError(Vec<Identity>, Vec<Identity>),
     #[error(
-        "san verification error: remote did not present the expected trustdomain ({0}), got {1:?}"
+        "identity verification error: peer did not present the expected trustdomain ({0}), got {1:?}"
     )]
     SanTrustDomainError(String, Vec<Identity>),
-    #[error("failed getting ex data")]
-    ExDataError,
-    #[error("failed getting peer cert")]
-    PeerCertError,
     #[error("ssl error: {0}")]
     SslError(#[from] Error),
 }
