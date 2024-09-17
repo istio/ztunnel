@@ -1,9 +1,23 @@
+// Copyright Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::state::WorkloadInfo;
-
+use anyhow::anyhow;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -44,13 +58,13 @@ where
 
 #[derive(Default)]
 pub struct WorkloadManagerAdminHandler {
-    state: RwLock<HashMap<crate::inpod::windows::WorkloadUid, ProxyState>>,
+    state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
 }
 
 impl WorkloadManagerAdminHandler {
     pub fn proxy_pending(
         &self,
-        uid: &crate::inpod::windows::WorkloadUid,
+        uid: &crate::inpod::WorkloadUid,
         workload_info: &Option<WorkloadInfo>,
     ) {
         let mut state = self.state.write().unwrap();
@@ -73,10 +87,9 @@ impl WorkloadManagerAdminHandler {
             }
         }
     }
-
     pub fn proxy_up(
         &self,
-        uid: &crate::inpod::windows::WorkloadUid,
+        uid: &crate::inpod::WorkloadUid,
         workload_info: &Option<WorkloadInfo>,
         cm: Option<ConnectionManager>,
     ) {
@@ -103,7 +116,7 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
-    pub fn proxy_down(&self, uid: &crate::inpod::windows::WorkloadUid) {
+    pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
@@ -118,5 +131,56 @@ impl WorkloadManagerAdminHandler {
                 debug_assert!(false, "proxy_down called where no proxy was created");
             }
         }
+    }
+
+    fn to_json(&self) -> anyhow::Result<serde_json::Value> {
+        if let Ok(state) = self.state.read() {
+            Ok(serde_json::to_value(&*state)?)
+        } else {
+            Err(anyhow!("Failed to read state"))
+        }
+    }
+}
+
+impl crate::admin::AdminHandler2 for WorkloadManagerAdminHandler {
+    fn key(&self) -> &'static str {
+        "workloadState"
+    }
+
+    fn handle(&self) -> anyhow::Result<serde_json::Value> {
+        self.to_json()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_proxy_state() {
+        let handler = WorkloadManagerAdminHandler::default();
+        let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
+
+        let uid1 = crate::inpod::linux::WorkloadUid::new("uid1".to_string());
+        handler.proxy_pending(&uid1, &None);
+        assert_eq!(data(), r#"{"uid1":{"state":"Pending"}}"#);
+        handler.proxy_up(
+            &uid1,
+            &Some(crate::state::WorkloadInfo {
+                name: "name".to_string(),
+                namespace: "ns".to_string(),
+                service_account: "sa".to_string(),
+            }),
+            None,
+        );
+        assert_eq!(
+            data(),
+            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Up"}}"#
+        );
+        handler.proxy_down(&uid1);
+        assert_eq!(data(), "{}");
+
+        let state = handler.state.read().unwrap();
+        assert_eq!(state.len(), 0);
     }
 }

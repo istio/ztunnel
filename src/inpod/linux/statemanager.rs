@@ -24,8 +24,8 @@ use crate::state::WorkloadInfo;
 use super::config::InPodConfig;
 
 use super::netns::{InpodNetns, NetnsID};
-use super::WorkloadUid;
 use super::WorkloadMessage;
+use super::WorkloadUid;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {
@@ -278,7 +278,7 @@ impl WorkloadProxyManagerState {
         self.admin_handler
             .proxy_pending(workload_uid, workload_info);
 
-        let workload_netns_id = netns.workload_netns_id();
+        let workload_netns_id = netns.workload_namespace_guid();
 
         debug!(
             workload=?workload_uid,

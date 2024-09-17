@@ -24,7 +24,6 @@ use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 use zds::workload_request::Payload;
 
-// Not dead code, but automock confuses Rust otherwise when built with certain targets
 #[allow(dead_code)]
 pub struct WorkloadStreamProcessor {
     stream: UnixStream,

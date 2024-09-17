@@ -17,12 +17,16 @@ use crate::readiness;
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::net::TcpStream;
+use tokio::time::sleep;
+use tokio_util::compat::Tokio02AsyncReadCompatExt;
+use tokio_util::compat::Tokio02AsyncWriteCompatExt;
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tracing::{debug, error, info, warn};
 
 use super::statemanager::WorkloadProxyManagerState;
 use crate::inpod::Error;
-use crate::inpod::windows::namespace::InpodNetns;
+
+use crate::inpod::windows::namespace::InpodNamespace;
 
 use super::protocol::WorkloadStreamProcessor;
 
@@ -104,29 +108,53 @@ impl WorkloadProxyNetworkHandler {
         Ok(Self { uds })
     }
 
-    async fn connect(&self) -> TcpStream {
-        let mut backoff = Duration::from_millis(10);
+    // OLD CODE USING UNIX STREAM  
+    // async fn connect(&self) -> UnixStream {
+    //     let mut backoff = Duration::from_millis(10);
 
+    //     debug!("connecting to server: {:?}", self.uds);
+
+    //     loop {
+    //         match super::packet::connect(&self.uds).await {
+    //             Err(e) => {
+    //                 backoff =
+    //                     std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
+    //                 warn!(
+    //                     "failed to connect to the Istio CNI node agent over {:?}, is the node agent healthy? details: {:?}. retrying in {:?}",
+    //                     &self.uds, e, backoff
+    //                 );
+    //                 tokio::time::sleep(backoff).await;
+    //                 continue;
+    //             }
+
+    //             Ok(conn) => {
+    //                 return conn;
+    //             }
+    //         };
+    //     }
+    // }
+    
+    // TODO make this work without UnixStream
+    async fn connect(&self) -> Result<NamedPipeClient, anyhow::Error> {
+        let mut backoff = Duration::from_millis(10);
+    
         debug!("connecting to server: {:?}", self.uds);
 
+        let client_options = ClientOptions::new()
+            .pipe_mode(tokio::net::windows::named_pipe::PipeMode::Message)
+            .open(&self.uds);
         loop {
-            let addr = self.uds.to_str().unwrap_or_default();
-            match TcpStream::connect(addr).await {
+            match client_options {
+                Ok(client) => {
+                    info!("connected to server: {:?}", self.uds);
+                    return Ok(client);
+                }
                 Err(e) => {
-                    backoff =
-                        std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
-                    warn!(
-                        "failed to connect to the Istio CNI node agent over {:?}, is the node agent healthy? details: {:?}. retrying in {:?}",
-                        &self.uds, e, backoff
-                    );
-                    tokio::time::sleep(backoff).await;
-                    continue;
+                    error!("failed to connect to server: {:?}, error: {:?}", self.uds, e);
+                    sleep(backoff).await;
+                    backoff *= 2;
                 }
-
-                Ok(conn) => {
-                    return conn;
-                }
-            };
+            }
         }
     }
 }
@@ -134,8 +162,7 @@ impl WorkloadProxyNetworkHandler {
 impl WorkloadProxyManager {
     pub fn verify_syscalls() -> anyhow::Result<()> {
         // verify that we are capable, so we can fail early if not.
-       InpodNetns::capable()
-            .map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))?;
+        InpodNamespace::capable().map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))?;
         // verify that we can set the socket mark, so we can fail early if not.
         Self::verify_set_mark().map_err(|e| anyhow::anyhow!("failed to set socket mark: {:?}", e))
     }
@@ -260,7 +287,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
     async fn read_message_and_retry_proxies(
         &mut self,
         processor: &mut WorkloadStreamProcessor,
-    ) -> anyhow::Result<Option<crate::inpod::windows::WorkloadMessage>> {
+    ) -> anyhow::Result<Option<crate::inpod::linux::WorkloadMessage>> {
         let readmsg = processor.read_message();
         // Note: readmsg future is NOT cancel safe, so we want to make sure this function doesn't exit
         // return without completing it.
@@ -444,7 +471,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_process_add() {
         let f = fixture!();
-        let (s1, mut s2) = TcpStream::pair().unwrap();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
 
@@ -468,7 +495,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_process_failed_announce() {
         let f = fixture!();
-        let (s1, mut s2) = TcpStream::pair().unwrap();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
 
@@ -491,7 +518,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_process_failed() {
         let f = fixture!();
-        let (s1, mut s2) = TcpStream::pair().unwrap();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
             WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
@@ -533,7 +560,7 @@ pub(crate) mod tests {
         let f = fixture!();
         let m = f.inpod_metrics;
         let mut state = f.state;
-        let (s1, mut s2) = TcpStream::pair().unwrap();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
             WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
 
@@ -567,7 +594,7 @@ pub(crate) mod tests {
     async fn test_process_snapshot_with_missing_workload() {
         let f = fixture!();
         let m = f.inpod_metrics;
-        let (s1, mut s2) = TcpStream::pair().unwrap();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
 
@@ -603,7 +630,7 @@ pub(crate) mod tests {
         assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 2);
 
         // second connection - don't send the one of the proxies here, to see ztunnel reconciles and removes it:
-        let (s1, mut s2) = TcpStream::pair().unwrap();
+        let (s1, mut s2) = UnixStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
 
         let server = tokio::spawn(async move {
