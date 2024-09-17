@@ -178,7 +178,7 @@ async fn add_workload_inner(
         .proxy_up(&uid, workload_info, proxies.connection_manager);
 
     let metrics = self.metrics.clone();
-    let admin_handler = self.admin_handler.clone();
+    let admin_handler: Arc<crate::inpod::windows::admin::WorkloadManagerAdminHandler> = self.admin_handler.clone();
 
     metrics.proxies_started.get_or_create(&()).inc();
     if let Some(proxy) = proxies.proxy {
