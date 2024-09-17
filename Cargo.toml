@@ -86,7 +86,7 @@ rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { git = "https://github.com/keithmattix/socket2.git", branch="windows-original-dst", features = ["all"] }
 textnonce = { version = "1.0" }
 thiserror = "2.0"
 tls-listener = { version = "0.11" }
@@ -122,7 +122,7 @@ pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58.0", features = ["Win32_System_HostCompute", "Win32_System_HostComputeNetwork", "Win32_System_HostComputeSystem", "Win32_NetworkManagement_IpHelper"] }
-uuid = "1.10.0"
+hcn = { git = "https://github.com/keithmattix/hcn-rs.git" }
 
 [build-dependencies]
 tonic-build = { version = "0.13", default-features = false, features = ["prost"] }

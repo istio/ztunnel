@@ -348,8 +348,9 @@ fn init_inpod_proxy_mgr(
     let metrics = Arc::new(crate::inpod::metrics::Metrics::new(
         registry.sub_registry_with_prefix("workload_manager"),
     ));
-    let proxy_mgr = crate::inpod::windows::init_and_new(metrics, admin_server, config, proxy_gen, ready)
-        .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
+    let proxy_mgr =
+        crate::inpod::windows::init_and_new(metrics, admin_server, config, proxy_gen, ready)
+            .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
 
     Ok(Box::pin(async move {
         match proxy_mgr.run(drain_rx).await {
@@ -374,8 +375,9 @@ fn init_inpod_proxy_mgr(
     let metrics = Arc::new(crate::inpod::metrics::Metrics::new(
         registry.sub_registry_with_prefix("workload_manager"),
     ));
-    let proxy_mgr = crate::inpod::linux::init_and_new(metrics, admin_server, config, proxy_gen, ready)
-        .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
+    let proxy_mgr =
+        crate::inpod::linux::init_and_new(metrics, admin_server, config, proxy_gen, ready)
+            .map_err(|e| anyhow::anyhow!("failed to start workload proxy manager {:?}", e))?;
 
     Ok(Box::pin(async move {
         match proxy_mgr.run(drain_rx).await {

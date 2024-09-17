@@ -177,7 +177,9 @@ impl TestApp {
     }
 
     #[cfg(target_os = "linux")]
-    pub async fn inpod_state(&self) -> anyhow::Result<HashMap<String, inpod::linux::admin::ProxyState>> {
+    pub async fn inpod_state(
+        &self,
+    ) -> anyhow::Result<HashMap<String, inpod::linux::admin::ProxyState>> {
         let body = self.admin_request_body("config_dump").await?;
         let serde_json::Value::Object(mut v) = serde_json::from_slice(&body)? else {
             anyhow::bail!("not an object");

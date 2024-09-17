@@ -63,7 +63,7 @@ pub struct WorkloadManagerAdminHandler {
 impl WorkloadManagerAdminHandler {
     pub fn proxy_pending(
         &self,
-        uid: &crate::inpod::linux::WorkloadUid,
+        uid: &crate::inpod::WorkloadUid,
         workload_info: &Option<WorkloadInfo>,
     ) {
         let mut state = self.state.write().unwrap();
