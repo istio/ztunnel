@@ -6,12 +6,6 @@ use windows::Win32::NetworkManagement::IpHelper::{SetCurrentThreadCompartmentId,
 
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
-pub struct NetnsID {
-    pub inode: libc::ino_t,
-    pub dev: libc::dev_t,
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct Namespace {
     pub id: u32,
     pub guid: GUID,
@@ -48,7 +42,8 @@ impl InpodNetns {
     pub fn new(cur_namespace: u32, workload_namespace: u32) -> std::io::Result<Self> {
         // We should check if the namespace is valid, but idk how to do that
         // the i32 doesn't matter, but i can't give it () and i need to give it something
-        let ns: Result<u32, i32> = Ok(workload_namespace); // = Compartment(&workload_namespace);
+        // FIXME: sjinxuan (or anybody else)
+        let ns: Result<u32, f32> = Ok(workload_namespace); // = Compartment(&workload_namespace);
         match ns {
             Err(e) => {
                 warn!("Failed to get namespace: {}", e);
@@ -61,7 +56,9 @@ impl InpodNetns {
                         id: ns,
                             // .namespace_id
                             // .expect("There must always be a namespace id"),
-                        // This is probably wrong
+                        // FIXME: sjinxuan (or anybody else)
+                        // since I couldnt figure out how to query namespace stuff, i can't get the guid so i just set it to zero.
+                        // this might not matter if we only use the id to move around
                         guid: GUID::from(0),
                     },
                 }),
@@ -76,18 +73,6 @@ impl InpodNetns {
     // Useful for logging / debugging
     pub fn workload_namespace_guid(&self) -> GUID {
         self.inner.workload_namespace.guid
-    }
-
-    // useful for logging / debugging
-    pub fn workload_netns_id(&self) -> NetnsID {  // FIXME
-        //// from previous implementation
-        // self.inner.netns_id
-        
-        // TODO: Implement this
-        NetnsID {
-            inode: 0,
-            dev: 0,
-        }
     }
 
     pub fn run<F, T>(&self, f: F) -> std::io::Result<T>
