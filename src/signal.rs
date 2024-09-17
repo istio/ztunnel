@@ -89,19 +89,28 @@ mod imp {
             .expect("Failed to register signal handler")
             .recv()
             .await;
-        info!("received signal {}, starting shutdown", name,);
+        info!("received signal {}, starting shutdown", name);
     }
 }
 
 #[cfg(not(unix))]
 mod imp {
     use tokio::sync::mpsc::Receiver;
+    use tracing::info;
 
-    pub(super) async fn shutdown(receiver: Receiver<()>) {
-        // This isn't quite right, but close enough for windows...
+    pub(super) async fn shutdown(receiver: &mut Receiver<()>) {
+        tokio::select! {
+            _ = watch_signal() => {}
+            _ = receiver.recv() => { info!("received explicit shutdown signal")}
+        };
+    }
+
+    // This isn't quite right, but close enough for windows...
+    async fn watch_signal() {
         tokio::signal::windows::ctrl_c()
             .expect("Failed to register signal handler")
             .recv()
             .await;
+        info!("received signal, starting shutdown");
     }
 }

@@ -82,7 +82,7 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
 
 #[cfg(not(target_os = "linux"))]
 fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
-    Err(io::Error::new(
+    Err(Error::new(
         io::ErrorKind::Other,
         "SO_ORIGINAL_DST not supported on this operating system",
     ))
@@ -90,7 +90,7 @@ fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn set_freebind_and_transparent(_: &TcpSocket) -> io::Result<()> {
-    Err(io::Error::new(
+    Err(Error::new(
         io::ErrorKind::Other,
         "IP_TRANSPARENT and IP_FREEBIND are not supported on this operating system",
     ))
