@@ -17,7 +17,7 @@ use crate::readiness;
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::net::UnixStream;
+use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
 use super::statemanager::WorkloadProxyManagerState;
@@ -104,13 +104,14 @@ impl WorkloadProxyNetworkHandler {
         Ok(Self { uds })
     }
 
-    async fn connect(&self) -> UnixStream {
+    async fn connect(&self) -> TcpStream {
         let mut backoff = Duration::from_millis(10);
 
         debug!("connecting to server: {:?}", self.uds);
 
         loop {
-            match super::packet::connect(&self.uds).await {
+            let addr = self.uds.to_str().unwrap_or_default();
+            match TcpStream::connect(addr).await {
                 Err(e) => {
                     backoff =
                         std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
@@ -443,7 +444,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_process_add() {
         let f = fixture!();
-        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let (s1, mut s2) = TcpStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
 
@@ -467,7 +468,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_process_failed_announce() {
         let f = fixture!();
-        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let (s1, mut s2) = TcpStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
 
@@ -490,7 +491,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_process_failed() {
         let f = fixture!();
-        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let (s1, mut s2) = TcpStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
             WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
@@ -532,7 +533,7 @@ pub(crate) mod tests {
         let f = fixture!();
         let m = f.inpod_metrics;
         let mut state = f.state;
-        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let (s1, mut s2) = TcpStream::pair().unwrap();
         let processor: WorkloadStreamProcessor =
             WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
 
@@ -566,7 +567,7 @@ pub(crate) mod tests {
     async fn test_process_snapshot_with_missing_workload() {
         let f = fixture!();
         let m = f.inpod_metrics;
-        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let (s1, mut s2) = TcpStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
         let mut state = f.state;
 
@@ -602,7 +603,7 @@ pub(crate) mod tests {
         assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 2);
 
         // second connection - don't send the one of the proxies here, to see ztunnel reconciles and removes it:
-        let (s1, mut s2) = UnixStream::pair().unwrap();
+        let (s1, mut s2) = TcpStream::pair().unwrap();
         let processor = WorkloadStreamProcessor::new(s1, f.drain_rx.clone());
 
         let server = tokio::spawn(async move {

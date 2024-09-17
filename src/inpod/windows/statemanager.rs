@@ -7,6 +7,7 @@ use crate::proxyfactory::ProxyFactory;
 use crate::state::WorkloadInfo;
 
 use super::config::InPodConfig;
+use tracing::{info, debug, Instrument};
 
 use super::WorkloadUid;
 use crate::inpod::windows::namespace::InpodNetns;
@@ -100,5 +101,155 @@ impl WorkloadProxyManagerState {
     // these are join handles that are driven by tokio, we just need to wait for them, so join these
     // last
     self.draining.join().await;
+  }
+
+  async fn add_workload(
+    &mut self,
+    workload_uid: &WorkloadUid,
+    workload_info: Option<WorkloadInfo>,
+    netns: InpodNetns,
+) -> Result<(), crate::proxy::Error> {
+    match self
+        .add_workload_inner(workload_uid, &workload_info, netns.clone())
+        .await
+    {
+        Ok(()) => {
+            self.update_proxy_count_metrics();
+            Ok(())
+        }
+        Err(e) => {
+            self.pending_workloads
+                .insert(workload_uid.clone(), (workload_info, netns));
+            self.update_proxy_count_metrics();
+            Err(e)
+        }
+    }
+}
+async fn add_workload_inner(
+    &mut self,
+    workload_uid: &WorkloadUid,
+    workload_info: &Option<WorkloadInfo>,
+    netns: InpodNetns,
+) -> Result<(), crate::proxy::Error> {
+    // check if we have a proxy already
+    let maybe_existing = self.workload_states.get(workload_uid);
+    if let Some(existing) = maybe_existing {
+        if existing.netns_id != netns.workload_netns_id() {
+            // inodes are different, we have a new netns.
+            // this can happen when there's a CNI failure (that's unrelated to us) which triggers
+            // pod sandobx to be re-created with a fresh new netns.
+            // drain the old proxy and add this one.
+            self.del_workload(workload_uid);
+        } else {
+            // idempotency - no error if we already have a proxy for the workload
+            // check if the inodes match. if they don't, we have a new netns
+            // we need to drain the previous proxy and add this one.
+            return Ok(());
+        }
+    }
+    self.admin_handler
+        .proxy_pending(workload_uid, workload_info);
+
+    let workload_netns_id = netns.workload_netns_id();
+
+    debug!(
+        workload=?workload_uid,
+        workload_info=?workload_info,
+        netns_id=?workload_netns_id,
+        "starting proxy",
+    );
+
+    // We create a per workload drain here. If the main loop in WorkloadProxyManager::run drains,
+    // we drain all these per-workload drains before exiting the loop
+    let (drain_tx, drain_rx) = drain::new();
+
+    let proxies = self
+        .proxy_gen
+        .new_proxies_from_factory(
+            Some(drain_rx),
+            workload_info.clone(),
+            Arc::from(self.inpod_config.socket_factory(netns)),
+        )
+        .await?;
+
+    let uid = workload_uid.clone();
+
+    self.admin_handler
+        .proxy_up(&uid, workload_info, proxies.connection_manager);
+
+    let metrics = self.metrics.clone();
+    let admin_handler = self.admin_handler.clone();
+
+    metrics.proxies_started.get_or_create(&()).inc();
+    if let Some(proxy) = proxies.proxy {
+        let span = if let Some(wl) = workload_info {
+            tracing::info_span!("proxy", wl=%format!("{}/{}", wl.namespace, wl.name))
+        } else {
+            tracing::info_span!("proxy", uid=%workload_uid.clone().into_string())
+        };
+        tokio::spawn(
+            async move {
+                proxy.run().await;
+                debug!("proxy for workload {:?} exited", uid);
+                metrics.proxies_stopped.get_or_create(&()).inc();
+                admin_handler.proxy_down(&uid);
+            }
+            .instrument(span),
+        );
+    }
+    if let Some(proxy) = proxies.dns_proxy {
+        let span = if let Some(wl) = workload_info {
+            tracing::info_span!("dns_proxy", wl=%format!("{}/{}", wl.namespace, wl.name))
+        } else {
+            tracing::info_span!("dns_proxy", uid=%workload_uid.clone().into_string())
+        };
+        tokio::spawn(proxy.run().instrument(span));
+    }
+
+    self.workload_states.insert(
+        workload_uid.clone(),
+        WorkloadState {
+            drain: drain_tx,
+            // TODO: implement this with the correct value
+            // netns_id: workload_netns_id,
+            netns_id: String::from(""),
+        },
+    );
+
+    Ok(())
+  }
+
+  pub fn have_pending(&self) -> bool {
+    !self.pending_workloads.is_empty()
+  }
+
+  pub fn ready(&self) -> bool {
+    // We are ready after we received our first snapshot and don't have any proxies that failed to start.
+    self.snapshot_received && !self.have_pending()
+  }
+
+  pub async fn retry_pending(&mut self) {
+    let current_pending_workloads = std::mem::take(&mut self.pending_workloads);
+  
+    for (uid, (info, netns)) in current_pending_workloads {
+        info!("retrying workload {:?}", uid);
+        match self.add_workload(&uid, info, netns).await {
+            Ok(()) => {}
+            Err(e) => {
+                info!("retrying workload {:?} failed: {}", uid, e);
+            }
+        }
+    }
+  }
+
+  fn update_proxy_count_metrics(&self) {
+    self.metrics
+        .active_proxy_count
+        .get_or_create(&())
+        .set(self.workload_states.len().try_into().unwrap_or(-1));
+    self.metrics
+        .pending_proxy_count
+        .get_or_create(&())
+        .set(self.pending_workloads.len().try_into().unwrap_or(-1));
   }
 }
