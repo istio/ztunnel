@@ -45,26 +45,29 @@ impl InpodNetns {
         setns(curr_namespace)
     }
 
-    // pub fn new(cur_namespace: u32, workload_namespace: String) -> std::io::Result<Self> {
-    //     let ns = hcn::get_namespace(&workload_namespace);
-    //     match ns {
-    //         Err(e) => {
-    //             warn!("Failed to get namespace: {}", e);
-    //             return Err(std::io::Error::last_os_error());
-    //         }
-    //         Ok(ns) => Ok(InpodNamespace {
-    //             inner: Arc::new(NetnsInner {
-    //                 current_namespace: cur_namespace,
-    //                 workload_namespace: Namespace {
-    //                     id: ns
-    //                         .namespace_id
-    //                         .expect("There must always be a namespace id"),
-    //                     guid: GUID::from(ns.id.as_str()),
-    //                 },
-    //             }),
-    //         }),
-    //     }
-    // }
+    pub fn new(cur_namespace: u32, workload_namespace: u32) -> std::io::Result<Self> {
+        // We should check if the namespace is valid, but idk how to do that
+        // the i32 doesn't matter, but i can't give it () and i need to give it something
+        let ns: Result<u32, i32> = Ok(workload_namespace); // = Compartment(&workload_namespace);
+        match ns {
+            Err(e) => {
+                warn!("Failed to get namespace: {}", e);
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(ns) => Ok(InpodNetns {
+                inner: Arc::new(NetnsInner {
+                    current_namespace: cur_namespace,
+                    workload_namespace: Namespace {
+                        id: ns,
+                            // .namespace_id
+                            // .expect("There must always be a namespace id"),
+                        // This is probably wrong
+                        guid: GUID::from(0),
+                    },
+                }),
+            }),
+        }
+    }
 
     pub fn workload_namespace(&self) -> u32 {
         self.inner.workload_namespace.id

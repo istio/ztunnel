@@ -48,7 +48,7 @@ impl WorkloadUid {
 
 #[derive(Debug)]
 pub struct WorkloadData {
-    namespace_id: String,
+    namespace_id: u32,
     workload_uid: WorkloadUid,
     workload_info: Option<istio::zds::WorkloadInfo>,
 }

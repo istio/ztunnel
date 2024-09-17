@@ -257,7 +257,7 @@ impl WorkloadProxyManagerState {
         self.admin_handler
             .proxy_pending(workload_uid, workload_info);
 
-        let workload_netns_id = netns.workload_netns_id();
+        let workload_netns_id = netns.workload_namespace_guid();
 
         debug!(
             workload=?workload_uid,
