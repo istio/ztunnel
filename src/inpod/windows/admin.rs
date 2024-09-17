@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tracing::error;
+use anyhow::anyhow;
 
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::state::WorkloadInfo;
@@ -118,5 +119,23 @@ impl WorkloadManagerAdminHandler {
                 debug_assert!(false, "proxy_down called where no proxy was created");
             }
         }
+    }
+
+    fn to_json(&self) -> anyhow::Result<serde_json::Value> {
+        if let Ok(state) = self.state.read() {
+            Ok(serde_json::to_value(&*state)?)
+        } else {
+            Err(anyhow!("Failed to read state"))
+        }
+    }
+}
+
+impl crate::admin::AdminHandler2 for WorkloadManagerAdminHandler {
+    fn key(&self) -> &'static str {
+        "workloadState"
+    }
+
+    fn handle(&self) -> anyhow::Result<serde_json::Value> {
+        self.to_json()
     }
 }
