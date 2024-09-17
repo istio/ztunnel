@@ -26,7 +26,6 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
-use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
@@ -124,7 +123,9 @@ impl Service {
     pub fn spawn(self) {
         self.s.spawn(|state, req| async move {
             match req.uri().path() {
+                #[cfg(target_os = "linux")]
                 "/debug/pprof/profile" => handle_pprof(req).await,
+                #[cfg(target_os = "linux")]
                 "/debug/pprof/heap" => handle_jemalloc_pprof_heapgen(req).await,
                 "/quitquitquit" => Ok(handle_server_shutdown(
                     state.shutdown_trigger.clone(),
@@ -233,7 +234,9 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
     dump
 }
 
+#[cfg(target_os = "linux")]
 async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+    use pprof::protos::Message;
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(1000)
         // .blocklist(&["libc", "libgcc", "pthread", "vdso"])
@@ -397,7 +400,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
     }
 }
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", target_os = "linux"))]
 async fn handle_jemalloc_pprof_heapgen(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
