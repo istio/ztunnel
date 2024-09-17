@@ -22,6 +22,7 @@ use tracing::{debug, error, info, warn};
 
 use super::statemanager::WorkloadProxyManagerState;
 use crate::inpod::Error;
+use crate::inpod::windows::namespace::InpodNetns;
 
 use super::protocol::WorkloadStreamProcessor;
 
@@ -132,7 +133,7 @@ impl WorkloadProxyNetworkHandler {
 impl WorkloadProxyManager {
     pub fn verify_syscalls() -> anyhow::Result<()> {
         // verify that we are capable, so we can fail early if not.
-        super::netns::InpodNetns::capable()
+       InpodNetns::capable()
             .map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))?;
         // verify that we can set the socket mark, so we can fail early if not.
         Self::verify_set_mark().map_err(|e| anyhow::anyhow!("failed to set socket mark: {:?}", e))
