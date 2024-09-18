@@ -27,6 +27,9 @@ use {
     tracing::warn,
 };
 
+#[cfg(target_os = "windows")]
+use socket2::SockRef;
+
 #[cfg(target_os = "linux")]
 pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
     let socket = SockRef::from(socket);
@@ -80,7 +83,20 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
+    let sock = SockRef::from(stream);
+    // Dual-stack IPv4/IPv6 sockets require us to check both options.
+    match windows::original_dst(&sock) {
+        Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
+        Err(_e4) => match windows::original_dst_ipv6(&sock) {
+            Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
+            Err(e6) => Err(e6),
+        },
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     Err(io::Error::new(
         io::ErrorKind::Other,
@@ -143,7 +159,20 @@ mod linux {
         sock.original_dst_ipv6()
     }
 }
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod windows {
+    use socket2::{SockAddr, SockRef};
+    use tokio::io;
 
+    pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
+        sock.original_dst()
+    }
+
+    pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
+        sock.original_dst_ipv6()
+    }
+}
 /// Listener is a wrapper For TCPListener with sane defaults. Notably, setting NODELAY
 pub struct Listener(TcpListener);
 
