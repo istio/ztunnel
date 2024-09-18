@@ -160,14 +160,7 @@ impl WorkloadProxyNetworkHandler {
 impl WorkloadProxyManager {
     pub fn verify_syscalls() -> anyhow::Result<()> {
         // verify that we are capable, so we can fail early if not.
-        InpodNamespace::capable().map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))?;
-        // verify that we can set the socket mark, so we can fail early if not.
-        Self::verify_set_mark().map_err(|e| anyhow::anyhow!("failed to set socket mark: {:?}", e))
-    }
-
-    fn verify_set_mark() -> anyhow::Result<()> {
-        let socket = tokio::net::TcpSocket::new_v4()?;
-        crate::socket::set_mark(&socket, 1337).map_err(|e| anyhow::anyhow!("failed to set mark on socket. make sure ztunnel has CAP_NET_RAW, CAP_NET_ADMIN. error: {:?}", e))
+        InpodNamespace::capable().map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))
     }
 
     pub fn new(
