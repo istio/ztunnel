@@ -111,7 +111,7 @@ pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58.0", features = ["Win32_System_HostCompute", "Win32_System_HostComputeNetwork", "Win32_System_HostComputeSystem", "Win32_NetworkManagement_IpHelper"] }
-uuid = "1.10.0"
+hcn = { git = "https://github.com/jsturtevant/hcn-rs.git" }
 
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }

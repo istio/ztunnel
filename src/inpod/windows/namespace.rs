@@ -1,10 +1,9 @@
-use log::warn;
 use std::sync::Arc;
+use tracing::warn;
 use windows::core::GUID;
 use windows::Win32::NetworkManagement::IpHelper::{
     GetCurrentThreadCompartmentId, SetCurrentThreadCompartmentId,
 };
-// use windows::Win32::System::HostComputeNetwork as hcn;
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct Namespace {
@@ -13,10 +12,7 @@ pub struct Namespace {
 }
 
 #[derive(Clone, Debug)]
-pub struct InpodNetns {
-    // sjinxuan: this Arc seems unecessary.
-    // In linux, a netns is represented by a file descriptor, we have to be mindful of copies, lifetimes, ownership, etc.
-    // In windows, a netns is represented by a u32. 
+pub struct InpodNamespace {
     inner: Arc<NetnsInner>,
 }
 
@@ -26,9 +22,8 @@ struct NetnsInner {
     workload_namespace: Namespace,
 }
 
-impl InpodNetns {
+impl InpodNamespace {
     pub fn current() -> std::io::Result<u32> {
-        // GetCurrentThreadCompartmentId returns 0 on failure, which not how WIN32_ERROR is documented.
         let curr_namespace = unsafe { GetCurrentThreadCompartmentId() };
         if curr_namespace.0 == 0 {
             warn!("GetCurrentThreadCompartmentId failed");
@@ -44,28 +39,21 @@ impl InpodNetns {
         setns(curr_namespace)
     }
 
-    pub fn new(cur_namespace: u32, workload_namespace: u32) -> std::io::Result<Self> {
-        // We should check if the namespace is valid, but idk how to do that, so just assume the namespace exists
-        // Maybe we can try switching in and out of it.
-        // the i32 doesn't matter, but i can't give it () and i need to give it something
-        // FIXME: sjinxuan (or anybody else)
-        let ns: Result<u32, f32> = Ok(workload_namespace); // = Compartment(&workload_namespace);
+    pub fn new(cur_namespace: u32, workload_namespace: String) -> std::io::Result<Self> {
+        let ns = hcn::get_namespace(&workload_namespace);
         match ns {
             Err(e) => {
                 warn!("Failed to get namespace: {}", e);
                 return Err(std::io::Error::last_os_error());
             }
-            Ok(ns) => Ok(InpodNetns {
+            Ok(ns) => Ok(InpodNamespace {
                 inner: Arc::new(NetnsInner {
                     current_namespace: cur_namespace,
                     workload_namespace: Namespace {
-                        id: ns,
-                            // .namespace_id
-                            // .expect("There must always be a namespace id"),
-                        // FIXME: sjinxuan (or anybody else)
-                        // since I couldnt figure out how to query namespace stuff, i can't get the guid so i just set it to zero.
-                        // this might not matter if we only use the id to move around
-                        guid: GUID::from(0),
+                        id: ns
+                            .namespace_id
+                            .expect("There must always be a namespace id"),
+                        guid: GUID::from(ns.id.as_str()),
                     },
                 }),
             }),
@@ -77,7 +65,6 @@ impl InpodNetns {
     }
 
     // Useful for logging / debugging
-    // sjinxuan: maybe we can delete this since the api only seems to be using u32 ids instead of the GUIDs.
     pub fn workload_namespace_guid(&self) -> GUID {
         self.inner.workload_namespace.guid
     }
@@ -90,6 +77,86 @@ impl InpodNetns {
         let ret = f();
         setns(self.inner.current_namespace).expect("this must never fail");
         Ok(ret)
+    }
+}
+
+fn setns(namespace: u32) -> std::io::Result<()> {
+    let error = unsafe { SetCurrentThreadCompartmentId(namespace) };
+    if error.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(error.0 as i32));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_namespace() -> Namespace{
+        let api_namespace = hcn::HostComputeNamespace::default();
+
+        let api_namespace = serde_json::to_string(&api_namespace).unwrap();
+        let handle = hcn::api::create_namespace(&GUID::zeroed(), &api_namespace)?;
+
+        // we don't get info back so need to query to get metadata about network
+        let query = HostComputeQuery::default();
+        let query = serde_json::to_string(&query).unwrap();
+
+        let api_namespace = api::query_namespace_properties(namespace_handle, &query)?;
+
+        let api_namespace: hcn::HostComputeNamespace = serde_json::from_str(&api_namespace).unwrap();
+
+        Namespace {
+            id: api_namespace.namespace_id.unwrap(),
+            guid: GUID::from(api_namespace.id.as_str()),
+        }
+    }
+
+    #[test]
+    fn test_run_works() {
+        if !crate::test_helpers::can_run_privilged_test() {
+            eprintln!("This test requires root; skipping");
+            return;
+        }
+
+        // TODO: Right now, creating a namespace doesn't automatically create a compartment
+        // (the actual network stack/context). Add these tests back when that capability is added
+        // in Windows Server 2025.
+        // start with new netns to not impact the current netns
+        // unshare(CloneFlags::CLONE_NEWNET).unwrap();
+        // let cur_netns = InpodNetns::current().unwrap();
+        // helpers::run_command("ip link add name dummy1 type dummy").unwrap();
+
+        // let other_netns = new_netns();
+
+        // let sync_netns =
+        //     netns_rs::get_from_path(format!("/proc/self/fd/{}", other_netns.as_raw_fd())).unwrap();
+        // sync_netns
+        //     .run(|_| helpers::run_command("ip link add name dummy2 type dummy"))
+        //     .expect("netns run failed")
+        //     .unwrap();
+
+        // // test with future netns
+        // let netns = InpodNetns::new(Arc::new(cur_netns), other_netns).unwrap();
+
+        // let output = netns
+        //     .run(|| Command::new("ip").args(["link", "show"]).output())
+        //     .expect("netns run failed")
+        //     .expect("tokio command failed");
+
+        // assert!(output.status.success());
+        // let out_str = String::from_utf8_lossy(output.stdout.as_slice());
+        // assert!(!out_str.contains("dummy1"));
+        // assert!(out_str.contains("dummy2"));
+
+        // // make sure we returned to the original ns
+
+        // let output = Command::new("ip").args(["link", "show"]).output().unwrap();
+
+        // assert!(output.status.success());
+        // let out_str = String::from_utf8_lossy(output.stdout.as_slice());
+        // assert!(out_str.contains("dummy1"));
+        // assert!(!out_str.contains("dummy2"));
     }
 }
 

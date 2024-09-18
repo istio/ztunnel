@@ -15,61 +15,61 @@
 use crate::inpod::windows::namespace::InpodNetns;
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
-use std::os::windows::io::FromRawSocket;
-use tokio::net::TcpSocket;
+use std::sync::Arc;
+
+use super::namespace::InpodNamespace;
 
 pub struct InPodConfig {
-    cur_netns: u32,
-    mark: Option<std::num::NonZeroU32>,
-    reuse_port: bool,
+    cur_namespace: u32,
+    reuse_port: bool, // TODO: Not supported in windows so always must be false
 }
 
 impl InPodConfig {
     pub fn new(cfg: &config::Config) -> std::io::Result<Self> {
+        if cfg.inpod_port_reuse {
+            return Err(std::io::Error::other(
+                "SO_REUSEPORT is not supported in windows",
+            ));
+        }
         Ok(InPodConfig {
-            cur_netns: InpodNetns::current()?,
-            mark: std::num::NonZeroU32::new(cfg.packet_mark.expect("in pod requires packet mark")),
+            cur_namespace: InpodNamespace::current()?,
             reuse_port: cfg.inpod_port_reuse,
         })
     }
     pub fn socket_factory(
         &self,
-        netns: InpodNetns,
+        netns: InpodNamespace,
     ) -> Box<dyn crate::proxy::SocketFactory + Send + Sync> {
         let sf = InPodSocketFactory::from_cfg(self, netns);
         if self.reuse_port {
-            Box::new(InPodSocketPortReuseFactory::new(sf))
+            // We should never get here
+            unreachable!("SO_REUSEPORT is not supported in windows");
         } else {
             Box::new(sf)
         }
     }
 
     pub fn cur_netns(&self) -> u32 {
-        self.cur_netns
-    }
-    fn mark(&self) -> Option<std::num::NonZeroU32> {
-        self.mark
+        self.cur_namespace
     }
 }
 
 struct InPodSocketFactory {
-    netns: InpodNetns,
-    mark: Option<std::num::NonZeroU32>,
+    netns: InpodNamespace,
 }
 impl InPodSocketFactory {
-    fn from_cfg(inpod_config: &InPodConfig, netns: InpodNetns) -> Self {
-        Self::new(netns, inpod_config.mark())
+    fn from_cfg(inpod_config: &InPodConfig, netns: InpodNamespace) -> Self {
+        Self::new(netns)
     }
-
-    fn new(netns: InpodNetns, mark: Option<std::num::NonZeroU32>) -> Self {
-        Self { netns, mark }
+    fn new(netns: InpodNamespace) -> Self {
+        Self { netns }
     }
 
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
         self.netns.run(f)?
     }
 
-    pub fn configure<S: std::os::windows::io::AsRawSocket, F: FnOnce() -> std::io::Result<S>>(
+    fn configure<S: std::os::windows::io::AsSocket, F: FnOnce() -> std::io::Result<S>>(
         &self,
         socket_factory: F,
         mark: u32,
@@ -78,7 +78,6 @@ impl InPodSocketFactory {
         let raw_socket = socket.as_raw_socket();
         let tcp_socket = unsafe { TcpSocket::from_raw_socket(raw_socket) };
 
-        crate::socket::set_mark(&tcp_socket, mark.into())?;
         Ok(socket)
     }
 }
@@ -126,78 +125,7 @@ struct InPodSocketPortReuseFactory {
 
 impl InPodSocketPortReuseFactory {
     fn new(sf: InPodSocketFactory) -> Self {
-        Self { sf }
-    }
-}
-
-impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
-    fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.sf.new_tcp_v4()
-    }
-
-    fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.sf.new_tcp_v6()
-    }
-
-    fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let sock = self.sf.configure(
-            || match addr {
-                std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
-                std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
-            },
-            self.sf.mark.unwrap().get(),
-        )?;
-
-        // TODO: use setsockopt on Windows
-
-        /* // set_reuseport doesn't exist for Windows
-        if let Err(e) = sock.set_reuseport(true) {
-            tracing::warn!("setting set_reuseport failed: {} addr: {}", e, addr);
-        }
-        */
-
-        sock.bind(addr)?;
-        sock.listen(128).map(socket::Listener::new)
-    }
-
-    fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
-        let sock = self.sf.configure(
-            || {
-                let sock = match addr {
-                    std::net::SocketAddr::V4(_) => socket2::Socket::new(
-                        socket2::Domain::IPV4,
-                        socket2::Type::DGRAM,
-                        None, // socket2::Protocol::UDP ??
-                    ),
-                    std::net::SocketAddr::V6(_) => socket2::Socket::new(
-                        socket2::Domain::IPV4,
-                        socket2::Type::DGRAM,
-                        None, // socket2::Protocol::UDP ??
-                    ),
-                }?;
-                Ok(sock)
-            },
-            self.sf.mark.unwrap().get(),
-        )?;
-
-        let socket_ref = socket2::SockRef::from(&sock);
-
-        // TODO: call setsockopt on Windows to set SO_RESU
-        /*
-        // important to set SO_REUSEPORT before binding!
-        socket_ref.set_reuse_port(true)?;
-        */
-        let addr = socket2::SockAddr::from(addr);
-        socket_ref.bind(&addr)?;
-
-        let std_sock: std::net::UdpSocket = sock.into();
-
-        std_sock.set_nonblocking(true)?;
-        tokio::net::UdpSocket::from_std(std_sock)
-    }
-
-    fn ipv6_enabled_localhost(&self) -> std::io::Result<bool> {
-        self.sf.ipv6_enabled_localhost()
+        panic!("SO_REUSEPORT is not supported in windows");
     }
 }
 
@@ -234,7 +162,7 @@ mod test {
         assert!(!inpod_cfg.reuse_port);
 
         let sf = inpod_cfg.socket_factory(
-            InpodNetns::new(
+            InpodNamespace::new(
                 Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
@@ -281,7 +209,7 @@ mod test {
         assert!(inpod_cfg.reuse_port);
 
         let sf = inpod_cfg.socket_factory(
-            InpodNetns::new(
+            InpodNamespace::new(
                 Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )
@@ -323,7 +251,7 @@ mod test {
         let inpod_cfg = InPodConfig::new(&cfg).unwrap();
 
         let sf = inpod_cfg.socket_factory(
-            InpodNetns::new(
+            InpodNamespace::new(
                 Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
                 new_netns(),
             )

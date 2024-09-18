@@ -1,0 +1,25 @@
+   Compiling ztunnel v0.0.0 (/home/morrislaw/Dev/ztunnel-windows)
+warning: unused variable: `stream`
+   --> src/inpod/windows/workloadmanager.rs:187:17
+    |
+187 |             let stream = tokio::select! {
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stream`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: function `main` is never used
+   --> src/inpod/windows/protocol.rs:147:10
+    |
+147 | async fn main() {
+    |          ^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: function `process` is never used
+   --> src/inpod/windows/protocol.rs:187:10
+    |
+187 | async fn process(
+    |          ^^^^^^^
+
+warning: `ztunnel` (lib) generated 3 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.26s

@@ -25,3 +25,15 @@ pub enum Error {
     #[error("announce error: {0}")]
     AnnounceError(String),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct WorkloadUid(String);
+
+impl WorkloadUid {
+    pub fn new(uid: String) -> Self {
+        Self(uid)
+    }
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
