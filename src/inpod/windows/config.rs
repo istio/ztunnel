@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::inpod::windows::namespace::InpodNetns;
+use crate::inpod::windows::namespace::InpodNamespace;
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
-use std::sync::Arc;
-
-use super::namespace::InpodNamespace;
 
 pub struct InPodConfig {
     cur_namespace: u32,
@@ -124,7 +121,7 @@ struct InPodSocketPortReuseFactory {
 }
 
 impl InPodSocketPortReuseFactory {
-    fn new(sf: InPodSocketFactory) -> Self {
+    fn new(_: InPodSocketFactory) -> Self {
         panic!("SO_REUSEPORT is not supported in windows");
     }
 }
@@ -163,7 +160,7 @@ mod test {
 
         let sf = inpod_cfg.socket_factory(
             InpodNamespace::new(
-                Arc::new(crate::inpod::linux::netns::InpodNetns::current().unwrap()),
+                Arc::new(InpodNamespace::current().unwrap()),
                 new_netns(),
             )
             .unwrap(),

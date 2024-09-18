@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-use anyhow::anyhow;
-=======
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,17 +12,12 @@ use anyhow::anyhow;
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
->>>>>>> keithmattix-stash
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::state::WorkloadInfo;
-<<<<<<< HEAD
-
-=======
 use anyhow::anyhow;
->>>>>>> keithmattix-stash
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -66,21 +58,13 @@ where
 
 #[derive(Default)]
 pub struct WorkloadManagerAdminHandler {
-<<<<<<< HEAD
-    state: RwLock<HashMap<crate::inpod::windows::WorkloadUid, ProxyState>>,
-=======
     state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
->>>>>>> keithmattix-stash
 }
 
 impl WorkloadManagerAdminHandler {
     pub fn proxy_pending(
         &self,
-<<<<<<< HEAD
-        uid: &crate::inpod::windows::WorkloadUid,
-=======
         uid: &crate::inpod::WorkloadUid,
->>>>>>> keithmattix-stash
         workload_info: &Option<WorkloadInfo>,
     ) {
         let mut state = self.state.write().unwrap();
@@ -103,16 +87,9 @@ impl WorkloadManagerAdminHandler {
             }
         }
     }
-<<<<<<< HEAD
-
-    pub fn proxy_up(
-        &self,
-        uid: &crate::inpod::windows::WorkloadUid,
-=======
     pub fn proxy_up(
         &self,
         uid: &crate::inpod::WorkloadUid,
->>>>>>> keithmattix-stash
         workload_info: &Option<WorkloadInfo>,
         cm: Option<ConnectionManager>,
     ) {
@@ -139,11 +116,7 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
-<<<<<<< HEAD
-    pub fn proxy_down(&self, uid: &crate::inpod::windows::WorkloadUid) {
-=======
     pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
->>>>>>> keithmattix-stash
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
@@ -178,8 +151,6 @@ impl crate::admin::AdminHandler2 for WorkloadManagerAdminHandler {
         self.to_json()
     }
 }
-<<<<<<< HEAD
-=======
 
 #[cfg(test)]
 mod test {
@@ -213,4 +184,3 @@ mod test {
         assert_eq!(state.len(), 0);
     }
 }
->>>>>>> keithmattix-stash

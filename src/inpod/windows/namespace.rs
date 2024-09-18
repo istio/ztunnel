@@ -80,6 +80,7 @@ impl InpodNamespace {
     }
 }
 
+// hop into a namespace
 fn setns(namespace: u32) -> std::io::Result<()> {
     let error = unsafe { SetCurrentThreadCompartmentId(namespace) };
     if error.0 != 0 {
@@ -92,7 +93,7 @@ fn setns(namespace: u32) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn new_namespace() -> Namespace{
+    fn new_namespace() -> Namespace {
         let api_namespace = hcn::HostComputeNamespace::default();
 
         let api_namespace = serde_json::to_string(&api_namespace).unwrap();
@@ -104,7 +105,8 @@ mod tests {
 
         let api_namespace = api::query_namespace_properties(namespace_handle, &query)?;
 
-        let api_namespace: hcn::HostComputeNamespace = serde_json::from_str(&api_namespace).unwrap();
+        let api_namespace: hcn::HostComputeNamespace =
+            serde_json::from_str(&api_namespace).unwrap();
 
         Namespace {
             id: api_namespace.namespace_id.unwrap(),
@@ -158,13 +160,4 @@ mod tests {
         // assert!(out_str.contains("dummy1"));
         // assert!(!out_str.contains("dummy2"));
     }
-}
-
-/// Hop into a namespace
-fn setns(namespace: u32) -> std::io::Result<()> {
-    let error = unsafe { SetCurrentThreadCompartmentId(namespace) };
-    if error.0 != 0 {
-        return Err(std::io::Error::from_raw_os_error(error.0 as i32));
-    }
-    Ok(())
 }

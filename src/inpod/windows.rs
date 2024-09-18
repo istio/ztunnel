@@ -14,11 +14,7 @@
 
 use super::metrics::Metrics;
 use crate::config as zconfig;
-<<<<<<< HEAD
-use crate::inpod::windows::protocol::istio::zds::WorkloadInfo;
-=======
-use crate::inpod::istio;
->>>>>>> keithmattix-stash
+use crate::inpod::istio::zds::WorkloadInfo;
 use crate::readiness;
 use std::sync::Arc;
 use workloadmanager::WorkloadProxyManager;

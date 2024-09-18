@@ -17,11 +17,16 @@ use crate::readiness;
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::net::UnixStream;
+use tokio::time::sleep;
+use tokio_util::compat::Tokio02AsyncReadCompatExt;
+use tokio_util::compat::Tokio02AsyncWriteCompatExt;
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tracing::{debug, error, info, warn};
 
 use super::statemanager::WorkloadProxyManagerState;
 use crate::inpod::Error;
+
+use crate::inpod::windows::namespace::InpodNamespace;
 
 use super::protocol::WorkloadStreamProcessor;
 
@@ -103,28 +108,53 @@ impl WorkloadProxyNetworkHandler {
         Ok(Self { uds })
     }
 
-    async fn connect(&self) -> UnixStream {
-        let mut backoff = Duration::from_millis(10);
+    // OLD CODE USING UNIX STREAM  
+    // async fn connect(&self) -> UnixStream {
+    //     let mut backoff = Duration::from_millis(10);
 
+    //     debug!("connecting to server: {:?}", self.uds);
+
+    //     loop {
+    //         match super::packet::connect(&self.uds).await {
+    //             Err(e) => {
+    //                 backoff =
+    //                     std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
+    //                 warn!(
+    //                     "failed to connect to the Istio CNI node agent over {:?}, is the node agent healthy? details: {:?}. retrying in {:?}",
+    //                     &self.uds, e, backoff
+    //                 );
+    //                 tokio::time::sleep(backoff).await;
+    //                 continue;
+    //             }
+
+    //             Ok(conn) => {
+    //                 return conn;
+    //             }
+    //         };
+    //     }
+    // }
+    
+    // TODO make this work without UnixStream
+    async fn connect(&self) -> Result<NamedPipeClient, anyhow::Error> {
+        let mut backoff = Duration::from_millis(10);
+    
         debug!("connecting to server: {:?}", self.uds);
 
+        let client_options = ClientOptions::new()
+            .pipe_mode(tokio::net::windows::named_pipe::PipeMode::Message)
+            .open(&self.uds);
         loop {
-            match super::packet::connect(&self.uds).await {
+            match client_options {
+                Ok(client) => {
+                    info!("connected to server: {:?}", self.uds);
+                    return Ok(client);
+                }
                 Err(e) => {
-                    backoff =
-                        std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
-                    warn!(
-                        "failed to connect to the Istio CNI node agent over {:?}, is the node agent healthy? details: {:?}. retrying in {:?}",
-                        &self.uds, e, backoff
-                    );
-                    tokio::time::sleep(backoff).await;
-                    continue;
+                    error!("failed to connect to server: {:?}, error: {:?}", self.uds, e);
+                    sleep(backoff).await;
+                    backoff *= 2;
                 }
-
-                Ok(conn) => {
-                    return conn;
-                }
-            };
+            }
         }
     }
 }
@@ -132,8 +162,7 @@ impl WorkloadProxyNetworkHandler {
 impl WorkloadProxyManager {
     pub fn verify_syscalls() -> anyhow::Result<()> {
         // verify that we are capable, so we can fail early if not.
-        super::netns::InpodNetns::capable()
-            .map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))?;
+        InpodNamespace::capable().map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))?;
         // verify that we can set the socket mark, so we can fail early if not.
         Self::verify_set_mark().map_err(|e| anyhow::anyhow!("failed to set socket mark: {:?}", e))
     }
