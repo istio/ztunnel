@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::os::windows::io::FromRawSocket;
 
-use tokio::net::TcpSocket;
 
 use crate::inpod::windows::namespace::InpodNamespace;
 use crate::proxy::DefaultSocketFactory;
