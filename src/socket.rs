@@ -19,7 +19,6 @@ use tokio::io;
 use tokio::net::TcpSocket;
 use tokio::net::{TcpListener, TcpStream};
 
-
 #[cfg(target_os = "linux")]
 use {
     socket2::{Domain, SockRef},
@@ -84,7 +83,6 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     }
 }
 
-
 #[cfg(target_os = "windows")]
 fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
     let sock = SockRef::from(stream);
@@ -93,29 +91,19 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
         Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
         Err(_e4) => match windows::original_dst_ipv6(&sock) {
             Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
-            Err(e6) => {
-                // if !sock.ip_transparent().unwrap_or(false) {
-                //     // In TPROXY mode, this is normal, so don't bother logging
-                //     warn!(
-                //         peer=?stream.peer_addr().unwrap(),
-                //         local=?stream.local_addr().unwrap(),
-                //         "failed to read SO_ORIGINAL_DST: {e4:?}, {e6:?}"
-                //     );
-                // }
-                Err(e6)
-            }
+            Err(e6) => Err(e6),
         },
     }
 }
 
-// #[cfg(not(target_os = "linux"))]
-// fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
-//     Err(io::Error::new(
-//         io::ErrorKind::Other,
-//         "SO_ORIGINAL_DST not supported on this operating system",
-//     ))
-// }
-// 
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn orig_dst_addr(_: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "SO_ORIGINAL_DST not supported on this operating system",
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn set_freebind_and_transparent(_: &TcpSocket) -> io::Result<()> {
     Err(io::Error::new(
