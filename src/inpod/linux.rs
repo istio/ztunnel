@@ -18,6 +18,7 @@ use crate::inpod::istio;
 use crate::readiness;
 use std::sync::Arc;
 use workloadmanager::WorkloadProxyManager;
+use super::WorkloadUid;
 
 use crate::proxyfactory::ProxyFactory;
 

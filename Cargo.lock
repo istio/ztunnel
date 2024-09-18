@@ -1160,14 +1160,14 @@ dependencies = [
 [[package]]
 name = "hcn"
 version = "0.1.0"
-source = "git+https://github.com/jsturtevant/hcn-rs.git#28d3456c07d9cf62b7e3316c65b9433d29becdce"
+source = "git+https://github.com/keithmattix/hcn-rs.git#a4b3f6ee703509694b6eb178b07cdbb637771e80"
 dependencies = [
  "anyhow",
  "log",
  "serde",
  "serde_json",
  "serde_repr",
- "windows 0.51.1",
+ "windows",
 ]
 
 [[package]]
@@ -1394,7 +1394,7 @@ dependencies = [
  "http-body",
  "hyper",
  "pin-project-lite",
- "socket2",
+ "socket2 0.5.8",
  "tokio",
  "tower-service",
  "tracing",
@@ -1587,7 +1587,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b58db92f96b720de98181bbbe63c831e87005ab460c1bf306eb2622b4707997f"
 dependencies = [
- "socket2",
+ "socket2 0.5.8",
  "widestring",
  "windows-sys 0.48.0",
  "winreg",
@@ -2998,6 +2998,15 @@ checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
 
 [[package]]
 name = "socket2"
+version = "0.5.7"
+source = "git+https://github.com/keithmattix/socket2.git?branch=windows-original-dst#6c160faa061a9a8fb67f878b00218bb8597ab73d"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "socket2"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c970269d99b64e60ec3bd6ad27270092a5394c4e309314b18ae3fe575695fbe8"
@@ -3333,7 +3342,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2",
+ "socket2 0.5.8",
  "tokio-macros",
  "windows-sys 0.52.0",
 ]
@@ -3755,31 +3764,12 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
-version = "0.51.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca229916c5ee38c2f2bc1e9d8f04df975b4bd93f9955dc69fabb5d91270045c9"
-dependencies = [
- "windows-core 0.51.1",
- "windows-targets 0.48.5",
-]
-
-[[package]]
-name = "windows"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
 dependencies = [
  "windows-core 0.58.0",
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.51.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1f8cf84f35d2db49a46868f947758c7a1138116f7fac3bc844f43ade1292e64"
-dependencies = [
- "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -4263,7 +4253,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "socket2",
+ "socket2 0.5.7",
  "split-iter",
  "test-case",
  "textnonce",
@@ -4283,7 +4273,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "windows 0.58.0",
+ "windows",
  "x509-parser 0.17.0",
  "ztunnel",
 ]

@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::istio::zds::WindowsNamespace;
 use super::metrics::Metrics;
 use crate::config as zconfig;
 use crate::inpod::istio::zds::WorkloadInfo;
 use crate::readiness;
 use std::sync::Arc;
 use workloadmanager::WorkloadProxyManager;
+use super::WorkloadUid;
 
 use crate::proxyfactory::ProxyFactory;
 
@@ -26,7 +28,6 @@ use self::config::InPodConfig;
 pub mod admin;
 mod config;
 pub mod namespace;
-pub mod packet;
 mod protocol;
 mod statemanager;
 mod workloadmanager;
@@ -34,21 +35,10 @@ mod workloadmanager;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
-pub struct WorkloadUid(String);
-
-impl WorkloadUid {
-    pub fn new(uid: String) -> Self {
-        Self(uid)
-    }
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
 
 #[derive(Debug)]
 pub struct WorkloadData {
-    windows_namespace_id: u32,
+    windows_namespace: Option<WindowsNamespace>,
     workload_uid: WorkloadUid,
     workload_info: Option<WorkloadInfo>,
 }
