@@ -1,18 +1,12 @@
-use crate::inpod::windows::protocol::istio::zds::WorkloadInfo;
+use crate::drain::DrainWatcher;
 use crate::inpod::windows::{WorkloadData, WorkloadMessage, WorkloadUid};
-use istio::zds::{
-    workload_request::Payload, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello,
+use crate::inpod::istio::zds::{
+    self, workload_request::Payload, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello,
 };
 use prost::Message;
+use tracing::info;
 use std::io::{IoSlice, IoSliceMut};
-use std::process::exit;
 use tokio::net::windows::named_pipe::*;
-
-pub mod istio {
-    pub mod zds {
-        tonic::include_proto!("istio.workload.zds");
-    }
-}
 
 const PIPE_NAME: &str = r"\\.\pipe\istio-zds";
 
@@ -20,20 +14,14 @@ pub fn get_zds_pipe_name() -> &'static str {
     PIPE_NAME
 }
 
-// pub fn get_zcs_name_piped_client() -> NamedPipeClient {
-//     ClientOptions::new()
-//         .pipe_mode(PipeMode::Message)
-//         .open(PIPE_NAME)
-//         .expect("Failed to connect to pipe")
-// }
-
 pub struct WorkloadStreamProcessor {
     client: NamedPipeClient,
+    drain: DrainWatcher,
 }
 
 impl WorkloadStreamProcessor {
-    pub fn new(client: NamedPipeClient) -> Self {
-        WorkloadStreamProcessor { client }
+    pub fn new(client: NamedPipeClient, drain: DrainWatcher) -> Self {
+        WorkloadStreamProcessor { client, drain }
     }
 
     pub async fn send_hello(&mut self) -> std::io::Result<()> {
@@ -45,7 +33,7 @@ impl WorkloadStreamProcessor {
 
     pub async fn send_ack(&mut self) -> std::io::Result<()> {
         let r = WorkloadResponse {
-            payload: Some(istio::zds::workload_response::Payload::Ack(Ack {
+            payload: Some(zds::workload_response::Payload::Ack(Ack {
                 error: String::new(),
             })),
         };
@@ -54,7 +42,7 @@ impl WorkloadStreamProcessor {
 
     pub async fn send_nack(&mut self, e: anyhow::Error) -> std::io::Result<()> {
         let r = WorkloadResponse {
-            payload: Some(istio::zds::workload_response::Payload::Ack(Ack {
+            payload: Some(zds::workload_response::Payload::Ack(Ack {
                 error: e.to_string(),
             })),
         };
@@ -90,8 +78,14 @@ impl WorkloadStreamProcessor {
         let len = {
             loop {
                 println!("Waiting for pipe to be readable");
-                self.client.readable().await?;
-                // let read = Overlapped::new(cb)
+                tokio::select! {
+                    biased; // check drain first, so we don't read from the socket if we are draining.
+                    _ = self.drain.clone().wait_for_drain() => {
+                        info!("workload proxy manager: drain requested");
+                        return Ok(None);
+                    }
+                    res =  self.client.readable() => res,
+                }?;
                 let res = self.client.try_read_vectored(&mut iov);
                 let ok_res = match res {
                     Ok(res) => {
@@ -122,15 +116,10 @@ fn get_workload_data(data: &[u8]) -> anyhow::Result<WorkloadMessage> {
     match payload {
         Payload::Add(a) => {
             let uid = a.uid;
-            let workload_info: Option<WorkloadInfo> = a.workload_info;
-            let windows_namespace_id: u32 = a
-                .windows_namespace_id
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Failed to parse windows_namespace_id: {}", e))?;
             Ok(WorkloadMessage::AddWorkload(WorkloadData {
-                windows_namespace_id,
+                windows_namespace: a.windows_namespace,
                 workload_uid: WorkloadUid::new(uid),
-                workload_info,
+                workload_info: a.workload_info,
             }))
         }
         Payload::Keep(k) => Ok(WorkloadMessage::KeepWorkload(WorkloadUid::new(k.uid))),
@@ -143,46 +132,6 @@ fn get_info_from_data<'a>(data: impl bytes::Buf + 'a) -> anyhow::Result<Workload
     Ok(WorkloadRequest::decode(data)?)
 }
 
-#[tokio::main]
-async fn main() {
-    let client = loop {
-        match ClientOptions::new()
-            .pipe_mode(PipeMode::Message)
-            .open(PIPE_NAME)
-        {
-            Ok(client) => break client,
-            Err(e) => {
-                println!("Failed to connect to pipe: {}", e);
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-        }
-    };
-
-    let mut processor = WorkloadStreamProcessor::new(client);
-    processor
-        .send_hello()
-        .await
-        .expect("Failed to send hello message");
-
-    println!("Sent hello message");
-    let resp = process(&mut processor)
-        .await
-        .expect("Failed to read message after sending hello");
-    match resp {
-        Some(msg) => {
-            println!("Received WorkloadMessage: {:?}", msg);
-            // Send Ack
-            processor
-                .send_ack()
-                .await
-                .expect("Failed to send ack message");
-        }
-        None => {
-            println!("No message received");
-            exit(1);
-        }
-    }
-}
 
 async fn process(
     processor: &mut WorkloadStreamProcessor,
