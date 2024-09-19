@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # shellcheck disable=SC2046,SC2086
 
 # Copyright Istio Authors
@@ -27,8 +27,6 @@ profiles=out/coverage/profiles
 export LLVM_PROFILE_FILE="$profiles/profile_%m_%p.profraw"
 # Enable coverage
 export RUSTFLAGS="-C instrument-coverage"
-# FIXME
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E"
 export RUST_BACKTRACE=1
 
 # Clean directory
