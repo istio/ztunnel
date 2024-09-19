@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use prost_types::value::Kind;
 use prost_types::Struct;
-use tonic::codegen::InterceptedService;
 
 use tracing::{error, instrument, warn};
 
@@ -29,7 +28,7 @@ use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateSer
 use crate::xds::istio::ca::IstioCertificateRequest;
 
 pub struct CaClient {
-    pub client: IstioCertificateServiceClient<InterceptedService<TlsGrpcChannel, AuthSource>>,
+    pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
     pub enable_impersonated_identity: bool,
     pub secret_ttl: i64,
 }
@@ -42,9 +41,8 @@ impl CaClient {
         enable_impersonated_identity: bool,
         secret_ttl: i64,
     ) -> Result<CaClient, Error> {
-        let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?)?;
-
-        let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
+        let svc = tls::grpc_connector(address, auth, cert_provider.fetch_cert().await?)?;
+        let client = IstioCertificateServiceClient::new(svc);
         Ok(CaClient {
             client,
             enable_impersonated_identity,

@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use crate::config::RootCert;
+use crate::identity::AuthSource;
 use crate::tls::lib::provider;
 use crate::tls::{ControlPlaneClientCertProvider, Error, WorkloadCertificate};
-use bytes::Bytes;
-use http_body::{Body, Frame};
+use hyper::body::Incoming;
 use hyper::Uri;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -24,11 +24,9 @@ use rustls::ClientConfig;
 use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
-
-use hyper::body::Incoming;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-
 use tonic::body::BoxBody;
 
 async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Error> {
@@ -89,20 +87,19 @@ async fn control_plane_client_config(root_cert: &RootCert) -> Result<ClientConfi
         .with_no_client_auth())
 }
 
-// pub type TlsGrpcChannel = hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, BoxBody>;
 #[derive(Clone, Debug)]
 pub struct TlsGrpcChannel {
     uri: Uri,
     client: hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, BoxBody>,
+    auth: Arc<AuthSource>,
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub async fn grpc_tls_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
-    grpc_connector(uri, control_plane_client_config(&root_cert).await?)
-}
-
-/// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: String, cc: ClientConfig) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_connector(
+    uri: String,
+    auth: AuthSource,
+    cc: ClientConfig,
+) -> Result<TlsGrpcChannel, Error> {
     let uri = Uri::try_from(uri)?;
     let _is_localhost_call = uri.host() == Some("localhost");
     let mut http: HttpConnector = HttpConnector::new();
@@ -131,37 +128,16 @@ pub fn grpc_connector(uri: String, cc: ClientConfig) -> Result<TlsGrpcChannel, E
         .timer(crate::hyper_util::TokioTimer)
         .build(https);
 
-    // Ok(client)
-    Ok(TlsGrpcChannel { uri, client })
-}
-
-#[derive(Default)]
-pub enum DefaultIncoming {
-    Some(Incoming),
-    #[default]
-    Empty,
-}
-
-impl Body for DefaultIncoming {
-    type Data = Bytes;
-    type Error = hyper::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        match self.get_mut() {
-            DefaultIncoming::Some(ref mut i) => Pin::new(i).poll_frame(cx),
-            DefaultIncoming::Empty => Pin::new(&mut http_body_util::Empty::<Bytes>::new())
-                .poll_frame(cx)
-                .map_err(|_| unreachable!()),
-        }
-    }
+    Ok(TlsGrpcChannel {
+        uri,
+        auth: Arc::new(auth),
+        client,
+    })
 }
 
 impl tower::Service<http::Request<BoxBody>> for TlsGrpcChannel {
-    type Response = http::Response<DefaultIncoming>;
-    type Error = hyper_util::client::legacy::Error;
+    type Response = http::Response<Incoming>;
+    type Error = anyhow::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -181,10 +157,12 @@ impl tower::Service<http::Request<BoxBody>> for TlsGrpcChannel {
         }
         let uri = uri.build().expect("uri must be valid");
         *req.uri_mut() = uri;
-        let future = self.client.request(req);
+
+        let client = self.client.clone();
+        let auth = self.auth.clone();
         Box::pin(async move {
-            let res = future.await?;
-            Ok(res.map(DefaultIncoming::Some))
+            auth.insert_headers(req.headers_mut()).await?;
+            Ok(client.request(req).await?)
         })
     }
 }
