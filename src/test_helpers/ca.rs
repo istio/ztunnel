@@ -78,6 +78,7 @@ impl CaServer {
         });
         let client = CaClient::new(
             "https://".to_string() + &server_addr.to_string(),
+            None,
             Box::new(tls::ControlPlaneAuthentication::RootCert(root_cert)),
             AuthSource::Token(
                 PathBuf::from(r"src/test_helpers/fake-jwt"),

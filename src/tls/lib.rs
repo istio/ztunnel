@@ -30,7 +30,7 @@ use tracing::error;
 
 #[async_trait::async_trait]
 pub trait ControlPlaneClientCertProvider: Send + Sync {
-    async fn fetch_cert(&self) -> Result<ClientConfig, Error>;
+    async fn fetch_cert(&self, alt_hostname: Option<String>) -> Result<ClientConfig, Error>;
 }
 
 #[async_trait::async_trait]
