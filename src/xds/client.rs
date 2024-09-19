@@ -619,16 +619,14 @@ impl AdsClient {
         let addr = self.config.address.clone();
         let tls_grpc_channel = tls::grpc_connector(
             self.config.address.clone(),
+            self.config.auth.clone(),
             self.config.tls_builder.fetch_cert().await?,
         )?;
 
-        let ads_connection = AggregatedDiscoveryServiceClient::with_interceptor(
-            tls_grpc_channel,
-            self.config.auth.clone(),
-        )
-        .max_decoding_message_size(200 * 1024 * 1024)
-        .delta_aggregated_resources(tonic::Request::new(outbound))
-        .await;
+        let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)
+            .max_decoding_message_size(200 * 1024 * 1024)
+            .delta_aggregated_resources(tonic::Request::new(outbound))
+            .await;
 
         let mut response_stream = ads_connection
             .map_err(|src| Error::Connection(addr, src))?

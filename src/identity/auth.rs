@@ -15,10 +15,6 @@
 use std::io;
 use std::path::PathBuf;
 
-use tonic::metadata::AsciiMetadataValue;
-use tonic::service::Interceptor;
-use tonic::{Code, Request, Status};
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthSource {
     // JWT authentication source which contains the token file path and the cluster id.
@@ -30,15 +26,18 @@ pub enum AuthSource {
 }
 
 impl AuthSource {
-    fn read_token(&self) -> io::Result<Option<(Vec<u8>, String)>> {
-        Ok(match self {
+    pub async fn insert_headers(&self, request: &mut http::HeaderMap) -> anyhow::Result<()> {
+        const AUTHORIZATION: &str = "authorization";
+        const CLUSTER: &str = "clusterid";
+        match self {
             AuthSource::Token(path, cluster_id) => {
-                let token = load_token(path).map(|mut t| {
+                let token = load_token(path).await.map(|mut t| {
                     let mut bearer: Vec<u8> = b"Bearer ".to_vec();
                     bearer.append(&mut t);
                     bearer
                 })?;
-                Some((token, cluster_id.to_string()))
+                request.insert(AUTHORIZATION, token.try_into()?);
+                request.insert(CLUSTER, cluster_id.try_into()?);
             }
             AuthSource::StaticToken(token, cluster_id) => {
                 let token = {
@@ -46,15 +45,17 @@ impl AuthSource {
                     bearer.extend_from_slice(token.as_bytes());
                     bearer
                 };
-                Some((token, cluster_id.to_string()))
+                request.insert(AUTHORIZATION, token.try_into()?);
+                request.insert(CLUSTER, cluster_id.try_into()?);
             }
-            AuthSource::None => None,
-        })
+            AuthSource::None => {}
+        }
+        Ok(())
     }
 }
 
-fn load_token(path: &PathBuf) -> io::Result<Vec<u8>> {
-    let t = std::fs::read(path)?;
+async fn load_token(path: &PathBuf) -> io::Result<Vec<u8>> {
+    let t = tokio::fs::read(path).await?;
 
     if t.is_empty() {
         return Err(io::Error::new(
@@ -63,23 +64,4 @@ fn load_token(path: &PathBuf) -> io::Result<Vec<u8>> {
         ));
     }
     Ok(t)
-}
-
-impl Interceptor for AuthSource {
-    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        if let Some((token, cluster_id)) = self
-            .read_token()
-            .map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))?
-        {
-            let token = AsciiMetadataValue::try_from(token)
-                .map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))?;
-            request.metadata_mut().insert("authorization", token);
-            if !cluster_id.is_empty() {
-                let id = AsciiMetadataValue::try_from(cluster_id.as_bytes().to_vec())
-                    .map_err(|e| Status::new(Code::Unauthenticated, e.to_string()))?;
-                request.metadata_mut().insert("clusterid", id);
-            }
-        }
-        Ok(request)
-    }
 }
