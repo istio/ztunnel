@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use prost_types::Struct;
