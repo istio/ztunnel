@@ -272,19 +272,11 @@ impl Worker {
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
         let mut pending: KeyedPriorityQueue<Identity, PendingPriority> = KeyedPriorityQueue::new();
-        // The backoff strategy used for retrying operations. Sets the initial values for the backoff.
-        // The values are chosen to be reasonable for the CA client to be able to recover from transient
-        // errors.
-        let mut cert_backoff = ExponentialBackoff {
-            initial_interval: Duration::from_millis(500),
-            current_interval: Duration::from_secs(1),
-            // The maximum interval is set to 150 seconds, which is the maximum time the backoff will
-            // wait to retry a cert again.
-            max_interval: CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL,
-            multiplier: 2.0,
-            randomization_factor: 0.2,
-            ..Default::default()
-        };
+        // The set of pending Identity requests with backoffs (i.e. pending requests that have already failed at least once).
+        // Basically, each cert fetch attempt gets its own backoff.
+        // This avoids delays where a fetch of identity A for pod A needlessly stalls the refetch of
+        // identity B for pod B. Kept separate from the `pending` KeyedPriorityKey for convenience.
+        let mut pending_backoffs_by_id: HashMap<Identity, ExponentialBackoff> = HashMap::new();
 
         'main: loop {
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
@@ -364,16 +356,41 @@ impl Worker {
                             //
                             // randomized interval =
                             //     retry_interval * (random value in range [1 - randomization_factor, 1 + randomization_factor])
-                            let retry = cert_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            //
+                            // Note that we are using a backoff-per-unique-identity-request. This is to prevent issues
+                            // when a cert cannot be fetched for Pod A, but that should not stall retries for
+                            // pods B, C, and D.
+                            let mut keyed_backoff = match pending_backoffs_by_id.remove(&id) {
+                                Some(backoff) => {
+                                    backoff
+                                },
+                                None => {
+                                    // The backoff strategy used for retrying operations. Sets the initial values for the backoff.
+                                    // The values are chosen to be reasonable for the CA client to be able to recover from transient
+                                    // errors.
+                                    ExponentialBackoff {
+                                        initial_interval: Duration::from_millis(500),
+                                        current_interval: Duration::from_secs(1),
+                                        // The maximum interval is set to 150 seconds, which is the maximum time the backoff will
+                                        // wait to retry a cert again.
+                                        max_interval: CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL,
+                                        multiplier: 2.0,
+                                        randomization_factor: 0.2,
+                                        ..Default::default()
+                                    }
+                                }
+                            };
+                            let retry = keyed_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            // Store the per-key backoff, we're gonna retry.
+                            pending_backoffs_by_id.insert(id.clone(), keyed_backoff);
                             tracing::debug!(%id, "certificate fetch failed ({err}), retrying in {retry:?}");
                             let refresh_at = Instant::now() + retry;
                             (CertState::Unavailable(err), refresh_at)
                         },
                         Ok(certs) => {
                              tracing::debug!(%id, "certificate fetch succeeded");
-                            // Reset the backoff on success.
-                            // [`reset`](https://docs.rs/backoff/0.4.0/backoff/backoff/trait.Backoff.html#method.reset)
-                            cert_backoff.reset();
+                            // Reset (pop and drop) the backoff on success.
+                            pending_backoffs_by_id.remove(&id);
                             let certs: tls::WorkloadCertificate = certs; // Type annotation.
                             let refresh_at = self.time_conv.system_time_to_instant(certs.refresh_at());
                             let refresh_at = if let Some(t) = refresh_at {
