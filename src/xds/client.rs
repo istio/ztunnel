@@ -14,6 +14,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};
@@ -206,6 +208,7 @@ impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
 
 pub struct Config {
     address: String,
+    host: Option<String>,
     tls_builder: Box<dyn tls::ClientCertProvider>,
     auth: identity::AuthSource,
     proxy_metadata: HashMap<String, String>,
@@ -253,6 +256,7 @@ impl Config {
                 .clone()
                 .expect("xds_address must be set to use xds"),
             tls_builder,
+            host: config.xds_host.clone(),
             auth: config.auth.clone(),
             handlers: HashMap::new(),
             initial_requests: Vec::new(),
@@ -617,9 +621,19 @@ impl AdsClient {
         };
 
         let addr = self.config.address.clone();
+
+        // If our XDS address is an ip address, override the authority header
+        let xds_addr_host = self.config.address.clone().replace("https://", "");
+        let xds_addr_host_substr: Vec<&str> = xds_addr_host.split(':').collect();
+        // let authority_override = match IpAddr::from_str(xds_addr_host_substr[0]) {
+        //     Ok(_) => Some(self.config.host.clone().expect("host must be set for IP XDS address")),
+        //     Err(_) => None,
+        // };
+
         let tls_grpc_channel = tls::grpc_connector(
             self.config.address.clone(),
             self.config.tls_builder.fetch_cert().await?,
+            None,
         )?;
 
         let ads_connection = AggregatedDiscoveryServiceClient::with_interceptor(

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use prost_types::value::Kind;
@@ -41,8 +43,16 @@ impl CaClient {
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
+        host: Option<String>
     ) -> Result<CaClient, Error> {
-        let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?)?;
+        // If our CA address is an ip address, override the authority header
+        // let ca_addr_host = address.clone().replace("https://", "");
+        // let ca_addr_host_substr: Vec<&str> = ca_addr_host.split(':').collect();
+        // let authority_override = match IpAddr::from_str(ca_addr_host_substr[0]) {
+        //     Ok(_) => Some(host.clone().expect("host must be set for IP CA address")),
+        //     Err(_) => None,
+        // };
+        let svc = tls::grpc_connector(address, cert_provider.fetch_cert().await?, None)?;
 
         let client = IstioCertificateServiceClient::with_interceptor(svc, auth);
         Ok(CaClient {

@@ -85,6 +85,7 @@ impl CaServer {
             ),
             true,
             60 * 60 * 24,
+            None, // Shouldn't need an authority header for a test CA server (on localhost)
         )
         .await
         .unwrap();
