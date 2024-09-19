@@ -8,11 +8,6 @@ use tracing::info;
 use std::io::{IoSlice, IoSliceMut};
 use tokio::net::windows::named_pipe::*;
 
-const PIPE_NAME: &str = r"\\.\pipe\istio-zds";
-
-pub fn get_zds_pipe_name() -> &'static str {
-    PIPE_NAME
-}
 
 pub struct WorkloadStreamProcessor {
     client: NamedPipeClient,
