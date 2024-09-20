@@ -381,7 +381,7 @@ impl WorkloadProxyManagerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inpod::test_helpers::{self, create_proxy_confilct, new_netns, uid};
+    use crate::inpod::test_helpers::{self, create_proxy_conflict, new_netns, uid};
     use crate::inpod::WorkloadData;
 
     use crate::inpod::istio::zds;
@@ -471,7 +471,7 @@ mod tests {
         let mut state = fixture.state;
         let ns = new_netns();
         // to make the proxy fail, bind to its ports in its netns
-        let sock = create_proxy_confilct(&ns);
+        let sock = create_proxy_conflict(&ns);
 
         let data = WorkloadData {
             netns: ns,
@@ -506,7 +506,7 @@ mod tests {
         let ns1 = new_netns();
         let ns2 = new_netns();
         // to make the proxy fail, bind to its ports in its netns
-        let _sock = create_proxy_confilct(&ns1);
+        let _sock = create_proxy_conflict(&ns1);
 
         // Add the pod in netns1
         let ret = state
@@ -542,7 +542,7 @@ mod tests {
 
         let ns = new_netns();
         // to make the proxy fail, bind to its ports in its netns
-        let _sock = create_proxy_confilct(&ns);
+        let _sock = create_proxy_conflict(&ns);
 
         let data = WorkloadData {
             netns: ns,

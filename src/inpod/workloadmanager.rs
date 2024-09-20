@@ -387,7 +387,7 @@ pub(crate) mod tests {
     use super::*;
 
     use crate::inpod::test_helpers::{
-        self, create_proxy_confilct, new_netns, read_hello, read_msg, send_snap_sent,
+        self, create_proxy_conflict, new_netns, read_hello, read_msg, send_snap_sent,
         send_workload_added, send_workload_del, uid,
     };
 
@@ -505,7 +505,7 @@ pub(crate) mod tests {
         let mut state = f.state;
 
         let podns = new_netns();
-        let socket = create_proxy_confilct(&podns);
+        let socket = create_proxy_conflict(&podns);
 
         let server = tokio::spawn(async move {
             read_hello(&mut s2).await;
