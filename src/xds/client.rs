@@ -623,7 +623,7 @@ impl AdsClient {
         let addr = self.config.address.clone();
         let tls_grpc_channel = tls::grpc_connector(
             self.config.address.clone(),
-						self.config.auth.clone(),
+            self.config.auth.clone(),
             self.config
                 .tls_builder
                 .fetch_cert(self.config.alt_hostname.clone())

@@ -42,7 +42,8 @@ impl CaClient {
         enable_impersonated_identity: bool,
         secret_ttl: i64,
     ) -> Result<CaClient, Error> {
-        let svc = tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
+        let svc =
+            tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
         let client = IstioCertificateServiceClient::new(svc);
         Ok(CaClient {
             client,

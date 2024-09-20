@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tonic::body::BoxBody;
+use tracing::debug;
 
 async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Error> {
     let mut roots = rustls::RootCertStore::empty();
@@ -174,6 +175,7 @@ async fn control_plane_client_config(
     let c = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(crate::tls::TLS_VERSIONS)?;
     if let Some(alt_hostname) = alt_hostname {
+        debug!("using alternate hostname {alt_hostname} for TLS verification");
         Ok(c.dangerous()
             .with_custom_certificate_verifier(Arc::new(AltHostnameVerifier {
                 roots: Arc::new(roots),
