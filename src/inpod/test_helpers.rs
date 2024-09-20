@@ -226,7 +226,7 @@ pub async fn send_workload_del(s: &mut UnixStream, uid: super::WorkloadUid) {
     .expect("failed to sendmsg");
 }
 
-pub fn create_proxy_confilct(ns: &std::os::fd::OwnedFd) -> std::os::fd::OwnedFd {
+pub fn create_proxy_conflict(ns: &std::os::fd::OwnedFd) -> std::os::fd::OwnedFd {
     let inpodns = InpodNetns::new(
         Arc::new(crate::inpod::netns::InpodNetns::current().unwrap()),
         ns.try_clone().unwrap(),
