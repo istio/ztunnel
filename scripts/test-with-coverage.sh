@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 # shellcheck disable=SC2046,SC2086
 
 # Copyright Istio Authors
@@ -49,8 +49,9 @@ test_bins=$(cargo test --benches --tests --bins --no-run --message-format=json $
 objs=""
 for file in $test_bins
 do
-    objs+=$(printf "%s %s " -object "$file")
+    objs="$objs $(printf "%s %s " -object "$file")"
 done
+echo $objs
 
 echo "Publishing coverage report to $output_dir"
 
