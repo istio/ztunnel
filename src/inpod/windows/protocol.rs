@@ -74,12 +74,12 @@ impl WorkloadStreamProcessor {
             loop {
                 println!("Waiting for pipe to be readable");
                 tokio::select! {
-                    biased; // check drain first, so we don't read from the socket if we are draining.
+                    biased; // check drain first, so we don't read from the pipe if we are draining.
                     _ = self.drain.clone().wait_for_drain() => {
                         info!("workload proxy manager: drain requested");
                         return Ok(None);
                     }
-                    res =  self.client.readable() => res,
+                    res = self.client.readable() => res,
                 }?;
                 let res = self.client.try_read_vectored(&mut iov);
                 let ok_res = match res {
@@ -101,6 +101,7 @@ impl WorkloadStreamProcessor {
                 break ok_res;
             }
         };
+        info!("Successfully read {:?} bytes from pipe", len);
         get_workload_data(&buffer[..len]).map(Some)
     }
 }
@@ -125,15 +126,4 @@ fn get_workload_data(data: &[u8]) -> anyhow::Result<WorkloadMessage> {
 
 fn get_info_from_data<'a>(data: impl bytes::Buf + 'a) -> anyhow::Result<WorkloadRequest> {
     Ok(WorkloadRequest::decode(data)?)
-}
-
-
-async fn process(
-    processor: &mut WorkloadStreamProcessor,
-) -> anyhow::Result<Option<WorkloadMessage>> {
-    let readmsg = processor.read_message();
-    // Note: readmsg future is NOT cancel safe, so we want to make sure this function doesn't exit
-    // return without completing it.
-    futures::pin_mut!(readmsg);
-    readmsg.await
 }

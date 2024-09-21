@@ -121,6 +121,8 @@ impl WorkloadProxyManagerState {
                     self.snapshot_names.insert(poddata.workload_uid.clone());
                 }
                 let ns = poddata.windows_namespace.expect("pod should have namespace");
+                // TODO: this is currently failing because HNS doesn't have a network compartment
+                // for the namespace. 
                 let netns = InpodNamespace::new(
                     self.inpod_config.cur_netns(),
                     ns.guid
