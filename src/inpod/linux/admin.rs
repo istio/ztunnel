@@ -89,7 +89,7 @@ impl WorkloadManagerAdminHandler {
     pub fn proxy_up(
         &self,
         uid: &crate::inpod::linux::WorkloadUid,
-        workload_info: &Option<WorkloadInfo>,
+        workload_info: &WorkloadInfo,
         cm: Option<ConnectionManager>,
     ) {
         let mut state = self.state.write().unwrap();
@@ -160,17 +160,16 @@ mod test {
         let handler = WorkloadManagerAdminHandler::default();
         let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
 
-        let uid1 = crate::inpod::linux::WorkloadUid::new("uid1".to_string());
-        handler.proxy_pending(&uid1, &None);
-        assert_eq!(data(), r#"{"uid1":{"state":"Pending"}}"#);
-        handler.proxy_up(
-            &uid1,
-            &Some(crate::state::WorkloadInfo {
-                name: "name".to_string(),
-                namespace: "ns".to_string(),
-                service_account: "sa".to_string(),
-            }),
-            None,
+        let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
+        let wli = WorkloadInfo {
+            name: "name".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "sa".to_string(),
+        };
+        handler.proxy_pending(&uid1, &wli);
+        assert_eq!(
+            data(),
+            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#
         );
         handler.proxy_up(&uid1, &wli, None);
         assert_eq!(

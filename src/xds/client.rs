@@ -14,8 +14,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-use std::net::IpAddr;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, mem};

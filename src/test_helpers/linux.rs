@@ -58,7 +58,7 @@ pub struct WorkloadManager {
 
 #[derive(Debug)]
 pub struct LocalZtunnel {
-    fd_sender: Option<MpscAckSender<inpod::Message>>,
+    fd_sender: Option<MpscAckSender<inpod_linux::Message>>,
     config_sender: MpscAckSender<LocalConfig>,
     namespace: Namespace,
 }
@@ -254,7 +254,7 @@ impl WorkloadManager {
         self.workloads = keep;
         for d in drop {
             if let Some(zt) = self.ztunnels.get_mut(&d.workload.node.to_string()).as_mut() {
-                let msg = inpod::Message::Stop(d.workload.uid.to_string());
+                let msg = inpod_linux::Message::Stop(d.workload.uid.to_string());
                 zt.fd_sender
                     .as_mut()
                     .unwrap()
@@ -543,7 +543,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                     .netns()
                     .run(|_| helpers::run_command("scripts/ztunnel-redirect-inpod.sh"))??;
                 let fd = network_namespace.netns().file().as_raw_fd();
-                let msg = inpod::Message::Start(inpod::StartZtunnelMessage {
+                let msg = inpod_linux::Message::Start(inpod_linux::StartZtunnelMessage {
                     uid: uid.to_string(),
                     workload_info: Some(wli),
                     fd,

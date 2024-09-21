@@ -293,6 +293,7 @@ mod tests {
             istio::zds::AddWorkload {
                 uid: uid.clone().into_string(),
                 workload_info: Some(wi.clone()),
+                windows_namespace: None,
             },
         ));
 

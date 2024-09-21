@@ -138,10 +138,10 @@ impl WorkloadProxyNetworkHandler {
 
         debug!("connecting to server: {:?}", self.uds);
 
-        let client_options = ClientOptions::new()
+        loop {
+            let client_options = ClientOptions::new()
             .pipe_mode(tokio::net::windows::named_pipe::PipeMode::Message)
             .open(&self.uds);
-        loop {
             match client_options {
                 Ok(client) => {
                     info!("connected to server: {:?}", self.uds);
@@ -355,7 +355,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                         .await
                         .map_err(|e| Error::SendAckError(e.to_string()))?;
                 }
-                Err(Error::ProxyError(e)) => {
+                Err(Error::ProxyError(uid, e)) => {
                     // setup the retry timer:
                     self.schedule_retry();
                     // proxy error is a transient error, so report it but don't disconnect

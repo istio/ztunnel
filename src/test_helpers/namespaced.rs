@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use libc::getpid;
-use nix::sched::{setns, CloneFlags};
 use nix::unistd::mkdtemp;
 use std::fs::File;
 use std::path::PathBuf;

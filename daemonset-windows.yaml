@@ -52,7 +52,7 @@ spec:
           operator: Exists
       containers:
       - name: istio-proxy
-        image: "istiolocaltesting.azurecr.io/ztunnel-windows:test-11"
+        image: "istiolocaltesting.azurecr.io/ztunnel-windows:test-16"
         ports:
         - containerPort: 15020
           name: ztunnel-stats
@@ -90,11 +90,13 @@ spec:
         - name: INPOD_ENABLED
           value: "true"
         - name: INPOD_UDS
-          value: '\\.\pipe\istio-zds'
+          value: \\.\pipe\istio-zds
         - name: INPOD_PORT_REUSE
           value: "false"
         - name: TERMINATION_GRACE_PERIOD_SECONDS
           value: "30"
+        - name: IPV6_ENABLED
+          value: "false"
         - name: POD_NAME
           valueFrom:
             fieldRef:

@@ -15,7 +15,10 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::Criterion;
+#[cfg(target_os = "linux")]
+use criterion::{criterion_group, criterion_main};
+#[cfg(target_os = "linux")]
 use pprof::criterion::{Output, PProfProfiler};
 
 use ztunnel::state::ProxyState;
@@ -76,6 +79,7 @@ pub fn xds(c: &mut Criterion) {
     });
 }
 
+#[cfg(target_os = "linux")]
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -84,4 +88,10 @@ criterion_group! {
     targets = xds
 }
 
+#[cfg(target_os = "linux")]
 criterion_main!(benches);
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    println!("This benchmark is only supported on Linux");
+}

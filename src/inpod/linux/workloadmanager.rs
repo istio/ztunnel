@@ -324,7 +324,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                 }
             }?;
 
-            debug!("received message: {:?}", msg);
+            info!("received message: {:?}", msg);
 
             // send ack:
             match self.state.process_msg(msg).await {
@@ -387,7 +387,7 @@ pub(crate) mod tests {
     use super::*;
 
     use crate::inpod::linux::test_helpers::{
-        self, create_proxy_confilct, new_netns, read_hello, read_msg, send_snap_sent,
+        self, create_proxy_conflict, new_netns, read_hello, read_msg, send_snap_sent,
         send_workload_added, send_workload_del, uid,
     };
 

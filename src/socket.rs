@@ -18,11 +18,11 @@ use tokio::io;
 
 use tokio::net::TcpSocket;
 use tokio::net::{TcpListener, TcpStream};
+use std::io::Error;
 
 #[cfg(target_os = "linux")]
 use {
     socket2::{Domain, SockRef},
-    std::io::Error,
     std::io::ErrorKind,
     tracing::warn,
 };
