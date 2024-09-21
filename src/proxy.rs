@@ -121,17 +121,30 @@ impl DefaultSocketFactory {
             );
         }
         if cfg.user_timeout_enabled {
-            // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
-            // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
-            let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-            tracing::trace!(
-                "set user timeout: {:?}",
-                socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut))
-            );
+            self.set_tcp_user_timeout(s)?;
         }
         Ok(())
     }
+
+    #[cfg(target_os = "linux")]
+    fn set_tcp_user_timeout(&self, s: &TcpSocket) -> io::Result<()> {
+        let cfg = self.0;
+        // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
+        // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
+        let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
+        tracing::trace!(
+            "set user timeout: {:?}",
+            socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut))
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_tcp_user_timeout(&self, _s: &TcpSocket) -> io::Result<()> {
+        unreachable!("user_timeout not supported on windows")
+    }
 }
+
 
 pub struct MarkSocketFactory {
     pub inner: DefaultSocketFactory,

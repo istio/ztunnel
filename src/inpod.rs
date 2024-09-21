@@ -13,7 +13,7 @@ pub mod istio {
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("error creating proxy: {0}")]
-    ProxyError(crate::proxy::Error),
+    ProxyError(String, crate::proxy::Error),
     #[error("error receiving message: {0}")]
     ReceiveMessageError(String),
     #[error("error sending ack: {0}")]

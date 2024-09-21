@@ -258,17 +258,8 @@ impl tower::Service<http::Request<Body>> for TlsGrpcChannel {
         if let Some(scheme) = self.uri.scheme() {
             uri = uri.scheme(scheme.to_owned());
         }
-
-        match &self.authority_override {
-            Some(authority) => {
-                info!("Overriding authority with {}", authority);
-                uri = uri.authority(authority.to_owned());
-            }
-            None => {
-                if let Some(authority) = self.uri.authority() {
-                    uri = uri.authority(authority.to_owned());
-                }
-            }
+        if let Some(authority) = self.uri.authority() {
+            uri = uri.authority(authority.to_owned());
         }
         if let Some(path_and_query) = req.uri().path_and_query() {
             uri = uri.path_and_query(path_and_query.to_owned());

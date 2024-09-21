@@ -2444,29 +2444,6 @@ dependencies = [
 
 [[package]]
 name = "pprof"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef5c97c51bd34c7e742402e216abdeb44d415fbe6ae41d56b114723e953711cb"
-dependencies = [
- "backtrace",
- "cfg-if",
- "criterion",
- "findshlibs",
- "libc",
- "log",
- "nix 0.26.4",
- "once_cell",
- "parking_lot",
- "protobuf",
- "protobuf-codegen-pure",
- "smallvec",
- "symbolic-demangle",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "pprof"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebbe2f8898beba44815fdc9e5a4ae9c929e21c5dc29b0c774a15555f7f58d6d0"
@@ -3209,8 +3186,9 @@ checksum = "8917285742e9f3e1683f0a9c4e6b57960b7314d0b08d30d1ecd426713ee2eee9"
 
 [[package]]
 name = "socket2"
-version = "0.5.7"
-source = "git+https://github.com/keithmattix/socket2.git?branch=windows-original-dst#08d6ca0eef2ca6996822b611c43fc385ed4de6c5"
+version = "0.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f5fd57c80058a56cf5c777ab8a126398ece8e442983605d280a44ce79d0edef"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
@@ -3218,12 +3196,11 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.5.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f5fd57c80058a56cf5c777ab8a126398ece8e442983605d280a44ce79d0edef"
+version = "0.6.0"
+source = "git+https://github.com/keithmattix/socket2.git?branch=add-tcp-retries-to-windows#3b6ea10cc0fde38a8819e05b338f9a3629c03ad6"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4505,8 +4482,7 @@ dependencies = [
  "pin-project-lite",
  "pingora-pool",
  "ppp",
- "pprof 0.13.0",
- "pprof 0.14.0",
+ "pprof",
  "prometheus-client",
  "prometheus-parse",
  "prost",
@@ -4523,7 +4499,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "socket2 0.5.7",
+ "socket2 0.6.0",
  "split-iter",
  "test-case",
  "textnonce",

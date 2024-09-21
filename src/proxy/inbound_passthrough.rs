@@ -117,6 +117,7 @@ impl InboundPassthrough {
         inbound_stream: TcpStream,
         enable_orig_src: bool,
     ) {
+        info!("proxying inbound plaintext connection");
         let start = Instant::now();
         let dest_addr = socket::orig_dst_addr_or_default(&inbound_stream);
         // Check if it is an illegal call to ourself, which could trampoline to illegal addresses or
@@ -212,13 +213,13 @@ impl InboundPassthrough {
         };
 
         let send = async {
-            trace!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
+            info!(%source_addr, %dest_addr, component="inbound plaintext", "connecting...");
 
             let outbound = super::freebind_connect(orig_src, dest_addr, pi.socket_factory.as_ref())
                 .await
                 .map_err(Error::ConnectionFailed)?;
 
-            trace!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
+            info!(%source_addr, destination=%dest_addr, component="inbound plaintext", "connected");
             copy::copy_bidirectional(
                 copy::TcpStreamSplitter(inbound_stream),
                 copy::TcpStreamSplitter(outbound),

@@ -30,6 +30,8 @@ use hyper::{Request, Response, header::CONTENT_TYPE, header::HeaderValue};
 use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use pprof::protos::Message;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -241,7 +243,6 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
 
 #[cfg(target_os = "linux")]
 async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
-    use pprof::protos::Message;
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(1000)
         // .blocklist(&["libc", "libgcc", "pthread", "vdso"])
@@ -260,7 +261,7 @@ async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<B
 }
 
 #[cfg(target_os = "windows")]
-async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+async fn _handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
     Ok(Response::builder()
         .status(hyper::StatusCode::NOT_FOUND)
         .body("pprof not supported on non-Linux platforms".into())

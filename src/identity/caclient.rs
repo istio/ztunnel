@@ -13,8 +13,6 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
-use std::str::FromStr;
 
 use async_trait::async_trait;
 use prost_types::Struct;
@@ -114,6 +112,7 @@ impl CaClient {
             warn!("no chain certs for: {}", id);
             vec![]
         };
+        info!("received certificate for {:?}", id);
         let certs = tls::WorkloadCertificate::new(&private_key, leaf, chain)?;
         // Make the certificate actually matches the identity we requested.
         if self.enable_impersonated_identity && certs.identity().as_ref() != Some(id) {

@@ -56,7 +56,7 @@ pub struct WorkloadProxyManagerState {
     // workloads we wanted to start but couldn't because we had an error starting them.
     // This happened to use mainly in testing when we redeploy ztunnel, and the old pod was
     // not completely drained yet.
-    pending_workloads: hashbrown::HashMap<WorkloadUid, (Option<WorkloadInfo>, InpodNamespace)>,
+    pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, InpodNamespace)>,
     draining: DrainingTasks,
 
     // new connection stuff
@@ -117,23 +117,30 @@ impl WorkloadProxyManagerState {
                         .unwrap_or_default(),
                     "pod received, starting proxy",
                 );
+                let Some(wli) = poddata.workload_info else {
+                    return Err(Error::ProtocolError(
+                        "workload_info is required but not present".into(),
+                    ));
+                };
                 if !self.snapshot_received {
                     self.snapshot_names.insert(poddata.workload_uid.clone());
                 }
-                let ns = poddata.windows_namespace.expect("pod should have namespace");
+                let ns = wli.windows_namespace.expect("pod should have windows namespace");
+                // TODO: this is currently failing because HNS doesn't have a network compartment
+                // for the namespace.
                 let netns = InpodNamespace::new(
                     self.inpod_config.cur_netns(),
                     ns.guid
                 )
-                    .map_err(|e| Error::ProxyError(crate::proxy::Error::Io(e)))?;
-                let info = poddata.workload_info.map(|w| WorkloadInfo {
-                    name: w.name,
-                    namespace: w.namespace,
-                    service_account: w.service_account,
-                });
+                    .map_err(|e| Error::ProxyError(poddata.workload_uid.0.clone(), crate::proxy::Error::Io(e)))?;
+                let info = WorkloadInfo {
+                    name: wli.name,
+                    namespace: wli.namespace,
+                    service_account: wli.service_account,
+                };
                 self.add_workload(&poddata.workload_uid, info, netns)
                     .await
-                    .map_err(Error::ProxyError)
+                    .map_err(|e| Error::ProxyError(poddata.workload_uid.0, e))
             }
             WorkloadMessage::KeepWorkload(workload_uid) => {
                 info!(
@@ -206,7 +213,7 @@ impl WorkloadProxyManagerState {
     async fn add_workload(
         &mut self,
         workload_uid: &WorkloadUid,
-        workload_info: Option<WorkloadInfo>,
+        workload_info: WorkloadInfo,
         netns: InpodNamespace,
     ) -> Result<(), crate::proxy::Error> {
         match self
@@ -228,7 +235,7 @@ impl WorkloadProxyManagerState {
     async fn add_workload_inner(
         &mut self,
         workload_uid: &WorkloadUid,
-        workload_info: &Option<WorkloadInfo>,
+        workload_info: &WorkloadInfo,
         netns: InpodNamespace,
     ) -> Result<(), crate::proxy::Error> {
         // check if we have a proxy already
@@ -280,30 +287,20 @@ impl WorkloadProxyManagerState {
         let metrics = self.metrics.clone();
         let admin_handler = self.admin_handler.clone();
 
-        metrics.proxies_started.get_or_create(&()).inc();
+        metrics.proxies_started.inc();
         if let Some(proxy) = proxies.proxy {
-            let span = if let Some(wl) = workload_info {
-                tracing::info_span!("proxy", wl=%format!("{}/{}", wl.namespace, wl.name))
-            } else {
-                tracing::info_span!("proxy", uid=%workload_uid.clone().into_string())
-            };
             tokio::spawn(
                 async move {
                     proxy.run().await;
                     debug!("proxy for workload {:?} exited", uid);
-                    metrics.proxies_stopped.get_or_create(&()).inc();
+                    metrics.proxies_stopped.inc();
                     admin_handler.proxy_down(&uid);
                 }
-                .instrument(span),
+                .instrument(tracing::info_span!("proxy", wl=%format!("{}/{}", workload_info.namespace, workload_info.name))),
             );
         }
         if let Some(proxy) = proxies.dns_proxy {
-            let span = if let Some(wl) = workload_info {
-                tracing::info_span!("dns_proxy", wl=%format!("{}/{}", wl.namespace, wl.name))
-            } else {
-                tracing::info_span!("dns_proxy", uid=%workload_uid.clone().into_string())
-            };
-            tokio::spawn(proxy.run().instrument(span));
+            tokio::spawn(proxy.run().instrument(tracing::info_span!("dns_proxy", wl=%format!("{}/{}", workload_info.namespace, workload_info.name))));
         }
 
         let namespace_id = netns.clone().workload_namespace();
@@ -358,11 +355,9 @@ impl WorkloadProxyManagerState {
     fn update_proxy_count_metrics(&self) {
         self.metrics
             .active_proxy_count
-            .get_or_create(&())
             .set(self.workload_states.len().try_into().unwrap_or(-1));
         self.metrics
             .pending_proxy_count
-            .get_or_create(&())
             .set(self.pending_workloads.len().try_into().unwrap_or(-1));
     }
 }

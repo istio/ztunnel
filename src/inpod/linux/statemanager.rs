@@ -389,7 +389,7 @@ impl WorkloadProxyManagerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inpod::linux::test_helpers::{self, create_proxy_confilct, new_netns, uid};
+    use crate::inpod::linux::test_helpers::{self, create_proxy_conflict, new_netns, uid};
     use crate::inpod::linux::WorkloadData;
 
     use crate::inpod::istio::zds;
@@ -407,6 +407,7 @@ mod tests {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            windows_namespace: None,
         })
     }
 

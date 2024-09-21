@@ -44,9 +44,9 @@ use ztunnel::xds::LocalWorkload;
 use ztunnel::{app, identity, metrics, proxy, rbac, strng, test_helpers};
 
 #[cfg(target_os = "linux")]
-use ztunnel::setup_netns_test;
-#[cfg(target_os = "linux")]
 use pprof::criterion::{Output, PProfProfiler};
+#[cfg(target_os = "linux")]
+use ztunnel::setup_netns_test;
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
