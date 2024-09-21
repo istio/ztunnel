@@ -57,14 +57,14 @@ where
 
 #[derive(Default)]
 pub struct WorkloadManagerAdminHandler {
-    state: RwLock<HashMap<crate::inpod::linux::WorkloadUid, ProxyState>>,
+    state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
 }
 
 impl WorkloadManagerAdminHandler {
     pub fn proxy_pending(
         &self,
         uid: &crate::inpod::WorkloadUid,
-        workload_info: &Option<WorkloadInfo>,
+        workload_info: &WorkloadInfo,
     ) {
         let mut state = self.state.write().unwrap();
 
@@ -88,8 +88,8 @@ impl WorkloadManagerAdminHandler {
     }
     pub fn proxy_up(
         &self,
-        uid: &crate::inpod::linux::WorkloadUid,
-        workload_info: &Option<WorkloadInfo>,
+        uid: &crate::inpod::WorkloadUid,
+        workload_info: &WorkloadInfo,
         cm: Option<ConnectionManager>,
     ) {
         let mut state = self.state.write().unwrap();
@@ -115,7 +115,7 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
-    pub fn proxy_down(&self, uid: &crate::inpod::linux::WorkloadUid) {
+    pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {
@@ -160,17 +160,16 @@ mod test {
         let handler = WorkloadManagerAdminHandler::default();
         let data = || serde_json::to_string(&handler.to_json().unwrap()).unwrap();
 
-        let uid1 = crate::inpod::linux::WorkloadUid::new("uid1".to_string());
-        handler.proxy_pending(&uid1, &None);
-        assert_eq!(data(), r#"{"uid1":{"state":"Pending"}}"#);
-        handler.proxy_up(
-            &uid1,
-            &Some(crate::state::WorkloadInfo {
-                name: "name".to_string(),
-                namespace: "ns".to_string(),
-                service_account: "sa".to_string(),
-            }),
-            None,
+        let uid1 = crate::inpod::WorkloadUid::new("uid1".to_string());
+        let wli = WorkloadInfo {
+            name: "name".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "sa".to_string(),
+        };
+        handler.proxy_pending(&uid1, &wli);
+        assert_eq!(
+            data(),
+            r#"{"uid1":{"info":{"name":"name","namespace":"ns","serviceAccount":"sa"},"state":"Pending"}}"#
         );
         handler.proxy_up(&uid1, &wli, None);
         assert_eq!(

@@ -12,7 +12,6 @@ metadata:
     app.kubernetes.io/version: "1.0.0"
     helm.sh/chart: ztunnel-windows-1.0.0
   annotations:
-    istio.io/rev: 1-23-0
 spec:
   updateStrategy:
     rollingUpdate:
@@ -35,7 +34,6 @@ spec:
         helm.sh/chart: ztunnel-windows-1.0.0
       annotations:
         sidecar.istio.io/inject: "false"
-        istio.io/rev: 1-23-0
         prometheus.io/port: "15020"
         prometheus.io/scrape: "true"
     spec:
@@ -52,11 +50,7 @@ spec:
           operator: Exists
       containers:
       - name: istio-proxy
-        image: "istiolocaltesting.azurecr.io/ztunnel-windows:test-11"
-        ports:
-        - containerPort: 15020
-          name: ztunnel-stats
-          protocol: TCP
+        image: "istiolocaltesting.azurecr.io/ztunnel-windows:20250321-6"
         resources:
           requests:
             cpu: 200m
@@ -73,16 +67,16 @@ spec:
         - proxy
         - ztunnel
         env:
-        # - name: CA_ADDRESS
-        #   value: istiod-1-23-0.istio-system.svc.cluster.local:15012
-        # - name: XDS_ADDRESS
-        #   value: istiod-1-23-0.istio-system.svc.cluster.local:15012
+        - name: ALT_XDS_HOSTNAME
+          value: "istiod-1-25-0.istio-system.svc"
+        - name: ALT_CA_HOSTNAME
+          value: "istiod-1-25-0.istio-system.svc"
         - name: USE_ENV_FOR_DEFAULT_ISTIOD_ADDR
           value: "true"
         - name: REVISION
-          value: "1-23-0"
+          value: "1-25-0"
         - name: RUST_LOG
-          value: "info"
+          value: "debug"
         - name: RUST_BACKTRACE
           value: "1"
         - name: ISTIO_META_CLUSTER_ID
@@ -90,11 +84,13 @@ spec:
         - name: INPOD_ENABLED
           value: "true"
         - name: INPOD_UDS
-          value: '\\.\pipe\istio-zds'
+          value: \\.\pipe\istio-zds
         - name: INPOD_PORT_REUSE
           value: "false"
         - name: TERMINATION_GRACE_PERIOD_SECONDS
           value: "30"
+        - name: IPV6_ENABLED
+          value: "false"
         - name: POD_NAME
           valueFrom:
             fieldRef:

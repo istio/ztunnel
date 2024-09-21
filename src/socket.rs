@@ -18,24 +18,23 @@ use tokio::io;
 
 use tokio::net::TcpSocket;
 use tokio::net::{TcpListener, TcpStream};
+use std::io::Error;
+use socket2::SockRef;
+
 
 #[cfg(target_os = "linux")]
 use {
-    socket2::{Domain, SockRef},
-    std::io::Error,
+    socket2::Domain,
     std::io::ErrorKind,
     tracing::warn,
 };
-
-#[cfg(target_os = "windows")]
-use socket2::SockRef;
 
 #[cfg(target_os = "linux")]
 pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
     let socket = SockRef::from(socket);
     match socket.domain()? {
         Domain::IPV4 => {
-            socket.set_ip_transparent(true)?;
+            socket.set_ip_transparent_v4(true)?;
             socket.set_freebind(true)?;
         }
         Domain::IPV6 => {
@@ -69,13 +68,13 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
         Err(e4) => match linux::original_dst_ipv6(&sock) {
             Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
             Err(e6) => {
-                if !sock.ip_transparent().unwrap_or(false) {
-                    // In TPROXY mode, this is normal, so don't bother logging
-                    warn!(
-                        peer=?stream.peer_addr().unwrap(),
-                        local=?stream.local_addr().unwrap(),
-                        "failed to read SO_ORIGINAL_DST: {e4:?}, {e6:?}"
-                    );
+                if !sock.ip_transparent_v4().unwrap_or(false) && !linux::ipv6_transparent(&sock).unwrap_or(false) {
+                // In TPROXY mode, this is normal, so don't bother logging
+                warn!(
+                    peer=?stream.peer_addr().unwrap(),
+                    local=?stream.local_addr().unwrap(),
+                    "failed to read SO_ORIGINAL_DST: {e4:?}, {e6:?}"
+                );
                 }
                 Err(e6)
             }
@@ -129,7 +128,7 @@ pub fn set_mark(_socket: &TcpSocket, _mark: u32) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod linux {
-    use std::os::unix::io::AsRawFd;
+    use std::{mem::MaybeUninit, os::unix::io::AsRawFd};
 
     use socket2::{SockAddr, SockRef};
     use tokio::io;
@@ -149,6 +148,25 @@ mod linux {
             }
         }
         Ok(())
+    }
+
+    pub fn ipv6_transparent(sock: &SockRef) -> io::Result<bool> {
+        let mut val: MaybeUninit<bool> = std::mem::MaybeUninit::uninit();
+        let mut len = size_of::<bool>() as libc::socklen_t;
+        unsafe {
+            match libc::getsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TRANSPARENT,
+                val.as_mut_ptr().cast(),
+                &mut len,
+            ) {
+                -1 => Err(std::io::Error::last_os_error()),
+                _ => {
+                    Ok(val.assume_init())
+                },
+            }
+        }
     }
 
     pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
@@ -193,10 +211,23 @@ impl Listener {
     }
 }
 
+// TODO: Apparently IP_TRANSPARENT doesn't work for ipv6, so probably want to add
+// some checks here.
 #[cfg(target_os = "linux")]
 impl Listener {
     pub fn set_transparent(&self) -> io::Result<()> {
-        SockRef::from(&self.0).set_ip_transparent(true)
+        let socket = SockRef::from(&self.0);
+        match socket.domain()? {
+            Domain::IPV4 => {
+                socket.set_ip_transparent_v4(true)?;
+                Ok(())
+            }
+            Domain::IPV6 => {
+                linux::set_ipv6_transparent(&socket)?;
+                Ok(())
+            }
+            _ => Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
+        }
     }
 }
 

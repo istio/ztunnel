@@ -11,8 +11,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use ztunnel::test_helpers::inpod_linux::StartZtunnelMessage;
+#[cfg(target_os = "linux")]
+use ztunnel::test_helpers::inpod_linux::{start_ztunnel_server, Message};
 
 use ztunnel::test_helpers::inpod::StartZtunnelMessage;
 use ztunnel::{
@@ -61,6 +65,7 @@ fn parse_proxy_workload_info() -> Result<WorkloadInfo, Error> {
                 name: "local".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
+                windows_namespace: None,
             });
         }
     };
@@ -76,6 +81,7 @@ fn parse_proxy_workload_info() -> Result<WorkloadInfo, Error> {
         name: name.to_string(),
         namespace: ns.to_string(),
         service_account: sa.to_string(),
+        windows_namespace: None,
     })
 }
 

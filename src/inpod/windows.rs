@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::istio::zds::WindowsNamespace;
 use super::metrics::Metrics;
 use crate::config as zconfig;
 use crate::inpod::istio::zds::WorkloadInfo;
@@ -38,7 +37,6 @@ pub mod test_helpers;
 
 #[derive(Debug)]
 pub struct WorkloadData {
-    windows_namespace: Option<WindowsNamespace>,
     workload_uid: WorkloadUid,
     workload_info: Option<WorkloadInfo>,
 }

@@ -43,7 +43,7 @@ impl InpodNamespace {
         match ns {
             Err(e) => {
                 warn!("Failed to get namespace: {}", e);
-                return Err(std::io::Error::last_os_error());
+                Err(std::io::Error::last_os_error())
             }
             Ok(ns) => Ok(InpodNamespace {
                 inner: Arc::new(NetnsInner {

@@ -287,6 +287,7 @@ mod tests {
             name: "test".to_string(),
             namespace: "default".to_string(),
             service_account: "defaultsvc".to_string(),
+            windows_namespace: None,
         };
         let uid = uid(0);
         let data = prep_request(zds::workload_request::Payload::Add(
