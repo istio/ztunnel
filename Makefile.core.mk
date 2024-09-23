@@ -8,6 +8,9 @@ endif
 test:
 	RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
 
+coverage:
+	FEATURES=$(FEATURES) ./scripts/test-with-coverage.sh 
+
 build:
 	cargo build $(FEATURES)
 
