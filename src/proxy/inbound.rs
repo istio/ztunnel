@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use tokio::sync::watch;
 
-use tracing::{debug, info, instrument, trace_span, Instrument};
+use tracing::{debug, info, info_span, trace_span, Instrument};
 
 use super::{ConnectionResult, Error, LocalWorkloadInformation, ResponseFlags};
 use crate::baggage::parse_baggage_header;
@@ -36,7 +36,7 @@ use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
-use crate::{assertions, copy, proxy, socket, strng, tls};
+use crate::{assertions, copy, handle_connection, proxy, socket, strng, tls};
 
 use crate::drain::run_with_drain;
 use crate::proxy::h2;
@@ -109,17 +109,34 @@ impl Inbound {
                         debug!(%conn, "accepted connection");
                         let cfg = pi.cfg.clone();
                         let request_handler = move |req| {
-                            Self::serve_connect(pi.clone(), conn.clone(), self.enable_orig_src, req)
+                            let id = Self::extract_traceparent(&req);
+                            let peer = conn.src;
+                            let req_handler = Self::serve_connect(
+                                pi.clone(),
+                                conn.clone(),
+                                self.enable_orig_src,
+                                req,
+                            )
+                            .instrument(info_span!("inbound", %id, %peer));
+                            // This is for each user connection, so most important to keep small
+                            assertions::size_between_ref(1500, 2500, &req_handler);
+                            req_handler
                         };
-                        let serve = Box::pin(h2::server::serve_connection(
+
+                        let serve_conn = h2::server::serve_connection(
                             cfg,
                             tls,
                             drain,
                             force_shutdown,
                             request_handler,
-                        ));
+                        );
+                        // This is per HBONE connection, so while would be nice to be small, at least it
+                        // is pooled so typically fewer of these.
+                        let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
                         serve.await
                     };
+                    // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
+                    // and measured above.
                     assertions::size_between_ref(1000, 1500, &serve_client);
                     tokio::task::spawn(serve_client.in_current_span());
                 }
@@ -145,10 +162,6 @@ impl Inbound {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(name="inbound", skip_all, fields(
-        id=%Self::extract_traceparent(&req),
-        peer=%conn.src,
-    ))]
     async fn serve_connect(
         pi: Arc<ProxyInputs>,
         conn: Connection,
@@ -199,7 +212,7 @@ impl Inbound {
             debug!("connected to: {}", ri.upstream_addr);
             Ok((conn_guard, stream))
         };
-        let (conn_guard, mut stream) = match rx.await {
+        let (mut conn_guard, mut stream) = match rx.await {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
                 ri.result_tracker.record_with_flag(Err(err), flag);
@@ -232,7 +245,7 @@ impl Inbound {
                 .instrument(trace_span!("hbone server"))
                 .await
             });
-        let res = conn_guard.handle_connection(send).await;
+        let res = handle_connection!(conn_guard, send);
         ri.result_tracker.record(res);
     }
 
