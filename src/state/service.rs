@@ -405,6 +405,10 @@ impl ServiceStore {
         if let Some(svc) = self.get_by_namespaced_host(&service_name) {
             // We may or may not accept the endpoint based on it's health
             if !svc.should_include_endpoint(ep.status) {
+                trace!(
+                    "service doesn't accept pod with status {:?}, skip",
+                    ep.status
+                );
                 return;
             }
             let mut svc = Arc::unwrap_or_clone(svc);
@@ -473,6 +477,10 @@ impl ServiceStore {
             // First add any staged service endpoints. Due to ordering issues, we may have received
             // the workloads before their associated services.
             if let Some(endpoints) = self.staged_services.remove(&namespaced_hostname) {
+                trace!(
+                    "staged service found, inserting {} endpoints",
+                    endpoints.len()
+                );
                 for (wip, ep) in endpoints {
                     if service.should_include_endpoint(ep.status) {
                         service.endpoints.insert(wip.clone(), ep);

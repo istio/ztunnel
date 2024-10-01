@@ -685,9 +685,7 @@ impl WorkloadStore {
     pub fn remove(&mut self, uid: &Strng) -> Option<Workload> {
         match self.by_uid.remove(uid) {
             None => {
-                trace!(
-                    "tried to remove workload but it was not found; presumably it was a service"
-                );
+                trace!("tried to remove workload but it was not found");
                 None
             }
             Some(prev) => {
