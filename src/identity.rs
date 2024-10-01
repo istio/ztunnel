@@ -39,7 +39,7 @@ pub enum Error {
     #[error("failed to create CSR: {0}")]
     Signing(Arc<tls::Error>),
     #[error("signing gRPC error ({}): {}", .0.code(), .0.message())]
-    SigningRequest(#[from] tonic::Status),
+    SigningRequest(#[from] Box<tonic::Status>),
     #[error("failed to process string: {0}")]
     Utf8(#[from] Utf8Error),
     #[error("did not find expected SAN: {0}")]

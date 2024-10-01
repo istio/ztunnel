@@ -83,7 +83,8 @@ impl CaClient {
             .client
             .clone()
             .create_certificate(req)
-            .await?
+            .await
+            .map_err(Box::new)?
             .into_inner();
         let leaf = resp
             .cert_chain
