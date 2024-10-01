@@ -150,7 +150,7 @@ impl ProxyStateUpdateMutator {
         let workload = Arc::new(workload);
 
         // First, remove the entry entirely to make sure things are cleaned up properly.
-        self.remove_for_insert(state, &workload.uid);
+        self.remove_workload_for_insert(state, &workload.uid);
 
         // Prefetch the cert for the workload.
         self.cert_fetcher.prefetch_cert(&workload);
@@ -166,7 +166,7 @@ impl ProxyStateUpdateMutator {
         self.remove_internal(state, xds_name, false);
     }
 
-    fn remove_for_insert(&self, state: &mut ProxyState, xds_name: &Strng) {
+    fn remove_workload_for_insert(&self, state: &mut ProxyState, xds_name: &Strng) {
         self.remove_internal(state, xds_name, true);
     }
 
@@ -174,9 +174,9 @@ impl ProxyStateUpdateMutator {
         level = Level::TRACE,
         name="remove",
         skip_all,
-        fields(name=%xds_name, for_insert=%for_insert),
+        fields(name=%xds_name, for_workload_insert=%for_workload_insert),
     )]
-    fn remove_internal(&self, state: &mut ProxyState, xds_name: &Strng, for_insert: bool) {
+    fn remove_internal(&self, state: &mut ProxyState, xds_name: &Strng, for_workload_insert: bool) {
         // remove workload by UID; if xds_name is a service then this will no-op
         if let Some(prev) = state.workloads.remove(&strng::new(xds_name)) {
             // Also remove service endpoints for the workload.
@@ -184,7 +184,7 @@ impl ProxyStateUpdateMutator {
 
             // This is a real removal (not a removal before insertion), and nothing else references the cert
             // Clear it out
-            if !for_insert
+            if !for_workload_insert
                 && state
                     .workloads
                     .was_last_identity_on_node(&prev.node, &prev.identity())
@@ -194,14 +194,14 @@ impl ProxyStateUpdateMutator {
             // We removed a workload, no reason to attempt to remove a service with the same name
             return;
         }
+        if for_workload_insert {
+            // This is a workload, don't attempt to remove as a service
+            return;
+        }
 
         let Ok(name) = NamespacedHostname::from_str(xds_name) else {
             // we don't have namespace/hostname xds primary key for service
-            if !for_insert {
-                warn!(
-                    "tried to remove service but it did not have the expected namespace/hostname format",
-                );
-            }
+            warn!("tried to remove service but it did not have the expected namespace/hostname format");
             return;
         };
 
@@ -214,7 +214,7 @@ impl ProxyStateUpdateMutator {
             trace!("not a service, not attempting to delete as such",);
             return;
         }
-        if !state.services.remove(&name) && !for_insert {
+        if !state.services.remove(&name) {
             warn!("tried to remove service, but it was not found");
         }
     }
@@ -238,6 +238,7 @@ impl ProxyStateUpdateMutator {
         state: &mut ProxyState,
         service: XdsService,
     ) -> anyhow::Result<()> {
+        debug!("handling insert");
         let mut service = Service::try_from(&service)?;
 
         // If the service already exists, add existing endpoints into the new service.
