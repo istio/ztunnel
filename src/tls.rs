@@ -59,6 +59,9 @@ pub enum Error {
 
     #[error("failed to build server verifier: {0}")]
     ServerVerifierBuilderError(#[from] VerifierBuilderError),
+
+    #[error("invalid alt hostname: {0}")]
+    InvalidAltHostname(#[from] rustls::pki_types::InvalidDnsNameError),
 }
 
 impl From<InvalidUri> for Error {

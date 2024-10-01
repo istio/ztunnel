@@ -212,6 +212,9 @@ pub struct Config {
     handlers: HashMap<Strng, Box<dyn RawHandler>>,
     initial_requests: Vec<DeltaDiscoveryRequest>,
     on_demand: bool,
+
+    /// alt_hostname provides an alternative accepted SAN for the control plane TLS verification
+    alt_hostname: Option<String>,
 }
 
 pub struct State {
@@ -258,6 +261,7 @@ impl Config {
             initial_requests: Vec::new(),
             on_demand: config.xds_on_demand,
             proxy_metadata: config.proxy_metadata.clone(),
+            alt_hostname: config.alt_xds_hostname.clone(),
         }
     }
 
@@ -620,7 +624,10 @@ impl AdsClient {
         let tls_grpc_channel = tls::grpc_connector(
             self.config.address.clone(),
             self.config.auth.clone(),
-            self.config.tls_builder.fetch_cert().await?,
+            self.config
+                .tls_builder
+                .fetch_cert(self.config.alt_hostname.clone())
+                .await?,
         )?;
 
         let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)

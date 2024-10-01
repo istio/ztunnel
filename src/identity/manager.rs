@@ -500,6 +500,7 @@ impl SecretManager {
             cfg.ca_address
                 .clone()
                 .expect("ca_address must be set to use CA"),
+            cfg.alt_ca_hostname.clone(),
             Box::new(tls::ControlPlaneAuthentication::RootCert(
                 cfg.ca_root_cert.clone(),
             )),

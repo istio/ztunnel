@@ -54,7 +54,7 @@ pub struct WorkloadCertificate {
     pub private_key: PrivateKeyDer<'static>,
 
     /// precomputed roots
-    roots: Arc<RootCertStore>,
+    pub roots: Arc<RootCertStore>,
 }
 
 pub fn identity_from_connection(conn: &server::ServerConnection) -> Option<Identity> {
@@ -106,7 +106,7 @@ pub fn identities(cert: X509Certificate) -> Result<Vec<Identity>, Error> {
 }
 
 impl Certificate {
-    // TOOD: I would love to parse this once, but ran into lifetime issues.
+    // TODO: I would love to parse this once, but ran into lifetime issues.
     fn parsed(&self) -> X509Certificate {
         x509_parser::parse_x509_certificate(&self.der)
             .expect("certificate was already parsed successfully before")

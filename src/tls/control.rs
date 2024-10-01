@@ -20,7 +20,9 @@ use hyper::body::Incoming;
 use hyper::Uri;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
-use rustls::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
@@ -28,6 +30,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tonic::body::BoxBody;
+use tracing::debug;
 
 async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Error> {
     let mut roots = rustls::RootCertStore::empty();
@@ -66,10 +69,10 @@ pub enum ControlPlaneAuthentication {
 
 #[async_trait::async_trait]
 impl ControlPlaneClientCertProvider for ControlPlaneAuthentication {
-    async fn fetch_cert(&self) -> Result<ClientConfig, Error> {
+    async fn fetch_cert(&self, alt_hostname: Option<String>) -> Result<ClientConfig, Error> {
         match self {
             ControlPlaneAuthentication::RootCert(root_cert) => {
-                control_plane_client_config(root_cert).await
+                control_plane_client_config(root_cert, alt_hostname).await
             }
             ControlPlaneAuthentication::ClientBundle(_bundle) => {
                 // TODO: implement this. Its is not currently used so no need.
@@ -79,12 +82,109 @@ impl ControlPlaneClientCertProvider for ControlPlaneAuthentication {
     }
 }
 
-async fn control_plane_client_config(root_cert: &RootCert) -> Result<ClientConfig, Error> {
+#[derive(Debug)]
+struct AltHostnameVerifier {
+    roots: Arc<rustls::RootCertStore>,
+    alt_server_name: ServerName<'static>,
+}
+
+// A custom verifier that allows alternative server names to be accepted.
+// Build our own verifier, inspired by https://github.com/rustls/rustls/blob/ccb79947a4811412ee7dcddcd0f51ea56bccf101/rustls/src/webpki/server_verifier.rs#L239.
+impl ServerCertVerifier for AltHostnameVerifier {
+    /// Will verify the certificate is valid in the following ways:
+    /// - Signed by a  trusted `RootCertStore` CA
+    /// - Not Expired
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        sn: &ServerName,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
+
+        let algs = provider().signature_verification_algorithms;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            algs.all,
+        )?;
+
+        if !ocsp_response.is_empty() {
+            tracing::trace!("Unvalidated OCSP response: {ocsp_response:?}");
+        }
+
+        // First attempt to verify the original server name...
+        if let Err(err) = rustls::client::verify_server_name(&cert, sn) {
+            tracing::debug!(
+                "failed to verify {sn:?} ({err}), attempting alt name {:?}",
+                self.alt_server_name
+            );
+            // That failed, lets try the alternative one
+            rustls::client::verify_server_name(&cert, &self.alt_server_name)?;
+        }
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    // Rest use the default implementations
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+async fn control_plane_client_config(
+    root_cert: &RootCert,
+    alt_hostname: Option<String>,
+) -> Result<ClientConfig, Error> {
     let roots = root_to_store(root_cert).await?;
-    Ok(ClientConfig::builder_with_provider(provider())
-        .with_protocol_versions(crate::tls::TLS_VERSIONS)?
-        .with_root_certificates(roots)
-        .with_no_client_auth())
+    let c = ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(crate::tls::TLS_VERSIONS)?;
+    if let Some(alt_hostname) = alt_hostname {
+        debug!("using alternate hostname {alt_hostname} for TLS verification");
+        Ok(c.dangerous()
+            .with_custom_certificate_verifier(Arc::new(AltHostnameVerifier {
+                roots: Arc::new(roots),
+                alt_server_name: ServerName::try_from(alt_hostname)?,
+            }))
+            .with_no_client_auth())
+    } else {
+        Ok(c.with_root_certificates(roots).with_no_client_auth())
+    }
 }
 
 #[derive(Clone, Debug)]

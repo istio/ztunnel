@@ -87,6 +87,8 @@ const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
+const ALT_XDS_HOSTNAME: &str = "ALT_XDS_HOSTNAME";
+const ALT_CA_HOSTNAME: &str = "ALT_CA_HOSTNAME";
 const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem";
 const TOKEN_PROVIDER_ENV: &str = "AUTH_TOKEN";
 const DEFAULT_TOKEN_PROVIDER: &str = "./var/run/secrets/tokens/istio-token";
@@ -186,10 +188,15 @@ pub struct Config {
     pub ca_address: Option<String>,
     /// Root cert for CA TLS verification.
     pub ca_root_cert: RootCert,
+    // Allow custom alternative CA hostname verification
+    pub alt_ca_hostname: Option<String>,
     /// XDS address to use. If unset, XDS will not be used.
     pub xds_address: Option<String>,
     /// Root cert for XDS TLS verification.
     pub xds_root_cert: RootCert,
+    // Allow custom alternative XDS hostname verification
+    pub alt_xds_hostname: Option<String>,
+
     /// TTL for CSR requests
     pub secret_ttl: Duration,
     /// YAML config for local XDS workloads
@@ -545,6 +552,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         xds_root_cert,
         ca_address,
         ca_root_cert,
+        alt_xds_hostname: parse(ALT_XDS_HOSTNAME)?,
+        alt_ca_hostname: parse(ALT_CA_HOSTNAME)?,
+
         secret_ttl: match parse::<String>(SECRET_TTL)? {
             Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_TTL),
             None => DEFAULT_TTL,
