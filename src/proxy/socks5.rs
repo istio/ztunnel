@@ -107,7 +107,7 @@ impl Socks5 {
                                 debug!(component="socks5", dur=?start.elapsed(), "connection completed");
                             }).instrument(span);
 
-                            assertions::size_between_ref(1000, 3000, &serve);
+                            assertions::size_between_ref(1000, 2000, &serve);
                             tokio::spawn(serve);
                         }
                         Err(e) => {
@@ -133,7 +133,6 @@ impl Socks5 {
 async fn handle_socks_connection(mut oc: OutboundConnection, mut stream: TcpStream) {
     match negotiate_socks_connection(&oc.pi, &mut stream).await {
         Ok(target) => {
-            // In many cases, when we are fail we don't have this.
             // TODO: ideally, we send the success after we connect. This allows us to actually give a
             // success only when we really succeeded, rather than if we completed the SOCKS handshake.
             // Additionally, it would allow us to get a proper address to send back/
@@ -152,10 +151,12 @@ async fn handle_socks_connection(mut oc: OutboundConnection, mut stream: TcpStre
         }
     }
 }
-// handle will process a SOCKS5 connection. This supports a minimal subset of the protocol,
-// sufficient to integrate with common clients:
+
+// negotiate_socks_connection will handle the negotiation of a SOCKS5 connection.
+// This ultimately outputs the target socket address, if the handshake is successful.
+// This supports a minimal subset of the protocol, sufficient to integrate with common clients:
 // - only unauthenticated requests
-// - only CONNECT, with IPv4 or IPv6
+// - only CONNECT, with IPv4/IPv6/Hostname
 async fn negotiate_socks_connection(
     pi: &ProxyInputs,
     stream: &mut TcpStream,
