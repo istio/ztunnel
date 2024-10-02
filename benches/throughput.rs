@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::future::Future;
 use std::io::Error;
@@ -27,7 +26,6 @@ use criterion::{
     criterion_group, criterion_main, BenchmarkGroup, Criterion, SamplingMode, Throughput,
 };
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use pprof::criterion::{Output, PProfProfiler};
 use prometheus_client::registry::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -38,11 +36,17 @@ use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 use ztunnel::state::workload::{Protocol, Workload};
 use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
+#[cfg(target_os = "linux")]
 use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
 use ztunnel::test_helpers::tcp::Mode;
 use ztunnel::test_helpers::{helpers, tcp};
 use ztunnel::xds::LocalWorkload;
-use ztunnel::{app, identity, metrics, proxy, rbac, setup_netns_test, strng, test_helpers};
+use ztunnel::{app, identity, metrics, proxy, rbac, strng, test_helpers};
+
+#[cfg(target_os = "linux")]
+use ztunnel::setup_netns_test;
+#[cfg(target_os = "linux")]
+use pprof::criterion::{Output, PProfProfiler};
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -55,6 +59,7 @@ const N_POLICIES: usize = 10_000;
 const DUMMY_NETWORK: &str = "198.51.100.0/24";
 
 #[ctor::ctor]
+#[cfg(target_os = "linux")]
 fn initialize_namespace_tests() {
     ztunnel::test_helpers::namespaced::initialize_namespace_tests();
 }
@@ -126,6 +131,8 @@ pub enum TestTrafficMode {
 }
 
 #[allow(clippy::type_complexity)]
+#[cfg(target_os = "linux")]
+
 fn initialize_environment(
     ztunnel_mode: WorkloadMode,
     traffic_mode: TestTrafficMode,
@@ -198,6 +205,7 @@ fn initialize_environment(
     Ok((manager, tx, ack_rx))
 }
 
+#[cfg(target_os = "linux")]
 fn spawn_client(
     i: usize,
     manager: &mut WorkloadManager,
@@ -264,6 +272,7 @@ struct TestClient {
     ack: Receiver<Result<(), Error>>,
 }
 
+#[cfg(target_os = "linux")]
 pub fn throughput(c: &mut Criterion) {
     const THROUGHPUT_SEND_SIZE: usize = GB;
     fn run_throughput<T: Measurement>(
@@ -315,6 +324,7 @@ pub fn throughput(c: &mut Criterion) {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn latency(c: &mut Criterion) {
     const LATENCY_SEND_SIZE: usize = KB;
     fn run_latency<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
@@ -340,6 +350,7 @@ pub fn latency(c: &mut Criterion) {
     run_latency(&mut c, "hbone", WorkloadMode::HBONE);
 }
 
+#[cfg(target_os = "linux")]
 pub fn connections(c: &mut Criterion) {
     fn run_connections<T: Measurement>(c: &mut BenchmarkGroup<T>, name: &str, mode: WorkloadMode) {
         let (_manager, tx, ack) =
@@ -363,6 +374,7 @@ pub fn connections(c: &mut Criterion) {
     run_connections(&mut c, "hbone", WorkloadMode::HBONE);
 }
 
+#[cfg(target_os = "linux")]
 pub fn rbac(c: &mut Criterion) {
     let policies = create_test_policies();
     let mut state = ProxyState::default();
@@ -525,36 +537,37 @@ fn hbone_connections(c: &mut Criterion) {
     // Connections/second
     c.throughput(Throughput::Elements(1));
     c.bench_function("connect_request_response", |b| {
-        b.to_async(&rt).iter(|| async {
-            let bench = async {
-                let mut addresses = addresses.lock().await;
-                let ta = ta.lock().await;
+            b.to_async(&rt).iter(|| async {
+                let bench = async {
+                    let mut addresses = addresses.lock().await;
+                    let ta = ta.lock().await;
 
-                // Get next address pair
-                *addresses = next_ip_pair(*addresses);
-                let source_addr = hbone_connection_ip(addresses.0);
-                let dest_addr = hbone_connection_ip(addresses.1);
+                    // Get next address pair
+                    *addresses = next_ip_pair(*addresses);
+                    let source_addr = hbone_connection_ip(addresses.0);
+                    let dest_addr = hbone_connection_ip(addresses.1);
 
-                // Start HBONE connection
-                let mut hbone = ta
-                    .socks5_connect(DestinationAddr::Ip(helpers::with_ip(echo_addr, dest_addr)), source_addr)
-                    .await;
+                    // Start HBONE connection
+                    let mut hbone = ta
+                        .socks5_connect(DestinationAddr::Ip(helpers::with_ip(echo_addr, dest_addr)), source_addr)
+                        .await;
 
-                // TCP ping
-                hbone.write_u8(42).await.ok();
-                hbone.read_u8().await.ok();
-            };
+                    // TCP ping
+                    hbone.write_u8(42).await.ok();
+                    hbone.read_u8().await.ok();
+                };
 
-            // If misconfigured, `socks5_connect` will silently fail causing subsequent commands
-            // to hang. Panic if too slow.
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(1)) => panic!("Timeout: Test is hanging."),
-                _ = bench => ()
-            };
-        })
-    });
+                // If misconfigured, `socks5_connect` will silently fail causing subsequent commands
+                // to hang. Panic if too slow.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => panic!("Timeout: Test is hanging."),
+                    _ = bench => ()
+                };
+            })
+        });
 }
 
+#[cfg(target_os = "linux")]
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -563,4 +576,10 @@ criterion_group! {
     targets = hbone_connections, throughput, latency, connections, metrics, rbac
 }
 
+#[cfg(target_os = "linux")]
 criterion_main!(benches);
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    println!("This benchmark is only supported on Linux");
+}

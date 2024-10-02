@@ -71,14 +71,14 @@ fn main() -> Result<(), anyhow::Error> {
         .nth_back(3)
         .unwrap();
 
-    let output: std::io::Result<std::process::Output>;
+    
     cfg_if::cfg_if! {
         if #[cfg(target_os = "windows")] {
             output = Command::new("powershell.exe")
             .arg("common/scripts/report_build_info.ps1")
             .output();
         } else {
-            output = Command::new("common/scripts/report_build_info.sh").output();
+            let output: std::io::Result<std::process::Output> = Command::new("common/scripts/report_build_info.sh").output();
 
         }
     }

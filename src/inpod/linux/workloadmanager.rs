@@ -324,7 +324,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                 }
             }?;
 
-            debug!("received message: {:?}", msg);
+            info!("received message: {:?}", msg);
 
             // send ack:
             match self.state.process_msg(msg).await {

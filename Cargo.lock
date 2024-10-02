@@ -1092,14 +1092,14 @@ dependencies = [
 [[package]]
 name = "hcn"
 version = "0.1.0"
-source = "git+https://github.com/jsturtevant/hcn-rs.git#28d3456c07d9cf62b7e3316c65b9433d29becdce"
+source = "git+https://github.com/keithmattix/hcn-rs.git#a4b3f6ee703509694b6eb178b07cdbb637771e80"
 dependencies = [
  "anyhow",
  "log",
  "serde",
  "serde_json",
  "serde_repr",
- "windows 0.51.1",
+ "windows",
 ]
 
 [[package]]
@@ -3526,31 +3526,12 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
-version = "0.51.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca229916c5ee38c2f2bc1e9d8f04df975b4bd93f9955dc69fabb5d91270045c9"
-dependencies = [
- "windows-core 0.51.1",
- "windows-targets 0.48.5",
-]
-
-[[package]]
-name = "windows"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
 dependencies = [
  "windows-core 0.58.0",
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.51.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1f8cf84f35d2db49a46868f947758c7a1138116f7fac3bc844f43ade1292e64"
-dependencies = [
- "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -3908,7 +3889,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "windows 0.58.0",
+ "windows",
  "x509-parser",
  "ztunnel",
 ]

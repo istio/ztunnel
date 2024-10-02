@@ -21,6 +21,7 @@ use hyper::Uri;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use rustls::ClientConfig;
+use tracing::info;
 use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
@@ -94,15 +95,16 @@ async fn control_plane_client_config(root_cert: &RootCert) -> Result<ClientConfi
 pub struct TlsGrpcChannel {
     uri: Uri,
     client: hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, BoxBody>,
+    authority_override: Option<String>,
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub async fn grpc_tls_connector(uri: String, root_cert: RootCert) -> Result<TlsGrpcChannel, Error> {
-    grpc_connector(uri, control_plane_client_config(&root_cert).await?)
+pub async fn grpc_tls_connector(uri: String, root_cert: RootCert, authority_override: Option<String>) -> Result<TlsGrpcChannel, Error> {
+    grpc_connector(uri, control_plane_client_config(&root_cert).await?, authority_override)
 }
 
 /// grpc_connector provides a client TLS channel for gRPC requests.
-pub fn grpc_connector(uri: String, cc: ClientConfig) -> Result<TlsGrpcChannel, Error> {
+pub fn grpc_connector(uri: String, cc: ClientConfig, authority_override: Option<String>) -> Result<TlsGrpcChannel, Error> {
     let uri = Uri::try_from(uri)?;
     let _is_localhost_call = uri.host() == Some("localhost");
     let mut http: HttpConnector = HttpConnector::new();
@@ -130,9 +132,8 @@ pub fn grpc_connector(uri: String, cc: ClientConfig) -> Result<TlsGrpcChannel, E
         .http2_keep_alive_timeout(Duration::from_secs(10))
         .timer(crate::hyper_util::TokioTimer)
         .build(https);
-
     // Ok(client)
-    Ok(TlsGrpcChannel { uri, client })
+    Ok(TlsGrpcChannel { uri, client, authority_override })
 }
 
 #[derive(Default)]
@@ -173,8 +174,17 @@ impl tower::Service<http::Request<BoxBody>> for TlsGrpcChannel {
         if let Some(scheme) = self.uri.scheme() {
             uri = uri.scheme(scheme.to_owned());
         }
-        if let Some(authority) = self.uri.authority() {
-            uri = uri.authority(authority.to_owned());
+
+        match &self.authority_override {
+            Some(authority) => {
+                info!("Overriding authority with {}", authority);
+                uri = uri.authority(authority.to_owned());
+            }
+            None => {
+                if let Some(authority) = self.uri.authority() {
+                    uri = uri.authority(authority.to_owned());
+                }
+            }
         }
         if let Some(path_and_query) = req.uri().path_and_query() {
             uri = uri.path_and_query(path_and_query.to_owned());

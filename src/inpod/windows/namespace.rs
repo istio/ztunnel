@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use tracing::warn;
-use windows::core::GUID;
 use windows::Win32::NetworkManagement::IpHelper::{
     GetCurrentThreadCompartmentId, SetCurrentThreadCompartmentId,
 };
 
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct Namespace {
     pub id: u32,
-    pub guid: GUID,
+    pub guid: String,
 }
 
 #[derive(Clone, Debug)]
@@ -44,7 +43,7 @@ impl InpodNamespace {
         match ns {
             Err(e) => {
                 warn!("Failed to get namespace: {}", e);
-                return Err(std::io::Error::last_os_error());
+                Err(std::io::Error::last_os_error())
             }
             Ok(ns) => Ok(InpodNamespace {
                 inner: Arc::new(NetnsInner {
@@ -53,7 +52,7 @@ impl InpodNamespace {
                         id: ns
                             .namespace_id
                             .expect("There must always be a namespace id"),
-                        guid: GUID::from(ns.id.as_str()),
+                        guid: ns.id,
                     },
                 }),
             }),
@@ -65,8 +64,8 @@ impl InpodNamespace {
     }
 
     // Useful for logging / debugging
-    pub fn workload_namespace_guid(&self) -> GUID {
-        self.inner.workload_namespace.guid
+    pub fn workload_namespace_guid(&self) -> String {
+        self.inner.workload_namespace.guid.clone()
     }
 
     pub fn run<F, T>(&self, f: F) -> std::io::Result<T>
@@ -91,26 +90,30 @@ fn setns(namespace: u32) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use hcn::schema::HostComputeQuery;
+    use hcn::api;
+    use windows::core::GUID;
+
     use super::*;
 
     fn new_namespace() -> Namespace {
-        let api_namespace = hcn::HostComputeNamespace::default();
+        let api_namespace = hcn::schema::HostComputeNamespace::default();
 
         let api_namespace = serde_json::to_string(&api_namespace).unwrap();
-        let handle = hcn::api::create_namespace(&GUID::zeroed(), &api_namespace)?;
+        let handle = hcn::api::create_namespace(&GUID::zeroed(), &api_namespace).unwrap();
 
         // we don't get info back so need to query to get metadata about network
         let query = HostComputeQuery::default();
         let query = serde_json::to_string(&query).unwrap();
 
-        let api_namespace = api::query_namespace_properties(namespace_handle, &query)?;
+        let api_namespace = api::query_namespace_properties(handle, &query).unwrap();
 
-        let api_namespace: hcn::HostComputeNamespace =
+        let api_namespace: hcn::schema::HostComputeNamespace =
             serde_json::from_str(&api_namespace).unwrap();
 
         Namespace {
             id: api_namespace.namespace_id.unwrap(),
-            guid: GUID::from(api_namespace.id.as_str()),
+            guid: api_namespace.id,
         }
     }
 
