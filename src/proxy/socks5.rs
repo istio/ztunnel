@@ -15,21 +15,20 @@
 use anyhow::Result;
 use byteorder::{BigEndian, ByteOrder};
 
+use crate::dns::resolver::Resolver;
 use hickory_proto::op::{Message, MessageType, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use hickory_server::authority::MessageRequest;
 use hickory_server::server::{Protocol, Request};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
-
-use crate::dns::resolver::Resolver;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
@@ -101,7 +100,7 @@ impl Socks5 {
                                     _ = force_shutdown.changed() => {
                                         debug!(component="socks5", "connection forcefully terminated");
                                     }
-                                    _ = handle(oc, stream) => {}
+                                    _ = handle_socks_connection(oc, stream) => {}
                                 }
                                 // Mark we are done with the connection, so drain can complete
                                 drop(drain);
@@ -131,12 +130,37 @@ impl Socks5 {
         .await
     }
 }
+async fn handle_socks_connection(mut oc: OutboundConnection, mut stream: TcpStream) {
+    match negotiate_socks_connection(&oc.pi, &mut stream).await {
+        Ok(target) => {
+            // TODO: ideally, we send the success after we connect. This allows us to actually give a
+            // success only when we really succeeded, rather than if we completed the SOCKS handshake.
+            // Additionally, it would allow us to get a proper address to send back/
+            let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+            if let Err(err) = send_success(&mut stream, dummy_addr).await {
+                warn!("failed to send socks success response: {err}");
+                return;
+            }
+            let remote_addr =
+                socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+            oc.proxy_to(stream, remote_addr, target).await
+        }
+        Err(e) => {
+            warn!("failed to negotiate socks connection: {e}");
+            send_error(&e, &mut stream).await;
+        }
+    }
+}
 
-// handle will process a SOCKS5 connection. This supports a minimal subset of the protocol,
-// sufficient to integrate with common clients:
+// negotiate_socks_connection will handle the negotiation of a SOCKS5 connection.
+// This ultimately outputs the target socket address, if the handshake is successful.
+// This supports a minimal subset of the protocol, sufficient to integrate with common clients:
 // - only unauthenticated requests
-// - only CONNECT, with IPv4 or IPv6
-async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
+// - only CONNECT, with IPv4/IPv6/Hostname
+async fn negotiate_socks_connection(
+    pi: &ProxyInputs,
+    stream: &mut TcpStream,
+) -> Result<SocketAddr, SocksError> {
     let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
 
     // Version(5), Number of auth methods
@@ -144,13 +168,19 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     stream.read_exact(&mut version).await?;
 
     if version[0] != 0x05 {
-        return Err(anyhow::anyhow!("Invalid version"));
+        return Err(SocksError::invalid_protocol(format!(
+            "unsupported version {}",
+            version[0]
+        )));
     }
 
     let nmethods = version[1];
 
     if nmethods == 0 {
-        return Err(anyhow::anyhow!("Invalid auth methods"));
+        return Err(SocksError::invalid_protocol(format!(
+            "methods cannot be zero {}",
+            version[0]
+        )));
     }
 
     // List of supported auth methods
@@ -159,7 +189,9 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     // Client must include 'unauthenticated' (0).
     if !methods.into_iter().any(|x| x == 0) {
-        return Err(anyhow::anyhow!("unsupported auth method"));
+        return Err(SocksError::invalid_protocol(
+            "only unauthenticated is supported".to_string(),
+        ));
     }
 
     // Select 'unauthenticated' (0).
@@ -171,11 +203,17 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     let version = version_command[0];
 
     if version != 0x05 {
-        return Err(anyhow::anyhow!("unsupported version"));
+        return Err(SocksError::invalid_protocol(format!(
+            "unsupported version {}",
+            version
+        )));
     }
 
     if version_command[1] != 1 {
-        return Err(anyhow::anyhow!("unsupported command"));
+        return Err(SocksError::invalid_protocol(format!(
+            "unsupported command {}",
+            version_command[1]
+        )));
     }
 
     // Skip RSV
@@ -185,40 +223,45 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
     let mut atyp = [0u8];
     stream.read_exact(&mut atyp).await?;
 
-    let ip;
-
-    match atyp[0] {
+    let ip = match atyp[0] {
         0x01 => {
             let mut hostb = [0u8; 4];
             stream.read_exact(&mut hostb).await?;
-            ip = IpAddr::V4(hostb.into());
+            IpAddr::V4(hostb.into())
         }
         0x04 => {
             let mut hostb = [0u8; 16];
             stream.read_exact(&mut hostb).await?;
-            ip = IpAddr::V6(hostb.into());
+            IpAddr::V6(hostb.into())
         }
         0x03 => {
             let mut domain_length = [0u8];
             stream.read_exact(&mut domain_length).await?;
             let mut domain = vec![0u8; domain_length[0] as usize];
             stream.read_exact(&mut domain).await?;
-            // TODO: DNS lookup, if we want to integrate with HTTP-based apps without
-            // a DNS server.
-            let ds = std::str::from_utf8(&domain)?;
-            let Some(resolver) = &oc.pi.resolver else {
-                return Err(anyhow::anyhow!(
-                    "unsupported hostname lookup, requires DNS enabled"
+
+            let Ok(ds) = std::str::from_utf8(&domain) else {
+                return Err(SocksError::invalid_protocol(format!(
+                    "domain is not a valid utf8 string: {domain:?}"
+                )));
+            };
+            let Some(resolver) = &pi.resolver else {
+                return Err(SocksError::invalid_protocol(
+                    "unsupported hostname lookup, requires DNS enabled".to_string(),
                 ));
             };
 
-            ip = dns_lookup(resolver.clone(), remote_addr, ds).await?;
-            // oc.pi.resolver.lookup()
-            // oc.pi.lookup_service_or_query(ds)
-            // return Err(anyhow::anyhow!("unsupported host {ds:?}"));
+            match dns_lookup(resolver.clone(), remote_addr, ds).await {
+                Ok(ip) => ip,
+                Err(e) => {
+                    return Err(SocksError::HostUnreachable(e));
+                }
+            }
         }
-        _ => {
-            return Err(anyhow::anyhow!("unsupported host"));
+        n => {
+            return Err(SocksError::invalid_protocol(format!(
+                "unsupported address type {n}",
+            )));
         }
     };
 
@@ -228,22 +271,7 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     let host = SocketAddr::new(ip, port);
 
-    // Send dummy values - the client generally ignores it.
-    let buf = [
-        0x05u8, // version
-        // TODO: report appropriate error here. Unfortunately this needs to happen *after* we connect
-        // That is, we need to do this within proxy_to().
-        0x00, // Success.
-        0x00, // reserved
-        // Address. TODO: actually return the address instead of hardcoded 0.0.0.0
-        0x01, 0x00, 0x00, 0x00, 0x00, // Port. TODO: actually return the port
-        0x00, 0x00,
-    ];
-    stream.write_all(&buf).await?;
-
-    debug!("accepted connection from {remote_addr} to {host}");
-    oc.proxy_to(stream, remote_addr, host).await;
-    Ok(())
+    Ok(host)
 }
 
 async fn dns_lookup(
@@ -294,4 +322,103 @@ async fn dns_lookup(
         .ok_or_else(|| Error::DnsEmpty)?;
 
     Ok(response)
+}
+
+/// send_error sends an error back to the SOCKS client
+/// This may fail, but since there is nothing a caller can do about it, failures are simply logged and
+/// not returned.
+pub async fn send_error(err: &SocksError, source: &mut TcpStream) {
+    // SOCKS response requires us to send a 'server bound address'.
+    // It's supposed to be the local address we have bound to.
+    // In many cases, when we are fail we don't have this.
+    let dummy_addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+    if let Err(e) = send_response(Some(err), source, dummy_addr).await {
+        warn!("failed to send socks error: {e}")
+    }
+}
+
+/// send_success sends a success back to the SOCKS client.
+pub async fn send_success(source: &mut TcpStream, local_addr: SocketAddr) -> Result<(), Error> {
+    send_response(None, source, local_addr).await
+}
+
+async fn send_response(
+    err: Option<&SocksError>,
+    source: &mut TcpStream,
+    local_addr: SocketAddr,
+) -> Result<(), Error> {
+    // https://www.rfc-editor.org/rfc/rfc1928#section-6
+    let mut buf: Vec<u8> = Vec::with_capacity(10);
+    buf.push(0x05); // version
+                    // Status
+    buf.push(match err {
+        None => 0,
+        Some(SocksError::General(_)) => 1,
+        Some(SocksError::NotAllowed(_)) => 2,
+        Some(SocksError::NetworkUnreachable(_)) => 3,
+        Some(SocksError::HostUnreachable(_)) => 4,
+        Some(SocksError::ConnectionRefused(_)) => 5,
+        Some(SocksError::CommandNotSupported(_)) => 7,
+    });
+    buf.push(0); // RSV
+    match local_addr {
+        SocketAddr::V4(addr_v4) => {
+            buf.push(0x01); // IPv4 address type
+            buf.extend_from_slice(&addr_v4.ip().octets());
+        }
+        SocketAddr::V6(addr_v6) => {
+            buf.push(0x04); // IPv6 address type
+            buf.extend_from_slice(&addr_v6.ip().octets());
+        }
+    }
+    // Add port in network byte order (big-endian)
+    buf.extend_from_slice(&local_addr.port().to_be_bytes());
+    source.write_all(&buf).await?;
+    Ok(())
+}
+
+/// OutboundProxyError maps outbound errors to SOCKS5 protocol errors
+/// See https://datatracker.ietf.org/doc/html/rfc1928#section-6.
+/// While the socks protocol only allows the int error, we record the full error
+/// for our own logging purposes.
+#[derive(thiserror::Error, Debug)]
+#[allow(dead_code)]
+pub enum SocksError {
+    #[error("General: {0}")]
+    General(Error),
+    #[error("NotAllowed: {0}")]
+    NotAllowed(Error),
+    #[error("NetworkUnreachable: {0}")]
+    NetworkUnreachable(Error),
+    #[error("HostUnreachable: {0}")]
+    HostUnreachable(Error),
+    #[error("ConnectionRefused: {0}")]
+    ConnectionRefused(Error),
+    #[error("CommandNotSupported: {0}")]
+    CommandNotSupported(Error),
+}
+
+impl SocksError {
+    pub fn into_inner(self) -> Error {
+        match self {
+            SocksError::General(e) => e,
+            SocksError::NotAllowed(e) => e,
+            SocksError::NetworkUnreachable(e) => e,
+            SocksError::HostUnreachable(e) => e,
+            SocksError::ConnectionRefused(e) => e,
+            SocksError::CommandNotSupported(e) => e,
+        }
+    }
+}
+
+impl SocksError {
+    pub fn invalid_protocol(reason: String) -> SocksError {
+        SocksError::CommandNotSupported(Error::Anyhow(anyhow::anyhow!(reason)))
+    }
+}
+
+impl From<std::io::Error> for SocksError {
+    fn from(value: std::io::Error) -> Self {
+        SocksError::General(Error::Io(value))
+    }
 }

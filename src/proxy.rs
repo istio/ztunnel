@@ -386,6 +386,9 @@ pub enum Error {
     #[error("{0}")]
     Generic(Box<dyn std::error::Error + Send + Sync>),
 
+    #[error("{0}")]
+    Anyhow(anyhow::Error),
+
     #[error("http2 handshake failed: {0}")]
     Http2Handshake(#[source] ::h2::Error),
 
