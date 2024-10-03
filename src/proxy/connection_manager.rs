@@ -20,7 +20,6 @@ use serde::{Serialize, Serializer};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Formatter;
-use std::future::Future;
 use std::net::SocketAddr;
 
 use crate::drain;
@@ -82,19 +81,29 @@ pub struct ConnectionGuard {
     watch: Option<DrainWatcher>,
 }
 
-impl ConnectionGuard {
-    pub async fn handle_connection(
-        mut self,
-        send: impl Future<Output = Result<(), Error>> + Sized,
-    ) -> Result<(), Error> {
-        let watch = self.watch.take().expect("watch cannot be taken twice");
+// For reasons that I don't fully understand, this uses an obscene amount of stack space when written as a normal function,
+// amounting to ~1kb overhead per connection.
+// Inlining it removes this entirely, and the macro ensures we do it consistently across the various areas we use it.
+#[macro_export]
+macro_rules! handle_connection {
+    ($connguard:expr, $future:expr) => {{
+        let watch = $connguard.watcher();
         tokio::select! {
-            res = send => {
-                self.cm.release(&self.conn);
+            res = $future => {
+                $connguard.release();
                 res
             }
             _signaled = watch.wait_for_drain() => Err(Error::AuthorizationPolicyLateRejection)
         }
+    }};
+}
+
+impl ConnectionGuard {
+    pub fn watcher(&mut self) -> drain::DrainWatcher {
+        self.watch.take().expect("watch cannot be taken twice")
+    }
+    pub fn release(self) {
+        self.cm.release(&self.conn);
     }
 }
 
@@ -215,7 +224,7 @@ impl ConnectionManager {
 
     // releases tracking on a connection
     // uses a counter to determine if there are other tracked connections or not so it may retain the tx/rx channels when necessary
-    fn release(&self, c: &InboundConnection) {
+    pub fn release(&self, c: &InboundConnection) {
         let mut drains = self.drains.write().expect("mutex");
         if let Some((k, mut v)) = drains.remove_entry(c) {
             if v.count > 1 {

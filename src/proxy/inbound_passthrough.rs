@@ -29,7 +29,7 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::Error;
 use crate::proxy::{metrics, util, ProxyInputs};
 use crate::state::workload::NetworkAddress;
-use crate::{assertions, copy, rbac, strng};
+use crate::{assertions, copy, handle_connection, rbac, strng};
 use crate::{proxy, socket};
 
 pub(super) struct InboundPassthrough {
@@ -206,7 +206,7 @@ impl InboundPassthrough {
             pi.metrics.clone(),
         ));
 
-        let conn_guard = match pi
+        let mut conn_guard = match pi
             .connection_manager
             .assert_rbac(&pi.state, &rbac_ctx, None)
             .await
@@ -241,7 +241,7 @@ impl InboundPassthrough {
             .await
         };
 
-        let res = conn_guard.handle_connection(send).await;
+        let res = handle_connection!(conn_guard, send);
         result_tracker.record(res);
     }
 }
