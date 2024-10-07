@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use crate::identity::Identity;
+use std::error::Error;
+use std::fmt::{Debug, Display};
 
 use crate::tls::lib::provider;
 use crate::tls::{ServerCertProvider, TlsError};
@@ -205,11 +207,31 @@ impl IdentityVerifier {
         }
         debug!("identity mismatch {id:?} != {:?}", self.identity);
         Err(rustls::Error::InvalidCertificate(
-            rustls::CertificateError::Other(rustls::OtherError(Arc::new(TlsError::SanError(
-                self.identity.clone(),
-                id,
+            rustls::CertificateError::Other(rustls::OtherError(Arc::new(DebugAsDisplay(
+                TlsError::SanError(self.identity.clone(), id),
             )))),
         ))
+    }
+}
+
+/// DebugAsDisplay is a shim to make an object implement Debug with its Display format
+/// This is to workaround rustls only using Debug which makes our errors worse.
+struct DebugAsDisplay<T>(T);
+
+impl<T: Display> Debug for DebugAsDisplay<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+impl<T: Display> Display for DebugAsDisplay<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+impl<T: Error + Display> Error for DebugAsDisplay<T> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.source()
     }
 }
 
