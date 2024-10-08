@@ -73,15 +73,25 @@ pub enum TlsError {
     #[error("signing error: {0}")]
     SigningError(#[from] identity::Error),
     #[error(
-        "identity verification error: peer did not present the expected SAN ({0:?}), got {1:?}"
+        "identity verification error: peer did not present the expected SAN ({}), got {}",
+        display_list(.0),
+        display_list(.1)
     )]
     SanError(Vec<Identity>, Vec<Identity>),
     #[error(
-        "identity verification error: peer did not present the expected trustdomain ({0}), got {1:?}"
+        "identity verification error: peer did not present the expected trustdomain ({0}), got {}",
+        display_list(.1)
     )]
     SanTrustDomainError(String, Vec<Identity>),
     #[error("ssl error: {0}")]
     SslError(#[from] Error),
+}
+
+fn display_list<T: ToString>(i: &[T]) -> String {
+    i.iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<String>>()
+        .join(",")
 }
 
 #[cfg(test)]
