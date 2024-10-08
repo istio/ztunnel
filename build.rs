@@ -49,7 +49,7 @@ fn main() -> Result<(), anyhow::Error> {
     };
     tonic_build::configure()
         .build_server(true)
-        .compile_with_config(
+        .compile_protos_with_config(
             config,
             &proto_files
                 .iter()
