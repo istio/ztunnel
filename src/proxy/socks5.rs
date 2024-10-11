@@ -399,19 +399,6 @@ pub enum SocksError {
 }
 
 impl SocksError {
-    pub fn into_inner(self) -> Error {
-        match self {
-            SocksError::General(e) => e,
-            SocksError::NotAllowed(e) => e,
-            SocksError::NetworkUnreachable(e) => e,
-            SocksError::HostUnreachable(e) => e,
-            SocksError::ConnectionRefused(e) => e,
-            SocksError::CommandNotSupported(e) => e,
-        }
-    }
-}
-
-impl SocksError {
     pub fn invalid_protocol(reason: String) -> SocksError {
         SocksError::CommandNotSupported(Error::Anyhow(anyhow::anyhow!(reason)))
     }
