@@ -119,7 +119,6 @@ pub fn initialize_namespace_tests() {
 
     write_to_stderr(&format!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net --setuid=0 --preserve-credentials --user -t {pid}`"))
       .expect("write");
-    return;
 }
 
 // write_to_stderr is a small helper to write a message to stderr.
