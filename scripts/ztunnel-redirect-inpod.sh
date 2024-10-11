@@ -7,7 +7,7 @@ set -ex
 # CONNMARK is needed to make original src work. we set conn mark on prerouting. this is will not effect connections
 # from ztunnel to outside the pod, which will go on OUTPUT chain.
 # as we are in the pod ns, we can use whatever iptables is default.
-iptables-restore --wait 10 <<EOF
+iptables-restore --wait 10 --noflush <<EOF
 *mangle
 :PREROUTING ACCEPT [0:0]
 :INPUT ACCEPT [0:0]
@@ -31,6 +31,8 @@ COMMIT
 -A OUTPUT -j ISTIO_OUTPUT
 -A PREROUTING -j ISTIO_PRERT
 -A ISTIO_OUTPUT -d 169.254.7.127/32 -p tcp -m tcp -j ACCEPT
+-A ISTIO_OUTPUT ! -o lo -p udp -m mark ! --mark 0x539/0xfff -m udp --dport 53 -j REDIRECT --to-ports 15053
+-A ISTIO_OUTPUT ! -d 127.0.0.1/32 -p tcp -m tcp --dport 53 -m mark ! --mark 0x539/0xfff -j REDIRECT --to-ports 15053
 -A ISTIO_OUTPUT -p tcp -m mark --mark 0x111/0xfff -j ACCEPT
 -A ISTIO_OUTPUT ! -d 127.0.0.1/32 -o lo -j ACCEPT
 -A ISTIO_OUTPUT ! -d 127.0.0.1/32 -p tcp -m mark ! --mark 0x539/0xfff -j REDIRECT --to-ports 15001
