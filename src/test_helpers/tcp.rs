@@ -184,10 +184,7 @@ where
             let mut buffer = [0; 512];
             let mut read = 0;
             let header = loop {
-                let n = match rw.read(&mut buffer[read..]).await {
-                    Ok(n) => n,
-                    _ => 0,
-                };
+                let n = rw.read(&mut buffer[read..]).await.unwrap_or_default();
                 read += n;
                 let header = HeaderResult::parse(&buffer[..read]);
                 if n == 0 || header.is_complete() || read >= 512 {

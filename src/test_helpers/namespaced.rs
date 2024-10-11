@@ -14,9 +14,9 @@
 
 use libc::getpid;
 use nix::unistd::mkdtemp;
-use std::fs;
 use std::fs::File;
 use std::path::PathBuf;
+use std::{fs, io};
 
 #[macro_export]
 macro_rules! function {
@@ -116,5 +116,30 @@ pub fn initialize_namespace_tests() {
     .expect("xtables bindmount");
 
     let pid = unsafe { getpid() };
-    eprintln!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net --setuid=0 --preserve-credentials --user -t {pid}`");
+
+    write_to_stderr(&format!("Starting test in {tmp:?}. Debug with `sudo nsenter --mount --net --setuid=0 --preserve-credentials --user -t {pid}`"))
+      .expect("write");
+}
+
+// write_to_stderr is a small helper to write a message to stderr.
+// use of `std` in before-main code is not guaranteed to be legal, and does fail in Rust 1.81:
+// https://users.rust-lang.org/t/ld-preload-with-init-array-fatal-runtime-error-thread-set-current-should-only-be-called-once-per-thread/117264/13
+fn write_to_stderr(message: &str) -> io::Result<()> {
+    let c_str = std::ffi::CString::new(message)?;
+    let buf = c_str.as_bytes_with_nul();
+    let count = buf.len() as libc::size_t;
+
+    let result = unsafe {
+        libc::write(
+            libc::STDERR_FILENO,
+            buf.as_ptr() as *const std::ffi::c_void,
+            count,
+        ) as libc::ssize_t
+    };
+
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
