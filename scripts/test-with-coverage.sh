@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -x
+set -xe
 
 ARTIFACTS="${ARTIFACTS:-out/coverage}"
 output_dir=$ARTIFACTS/report
