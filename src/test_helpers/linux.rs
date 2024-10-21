@@ -58,7 +58,7 @@ pub struct WorkloadManager {
 
 #[derive(Debug)]
 pub struct LocalZtunnel {
-    fd_sender: Option<MpscAckSender<inpod::StartZtunnelMessage>>,
+    fd_sender: Option<MpscAckSender<inpod::Message>>,
     config_sender: MpscAckSender<LocalConfig>,
     namespace: Namespace,
 }
@@ -124,7 +124,7 @@ impl WorkloadManager {
         let mut inpod_uds: PathBuf = "/dev/null".into();
         let ztunnel_server = if self.mode == Shared {
             inpod_uds = self.tmp_dir.join(node);
-            Some(start_ztunnel_server(inpod_uds.clone()))
+            Some(start_ztunnel_server(inpod_uds.clone()).await)
         } else {
             None
         };
@@ -169,60 +169,66 @@ impl WorkloadManager {
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
-        ns.run_ready(move |ready| async move {
-            if proxy_mode == ProxyMode::Dedicated {
-                // not needed in "inpod" (shared proxy) mode. In shared mode we run `ztunnel-redirect-inpod.sh`
-                // inside the pod's netns
-                helpers::run_command("scripts/ztunnel-redirect.sh")?;
-            }
-            let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
-            let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
-            let shutdown = app.shutdown.trigger();
+        let cloned_ns2 = ns.clone();
+        // run_ready will spawn a thread and block on it. Run with spawn_blocking so it doesn't block the runtime.
+        tokio::task::spawn_blocking(move || {
+            ns.run_ready(move |ready| async move {
+                if proxy_mode == ProxyMode::Dedicated {
+                    // not needed in "inpod" (shared proxy) mode. In shared mode we run `ztunnel-redirect-inpod.sh`
+                    // inside the pod's netns
+                    helpers::run_command("scripts/ztunnel-redirect.sh")?;
+                }
+                let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
+                let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
+                let shutdown = app.shutdown.trigger();
 
-            // inpod mode doesn't have ore need these, so just put bogus values.
-            let proxy_addresses = app.proxy_addresses.unwrap_or(proxy::Addresses {
-                inbound: "0.0.0.0:0".parse()?,
-                outbound: "0.0.0.0:0".parse()?,
-                socks5: Some("0.0.0.0:0".parse()?),
-            });
+                // inpod mode doesn't have ore need these, so just put bogus values.
+                let proxy_addresses = app.proxy_addresses.unwrap_or(proxy::Addresses {
+                    inbound: "0.0.0.0:0".parse()?,
+                    outbound: "0.0.0.0:0".parse()?,
+                    socks5: Some("0.0.0.0:0".parse()?),
+                });
 
-            let ta = TestApp {
-                // Not actually accessible
-                admin_address: helpers::with_ip(app.admin_address, ip),
-                metrics_address: helpers::with_ip(app.metrics_address, ip),
-                readiness_address: helpers::with_ip(app.readiness_address, ip),
-                proxy_addresses: proxy::Addresses {
-                    outbound: helpers::with_ip(proxy_addresses.outbound, ip),
-                    inbound: helpers::with_ip(proxy_addresses.inbound, ip),
-                    socks5: proxy_addresses.socks5.map(|i| helpers::with_ip(i, ip)),
-                },
-                tcp_dns_proxy_address: Some(helpers::with_ip(
-                    app.tcp_dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
-                    ip,
-                )),
-                udp_dns_proxy_address: Some(helpers::with_ip(
-                    app.udp_dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
-                    ip,
-                )),
-                cert_manager,
+                let ta = TestApp {
+                    // Not actually accessible
+                    admin_address: helpers::with_ip(app.admin_address, ip),
+                    metrics_address: helpers::with_ip(app.metrics_address, ip),
+                    readiness_address: helpers::with_ip(app.readiness_address, ip),
+                    proxy_addresses: proxy::Addresses {
+                        outbound: helpers::with_ip(proxy_addresses.outbound, ip),
+                        inbound: helpers::with_ip(proxy_addresses.inbound, ip),
+                        socks5: proxy_addresses.socks5.map(|i| helpers::with_ip(i, ip)),
+                    },
+                    tcp_dns_proxy_address: Some(helpers::with_ip(
+                        app.tcp_dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
+                        ip,
+                    )),
+                    udp_dns_proxy_address: Some(helpers::with_ip(
+                        app.udp_dns_proxy_address.unwrap_or("0.0.0.0:0".parse()?),
+                        ip,
+                    )),
+                    cert_manager,
 
-                namespace: Some(cloned_ns),
-                shutdown,
-            };
-            ta.ready().await;
-            info!("ready");
-            ready.set_ready();
-            tx.send(ta)?;
+                    namespace: Some(cloned_ns),
+                    shutdown,
+                };
+                ta.ready().await;
+                info!("ready");
+                ready.set_ready();
+                tx.send(ta)?;
 
-            app.wait_termination().await
-        })?;
+                app.wait_termination().await
+            })
+        })
+        .await
+        .unwrap()?;
 
         // Make sure our initial config is ACKed
         tx_cfg.wait().await?;
         let zt_info = LocalZtunnel {
             fd_sender: ztunnel_server,
             config_sender: tx_cfg,
-            namespace: ns,
+            namespace: cloned_ns2,
         };
         self.ztunnels.insert(node.to_string(), zt_info);
         let ta = rx.recv()?;
@@ -249,11 +255,7 @@ impl WorkloadManager {
         self.workloads = keep;
         for d in drop {
             if let Some(zt) = self.ztunnels.get_mut(&d.workload.node.to_string()).as_mut() {
-                let msg = inpod::StartZtunnelMessage {
-                    uid: d.workload.uid.to_string(),
-                    workload_info: None,
-                    fd: -1, // Test server handles -1 as del
-                };
+                let msg = inpod::Message::Stop(d.workload.uid.to_string());
                 zt.fd_sender
                     .as_mut()
                     .unwrap()
@@ -542,11 +544,11 @@ impl<'a> TestWorkloadBuilder<'a> {
                     .netns()
                     .run(|_| helpers::run_command("scripts/ztunnel-redirect-inpod.sh"))??;
                 let fd = network_namespace.netns().file().as_raw_fd();
-                let msg = inpod::StartZtunnelMessage {
+                let msg = inpod::Message::Start(inpod::StartZtunnelMessage {
                     uid: uid.to_string(),
                     workload_info: Some(wli),
                     fd,
-                };
+                });
                 zt_info
                     .fd_sender
                     .as_mut()
