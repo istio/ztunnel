@@ -9,6 +9,7 @@ default = ["tls-ring"]
 jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"]
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen"]
+tls-symcrypt = ["rustls-symcrypt"]
 testing = ["dep:rcgen", "rcgen/x509-parser"] # Enables utilities supporting tests.
 
 [lib]
@@ -102,6 +103,7 @@ arcstr = { version = "1.1", features = ["serde"] }
 tracing-core = "0.1.32"
 tracing-appender = "0.2.3"
 tokio-util = { version = "0.7.11", features = ["io-util"] }
+rustls-symcrypt = { version = "0.1.0", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
