@@ -258,7 +258,6 @@ impl Config {
                 .clone()
                 .expect("xds_address must be set to use xds"),
             tls_builder,
-            host: config.xds_host.clone(),
             auth: config.auth.clone(),
             handlers: HashMap::new(),
             initial_requests: Vec::new(),
@@ -623,14 +622,6 @@ impl AdsClient {
         };
 
         let addr = self.config.address.clone();
-
-        // If our XDS address is an ip address, override the authority header
-        let xds_addr_host = self.config.address.clone().replace("https://", "");
-        let xds_addr_host_substr: Vec<&str> = xds_addr_host.split(':').collect();
-        // let authority_override = match IpAddr::from_str(xds_addr_host_substr[0]) {
-        //     Ok(_) => Some(self.config.host.clone().expect("host must be set for IP XDS address")),
-        //     Err(_) => None,
-        // };
 
         let tls_grpc_channel = tls::grpc_connector(
             self.config.address.clone(),

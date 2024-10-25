@@ -80,7 +80,7 @@ rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-socket2 = { git = "https://github.com/keithmattix/socket2.git", branch="windows-original-dst", features = ["all"] }
+socket2 = { version = "0.5.8", features = ["all"] }
 textnonce = { version = "1.0" }
 thiserror = "2.0"
 tls-listener = { version = "0.11" }

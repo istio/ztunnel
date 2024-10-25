@@ -52,11 +52,7 @@ spec:
           operator: Exists
       containers:
       - name: istio-proxy
-        image: "istiolocaltesting.azurecr.io/ztunnel-windows:test-16"
-        ports:
-        - containerPort: 15020
-          name: ztunnel-stats
-          protocol: TCP
+        image: "istiolocaltesting.azurecr.io/ztunnel-windows:test-21"
         resources:
           requests:
             cpu: 200m
@@ -73,16 +69,16 @@ spec:
         - proxy
         - ztunnel
         env:
-        # - name: CA_ADDRESS
-        #   value: istiod-1-23-0.istio-system.svc.cluster.local:15012
-        # - name: XDS_ADDRESS
-        #   value: istiod-1-23-0.istio-system.svc.cluster.local:15012
+        - name: ALT_XDS_HOSTNAME
+          value: "istiod-1-23-0.istio-system.svc"
+        - name: ALT_CA_HOSTNAME
+          value: "istiod-1-23-0.istio-system.svc"
         - name: USE_ENV_FOR_DEFAULT_ISTIOD_ADDR
           value: "true"
         - name: REVISION
           value: "1-23-0"
         - name: RUST_LOG
-          value: "info"
+          value: "debug"
         - name: RUST_BACKTRACE
           value: "1"
         - name: ISTIO_META_CLUSTER_ID

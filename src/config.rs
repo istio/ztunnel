@@ -226,16 +226,12 @@ pub struct Config {
     /// CA address to use. If fake_ca is set, this will be None.
     /// Note: we do not implicitly use None when set to "" since using the fake_ca is not secure.
     pub ca_address: Option<String>,
-    /// CA host to use if the CA address is an ip address
-    pub ca_host: Option<String>,
     /// Root cert for CA TLS verification.
     pub ca_root_cert: RootCert,
     // Allow custom alternative CA hostname verification
     pub alt_ca_hostname: Option<String>,
     /// XDS address to use. If unset, XDS will not be used.
     pub xds_address: Option<String>,
-    /// XDS host to use if the XDS address is an ip address
-    pub xds_host: Option<String>,
     /// Root cert for XDS TLS verification.
     pub xds_root_cert: RootCert,
     // Allow custom alternative XDS hostname verification
@@ -469,8 +465,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     let ca_host = ca_address.as_ref().map(|addr| addr.clone().replace("https://", ""));
 
-    match parse::<bool>(USE_ENV_FOR_DEFAULT_ISTIOD_ADDR) {
-        Ok(Some(true)) => {
+    match parse::<bool>(USE_ENV_FOR_DEFAULT_ISTIOD_ADDR)? {
+        Some(true) => {
             // If we are using the environment for XDS and CA addresses, we should override the
             // values we just parsed with the environment variables.
             // However, we need to keep the hosts around for SNI purposes.
@@ -478,13 +474,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             if revision.as_ref().is_ok() {
                 istiod_addr_env = format!("ISTIOD_{}_SERVICE_HOST", revision.ok().unwrap().replace("-", "_"));
             }
-            let istiod_addr = format!("https://{}:15012", env::var(istiod_addr_env).unwrap());
-            xds_address = validate_uri(Some(istiod_addr.clone()))?;
-            ca_address = validate_uri(Some(istiod_addr))?;
+            let istiod_host = env::var(istiod_addr_env.clone()).unwrap();
+            let istiod_addr = format!("https://{}:15012", istiod_host);
+            let validated_addr = validate_uri(Some(istiod_addr))?;
+            xds_address = validated_addr.clone();
+            ca_address = validated_addr.clone();
         }
-        Ok(Some(false)) => {}
-        Ok(None) => {}
-        Err(e) => return Err(Error::EnvVar(USE_ENV_FOR_DEFAULT_ISTIOD_ADDR.to_string(), e.to_string())),
+        Some(false) => {}
+        None => {}
     }
 
     let xds_root_cert_provider =
@@ -709,10 +706,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         cluster_domain,
 
         xds_address,
-        xds_host,
         xds_root_cert,
         ca_address,
-        ca_host,
         ca_root_cert,
         alt_xds_hostname: parse(ALT_XDS_HOSTNAME)?,
         alt_ca_hostname: parse(ALT_CA_HOSTNAME)?,

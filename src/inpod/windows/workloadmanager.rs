@@ -356,11 +356,11 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                         .map_err(|e| Error::SendAckError(e.to_string()))?;
                 }
                 Err(Error::ProxyError(uid, e)) => {
+                    error!(%uid, "failed to start proxy: {:?}", e);
                     // setup the retry timer:
                     self.schedule_retry();
                     // proxy error is a transient error, so report it but don't disconnect
                     // TODO: raise metrics
-                    error!("failed to start proxy: {:?}", e);
                     processor
                         .send_nack(anyhow::anyhow!("failure to start proxy : {:?}", e))
                         .await
