@@ -62,7 +62,7 @@ impl Server {
 
 async fn handle_metrics(
     reg: Arc<Mutex<Registry>>,
-    _req: Request<Incoming>,
+    req: Request<Incoming>,
 ) -> Response<Full<Bytes>> {
     let mut buf = String::new();
     let reg = reg.lock().expect("mutex");
@@ -73,12 +73,26 @@ async fn handle_metrics(
             .expect("builder with known status code should not fail");
     }
 
+    let response_content_type = match req
+        .headers()
+        .get(http::header::ACCEPT)
+        .unwrap_or(&http::HeaderValue::from_str("").expect("static str must parse"))
+        .to_str()
+        .unwrap_or_default()
+        .to_lowercase()
+        .split(";")
+        .collect::<Vec<_>>()
+        .first()
+    {
+        Some(&"application/openmetrics-text") => {
+            "application/openmetrics-text;charset=utf-8;version=1.0.0"
+        }
+        _ => "text/plain; charset=utf-8",
+    };
+
     Response::builder()
         .status(hyper::StatusCode::OK)
-        .header(
-            hyper::header::CONTENT_TYPE,
-            "application/openmetrics-text;charset=utf-8;version=1.0.0",
-        )
+        .header(hyper::header::CONTENT_TYPE, response_content_type)
         .body(buf.into())
         .expect("builder with known status code should not fail")
 }
