@@ -900,6 +900,7 @@ mod namespaced {
 
         let zt = manager.resolve("ztunnel-node")?;
         let ourself = manager.resolve("client")?;
+        let localhost: IpAddr = "127.0.0.1".parse()?;
         malicious_calls_test(
             client,
             vec![
@@ -919,6 +920,14 @@ mod namespaced {
                 (ourself, 15000, Connection), // admin: doesn't exist on this network
                 (ourself, 15020, Connection), // Stats: doesn't exist on this network
                 (ourself, 15021, Connection), // Readiness: doesn't exist on this network
+                (localhost, 15001, Request),  // Outbound: should be blocked due to recursive call
+                (localhost, 15006, Request),  // Inbound: should be blocked due to recursive call
+                (localhost, 15008, Request),  // HBONE: expected TLS, reject
+                // Localhost still get connection established, as ztunnel accepts anything. But they are dropped immediately.
+                (localhost, 15080, Connection), // socks5: current disabled, so we just cannot connect
+                (localhost, 15000, Connection), // admin: doesn't exist on this network
+                (localhost, 15020, Connection), // Stats: doesn't exist on this network
+                (localhost, 15021, Connection), // Readiness: doesn't exist on this network
             ],
         )
         .await?;

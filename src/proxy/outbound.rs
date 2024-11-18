@@ -155,6 +155,12 @@ impl OutboundConnection {
     ) {
         let start = Instant::now();
 
+        let illegal_call =
+            dest_addr.ip().is_loopback() && self.pi.cfg.illegal_ports.contains(&dest_addr.port());
+        if illegal_call {
+            metrics::log_early_deny(source_addr, dest_addr, Reporter::source, Error::SelfCall);
+            return;
+        }
         // First find the source workload of this traffic. If we don't know where the request is from
         // we will reject it.
         let build = self
