@@ -21,8 +21,6 @@ use tokio::sync::watch;
 
 use tracing::{debug, error, info, trace, Instrument};
 
-use crate::config::ProxyMode;
-
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
 use crate::proxy::metrics::Reporter;
@@ -92,7 +90,7 @@ impl InboundPassthrough {
                                 drop(drain);
                                 debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
                             }
-                                .in_current_span();
+                              .in_current_span();
 
                             assertions::size_between_ref(1500, 3000, &serve_client);
                             tokio::spawn(serve_client);
@@ -127,15 +125,7 @@ impl InboundPassthrough {
         let dest_addr = socket::orig_dst_addr_or_default(&inbound_stream);
         // Check if it is an illegal call to ourself, which could trampoline to illegal addresses or
         // lead to infinite loops
-        let illegal_call = if pi.cfg.proxy_mode == ProxyMode::Shared {
-            // User sent a request to pod:15006. This would forward to pod:15006 infinitely
-            // OR
-            // User sent a request to the ztunnel directly. This isn't allowed
-            pi.cfg.illegal_ports.contains(&dest_addr.port())
-                || Some(dest_addr.ip()) == pi.cfg.local_ip
-        } else {
-            false
-        };
+        let illegal_call = pi.cfg.illegal_ports.contains(&dest_addr.port());
         if illegal_call {
             metrics::log_early_deny(
                 source_addr,

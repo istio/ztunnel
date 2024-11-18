@@ -153,7 +153,6 @@ impl WorkloadManager {
             fake_ca: true,
             local_xds_config,
             local_node: Some(node.to_string()),
-            local_ip: Some(ns.ip()),
             proxy_workload_information: wli,
             inpod_uds,
             proxy_mode,

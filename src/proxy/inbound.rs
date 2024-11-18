@@ -27,7 +27,7 @@ use super::{ConnectionResult, Error, LocalWorkloadInformation, ResponseFlags};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
-use crate::config::{Config, ProxyMode};
+use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
@@ -375,14 +375,7 @@ impl Inbound {
         local_workload: &Workload,
         hbone_addr: SocketAddr,
     ) -> Result<(), Error> {
-        let illegal_call = if cfg.proxy_mode == ProxyMode::Shared {
-            // User sent a request to pod:15006. This would forward to pod:15006 infinitely
-            // Use hbone_addr instead of upstream_addr to allow for sandwich mode, which intentionally
-            // sends to 15008.
-            cfg.illegal_ports.contains(&hbone_addr.port())
-        } else {
-            false // TODO: do we need any check here?
-        };
+        let illegal_call = cfg.illegal_ports.contains(&hbone_addr.port());
         if illegal_call {
             return Err(Error::SelfCall);
         }
