@@ -41,7 +41,6 @@ const PROXY_WORKLOAD_INFO: &str = "PROXY_WORKLOAD_INFO";
 const PACKET_MARK: &str = "PACKET_MARK";
 const INPOD_UDS: &str = "INPOD_UDS";
 const INPOD_PORT_REUSE: &str = "INPOD_PORT_REUSE";
-const INSTANCE_IP: &str = "INSTANCE_IP";
 const CLUSTER_ID: &str = "CLUSTER_ID";
 const CLUSTER_DOMAIN: &str = "CLUSTER_DOMAIN";
 const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
@@ -176,8 +175,6 @@ pub struct Config {
     /// The proxy mode of ztunnel, Shared or Dedicated, default to Shared.
     pub proxy_mode: ProxyMode,
     pub proxy_workload_information: Option<state::WorkloadInfo>,
-    /// The local_ip we are running at.
-    pub local_ip: Option<IpAddr>,
     /// The Cluster ID of the cluster that his ztunnel belongs to
     pub cluster_id: String,
     /// The domain of the cluster that this ztunnel belongs to
@@ -544,7 +541,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         local_node: parse(NODE_NAME)?,
         proxy_mode,
         proxy_workload_information,
-        local_ip: parse(INSTANCE_IP)?,
         cluster_id,
         cluster_domain,
 
