@@ -73,26 +73,45 @@ async fn handle_metrics(
             .expect("builder with known status code should not fail");
     }
 
-    let response_content_type = match req
+    let response_content_type: &str = req
         .headers()
-        .get(http::header::ACCEPT)
-        .unwrap_or(&http::HeaderValue::from_str("").expect("static str must parse"))
-        .to_str()
+        .get_all(http::header::ACCEPT)
+        .iter()
+        .find_map(|v| {
+            match v
+                .to_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .split(";")
+                .collect::<Vec<_>>()
+                .first()
+            {
+                Some(&"application/openmetrics-text") => Some(ContentType::OpenMetrics),
+                _ => None,
+            }
+        })
         .unwrap_or_default()
-        .to_lowercase()
-        .split(";")
-        .collect::<Vec<_>>()
-        .first()
-    {
-        Some(&"application/openmetrics-text") => {
-            "application/openmetrics-text;charset=utf-8;version=1.0.0"
-        }
-        _ => "text/plain; charset=utf-8",
-    };
+        .into();
 
     Response::builder()
         .status(hyper::StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, response_content_type)
         .body(buf.into())
         .expect("builder with known status code should not fail")
+}
+
+#[derive(Default)]
+enum ContentType {
+    #[default]
+    PlainText,
+    OpenMetrics,
+}
+
+impl From<ContentType> for &str {
+    fn from(c: ContentType) -> Self {
+        match c {
+            ContentType::PlainText => "text/plain; charset=utf-8",
+            ContentType::OpenMetrics => "application/openmetrics-text;charset=utf-8;version=1.0.0",
+        }
+    }
 }
