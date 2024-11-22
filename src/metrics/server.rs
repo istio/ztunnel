@@ -73,25 +73,7 @@ async fn handle_metrics(
             .expect("builder with known status code should not fail");
     }
 
-    let response_content_type: &str = req
-        .headers()
-        .get_all(http::header::ACCEPT)
-        .iter()
-        .find_map(|v| {
-            match v
-                .to_str()
-                .unwrap_or_default()
-                .to_lowercase()
-                .split(";")
-                .collect::<Vec<_>>()
-                .first()
-            {
-                Some(&"application/openmetrics-text") => Some(ContentType::OpenMetrics),
-                _ => None,
-            }
-        })
-        .unwrap_or_default()
-        .into();
+    let response_content_type = content_type(&req);
 
     Response::builder()
         .status(hyper::StatusCode::OK)
@@ -113,5 +95,60 @@ impl From<ContentType> for &str {
             ContentType::PlainText => "text/plain; charset=utf-8",
             ContentType::OpenMetrics => "application/openmetrics-text;charset=utf-8;version=1.0.0",
         }
+    }
+}
+
+#[inline(always)]
+fn content_type<T>(req: &Request<T>) -> &str {
+    req.headers()
+        .get_all(http::header::ACCEPT)
+        .iter()
+        .find_map(|v| {
+            match v
+                .to_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .split(";")
+                .collect::<Vec<_>>()
+                .first()
+            {
+                Some(&"application/openmetrics-text") => Some(ContentType::OpenMetrics),
+                _ => None,
+            }
+        })
+        .unwrap_or_default()
+        .into()
+}
+
+mod test {
+
+    #[test]
+    fn test_content_type() {
+        let plain_text_req = http::Request::new("I want some plain text");
+        assert_eq!(
+            super::content_type(&plain_text_req),
+            "text/plain; charset=utf-8"
+        );
+
+        let openmetrics_req = http::Request::builder()
+            .header("X-Custom-Beep", "boop")
+            .header("Accept", "application/json")
+            .header("Accept", "application/openmetrics-text; other stuff")
+            .body("I would like openmetrics")
+            .unwrap();
+        assert_eq!(
+            super::content_type(&openmetrics_req),
+            "application/openmetrics-text;charset=utf-8;version=1.0.0"
+        );
+
+        let unsupported_req_accept = http::Request::builder()
+            .header("Accept", "application/json")
+            .body("I would like some json")
+            .unwrap();
+        // asking for something we don't support, fall back to plaintext
+        assert_eq!(
+            super::content_type(&unsupported_req_accept),
+            "text/plain; charset=utf-8"
+        )
     }
 }
