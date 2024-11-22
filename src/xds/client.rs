@@ -436,7 +436,6 @@ pub struct Demander {
 
 #[derive(Debug)]
 enum XdsSignal {
-    None,
     Ack,
     Nack,
 }
@@ -444,7 +443,6 @@ enum XdsSignal {
 impl Display for XdsSignal {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            XdsSignal::None => "NONE",
             XdsSignal::Ack => "ACK",
             XdsSignal::Nack => "NACK",
         })
@@ -642,10 +640,14 @@ impl AdsClient {
                     self.handle_demand_event(_demand_event, &discovery_req_tx).await?;
                 }
                 msg = response_stream.message() => {
-                    let msg = msg?;
+                    let Some(msg) = msg? else {
+                        // If we got a None message, the stream ended without error.
+                        // This could be an explicit OK response, or if the stream is reset without a gRPC status.
+                        return Ok(());
+                    };
                     let mut received_type = None;
                     if !self.types_to_expect.is_empty() {
-                        received_type = msg.as_ref().map(|e| e.type_url.clone());
+                        received_type = Some(msg.type_url.clone())
                     }
                     if let XdsSignal::Ack = self.handle_stream_event(msg, &discovery_req_tx).await? {
                         if let Some(received_type) = received_type {
@@ -662,12 +664,9 @@ impl AdsClient {
 
     async fn handle_stream_event(
         &mut self,
-        stream_event: Option<DeltaDiscoveryResponse>,
+        response: DeltaDiscoveryResponse,
         send: &mpsc::Sender<DeltaDiscoveryRequest>,
     ) -> Result<XdsSignal, Error> {
-        let Some(response) = stream_event else {
-            return Ok(XdsSignal::None);
-        };
         let type_url = response.type_url.clone();
         let nonce = response.nonce.clone();
         info!(
