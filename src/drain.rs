@@ -17,35 +17,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-// #[derive(Debug)]
-// pub struct DrainTrigger(internal::Signal);
-
-// impl DrainTrigger {
-//     /// start_drain_and_wait initiates a draining sequence. The future will not complete until the drain
-//     /// is complete (all outstanding DrainWatchers are dropped).
-//     pub async fn start_drain_and_wait(self) {
-//         self.0.drain().await
-//     }
-// }
-
-// #[derive(Clone, Debug)]
 pub use internal::DrainMode;
 pub use internal::ReleaseShutdown as DrainBlocker;
 pub use internal::Signal as DrainTrigger;
 pub use internal::Watch as DrainWatcher;
-// pub struct DrainWatcher(internal::Watch);
-//
-// impl DrainWatcher {
-//     /// wait_for_drain will return once a drain has been initiated.
-//     /// The drain will not complete until the returned DrainBlocker is dropped
-//     pub async fn wait_for_drain(self) -> DrainBlocker {
-//         DrainBlocker(self.0.signaled().await)
-//     }
-// }
-
-// #[allow(dead_code)]
-/// DrainBlocker provides a token that must be dropped to unblock the drain.
-// pub struct DrainBlocker(internal::ReleaseShutdown);
 
 /// New constructs a new pair for draining
 /// * DrainTrigger can be used to start a draining sequence and wait for it to complete.

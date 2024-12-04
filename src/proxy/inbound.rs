@@ -709,7 +709,7 @@ mod tests {
         Workload(&'a str, Option<ApplicationTunnel>),
     }
 
-    impl<'a> Waypoint<'a> {
+    impl Waypoint<'_> {
         fn app_tunnel(&self) -> Option<ApplicationTunnel> {
             match self.clone() {
                 Waypoint::Service(_, v) => v,
