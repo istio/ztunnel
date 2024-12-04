@@ -503,7 +503,7 @@ impl<'de> Deserialize<'de> for NamespacedHostname {
     {
         struct NamespacedHostnameVisitor;
 
-        impl<'de> Visitor<'de> for NamespacedHostnameVisitor {
+        impl Visitor<'_> for NamespacedHostnameVisitor {
             type Value = NamespacedHostname;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -553,7 +553,7 @@ impl<'de> Deserialize<'de> for NetworkAddress {
     {
         struct NetworkAddressVisitor;
 
-        impl<'de> Visitor<'de> for NetworkAddressVisitor {
+        impl Visitor<'_> for NetworkAddressVisitor {
             type Value = NetworkAddress;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
