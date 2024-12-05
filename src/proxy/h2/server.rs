@@ -19,6 +19,7 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 use http::request::Parts;
 use http::Response;
+use std::fmt::Debug;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,6 +31,14 @@ pub struct H2Request {
     request: Parts,
     recv: h2::RecvStream,
     send: h2::server::SendResponse<Bytes>,
+}
+
+impl Debug for H2Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H2Request")
+            .field("request", &self.request)
+            .finish()
+    }
 }
 
 impl H2Request {
