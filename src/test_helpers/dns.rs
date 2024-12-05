@@ -16,7 +16,7 @@ use crate::config::Address;
 use crate::dns::resolver::{Answer, Resolver};
 use crate::dns::Metrics;
 use crate::drain::DrainTrigger;
-use crate::proxy::{DefaultSocketFactory, Error};
+use crate::proxy::Error;
 use crate::state::workload::Workload;
 use crate::state::WorkloadInfo;
 use crate::test_helpers::new_proxy_state;
@@ -253,7 +253,7 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
         Arc::new(Metrics::new(istio_registry))
     };
     let (signal, drain) = drain::new();
-    let factory = crate::proxy::DefaultSocketFactory {};
+    let factory = crate::proxy::DefaultSocketFactory::default();
 
     let state = new_proxy_state(
         &[XdsWorkload {
@@ -299,7 +299,7 @@ pub async fn run_dns(responses: HashMap<Name, Vec<IpAddr>>) -> anyhow::Result<Te
     let cfg = internal_resolver_config(tcp, udp);
     let opts = ResolverOpts::default();
     let resolver = Arc::new(
-        dns::forwarder::Forwarder::new(cfg, Arc::new(DefaultSocketFactory), opts)
+        dns::forwarder::Forwarder::new(cfg, Arc::new(factory), opts)
             .map_err(|e| Error::Generic(Box::new(e)))?,
     );
     Ok(TestDnsServer {
