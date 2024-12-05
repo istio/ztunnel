@@ -76,34 +76,14 @@ pub struct DefaultSocketFactory(pub config::SocketConfig);
 impl SocketFactory for DefaultSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<TcpSocket> {
         TcpSocket::new_v4().and_then(|s| {
-            s.set_nodelay(true)?;
-            let cfg = self.0;
-            if cfg.keepalive_enabled {
-                let ka = TcpKeepalive::new()
-                    .with_time(cfg.keepalive_time)
-                    .with_retries(cfg.keepalive_retries)
-                    .with_interval(cfg.keepalive_interval);
-                tracing::trace!(
-                    "set keepalive: {:?}",
-                    socket2::SockRef::from(&s).set_tcp_keepalive(&ka)
-                );
-            }
-            if cfg.user_timeout_enabled {
-                // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
-                // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
-                let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-                tracing::trace!(
-                    "set user timeout: {:?}",
-                    socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut))
-                );
-            }
+            self.setup_socket(&s)?;
             Ok(s)
         })
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<TcpSocket> {
         TcpSocket::new_v6().and_then(|s| {
-            s.set_nodelay(true)?;
+            self.setup_socket(&s)?;
             Ok(s)
         })
     }
@@ -122,6 +102,33 @@ impl SocketFactory for DefaultSocketFactory {
 
     fn ipv6_enabled_localhost(&self) -> io::Result<bool> {
         ipv6_enabled_on_localhost()
+    }
+}
+
+impl DefaultSocketFactory {
+    fn setup_socket(&self, s: &TcpSocket) -> io::Result<()> {
+        s.set_nodelay(true)?;
+        let cfg = self.0;
+        if cfg.keepalive_enabled {
+            let ka = TcpKeepalive::new()
+                .with_time(cfg.keepalive_time)
+                .with_retries(cfg.keepalive_retries)
+                .with_interval(cfg.keepalive_interval);
+            tracing::trace!(
+                "set keepalive: {:?}",
+                socket2::SockRef::from(&s).set_tcp_keepalive(&ka)
+            );
+        }
+        if cfg.user_timeout_enabled {
+            // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
+            // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
+            let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
+            tracing::trace!(
+                "set user timeout: {:?}",
+                socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut))
+            );
+        }
+        Ok(())
     }
 }
 
