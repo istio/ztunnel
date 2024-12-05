@@ -50,7 +50,7 @@ pub struct Connection {
 
 struct OptionDisplay<'a, T>(&'a Option<T>);
 
-impl<'a, T: Display> Display for OptionDisplay<'a, T> {
+impl<T: Display> Display for OptionDisplay<'_, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.0 {
             None => write!(f, "None"),

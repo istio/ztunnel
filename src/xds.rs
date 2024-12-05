@@ -51,7 +51,7 @@ mod types;
 
 struct DisplayStatus<'a>(&'a tonic::Status);
 
-impl<'a> fmt::Display for DisplayStatus<'a> {
+impl fmt::Display for DisplayStatus<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let s = &self.0;
         write!(f, "status: {:?}, message: {:?}", s.code(), s.message())?;

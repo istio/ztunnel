@@ -162,7 +162,7 @@ struct Visitor<'writer> {
     writer: Writer<'writer>,
 }
 
-impl<'writer> Visitor<'writer> {
+impl Visitor<'_> {
     fn write_padded(&mut self, value: &impl Debug) -> std::fmt::Result {
         let padding = if self.is_empty {
             self.is_empty = false;
@@ -321,7 +321,7 @@ impl<'a> WriteAdaptor<'a> {
         Self { fmt_write }
     }
 }
-impl<'a> io::Write for WriteAdaptor<'a> {
+impl io::Write for WriteAdaptor<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let s =
             std::str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -488,7 +488,7 @@ pub mod testing {
         }
     }
 
-    impl<'a> io::Write for MockWriter<'a> {
+    impl io::Write for MockWriter<'_> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             let mut target = self.buf()?;
             target.write(buf)
@@ -499,7 +499,7 @@ pub mod testing {
         }
     }
 
-    impl<'a> fmt::MakeWriter<'_> for MockWriter<'a> {
+    impl fmt::MakeWriter<'_> for MockWriter<'_> {
         type Writer = Self;
 
         fn make_writer(&self) -> Self::Writer {
