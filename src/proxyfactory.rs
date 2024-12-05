@@ -70,11 +70,12 @@ impl ProxyFactory {
         &self,
         proxy_workload_info: WorkloadInfo,
     ) -> Result<ProxyResult, Error> {
+        let base = crate::proxy::DefaultSocketFactory(self.config.socket_config);
         let factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync> =
             if let Some(mark) = self.config.packet_mark {
-                Arc::new(crate::proxy::MarkSocketFactory(mark))
+                Arc::new(crate::proxy::MarkSocketFactory { inner: base, mark })
             } else {
-                Arc::new(crate::proxy::DefaultSocketFactory)
+                Arc::new(base)
             };
         self.new_proxies_from_factory(None, proxy_workload_info, factory)
             .await
