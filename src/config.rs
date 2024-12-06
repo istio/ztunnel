@@ -39,6 +39,11 @@ const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
 const PROXY_WORKLOAD_INFO: &str = "PROXY_WORKLOAD_INFO";
 const PACKET_MARK: &str = "PACKET_MARK";
+const KEEPALIVE_TIME: &str = "KEEPALIVE_TIME";
+const KEEPALIVE_INTERVAL: &str = "KEEPALIVE_INTERVAL";
+const KEEPALIVE_RETRIES: &str = "KEEPALIVE_RETRIES";
+const KEEPALIVE_ENABLED: &str = "KEEPALIVE_ENABLED";
+const USER_TIMEOUT_ENABLED: &str = "USER_TIMEOUT_ENABLED";
 const INPOD_UDS: &str = "INPOD_UDS";
 const INPOD_PORT_REUSE: &str = "INPOD_PORT_REUSE";
 const CLUSTER_ID: &str = "CLUSTER_ID";
@@ -239,6 +244,31 @@ pub struct Config {
     // For dedicated mode, it is not strictly required, but can be useful in some environments to
     // distinguish proxy traffic from application traffic.
     pub packet_mark: Option<u32>,
+
+    pub socket_config: SocketConfig,
+}
+
+#[derive(serde::Serialize, Clone, Copy, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SocketConfig {
+    pub keepalive_time: Duration,
+    pub keepalive_interval: Duration,
+    pub keepalive_retries: u32,
+    pub keepalive_enabled: bool,
+    pub user_timeout_enabled: bool,
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            keepalive_time: Duration::from_secs(180),
+            keepalive_interval: Duration::from_secs(180),
+            keepalive_retries: 9,
+            keepalive_enabled: true,
+            // Might be a good idea but for now we haven't proven this out enough.
+            user_timeout_enabled: false,
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -271,6 +301,16 @@ fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
 
 fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
     parse(env).map(|v| v.unwrap_or(default))
+}
+
+fn parse_duration(env: &str) -> Result<Option<Duration>, Error> {
+    parse::<String>(env)?
+        .map(|ds| duration_str::parse(&ds).map_err(|_| Error::EnvVar(env.to_string(), ds)))
+        .transpose()
+}
+
+fn parse_duration_default(env: &str, default: Duration) -> Result<Duration, Error> {
+    parse_duration(env).map(|v| v.unwrap_or(default))
 }
 
 fn parse_args() -> String {
@@ -469,6 +509,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         _ => None,
     };
 
+    let socket_config_defaults = SocketConfig::default();
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
@@ -483,19 +525,17 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_POOL_MAX_STREAMS_PER_CONNECTION,
         )?,
 
-        pool_unused_release_timeout: match parse::<String>(POOL_UNUSED_RELEASE_TIMEOUT)? {
-            Some(ttl) => duration_str::parse(&ttl)
-                .map_err(|_| Error::EnvVar(POOL_UNUSED_RELEASE_TIMEOUT.to_string(), ttl))?,
-            None => DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
-        },
+        pool_unused_release_timeout: parse_duration_default(
+            POOL_UNUSED_RELEASE_TIMEOUT,
+            DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
+        )?,
 
         window_size: 4 * 1024 * 1024,
         connection_window_size: 4 * 1024 * 1024,
         frame_size: 1024 * 1024,
 
-        self_termination_deadline: match parse::<String>(CONNECTION_TERMINATION_DEADLINE)? {
-            Some(period) => duration_str::parse(&period)
-                .map_err(|_| Error::EnvVar(POOL_UNUSED_RELEASE_TIMEOUT.to_string(), period))?,
+        self_termination_deadline: match parse_duration(CONNECTION_TERMINATION_DEADLINE)? {
+            Some(period) => period,
             None => match parse::<u64>(TERMINATION_GRACE_PERIOD_SECONDS)? {
                 // We want our drain period to be less than Kubernetes, so we can use the last few seconds
                 // to abruptly terminate anything remaining before Kubernetes SIGKILLs us.
@@ -551,10 +591,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         alt_xds_hostname: parse(ALT_XDS_HOSTNAME)?,
         alt_ca_hostname: parse(ALT_CA_HOSTNAME)?,
 
-        secret_ttl: match parse::<String>(SECRET_TTL)? {
-            Some(ttl) => duration_str::parse(ttl).unwrap_or(DEFAULT_TTL),
-            None => DEFAULT_TTL,
-        },
+        secret_ttl: parse_duration_default(SECRET_TTL, DEFAULT_TTL)?,
         local_xds_config,
         xds_on_demand: parse_default(XDS_ON_DEMAND, false)?,
         proxy_metadata: pc.proxy_metadata,
@@ -573,6 +610,47 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         dns_resolver_opts,
         inpod_uds: parse_default(INPOD_UDS, PathBuf::from("/var/run/ztunnel/ztunnel.sock"))?,
         inpod_port_reuse: parse_default(INPOD_PORT_REUSE, true)?,
+        socket_config: SocketConfig {
+            // Our goal with keepalives is to stop things from dropping our connection prematurely.
+            // So we want this to be a short enough interval to achieve that goal, without causing
+            // excessive pings.
+            //
+            // Note that keepalives are not hop-by-hop. So without setting keepalives in Ztunnel,
+            // an application may rely on keepalives which are now only going to the local Ztunnel.
+            // This results in hitting timeout's and unexpected behavior. This only impacts TCP keepalives;
+            // application level keepalives work fine.
+            //
+            // Some popular services, like Google LBs have a 10 minute timeout, so we will aim to be
+            // well below that.
+            // Other systems' defaults:
+            // * Go: 15s/15s, 9 retries
+            // * Linux: 2hr delay, 75s interval, 9 retries (note: its off by default, though)
+            // * Envoy: no default
+            // * Linkerd2: 10s delay (then hitting Linux level settings for the rest)
+            //
+            // Note that because keepalives are a property of the socket (which has two ends), not the connection,
+            // we cannot somehow read what the peer set and forward it (which would be neat).
+            keepalive_time: parse_duration_default(
+                KEEPALIVE_TIME,
+                socket_config_defaults.keepalive_time,
+            )?,
+            keepalive_interval: parse_duration_default(
+                KEEPALIVE_INTERVAL,
+                socket_config_defaults.keepalive_interval,
+            )?,
+            keepalive_retries: parse_default(
+                KEEPALIVE_RETRIES,
+                socket_config_defaults.keepalive_retries,
+            )?,
+            keepalive_enabled: parse_default(
+                KEEPALIVE_ENABLED,
+                socket_config_defaults.keepalive_enabled,
+            )?,
+            user_timeout_enabled: parse_default(
+                USER_TIMEOUT_ENABLED,
+                socket_config_defaults.user_timeout_enabled,
+            )?,
+        },
         packet_mark: parse(PACKET_MARK)?.or_else(|| {
             if proxy_mode == ProxyMode::Shared {
                 // For inpod, mark is required so default it

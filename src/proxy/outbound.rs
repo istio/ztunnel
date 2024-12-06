@@ -548,7 +548,7 @@ mod tests {
         }
         let state = new_proxy_state(&workloads, &services, &[]);
 
-        let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory);
+        let sock_fact = std::sync::Arc::new(crate::proxy::DefaultSocketFactory::default());
 
         let wi = WorkloadInfo {
             name: "source-workload".to_string(),

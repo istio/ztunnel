@@ -24,7 +24,7 @@ use hickory_proto::error::ProtoError;
 
 use crate::strng::Strng;
 use rand::Rng;
-
+use socket2::TcpKeepalive;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tracing::{debug, trace, warn, Instrument};
@@ -71,19 +71,19 @@ pub trait SocketFactory {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct DefaultSocketFactory;
+pub struct DefaultSocketFactory(pub config::SocketConfig);
 
 impl SocketFactory for DefaultSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<TcpSocket> {
         TcpSocket::new_v4().and_then(|s| {
-            s.set_nodelay(true)?;
+            self.setup_socket(&s)?;
             Ok(s)
         })
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<TcpSocket> {
         TcpSocket::new_v6().and_then(|s| {
-            s.set_nodelay(true)?;
+            self.setup_socket(&s)?;
             Ok(s)
         })
     }
@@ -105,33 +105,63 @@ impl SocketFactory for DefaultSocketFactory {
     }
 }
 
-pub struct MarkSocketFactory(pub u32);
+impl DefaultSocketFactory {
+    fn setup_socket(&self, s: &TcpSocket) -> io::Result<()> {
+        s.set_nodelay(true)?;
+        let cfg = self.0;
+        if cfg.keepalive_enabled {
+            let ka = TcpKeepalive::new()
+                .with_time(cfg.keepalive_time)
+                .with_retries(cfg.keepalive_retries)
+                .with_interval(cfg.keepalive_interval);
+            tracing::trace!(
+                "set keepalive: {:?}",
+                socket2::SockRef::from(&s).set_tcp_keepalive(&ka)
+            );
+        }
+        if cfg.user_timeout_enabled {
+            // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
+            // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
+            let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
+            tracing::trace!(
+                "set user timeout: {:?}",
+                socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut))
+            );
+        }
+        Ok(())
+    }
+}
+
+pub struct MarkSocketFactory {
+    pub inner: DefaultSocketFactory,
+    pub mark: u32,
+}
 
 impl SocketFactory for MarkSocketFactory {
     fn new_tcp_v4(&self) -> io::Result<TcpSocket> {
-        DefaultSocketFactory.new_tcp_v4().and_then(|s| {
-            socket::set_mark(&s, self.0)?;
+        self.inner.new_tcp_v4().and_then(|s| {
+            socket::set_mark(&s, self.mark)?;
             Ok(s)
         })
     }
 
     fn new_tcp_v6(&self) -> io::Result<TcpSocket> {
-        DefaultSocketFactory.new_tcp_v6().and_then(|s| {
-            socket::set_mark(&s, self.0)?;
+        self.inner.new_tcp_v6().and_then(|s| {
+            socket::set_mark(&s, self.mark)?;
             Ok(s)
         })
     }
 
     fn tcp_bind(&self, addr: SocketAddr) -> io::Result<socket::Listener> {
-        DefaultSocketFactory.tcp_bind(addr)
+        self.inner.tcp_bind(addr)
     }
 
     fn udp_bind(&self, addr: SocketAddr) -> io::Result<tokio::net::UdpSocket> {
-        DefaultSocketFactory.udp_bind(addr)
+        self.inner.udp_bind(addr)
     }
 
     fn ipv6_enabled_localhost(&self) -> io::Result<bool> {
-        DefaultSocketFactory.ipv6_enabled_localhost()
+        self.inner.ipv6_enabled_localhost()
     }
 }
 

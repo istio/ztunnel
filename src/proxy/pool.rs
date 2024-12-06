@@ -1000,7 +1000,7 @@ mod test {
             pool_unused_release_timeout: idle,
             ..crate::config::parse_config().unwrap()
         };
-        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory);
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
 
         let mut state = ProxyState::new(None);
         let wl = Arc::new(workload::Workload {
