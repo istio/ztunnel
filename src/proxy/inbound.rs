@@ -171,6 +171,8 @@ impl Inbound {
         let src = conn.src;
         let dst = conn.dst;
 
+        debug!(%conn, ?req, "received request");
+
         // In order to ensure we properly handle all errors, we split up serving inbound request into a few
         // phases.
 
