@@ -1305,7 +1305,7 @@ mod tests {
         let (state, local_workload) = state();
         let forwarder = forwarder();
         let (_signal, drain) = drain::new();
-        let factory = crate::proxy::DefaultSocketFactory;
+        let factory = crate::proxy::DefaultSocketFactory::default();
         let proxy = Server::new(
             domain,
             config::Address::Localhost(false, 0),
@@ -1391,7 +1391,7 @@ mod tests {
             .unwrap(),
         );
         let (_signal, drain) = drain::new();
-        let factory = crate::proxy::DefaultSocketFactory;
+        let factory = crate::proxy::DefaultSocketFactory::default();
         let server = Server::new(
             domain,
             config::Address::Localhost(false, 0),
@@ -1473,7 +1473,7 @@ mod tests {
         });
         let domain = "cluster.local".to_string();
         let (_signal, drain) = drain::new();
-        let factory = crate::proxy::DefaultSocketFactory;
+        let factory = crate::proxy::DefaultSocketFactory::default();
         let server = Server::new(
             domain,
             config::Address::Localhost(false, 0),
@@ -1514,7 +1514,7 @@ mod tests {
         let f = SystemForwarder::from_parts(
             true,
             "cluster.local".to_string(),
-            Arc::new(DefaultSocketFactory),
+            Arc::new(DefaultSocketFactory::default()),
             opts,
             None,
             search,

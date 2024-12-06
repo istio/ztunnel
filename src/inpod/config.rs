@@ -22,6 +22,7 @@ pub struct InPodConfig {
     cur_netns: Arc<std::os::fd::OwnedFd>,
     mark: Option<std::num::NonZeroU32>,
     reuse_port: bool,
+    socket_config: config::SocketConfig,
 }
 
 impl InPodConfig {
@@ -30,13 +31,15 @@ impl InPodConfig {
             cur_netns: Arc::new(InpodNetns::current()?),
             mark: std::num::NonZeroU32::new(cfg.packet_mark.expect("in pod requires packet mark")),
             reuse_port: cfg.inpod_port_reuse,
+            socket_config: cfg.socket_config,
         })
     }
     pub fn socket_factory(
         &self,
         netns: InpodNetns,
     ) -> Box<dyn crate::proxy::SocketFactory + Send + Sync> {
-        let sf = InPodSocketFactory::from_cfg(self, netns);
+        let base = crate::proxy::DefaultSocketFactory(self.socket_config);
+        let sf = InPodSocketFactory::from_cfg(base, self, netns);
         if self.reuse_port {
             Box::new(InPodSocketPortReuseFactory::new(sf))
         } else {
@@ -53,16 +56,26 @@ impl InPodConfig {
 }
 
 struct InPodSocketFactory {
+    inner: DefaultSocketFactory,
     netns: InpodNetns,
     mark: Option<std::num::NonZeroU32>,
 }
 
 impl InPodSocketFactory {
-    fn from_cfg(inpod_config: &InPodConfig, netns: InpodNetns) -> Self {
-        Self::new(netns, inpod_config.mark())
+    fn from_cfg(
+        inner: DefaultSocketFactory,
+        inpod_config: &InPodConfig,
+        netns: InpodNetns,
+    ) -> Self {
+        Self::new(inner, netns, inpod_config.mark())
     }
-    fn new(netns: InpodNetns, mark: Option<std::num::NonZeroU32>) -> Self {
-        Self { netns, mark }
+
+    fn new(
+        inner: DefaultSocketFactory,
+        netns: InpodNetns,
+        mark: Option<std::num::NonZeroU32>,
+    ) -> Self {
+        Self { inner, netns, mark }
     }
 
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
@@ -84,11 +97,11 @@ impl InPodSocketFactory {
 
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| DefaultSocketFactory.new_tcp_v4())
+        self.configure(|| self.inner.new_tcp_v4())
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(|| DefaultSocketFactory.new_tcp_v6())
+        self.configure(|| self.inner.new_tcp_v6())
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
@@ -104,7 +117,7 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
     }
 
     fn ipv6_enabled_localhost(&self) -> std::io::Result<bool> {
-        self.run_in_ns(|| DefaultSocketFactory.ipv6_enabled_localhost())
+        self.run_in_ns(|| self.inner.ipv6_enabled_localhost())
     }
 }
 
