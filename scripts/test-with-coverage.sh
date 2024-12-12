@@ -28,7 +28,7 @@ export LLVM_PROFILE_FILE="$profiles/profile_%m_%p.profraw"
 # Enable coverage
 export RUSTFLAGS="-C instrument-coverage"
 export RUST_BACKTRACE=1
-export RUSTUP_DEFAULT_TOOLCHAIN=$(rustup show active-toolchain | awk '{print $1}')
+RUSTUP_DEFAULT_TOOLCHAIN="$(rustup show active-toolchain | awk '{print $1}')"
 
 # Clean directory
 rm -rf "$profdata" "$profiles"
