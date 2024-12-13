@@ -63,6 +63,8 @@ run fake server with:
 INPOD_UDS=/tmp/ztunnel cargo run --example inpodserver -- pod1
 ```
 
+(note: In the above command, you can override PROXY_WORKLOAD_INFO default value if you need to match to different values in your `localhost.yaml` file)
+
 run ztunnel (as root) with:
 
 ```shell
