@@ -28,6 +28,7 @@ export LLVM_PROFILE_FILE="$profiles/profile_%m_%p.profraw"
 # Enable coverage
 export RUSTFLAGS="-C instrument-coverage"
 export RUST_BACKTRACE=1
+RUSTUP_DEFAULT_TOOLCHAIN="$(rustup show active-toolchain | awk '{print $1}')"
 
 # Clean directory
 rm -rf "$profdata" "$profiles"
@@ -38,7 +39,7 @@ cargo test --benches --tests --bins $FEATURES
 
 # Merge profraw data
 echo "Merging profraw files in $profiles to $profdata"
-llvm-profdata merge -sparse $(find "$profiles" -name '*.profraw') -o $profdata
+rustup run "$RUSTUP_DEFAULT_TOOLCHAIN" llvm-profdata merge -sparse $(find "$profiles" -name '*.profraw') -o $profdata
 
 # Taken from 
 # https://doc.rust-lang.org/rustc/instrument-coverage.html#tips-for-listing-the-binaries-automatically
@@ -55,7 +56,7 @@ echo $objs
 
 echo "Publishing coverage report to $output_dir"
 
-llvm-cov show \
+rustup run "$RUSTUP_DEFAULT_TOOLCHAIN" llvm-cov show \
     -instr-profile="$profdata" \
     $objs \
     -Xdemangler=rustfilt \
