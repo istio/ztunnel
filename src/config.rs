@@ -273,8 +273,8 @@ impl Default for SocketConfig {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("invalid env var {0}={1}")]
-    EnvVar(String, String),
+    #[error("invalid env var {0}={1} ({2})")]
+    EnvVar(String, String, String),
     #[error("error parsing proxy config: {0}")]
     ProxyConfig(anyhow::Error),
     #[error("invalid uri: {0}")]
@@ -289,23 +289,31 @@ impl From<InvalidUri> for Error {
     }
 }
 
-fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error> {
+fn parse<T: FromStr>(env: &str) -> Result<Option<T>, Error>
+where
+    <T as FromStr>::Err: ToString,
+{
     match env::var(env) {
         Ok(val) => val
             .parse()
             .map(|v| Some(v))
-            .map_err(|_| Error::EnvVar(env.to_string(), val)),
+            .map_err(|e: <T as FromStr>::Err| Error::EnvVar(env.to_string(), val, e.to_string())),
         Err(_) => Ok(None),
     }
 }
 
-fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error> {
+fn parse_default<T: FromStr>(env: &str, default: T) -> Result<T, Error>
+where
+    <T as FromStr>::Err: std::error::Error + Sync + Send,
+{
     parse(env).map(|v| v.unwrap_or(default))
 }
 
 fn parse_duration(env: &str) -> Result<Option<Duration>, Error> {
     parse::<String>(env)?
-        .map(|ds| duration_str::parse(&ds).map_err(|_| Error::EnvVar(env.to_string(), ds)))
+        .map(|ds| {
+            duration_str::parse(&ds).map_err(|e| Error::EnvVar(env.to_string(), ds, e.to_string()))
+        })
         .transpose()
 }
 
@@ -469,7 +477,15 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(proxy_mode) => match proxy_mode.as_str() {
             PROXY_MODE_DEDICATED => ProxyMode::Dedicated,
             PROXY_MODE_SHARED => ProxyMode::Shared,
-            _ => return Err(Error::EnvVar(PROXY_MODE.to_string(), proxy_mode)),
+            _ => {
+                return Err(Error::EnvVar(
+                    PROXY_MODE.to_string(),
+                    proxy_mode,
+                    format!(
+                        "PROXY_MODE must be one of {PROXY_MODE_DEDICATED}, {PROXY_MODE_SHARED}"
+                    ),
+                ))
+            }
         },
         None => ProxyMode::Shared,
     };
