@@ -230,7 +230,7 @@ impl OutboundConnection {
 
         let request = http::Request::builder()
             .uri(
-                &req.hbone_target_destination
+                req.hbone_target_destination
                     .expect("HBONE must have target")
                     .to_string(),
             )

@@ -125,7 +125,7 @@ impl WorkloadStreamProcessor {
             };
 
             // call maybe_get_fd first (and not get_info_from_data), so that if it fails we will close the FDs.
-            let maybe_our_fd = maybe_get_fd(res.cmsgs())?;
+            let maybe_our_fd = maybe_get_fd(res.cmsgs()?)?;
             let flags = res.flags;
             (flags, maybe_our_fd, res.bytes)
         };
