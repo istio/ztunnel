@@ -31,6 +31,7 @@ use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
 use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
+use educe::Educe;
 use futures_util::FutureExt;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
@@ -127,10 +128,11 @@ impl WorkloadInfo {
     }
 }
 
-#[derive(derivative::Derivative, Debug, Clone, Eq, PartialEq, Hash, serde::Serialize)]
+#[derive(Educe, Debug, Clone, Eq, serde::Serialize)]
+#[educe(PartialEq, Hash)]
 pub struct ProxyRbacContext {
     pub conn: rbac::Connection,
-    #[derivative(Hash = "ignore", PartialEq = "ignore")]
+    #[educe(Hash(ignore), PartialEq(ignore))]
     pub dest_workload: Arc<Workload>,
 }
 
