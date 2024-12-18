@@ -79,7 +79,8 @@ pub enum TlsError {
     )]
     SanError(Vec<Identity>, Vec<Identity>),
     #[error(
-        "identity verification error: peer did not present the expected trustdomain ({0}), got {}",
+        "identity verification error: peer did not present the expected trustdomain ({}), got {}",
+        .0,
         display_list(.1)
     )]
     SanTrustDomainError(String, Vec<Identity>),

@@ -42,15 +42,15 @@ async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.22"
 byteorder = "1.5"
-bytes = { version = "1.5", features = ["serde"] }
+bytes = { version = "1.9", features = ["serde"] }
 chrono = "0.4"
-duration-str = "0.7"
+duration-str = "0.11"
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-jemalloc_pprof = { version = "0.1.0", optional = true }
-tikv-jemallocator = { version = "0.5.4", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
-hashbrown = "0.14"
+jemalloc_pprof = { version = "0.6.0", optional = true }
+tikv-jemallocator = { version = "0.6.0", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
+hashbrown = "0.15"
 hickory-client = "0.24"
 hickory-proto = "0.24"
 hickory-resolver = "0.24"
@@ -58,59 +58,59 @@ hickory-server = { version = "0.24", features = [ "hickory-resolver" ] }
 http-body = { package = "http-body", version = "1" }
 http-body-util = "0.1"
 http-types = { version = "2.12", default-features = false }
-hyper = { version = "1.3", features = ["full"] }
+hyper = { version = "1.5", features = ["full"] }
 hyper-rustls = { version = "0.27.0", default-features = false, features = ["logging", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 ipnet = { version = "2.9", features = ["serde"] }
-itertools = "0.12"
+itertools = "0.13"
 keyed_priority_queue = "0.4"
 libc = "0.2"
 log = "0.4"
-nix = { version = "0.28", features = ["socket", "sched", "uio", "fs", "ioctl", "user", "net", "mount"] }
+nix = { version = "0.29", features = ["socket", "sched", "uio", "fs", "ioctl", "user", "net", "mount"] }
 once_cell = "1.19"
 ppp = "2.2"
 prometheus-client = { version = "0.22" }
 prometheus-parse = "0.2"
 prost = "0.13"
 prost-types = "0.13"
-rand = "0.8"
+rand = { version = "0.8" , features = ["small_rng"]}
 rcgen = { version = "0.13", optional = true, features = ["pem"] }
 rustls = { version = "0.23", default-features = false }
-rustls-native-certs = "0.7.0"
-rustls-pemfile = "2.1"
+rustls-native-certs = "0.8"
+rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 socket2 = { version = "0.5", features = ["all"] }
 textnonce = { version = "1.0" }
-thiserror = "1.0"
+thiserror = "2.0"
 tls-listener = { version = "0.10" }
-tokio = { version = "1.0", features = ["full", "test-util"] }
+tokio = { version = "1.42", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.12", default-features = false, features = ["prost", "codegen"] }
-tower = { version = "0.4", features = ["full"] }
+tower = { version = "0.5", features = ["full"] }
 tracing = { version = "0.1"}
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "json"] }
-url = "2.2"
+url = "2.5"
 x509-parser = { version = "0.16", default-features = false }
 tracing-log = "0.2"
-backoff = "0.4.0"
+backoff = "0.4"
 pin-project-lite = "0.2"
-pingora-pool = "0.1.0"
-flurry = "0.5.0"
-h2 = "0.4.5"
-http = "1.1"
+pingora-pool = "0.4"
+flurry = "0.5"
+h2 = "0.4"
+http = "1.2"
 split-iter = "0.1"
 arcstr = { version = "1.1", features = ["serde"] }
-tracing-core = "0.1.32"
-tracing-appender = "0.2.3"
-tokio-util = { version = "0.7.11", features = ["io-util"] }
-derivative = "2.2.0"
+tracing-core = "0.1"
+tracing-appender = "0.2"
+tokio-util = { version = "0.7", features = ["io-util"] }
+derivative = "2.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
-pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion"] }
+pprof = { version = "0.14", features = ["protobuf", "protobuf-codec", "criterion"] }
 
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }

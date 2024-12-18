@@ -785,7 +785,7 @@ mod namespaced {
                     hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
 
                 let request = hyper::Request::builder()
-                    .uri(&srv.to_string())
+                    .uri(srv.to_string())
                     .method(Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .body(Empty::<Bytes>::new())
@@ -847,7 +847,7 @@ mod namespaced {
                     hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
 
                 let request = hyper::Request::builder()
-                    .uri(&clt.to_string())
+                    .uri(clt.to_string())
                     .method(Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .body(Empty::<Bytes>::new())

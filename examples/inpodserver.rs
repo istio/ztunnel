@@ -72,11 +72,11 @@ fn parse_proxy_workload_info() -> Result<WorkloadInfo, Error> {
         )));
     };
 
-    return Ok(WorkloadInfo {
+    Ok(WorkloadInfo {
         name: name.to_string(),
         namespace: ns.to_string(),
         service_account: sa.to_string(),
-    });
+    })
 }
 
 #[derive(thiserror::Error, Debug)]

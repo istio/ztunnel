@@ -20,6 +20,7 @@ use hyper::body::Incoming;
 use hyper::Uri;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
+use itertools::Itertools;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
@@ -53,8 +54,16 @@ async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Er
             roots.add_parsable_certificates(certs);
         }
         RootCert::Default => {
-            let certs = rustls_native_certs::load_native_certs()
-                .map_err(|e| Error::InvalidRootCert(e.to_string()))?;
+            let certs = {
+                let rustls_native_certs::CertificateResult { certs, errors, .. } =
+                    rustls_native_certs::load_native_certs();
+                if !errors.is_empty() {
+                    return Err(Error::InvalidRootCert(
+                        errors.into_iter().map(|e| e.to_string()).join(","),
+                    ));
+                }
+                certs
+            };
             roots.add_parsable_certificates(certs);
         }
     };

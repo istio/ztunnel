@@ -82,7 +82,7 @@ impl fmt::Display for DisplayStatus<'_> {
 pub enum Error {
     #[error("gRPC error {}", DisplayStatus(.0))]
     GrpcStatus(#[from] tonic::Status),
-    #[error("gRPC connection error connecting to {0}: {}", DisplayStatus(.1))]
+    #[error("gRPC connection error connecting to {}: {}", .0, DisplayStatus(.1))]
     Connection(String, #[source] tonic::Status),
     /// Attempted to send on a MPSC channel which has been canceled
     #[error(transparent)]
