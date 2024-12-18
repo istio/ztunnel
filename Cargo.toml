@@ -50,7 +50,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 jemalloc_pprof = { version = "0.1.0", optional = true }
 tikv-jemallocator = { version = "0.5.4", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
-hashbrown = "0.14"
+hashbrown = "0.15"
 hickory-client = "0.24"
 hickory-proto = "0.24"
 hickory-resolver = "0.24"
