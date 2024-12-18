@@ -75,7 +75,7 @@ prost = "0.13"
 prost-types = "0.13"
 rand = "0.8"
 rcgen = { version = "0.13", optional = true, features = ["pem"] }
-rustls = { version = "0.23", default-features = false }
+rustls = { version = "0.23.18", default-features = false }
 rustls-native-certs = "0.7.0"
 rustls-pemfile = "2.1"
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -110,7 +110,7 @@ derivative = "2.2.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
-pprof = { version = "0.13", features = ["protobuf", "protobuf-codec", "criterion"] }
+pprof = { version = "0.14", features = ["protobuf", "protobuf-codec", "criterion"] }
 
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
