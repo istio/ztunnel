@@ -1,0 +1,15 @@
+
+version: 2
+updates:
+  # Maintain dependencies for GitHub Actions
+  - package-ecosystem: "cargo"
+    # Workflow files stored in the default location of `.github/workflows`. (You don't need to specify `/.github/workflows` for `directory`. You can use `directory: "/"`.)
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    rebase-strategy: "disabled"
+    groups:
+      all:
+        applies-to: version-updates
+          patterns:
+          - "*"
