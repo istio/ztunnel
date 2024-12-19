@@ -134,6 +134,7 @@ impl WorkloadProxyManagerState {
                     ));
                 };
                 if !self.snapshot_received {
+                    debug!("got workload add before snapshot");
                     self.snapshot_names.insert(poddata.workload_uid.clone());
                 }
                 let netns =
@@ -172,12 +173,12 @@ impl WorkloadProxyManagerState {
                     "pod delete request, shutting down proxy"
                 );
                 if !self.snapshot_received {
-                    // TODO: consider if this is an error. if not, do this instead:
-                    // self.snapshot_names.remove(&workload_uid)
-                    // self.pending_workloads.remove(&workload_uid)
-                    return Err(Error::ProtocolError(
-                        "pod delete received before snapshot".into(),
-                    ));
+                    debug!("got workload delete before snapshot");
+                    // Since we insert here on AddWorkload before we get a snapshot,
+                    // make sure we also opportunistically remove here before we
+                    // get a snapshot
+                    self.snapshot_names.remove(&workload_uid);
+                    return Ok(());
                 }
                 self.del_workload(&workload_uid);
                 Ok(())
