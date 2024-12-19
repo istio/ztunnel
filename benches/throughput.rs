@@ -70,6 +70,8 @@ fn create_test_policies() -> Vec<Authorization> {
                 StringMatch::Exact("random-exac-2bc13".into()),
             ],
             not_namespaces: vec![],
+            service_accounts: vec![],
+            not_service_accounts: vec![],
             principals: vec![
                 StringMatch::Prefix("random-prefix-2b123".into()),
                 StringMatch::Suffix("random-postix-2b723".into()),
