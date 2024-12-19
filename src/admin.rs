@@ -457,6 +457,7 @@ mod tests {
     use crate::xds::istio::security::Clause as XdsClause;
     use crate::xds::istio::security::Match as XdsMatch;
     use crate::xds::istio::security::Rule as XdsRule;
+    use crate::xds::istio::security::ServiceAccountMatch as XdsServiceAccountMatch;
     use crate::xds::istio::security::StringMatch as XdsStringMatch;
     use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
     use crate::xds::istio::workload::GatewayAddress as XdsGatewayAddress;
@@ -713,6 +714,14 @@ mod tests {
                         }],
                         not_namespaces: vec![XdsStringMatch {
                             match_type: Some(XdsMatchType::Exact("not-ns".to_string())),
+                        }],
+                        service_accounts: vec![XdsServiceAccountMatch {
+                            namespace: "ns".into(),
+                            service_account: "sa".into(),
+                        }],
+                        not_service_accounts: vec![XdsServiceAccountMatch {
+                            namespace: "ns".into(),
+                            service_account: "sa".into(),
                         }],
                         principals: vec![XdsStringMatch {
                             match_type: Some(XdsMatchType::Exact(
