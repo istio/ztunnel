@@ -177,6 +177,10 @@ impl WorkloadProxyManagerState {
                     // Since we insert here on AddWorkload before we get a snapshot,
                     // make sure we also opportunistically remove here before we
                     // get a snapshot
+                    //
+                    // Note that unlike AddWorkload we do *not* need to remove the workload here,
+                    // as it should be auto-dropped subsequently during snapshot reconcile(), when
+                    // we actually get the `SnapshotSent` notification.
                     self.snapshot_names.remove(&workload_uid);
                     return Ok(());
                 }
