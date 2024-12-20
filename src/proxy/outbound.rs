@@ -222,12 +222,6 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         req: &Request,
     ) -> Result<H2Stream, Error> {
-        let mut f = http_types::proxies::Forwarded::new();
-        f.add_for(remote_addr.to_string());
-        if let Some(svc) = &req.intended_destination_service {
-            f.set_host(svc.hostname.as_str());
-        }
-
         let request = http::Request::builder()
             .uri(
                 req.hbone_target_destination
@@ -237,7 +231,10 @@ impl OutboundConnection {
             .method(hyper::Method::CONNECT)
             .version(hyper::Version::HTTP_2)
             .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
-            .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
+            .header(
+                FORWARDED,
+                build_forwarded(remote_addr, &req.intended_destination_service),
+            )
             .header(TRACEPARENT_HEADER, self.id.header())
             .body(())
             .expect("builder with known status code should not fail");
@@ -427,6 +424,17 @@ impl OutboundConnection {
             actual_destination,
             upstream_sans,
         })
+    }
+}
+
+fn build_forwarded(remote_addr: SocketAddr, server: &Option<ServiceDescription>) -> String {
+    match server {
+        None => {
+            format!("for=\"{remote_addr}\"")
+        }
+        Some(svc) => {
+            format!("for=\"{remote_addr}\";host={}", svc.hostname)
+        }
     }
 }
 
@@ -1135,6 +1143,29 @@ mod tests {
             }),
         )
         .await;
+    }
+
+    #[test]
+    fn build_forwarded() {
+        assert_eq!(
+            super::build_forwarded("127.0.0.1:80".parse().unwrap(), &None),
+            r#"for="127.0.0.1:80""#,
+        );
+        assert_eq!(
+            super::build_forwarded("[::1]:80".parse().unwrap(), &None),
+            r#"for="[::1]:80""#,
+        );
+        assert_eq!(
+            super::build_forwarded(
+                "127.0.0.1:80".parse().unwrap(),
+                &Some(ServiceDescription {
+                    hostname: "example.com".into(),
+                    name: Default::default(),
+                    namespace: Default::default(),
+                }),
+            ),
+            r#"for="127.0.0.1:80";host=example.com"#,
+        );
     }
 
     #[derive(PartialEq, Debug)]

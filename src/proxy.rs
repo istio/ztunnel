@@ -764,6 +764,24 @@ pub fn ipv6_enabled_on_localhost() -> io::Result<bool> {
     read_sysctl(IPV6_DISABLED_LO).map(|s| s != "1")
 }
 
+pub fn parse_forwarded_host(input: &str) -> Option<String> {
+    if !input.is_ascii() {
+        return None;
+    }
+    input
+        .split(';')
+        .find(|part| part.trim().starts_with("host="))
+        .and_then(|host_part| {
+            host_part
+                .trim()
+                .strip_prefix("host=")
+                .map(|h| h.strip_prefix("\"").unwrap_or(h))
+                .map(|h| h.strip_suffix("\"").unwrap_or(h))
+                .map(|s| s.to_string())
+        })
+        .filter(|host| !host.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,6 +847,26 @@ mod tests {
             !check_from_network_gateway(&state, &upstream_with_hostname, not_from_gw_conn.as_ref())
                 .await
         );
+    }
+
+    #[test]
+    fn test_parse_forwarded_host() {
+        let header = "by=identifier;for=identifier;host=example.com;proto=https";
+        assert_eq!(
+            parse_forwarded_host(header),
+            Some("example.com".to_string())
+        );
+        let header = "by=identifier;for=identifier;host=\"example.com\";proto=https";
+        assert_eq!(
+            parse_forwarded_host(header),
+            Some("example.com".to_string())
+        );
+        let header = "by=identifier;for=identifier;proto=https";
+        assert_eq!(parse_forwarded_host(header), None);
+        let header = "by=identifier;for=identifier;host=;proto=https";
+        assert_eq!(parse_forwarded_host(header), None);
+        let header = r#"for=for;by=by;host=host;proto="pröto""#;
+        assert_eq!(parse_forwarded_host(header), None);
     }
 
     // private helpers
