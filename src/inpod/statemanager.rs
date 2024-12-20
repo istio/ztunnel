@@ -581,12 +581,16 @@ mod tests {
             workload_info: workload_info(),
         };
 
-        state.process_msg(WorkloadMessage::AddWorkload(data)).await.unwrap();
+        state
+            .process_msg(WorkloadMessage::AddWorkload(data))
+            .await
+            .unwrap();
         assert!(state.snapshot_names.len() == 1);
 
         state
             .process_msg(WorkloadMessage::DelWorkload(uid(0)))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         assert!(state.snapshot_names.is_empty());
 
