@@ -182,6 +182,10 @@ impl WorkloadProxyManagerState {
                     // as it should be auto-dropped subsequently during snapshot reconcile(), when
                     // we actually get the `SnapshotSent` notification.
                     self.snapshot_names.remove(&workload_uid);
+                    // `reconcile()` will drop this workload later, but if the workload never successfully
+                    // starts it will stay in the pending queue (which `reconcile()` can't remove it from),
+                    // so clear the pending queue here.
+                    self.pending_workloads.remove(&workload_uid);
                     return Ok(());
                 }
                 self.del_workload(&workload_uid);
@@ -203,13 +207,11 @@ impl WorkloadProxyManagerState {
     // reconcile existing state to snaphsot. drains any workloads not in the snapshot
     // this can happen if workloads were removed while we were disconnected.
     fn reconcile(&mut self) {
-        for (wl_uid, workload_state) in self
+        for (_, workload_state) in self
             .workload_states
             .extract_if(|uid, _| !self.snapshot_names.contains(uid))
         {
             self.draining.shutdown_workload(workload_state);
-            // Also clear pending queue if we have something stuck in there for this UID
-            self.pending_workloads.remove(&wl_uid);
         }
         self.snapshot_names.clear();
         self.update_proxy_count_metrics();
