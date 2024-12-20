@@ -203,11 +203,13 @@ impl WorkloadProxyManagerState {
     // reconcile existing state to snaphsot. drains any workloads not in the snapshot
     // this can happen if workloads were removed while we were disconnected.
     fn reconcile(&mut self) {
-        for (_, workload_state) in self
+        for (wl_uid, workload_state) in self
             .workload_states
             .extract_if(|uid, _| !self.snapshot_names.contains(uid))
         {
             self.draining.shutdown_workload(workload_state);
+            // Also clear pending queue if we have something stuck in there for this UID
+            self.pending_workloads.remove(&wl_uid);
         }
         self.snapshot_names.clear();
         self.update_proxy_count_metrics();
