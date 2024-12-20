@@ -134,6 +134,7 @@ impl WorkloadProxyManagerState {
                     ));
                 };
                 if !self.snapshot_received {
+                    debug!("got workload add before snapshot");
                     self.snapshot_names.insert(poddata.workload_uid.clone());
                 }
                 let netns =
@@ -172,12 +173,12 @@ impl WorkloadProxyManagerState {
                     "pod delete request, shutting down proxy"
                 );
                 if !self.snapshot_received {
-                    // TODO: consider if this is an error. if not, do this instead:
-                    // self.snapshot_names.remove(&workload_uid)
-                    // self.pending_workloads.remove(&workload_uid)
-                    return Err(Error::ProtocolError(
-                        "pod delete received before snapshot".into(),
-                    ));
+                    debug!("got workload delete before snapshot");
+                    // Since we insert here on AddWorkload before we get a snapshot,
+                    // make sure we also opportunistically remove here before we
+                    // get a snapshot
+                    self.snapshot_names.remove(&workload_uid);
+                    return Ok(());
                 }
                 self.del_workload(&workload_uid);
                 Ok(())
@@ -536,7 +537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idemepotency_add_workload_fails_and_then_deleted() {
+    async fn idempotency_add_workload_fails_and_then_deleted() {
         let fixture = fixture!();
         let mut state = fixture.state;
 
@@ -563,6 +564,38 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(!state.have_pending());
+        state.drain().await;
+    }
+
+    #[tokio::test]
+    async fn del_workload_before_snapshot_removes_from_snapshot() {
+        let fixture = fixture!();
+        let mut state = fixture.state;
+
+        let ns = new_netns();
+
+        let data = WorkloadData {
+            netns: ns,
+            workload_uid: uid(0),
+            workload_info: workload_info(),
+        };
+
+        state.process_msg(WorkloadMessage::AddWorkload(data)).await.unwrap();
+        assert!(state.snapshot_names.len() == 1);
+
+        state
+            .process_msg(WorkloadMessage::DelWorkload(uid(0)))
+            .await.unwrap();
+
+        assert!(state.snapshot_names.is_empty());
+
+        state
+            .process_msg(WorkloadMessage::WorkloadSnapshotSent)
+            .await
+            .unwrap();
+
+        assert!(state.snapshot_names.is_empty());
         assert!(!state.have_pending());
         state.drain().await;
     }
