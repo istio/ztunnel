@@ -588,14 +588,14 @@ mod tests {
             .process_msg(WorkloadMessage::DelWorkload(uid(0)))
             .await.unwrap();
 
-        assert!(state.snapshot_names.len() == 0);
+        assert!(state.snapshot_names.is_empty());
 
         state
             .process_msg(WorkloadMessage::WorkloadSnapshotSent)
             .await
             .unwrap();
 
-        assert!(state.snapshot_names.len() == 0);
+        assert!(state.snapshot_names.is_empty());
         assert!(!state.have_pending());
         state.drain().await;
     }
