@@ -577,11 +577,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn del_workload_before_snapshot_removes_from_snapshot() {
+    async fn del_workload_before_snapshot_removes_from_snapshot_and_pending() {
         let fixture = fixture!();
         let mut state = fixture.state;
 
         let ns = new_netns();
+
+        // to make the proxy fail, bind to its ports in its netns
+        let _sock = create_proxy_conflict(&ns);
 
         let data = WorkloadData {
             netns: ns,
@@ -589,11 +592,11 @@ mod tests {
             workload_info: workload_info(),
         };
 
-        state
-            .process_msg(WorkloadMessage::AddWorkload(data))
-            .await
-            .unwrap();
+        let ret = state.process_msg(WorkloadMessage::AddWorkload(data)).await;
+
         assert!(state.snapshot_names.len() == 1);
+        assert!(ret.is_err());
+        assert!(state.have_pending());
 
         state
             .process_msg(WorkloadMessage::DelWorkload(uid(0)))
