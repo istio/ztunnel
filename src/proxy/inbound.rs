@@ -40,7 +40,7 @@ use crate::{assertions, copy, handle_connection, proxy, socket, strng, tls};
 use crate::drain::run_with_drain;
 use crate::proxy::h2;
 use crate::state::workload::address::Address;
-use crate::state::workload::{self, NetworkAddress, Workload};
+use crate::state::workload::{self, NamespacedHostname, NetworkAddress, Workload};
 use crate::state::{DemandProxyState, ProxyRbacContext};
 use crate::tls::TlsError;
 
@@ -160,6 +160,7 @@ impl Inbound {
             .unwrap_or_else(TraceParent::new)
     }
 
+    /// serve_connect handles a single connection from a client.
     #[allow(clippy::too_many_arguments)]
     async fn serve_connect(
         pi: Arc<ProxyInputs>,
@@ -250,8 +251,10 @@ impl Inbound {
         ri.result_tracker.record(res);
     }
 
+    // build_inbound_request builds up the context for an inbound request.
     async fn build_inbound_request(
         pi: &Arc<ProxyInputs>,
+        // HBONE connection
         conn: Connection,
         req: &H2Request,
     ) -> Result<InboundRequest, InboundError> {
@@ -261,18 +264,46 @@ impl Inbound {
         }
 
         let start = Instant::now();
-        let hbone_addr = req
+
+        // Extract the host or IP from the authority pseudo-header of the URI
+        let hbone_host = req
             .uri()
-            .to_string()
-            .as_str()
-            .parse::<SocketAddr>()
-            .map_err(|_| {
+            .host()
+            .ok_or_else(|| {
                 InboundError(
                     Error::ConnectAddress(req.uri().to_string()),
                     StatusCode::BAD_REQUEST,
                 )
             })?;
 
+        let hbone_port = req
+            .uri()
+            .port_u16()
+            .ok_or_else(|| {
+                InboundError(
+                    Error::ConnectAddress(req.uri().to_string()),
+                    StatusCode::BAD_REQUEST,
+                )
+            })?;
+
+        let hbone_authority = format!("{}:{}", hbone_host, hbone_port);
+
+        let hbone_addr = match hbone_authority.as_str().parse::<SocketAddr>() {
+            Ok(addr) => addr,
+            Err(_) => {
+                match Self::convert_hostname_to_ip(hbone_host, hbone_port, &pi.state) {
+                    Ok(addr) => addr,
+                    Err(_) => {
+                        return Err(InboundError(
+                            Error::ConnectAddress(req.uri().to_string()),
+                            StatusCode::BAD_REQUEST,
+                        ));
+                    }
+                }
+            }
+        };
+
+        // Get the destination workload information of the destination ztunnel
         let destination_workload = pi
             .local_workload_information
             .get_workload()
@@ -280,7 +311,7 @@ impl Inbound {
             // At this point we already fetched the local workload for TLS, so it should be infallible.
             .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
 
-        // Check the request is allowed
+        // Check the request is allowed by verifying the connection IP and the hbone address IP are the same
         Self::validate_destination(&pi.cfg, &pi.state, &conn, &destination_workload, hbone_addr)
             .await
             .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
@@ -293,6 +324,7 @@ impl Inbound {
         // Connection has 15008, swap with the real port
         let conn = Connection {
             dst: upstream_addr,
+            // copies the rest of the connection fields from conn
             ..conn
         };
 
@@ -368,6 +400,35 @@ impl Inbound {
         })
     }
 
+    fn convert_hostname_to_ip(
+        hbone_host: &str,
+        hbone_port: u16,
+        state: &DemandProxyState
+    ) -> Result<SocketAddr, Error> {
+        let parts: Vec<&str> = hbone_host.split('.').collect();
+        if parts.len() <= 1 {
+            return Err(Error::ConnectAddress(hbone_host.to_string()));
+        }
+        let namespace = parts[1];
+        let namespaced_name = &NamespacedHostname {
+            namespace: namespace.into(),
+            hostname: hbone_host.into(),
+        };
+        let ip_addr = state.read().find_hostname(namespaced_name).map(|addr| {
+            match addr {
+                Address::Service(svc) => svc.vips[0].address,
+                Address::Workload(wl) => wl.workload_ips[0],
+            }
+        });
+        
+        match ip_addr {
+            Some(_) => Ok(SocketAddr::new(ip_addr.unwrap(), hbone_port)),
+            None => {
+                return Err(Error::ConnectAddress(hbone_host.to_string()));
+            }
+        }
+    }
+
     /// validate_destination ensures the destination is an allowed request.
     async fn validate_destination(
         cfg: &Config,
@@ -381,10 +442,13 @@ impl Inbound {
             return Err(Error::SelfCall);
         }
 
+        // TODO(jaellio): This is when IP address for the connection and the HBONE address 
         if conn.dst.ip() == hbone_addr.ip() {
             // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
+            // HBONE address contains the original port, so we need that to update the port from 15008.
             return Ok(());
         }
+        
         if local_workload.application_tunnel.is_some() {
             // In the case they have their own tunnel, they will get the HBONE target address in the PROXY
             // header, and their application can decide what to do with it; we don't validate this.
@@ -405,7 +469,7 @@ impl Inbound {
         let lookup_is_destination_this_waypoint = || -> Option<bool> {
             let state = state.read();
 
-            // TODO Allow HBONE address to be a hostname. We have to respect rules about
+            // TODO(jaellio): Allow HBONE address to be a hostname. We have to respect rules about
             // hostname scoping. Can we use the client's namespace here to do that?
             let hbone_target = state.find_address(hbone_dst)?;
 
@@ -450,6 +514,7 @@ impl Inbound {
         Ok(())
     }
 
+    /// find_inbound_upstream determines the next hop for an inbound request.
     fn find_inbound_upstream(
         state: &DemandProxyState,
         conn: &Connection,
@@ -476,7 +541,7 @@ impl Inbound {
 
         (upstream_addr, inbound_protocol, services)
     }
-}
+    }
 
 struct InboundRequest {
     for_host: Option<String>,
@@ -565,6 +630,8 @@ mod tests {
     const SERVER_POD_IP: &str = "10.0.0.2";
     const SERVER_SVC_IP: &str = "10.10.0.1";
 
+    const SERVER_POD_HOSTNAME: &str = "server.default.svc.cluster.local";
+
     const WAYPOINT_POD_IP: &str = "10.0.0.3";
     const WAYPOINT_SVC_IP: &str = "10.10.0.2";
 
@@ -626,6 +693,32 @@ mod tests {
             }
             None => {
                 res.expect_err("did not find upstream");
+            }
+        }
+    }
+
+    // TODO(jaellio): Should we want SERVER_SVC_IP or SERVER_POD_IP?
+    #[test_case(Waypoint::None, SERVER_POD_HOSTNAME, Some((SERVER_SVC_IP, TARGET_PORT)); "to workload no waypoint")]
+    fn test_convert_hostname_to_ip<'a>(
+        target_waypoint: Waypoint<'a>,
+        hbone_dst: &str,
+        want: Option<(&str, u16)>,
+    ) {
+        let state = test_state(target_waypoint).expect("state setup");
+        let res = Inbound::convert_hostname_to_ip(hbone_dst, TARGET_PORT, &state);
+
+        match want {
+            Some((ip, port)) => {
+                match res {
+                    Ok(got_addr) => assert_eq!(got_addr, SocketAddr::new(ip.parse().unwrap(), port)),
+                    Err(e) => assert!(false, "expected Ok, but got Err: {:?}", e),
+                }
+            }
+            None => {
+                match res {
+                    Ok(_) => assert!(false, "expected Err, but got Ok"),
+                    Err(_) => assert!(true, "failed to convert hostname in uri to ip"), // Expected error, test passes
+                }
             }
         }
     }
