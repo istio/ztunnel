@@ -442,13 +442,11 @@ impl Inbound {
             return Err(Error::SelfCall);
         }
 
-        // TODO(jaellio): This is when IP address for the connection and the HBONE address 
         if conn.dst.ip() == hbone_addr.ip() {
             // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
-            // HBONE address contains the original port, so we need that to update the port from 15008.
+            // TODO(jaellio): note - HBONE address contains the original port, so we need that to update the port from 15008.
             return Ok(());
         }
-        
         if local_workload.application_tunnel.is_some() {
             // In the case they have their own tunnel, they will get the HBONE target address in the PROXY
             // header, and their application can decide what to do with it; we don't validate this.
@@ -469,7 +467,6 @@ impl Inbound {
         let lookup_is_destination_this_waypoint = || -> Option<bool> {
             let state = state.read();
 
-            // TODO(jaellio): Allow HBONE address to be a hostname. We have to respect rules about
             // hostname scoping. Can we use the client's namespace here to do that?
             let hbone_target = state.find_address(hbone_dst)?;
 
@@ -541,7 +538,7 @@ impl Inbound {
 
         (upstream_addr, inbound_protocol, services)
     }
-    }
+}
 
 struct InboundRequest {
     for_host: Option<String>,
