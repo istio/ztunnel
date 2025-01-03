@@ -788,7 +788,7 @@ impl WorkloadStore {
 
     /// Finds the workload by address, as an arc.
     pub fn find_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
-        dbg!(dbg!(self.by_addr.get(addr)).map(WorkloadByAddr::get))
+        self.by_addr.get(addr).map(WorkloadByAddr::get)
     }
 
     /// Finds the workload by workload information, as an arc.
