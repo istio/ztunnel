@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
 use std::default::Default;
@@ -632,12 +633,81 @@ pub struct WorkloadStore {
     // is simpler (and only requires a channelsize of 1)
     insert_notifier: Sender<()>,
 
-    /// byAddress maps workload network addresses to workloads
-    by_addr: HashMap<NetworkAddress, Arc<Workload>>,
-    /// byUid maps workload UIDs to workloads
+    /// by_addr maps workload network addresses to workloads
+    by_addr: HashMap<NetworkAddress, WorkloadByAddr>,
+    /// by_uid maps workload UIDs to workloads
     pub(super) by_uid: HashMap<Strng, Arc<Workload>>,
     // Identity->Set of UIDs. Only stores local nodes
     node_local_by_identity: HashMap<WorkloadIdentity, HashSet<Strng>>,
+}
+
+#[derive(Debug)]
+/// WorkloadByAddr is a small wrapper around a single or multiple Workloads
+/// We split these as in the vast majority of cases there is only a single one, so we save vec allocation.
+enum WorkloadByAddr {
+    Single(Arc<Workload>),
+    Many(Vec<Arc<Workload>>),
+}
+
+impl WorkloadByAddr {
+    // insert adds the workload
+    pub fn insert(&mut self, w: Arc<Workload>) {
+        match self {
+            WorkloadByAddr::Single(workload) => {
+                *self = WorkloadByAddr::Many(vec![workload.clone(), w]);
+            }
+            WorkloadByAddr::Many(v) => {
+                v.push(w);
+            }
+        }
+    }
+    // remove_uid mutates the address to remove the workload referenced by the UID.
+    // If 'true' is returned, there is no workload remaining at all
+    pub fn remove_uid(&mut self, uid: Strng) -> bool {
+        match self {
+            WorkloadByAddr::Single(wl) => {
+                // Remove it if the UID matches, else do nothing
+                wl.uid == uid
+            }
+            WorkloadByAddr::Many(ws) => {
+                ws.retain(|w| w.uid != uid);
+                match ws.as_slice() {
+                    [] => true,
+                    [wl] => {
+                        // We now have one workload, transition to Single
+                        *self = WorkloadByAddr::Single(wl.clone());
+                        false
+                    }
+                    // We still have many. We removed already so no need to do anything
+                    _ => false,
+                }
+            }
+        }
+    }
+    pub fn get(&self) -> Arc<Workload> {
+        match self {
+            WorkloadByAddr::Single(workload) => workload.clone(),
+            WorkloadByAddr::Many(workloads) => workloads
+                .iter()
+                .max_by_key(|w| {
+                    // Setup a ranking criteria in the event of a conflict.
+                    // We prefer pod objects, as they are not (generally) spoof-able and is the most
+                    // likely to truthfully correspond to what is behind the service.
+                    let is_pod = w.uid.contains("//Pod/");
+                    // We fallback to looking for HBONE -- a resource marked as in the mesh is likely
+                    // to have more useful context than one not in the mesh.
+                    let is_hbone = w.protocol == Protocol::HBONE;
+                    match (is_pod, is_hbone) {
+                        (true, true) => 3,
+                        (true, false) => 2,
+                        (false, true) => 1,
+                        (false, false) => 0,
+                    }
+                })
+                .expect("must have at least one workload")
+                .clone(),
+        }
+    }
 }
 
 impl WorkloadStore {
@@ -664,8 +734,11 @@ impl WorkloadStore {
 
         if w.network_mode != NetworkMode::HostNetwork {
             for ip in &w.workload_ips {
+                let k = network_addr(w.network.clone(), *ip);
                 self.by_addr
-                    .insert(network_addr(w.network.clone(), *ip), w.clone());
+                    .entry(k)
+                    .and_modify(|ws| ws.insert(w.clone()))
+                    .or_insert_with(|| WorkloadByAddr::Single(w.clone()));
             }
         }
         self.by_uid.insert(w.uid.clone(), w.clone());
@@ -691,8 +764,13 @@ impl WorkloadStore {
             Some(prev) => {
                 if prev.network_mode != NetworkMode::HostNetwork {
                     for wip in prev.workload_ips.iter() {
-                        self.by_addr
-                            .remove(&network_addr(prev.network.clone(), *wip));
+                        if let Entry::Occupied(mut o) =
+                            self.by_addr.entry(network_addr(prev.network.clone(), *wip))
+                        {
+                            if o.get_mut().remove_uid(prev.uid.clone()) {
+                                o.remove();
+                            }
+                        }
                     }
                 }
                 let id = (&prev.identity()).into();
@@ -710,7 +788,7 @@ impl WorkloadStore {
 
     /// Finds the workload by address, as an arc.
     pub fn find_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
-        self.by_addr.get(addr).cloned()
+        dbg!(dbg!(self.by_addr.get(addr)).map(WorkloadByAddr::get))
     }
 
     /// Finds the workload by workload information, as an arc.
@@ -1218,6 +1296,99 @@ mod tests {
         );
         assert_eq!(state.read().unwrap().services.num_vips(), 0);
         assert_eq!((state.read().unwrap().services.num_services()), 0);
+    }
+
+    #[test]
+    fn overlapping_workload_ip() {
+        let (state, _, updater) = setup_test();
+
+        let ip1 = Ipv4Addr::new(127, 0, 0, 1);
+
+        let nw_addr1 = network_addr(strng::EMPTY, IpAddr::V4(ip1));
+
+        let xds_ip1 = Bytes::copy_from_slice(&ip1.octets());
+
+        let uid1 = "cluster1//Pod/default/my-pod/a".to_string();
+        let uid2 = "cluster1/networking.istio.io/WorkloadEntry/default/myns".to_string();
+
+        // Insert two workloads with the same IP
+        updater
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some pod".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        updater
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid2.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some we".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Insert the same object again (i.e. and update)
+        updater
+            .insert_workload(
+                &mut state.write().unwrap(),
+                XdsWorkload {
+                    uid: uid1.to_owned(),
+                    addresses: vec![xds_ip1.clone()],
+                    name: "some pod".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(state.read().unwrap().workloads.by_addr.len(), 1);
+        assert_eq!(state.read().unwrap().workloads.by_uid.len(), 2);
+        {
+            let read = state.read().unwrap();
+            let WorkloadByAddr::Many(wls) = read.workloads.by_addr.get(&nw_addr1).unwrap() else {
+                panic!("unexpected workload");
+            };
+            assert_eq!(wls.len(), 2);
+        }
+        // We should get the pod
+        assert_eq!(
+            state.read().unwrap().workloads.find_address(&nw_addr1),
+            Some(Arc::new(Workload {
+                uid: uid1.as_str().into(),
+                workload_ips: vec![nw_addr1.address],
+                name: "some pod".into(),
+                ..test_helpers::test_default_workload()
+            }))
+        );
+
+        // Remove one...
+        updater.remove(&mut state.write().unwrap(), &uid1.as_str().into());
+        assert_eq!(state.read().unwrap().workloads.by_addr.len(), 1);
+        assert_eq!(state.read().unwrap().workloads.by_uid.len(), 1);
+        assert_eq!(
+            state.read().unwrap().workloads.find_address(&nw_addr1),
+            Some(Arc::new(Workload {
+                uid: uid2.as_str().into(),
+                workload_ips: vec![nw_addr1.address],
+                name: "some we".into(),
+                ..test_helpers::test_default_workload()
+            }))
+        );
+
+        // Remove the last one
+        updater.remove(&mut state.write().unwrap(), &uid2.as_str().into());
+        assert_eq!(
+            state.read().unwrap().workloads.find_address(&nw_addr1),
+            None,
+        );
+
+        assert_eq!(state.read().unwrap().workloads.by_addr.len(), 0);
+        assert_eq!(state.read().unwrap().workloads.by_uid.len(), 0);
     }
 
     #[test]
