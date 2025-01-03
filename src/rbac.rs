@@ -22,6 +22,7 @@ use xds::istio::security::string_match::MatchType;
 use xds::istio::security::Address as XdsAddress;
 use xds::istio::security::Authorization as XdsRbac;
 use xds::istio::security::Match;
+use xds::istio::security::ServiceAccountMatch as XdsServiceAccountMatch;
 use xds::istio::security::StringMatch as XdsStringMatch;
 
 use crate::identity::Identity;
@@ -82,6 +83,7 @@ impl Authorization {
 
     #[instrument(level = "trace", skip_all, fields(policy=self.to_key().as_str()))]
     pub fn matches(&self, conn: &Connection) -> bool {
+        let full_identity = conn.src_identity.as_ref();
         let id = conn
             .src_identity
             .as_ref()
@@ -132,6 +134,12 @@ impl Authorization {
                         &mg.destination_ports,
                         &mg.not_destination_ports,
                         |p| *p == conn.dst.port(),
+                    );
+                    m &= Self::matches_internal(
+                        "service_accounts",
+                        &mg.service_accounts,
+                        &mg.not_service_accounts,
+                        |p| p.matches(&full_identity),
                     );
                     m &= Self::matches_internal(
                         "principals",
@@ -207,6 +215,10 @@ pub struct RbacMatch {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub not_namespaces: Vec<StringMatch>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub service_accounts: Vec<ServiceAccountMatch>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub not_service_accounts: Vec<ServiceAccountMatch>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub principals: Vec<StringMatch>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub not_principals: Vec<StringMatch>,
@@ -228,6 +240,8 @@ impl RbacMatch {
     fn is_empty(&self) -> bool {
         self.namespaces.is_empty()
             && self.not_namespaces.is_empty()
+            && self.service_accounts.is_empty()
+            && self.not_service_accounts.is_empty()
             && self.principals.is_empty()
             && self.not_principals.is_empty()
             && self.source_ips.is_empty()
@@ -264,6 +278,26 @@ impl StringMatch {
             StringMatch::Suffix(suf) => check.ends_with(suf.as_str()),
             StringMatch::Exact(exact) => exact.as_str() == check,
             StringMatch::Presence() => !check.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServiceAccountMatch {
+    namespace: Strng,
+    service_account: Strng,
+}
+
+impl ServiceAccountMatch {
+    pub fn matches(&self, check: &Option<&Identity>) -> bool {
+        match check {
+            Some(Identity::Spiffe {
+                trust_domain: _,
+                namespace,
+                service_account,
+            }) => namespace == &self.namespace && service_account == &self.service_account,
+            // No identity at all, this does not match
+            None => false,
         }
     }
 }
@@ -340,6 +374,12 @@ impl TryFrom<&Match> for RbacMatch {
                 .iter()
                 .filter_map(From::from)
                 .collect(),
+            service_accounts: resource.service_accounts.iter().map(From::from).collect(),
+            not_service_accounts: resource
+                .not_service_accounts
+                .iter()
+                .map(From::from)
+                .collect(),
             principals: resource.principals.iter().filter_map(From::from).collect(),
             not_principals: resource
                 .not_principals
@@ -398,6 +438,15 @@ impl From<&XdsStringMatch> for Option<StringMatch> {
             MatchType::Suffix(s) => StringMatch::Suffix(s.into()),
             MatchType::Presence(_) => StringMatch::Presence(),
         })
+    }
+}
+
+impl From<&XdsServiceAccountMatch> for ServiceAccountMatch {
+    fn from(resource: &XdsServiceAccountMatch) -> Self {
+        Self {
+            namespace: resource.namespace.as_str().into(),
+            service_account: resource.service_account.as_str().into(),
+        }
     }
 }
 
@@ -616,6 +665,15 @@ mod tests {
         &tls_conn() => true,
         &tls_conn_alt() => false);
     rbac_test!(not_namespaces, vec![StringMatch::Exact("namespace".into())],
+        &plaintext_conn() => true,
+        &tls_conn() => false,
+        &tls_conn_alt() => true);
+
+    rbac_test!(service_accounts, vec![ServiceAccountMatch {namespace: "namespace".into(), service_account: "account".into() }],
+        &plaintext_conn() => false,
+        &tls_conn() => true,
+        &tls_conn_alt() => false);
+    rbac_test!(not_service_accounts, vec![ServiceAccountMatch {namespace: "namespace".into(), service_account: "account".into() }],
         &plaintext_conn() => true,
         &tls_conn() => false,
         &tls_conn_alt() => true);
