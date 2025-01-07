@@ -21,6 +21,7 @@ mod namespaced {
 
     use std::net::{IpAddr, SocketAddr};
 
+    use anyhow::Context;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
@@ -56,7 +57,7 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn local_captured_inpod() -> anyhow::Result<()> {
+    async fn local_captured_inpod() {
         simple_client_server_test(
             setup_netns_test!(Shared),
             Captured(DEFAULT_NODE),
@@ -66,17 +67,7 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn server_uncaptured_inpod() -> anyhow::Result<()> {
-        simple_client_server_test(
-            setup_netns_test!(Shared),
-            Captured(DEFAULT_NODE),
-            Uncaptured,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn client_uncaptured_inpod() -> anyhow::Result<()> {
+    async fn server_uncaptured_inpod() {
         simple_client_server_test(
             setup_netns_test!(Shared),
             Captured(DEFAULT_NODE),
@@ -86,7 +77,17 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn cross_node_captured_inpod() -> anyhow::Result<()> {
+    async fn client_uncaptured_inpod() {
+        simple_client_server_test(
+            setup_netns_test!(Shared),
+            Captured(DEFAULT_NODE),
+            Uncaptured,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn cross_node_captured_inpod() {
         simple_client_server_test(
             setup_netns_test!(Shared),
             Captured(DEFAULT_NODE),
@@ -99,7 +100,7 @@ mod namespaced {
     // This is not currently supported since https://github.com/istio/ztunnel/commit/12d154cceb1d20eb1f11ae43c2310e66e93c7120
 
     #[tokio::test]
-    async fn server_uncaptured_dedicated() -> anyhow::Result<()> {
+    async fn server_uncaptured_dedicated() {
         simple_client_server_test(
             setup_netns_test!(Dedicated),
             Captured(DEFAULT_NODE),
@@ -109,7 +110,7 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn client_uncaptured_dedicated() -> anyhow::Result<()> {
+    async fn client_uncaptured_dedicated() {
         simple_client_server_test(
             setup_netns_test!(Dedicated),
             Captured(DEFAULT_NODE),
@@ -119,7 +120,7 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn cross_node_captured_dedicated() -> anyhow::Result<()> {
+    async fn cross_node_captured_dedicated() {
         simple_client_server_test(
             setup_netns_test!(Dedicated),
             Captured(DEFAULT_NODE),
@@ -1110,7 +1111,7 @@ mod namespaced {
         mut manager: WorkloadManager,
         client_node: WorkloadMode,
         server_node: WorkloadMode,
-    ) -> anyhow::Result<()> {
+    ) {
         // Simple test of client -> server, with the configured mode and nodes
         let client_ztunnel = match client_node {
             // Note: we always deploy as 'dedicated', just it will be ignored if we are shared
@@ -1124,7 +1125,8 @@ mod namespaced {
                             service_account: "client".to_string(),
                         }),
                     )
-                    .await?,
+                    .await
+                    .unwrap(),
             ),
             Uncaptured => None,
         };
@@ -1143,7 +1145,8 @@ mod namespaced {
                                     service_account: "server".to_string(),
                                 }),
                             )
-                            .await?,
+                            .await
+                            .unwrap(),
                     )
                 }
             }
@@ -1152,19 +1155,21 @@ mod namespaced {
         let server = manager
             .workload_builder("server", server_node.node())
             .register()
-            .await?;
-        run_tcp_server(server)?;
+            .await
+            .unwrap();
+        run_tcp_server(server).expect("tcp server");
 
         let client = manager
             .workload_builder("client", client_node.node())
             .register()
-            .await?;
+            .await
+            .unwrap();
         let target = if manager.mode() == Dedicated && !matches!(server_node, Uncaptured) {
             "ztunnel-remote-node"
         } else {
             "server"
         };
-        run_tcp_client(client, manager.resolver(), target)?;
+        run_tcp_client(client, manager.resolver(), target).expect("tcp client");
 
         let metrics = [
             (CONNECTIONS_OPENED, 1),
@@ -1225,7 +1230,6 @@ mod namespaced {
             }
             telemetry::testing::assert_contains(want);
         }
-        Ok(())
     }
 
     fn destination_labels() -> HashMap<String, String> {
@@ -1321,17 +1325,19 @@ mod namespaced {
                     info!("Running client attempt {attempt} to {srv}");
                     let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(srv))
                         .await
-                        .unwrap()
-                        .unwrap();
+                        .context("connection timeout")?
+                        .context("connection failed")?;
                     timeout(
                         Duration::from_secs(5),
                         double_read_write_stream(&mut stream),
                     )
                     .await
-                    .unwrap();
+                    .context("write timeout")?
+                    .context("write failed")?;
                 }
                 Ok(())
-            })?
+            })
+            .context("run client failed")?
             .join()
             .unwrap()
     }
@@ -1404,13 +1410,13 @@ mod namespaced {
         Ok(())
     }
 
-    async fn double_read_write_stream(stream: &mut TcpStream) -> usize {
+    async fn double_read_write_stream(stream: &mut TcpStream) -> anyhow::Result<usize> {
         const BODY: &[u8] = b"hello world";
-        stream.write_all(BODY).await.unwrap();
+        stream.write_all(BODY).await?;
         let mut buf = [0; BODY.len() * 2];
-        stream.read_exact(&mut buf).await.unwrap();
+        stream.read_exact(&mut buf).await?;
         assert_eq!(b"hello worldhello world", &buf);
-        BODY.len() * 2
+        Ok(BODY.len() * 2)
     }
 
     async fn hbone_read_write_stream(stream: &mut TcpStream) {

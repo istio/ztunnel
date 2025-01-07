@@ -417,6 +417,7 @@ pub mod testing {
     use once_cell::sync::Lazy;
     use serde_json::Value;
     use std::collections::HashMap;
+    use std::fmt::{Display, Formatter};
     use std::io;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -425,8 +426,35 @@ pub mod testing {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
+    #[derive(Debug)]
+    pub enum LogError {
+        // Wanted to equal the value, its missing
+        Missing(String),
+        // Want to be absent but it is present
+        Present(String),
+        // Mismatch: want, got
+        Mismatch(String, String),
+    }
+
+    impl Display for LogError {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            match self {
+                LogError::Missing(_v) => {
+                    write!(f, "missing")
+                }
+                LogError::Present(v) => {
+                    write!(f, "{v:?} found unexpectedly")
+                }
+                LogError::Mismatch(want, got) => {
+                    write!(f, "{want:?} != {got:?}")
+                }
+            }
+        }
+    }
+
     /// assert_contains asserts the logs contain a line with the matching keys.
     /// Common keys to match one are "target" and "message"; most of the rest are custom.
+    #[track_caller]
     pub fn assert_contains(want: HashMap<&str, &str>) {
         let logs = {
             let buf = global_buf().lock().unwrap();
@@ -434,39 +462,57 @@ pub mod testing {
                 .expect("Logs contain invalid UTF8")
                 .to_string()
         };
-        let logs: Vec<serde_json::Value> = logs
+        let errors: Vec<HashMap<_, _>> = logs
             .lines()
             .map(|line| {
                 serde_json::from_str::<serde_json::Value>(line).expect("log must be valid json")
             })
-            .collect();
-        let matched = logs.iter().find(|log| {
-            for (k, v) in &want {
-                let Some(have) = log.get(k) else {
-                    if !v.is_empty() {
-                        // Required key not found, continue
-                        return false;
-                    } else {
+            .map(|log| {
+                let mut errors = HashMap::new();
+                for (k, v) in &want {
+                    let Some(have) = log.get(k) else {
+                        if !v.is_empty() {
+                            errors.insert(k.to_string(), LogError::Missing(v.to_string()));
+                        }
+                        continue;
+                    };
+                    let have = match have {
+                        Value::Number(n) => format!("{n}"),
+                        Value::String(v) => v.clone(),
+                        _ => panic!("assert_contains currently only supports string/number values"),
+                    };
+                    if v.is_empty() {
+                        errors.insert(k.to_string(), LogError::Present(have));
                         continue;
                     }
-                };
-                let have = match have {
-                    Value::Number(n) => format!("{n}"),
-                    Value::String(v) => v.clone(),
-                    _ => panic!("assert_contains currently only supports string/number values"),
-                };
-                // TODO fuzzy match
-                if !v.is_empty() && *v != have {
-                    // no match
-                    return false;
+                    // TODO fuzzy match
+                    if *v != have {
+                        errors.insert(k.to_string(), LogError::Mismatch(v.to_string(), have));
+                    }
                 }
-            }
-            true
-        });
-        assert!(
-            matched.is_some(),
-            "wanted a log line matching {want:?}, got {}",
-            logs.iter().map(|x| x.to_string()).join("\n")
+                errors
+            })
+            .sorted_by_key(|h| h.len())
+            .collect();
+
+        let found_exact_match = errors.first().map(|h| h.is_empty()).unwrap_or(false);
+        if found_exact_match {
+            return;
+        }
+
+        let total = errors.len();
+        let help = errors
+            .iter()
+            .take(10)
+            .map(|h| {
+                h.iter()
+                    .sorted_by_key(|(k, _)| *k)
+                    .map(|(k, err)| format!("{}:{}", k, err))
+                    .join("\n")
+            })
+            .join("\n\n");
+        panic!(
+            "Analyzed {total} logs but none matched our criteria. Closest 10 matches:\n\n{help}"
         );
     }
 
