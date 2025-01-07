@@ -47,7 +47,8 @@ macro_rules! setup_netns_test {
         let function_name = function_name
             .strip_suffix("::{{closure}}")
             .unwrap_or_else(|| function_name);
-        ztunnel::test_helpers::linux::WorkloadManager::new(function_name, $mode)?
+        ztunnel::test_helpers::linux::WorkloadManager::new(function_name, $mode)
+            .expect("namespace setup failed")
     }};
 }
 /// initialize_namespace_tests sets up the namespace tests.
