@@ -15,7 +15,7 @@
 use futures::stream::StreamExt;
 use futures_util::TryFutureExt;
 use http::{Method, Response, StatusCode};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
@@ -49,6 +49,56 @@ pub(super) struct Inbound {
     drain: DrainWatcher,
     pi: Arc<ProxyInputs>,
     enable_orig_src: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum HboneAddress {
+    SocketAddr(SocketAddr),
+    SvcHostname(String, u16),
+}
+
+impl HboneAddress {
+    pub fn port(&self) -> u16 {
+        match self {
+            HboneAddress::SocketAddr(s) => s.port(),
+            HboneAddress::SvcHostname(_, p) => *p,
+        }
+    }
+
+    pub fn ip(&self) -> Option<IpAddr> {
+        match self {
+            HboneAddress::SocketAddr(s) => Some(s.ip()),
+            HboneAddress::SvcHostname(_, _) => None,
+        }
+    }
+
+    pub fn svc_hostname(&self) -> Option<String> {
+        match self {
+            HboneAddress::SocketAddr(_) => None,
+            HboneAddress::SvcHostname(s, _) => Some(s.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for HboneAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HboneAddress::SocketAddr(addr) => write!(f, "{}", addr),
+            HboneAddress::SvcHostname(host, port) => write!(f, "{}:{}", host, port),
+        }
+    }
+}
+
+impl From<SocketAddr> for HboneAddress {
+    fn from(socket_addr: SocketAddr) -> Self {
+        HboneAddress::SocketAddr(socket_addr)
+    }
+}
+
+impl From<(String, u16)> for HboneAddress {
+    fn from(svc_hostname: (String, u16)) -> Self {
+        HboneAddress::SvcHostname(svc_hostname.0, svc_hostname.1)
+    }
 }
 
 impl Inbound {
@@ -289,18 +339,8 @@ impl Inbound {
         let hbone_authority = format!("{}:{}", hbone_host, hbone_port);
 
         let hbone_addr = match hbone_authority.as_str().parse::<SocketAddr>() {
-            Ok(addr) => addr,
-            Err(_) => {
-                match Self::convert_hostname_to_ip(hbone_host, hbone_port, &pi.state) {
-                    Ok(addr) => addr,
-                    Err(_) => {
-                        return Err(InboundError(
-                            Error::ConnectAddress(req.uri().to_string()),
-                            StatusCode::BAD_REQUEST,
-                        ));
-                    }
-                }
-            }
+            Ok(addr) => HboneAddress::SocketAddr(addr),
+            Err(_) => HboneAddress::SvcHostname(hbone_host.to_string(), hbone_port),
         };
 
         // Get the destination workload information of the destination ztunnel
@@ -312,13 +352,14 @@ impl Inbound {
             .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
 
         // Check the request is allowed by verifying the connection IP and the hbone address IP are the same
-        Self::validate_destination(&pi.cfg, &pi.state, &conn, &destination_workload, hbone_addr)
+        Self::validate_destination(&pi.cfg, &pi.state, &conn, &destination_workload, hbone_addr.clone())
             .await
             .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
         // Determine the next hop.
+        let hbone_addr_clone = hbone_addr.clone();
         let (upstream_addr, inbound_protocol, upstream_service) =
-            Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, hbone_addr);
+            Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, hbone_addr_clone);
 
         let original_dst = conn.dst;
         // Connection has 15008, swap with the real port
@@ -378,7 +419,7 @@ impl Inbound {
             // For consistency with outbound logs, report the original destination (with 15008 port)
             // as dst.addr, and the target address as dst.hbone_addr
             original_dst,
-            Some(hbone_addr),
+            Some(hbone_addr.clone()),
             start,
             ConnectionOpen {
                 reporter: Reporter::destination,
@@ -390,6 +431,7 @@ impl Inbound {
             },
             pi.metrics.clone(),
         ));
+        //let hbone_addr_clone = hbone_addr.clone();
         Ok(InboundRequest {
             for_host,
             rbac_ctx,
@@ -435,18 +477,66 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         local_workload: &Workload,
-        hbone_addr: SocketAddr,
+        hbone_addr: HboneAddress,
     ) -> Result<(), Error> {
         let illegal_call = cfg.illegal_ports.contains(&hbone_addr.port());
         if illegal_call {
             return Err(Error::SelfCall);
         }
 
-        if conn.dst.ip() == hbone_addr.ip() {
-            // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
+        match hbone_addr {
+            HboneAddress::SvcHostname(hbone_host, hbone_port) => {
+                // Validate a service or workload exists for the hostname
+                let parts: Vec<&str> = hbone_host.split('.').collect();
+                if parts.len() <= 1 {
+                    // TODO(jaellio): Update error msg/type
+                    return Err(Error::ConnectAddress(hbone_host.to_string()));
+                }
+                let namespace = parts[1];
+                if namespace != local_workload.namespace {
+                    //TODO(jaellio): Update error msg/type. This is a namespace scoping issue.
+                    return Err(Error::ConnectAddress(hbone_host.to_string()));
+                }
+                let namespaced_name = &NamespacedHostname {
+                    namespace: namespace.into(),
+                    hostname: hbone_host.into(),
+                };
+                let addr = match state.read().find_hostname(namespaced_name){
+                    Some(addr) => addr,
+                    None => return Err(Error::ConnectAddress(namespaced_name.to_string())),
+                };
+
+                // Validate the destination pod is a member of the service
+                let upstream_addr = SocketAddr::new(conn.dst.ip(), hbone_port);
+                match addr {
+                    Address::Service(svc) => {
+                        if !svc.contains_endpoint(local_workload) {
+                            return Err(Error::IPMismatch(conn.dst.ip(), upstream_addr.ip()));
+                        }
+                    }
+                    Address::Workload(wl) => {
+                        if !wl.workload_ips.contains(&conn.dst.ip()) {
+                            return Err(Error::IPMismatch(conn.dst.ip(), upstream_addr.ip()));
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            HboneAddress::SocketAddr(_) => (),
+        }
+
+        let hbone_ip = match hbone_addr.ip() {
+            Some(ip) => ip,
+            None => return Err(Error::ConnectAddress(hbone_addr.to_string())),
+        };
+
+        if conn.dst.ip() == hbone_ip {
+            // Normal case: both the connection destination IP and the HBONE address from the authority header are aligned.
+            // This is allowed (we really only need the HBONE address for the port.)
             // TODO(jaellio): note - HBONE address contains the original port, so we need that to update the port from 15008.
             return Ok(());
         }
+        // TODO(jaellio): What does application tunnel mean here?
         if local_workload.application_tunnel.is_some() {
             // In the case they have their own tunnel, they will get the HBONE target address in the PROXY
             // header, and their application can decide what to do with it; we don't validate this.
@@ -460,7 +550,7 @@ impl Inbound {
         // To do this, we do a lookup to see if the HBONE target has us as its waypoint.
         let hbone_dst = &NetworkAddress {
             network: conn.dst_network.clone(),
-            address: hbone_addr.ip(),
+            address: hbone_ip,
         };
 
         // None means we need to do on-demand lookup
@@ -506,7 +596,7 @@ impl Inbound {
         };
 
         if res.is_none() || res == Some(false) {
-            return Err(Error::IPMismatch(conn.dst.ip(), hbone_addr.ip()));
+            return Err(Error::IPMismatch(conn.dst.ip(), hbone_ip));
         }
         Ok(())
     }
@@ -516,7 +606,7 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         local_workload: &Workload,
-        hbone_addr: SocketAddr,
+        hbone_addr: HboneAddress,
     ) -> (SocketAddr, AppProtocol, Vec<Arc<Service>>) {
         let upstream_addr = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
 
@@ -545,7 +635,7 @@ struct InboundRequest {
     rbac_ctx: ProxyRbacContext,
     result_tracker: Box<ConnectionResult>,
     upstream_addr: SocketAddr,
-    hbone_addr: SocketAddr,
+    hbone_addr: HboneAddress,
     inbound_protocol: AppProtocol,
 }
 
