@@ -18,7 +18,6 @@ use http::{Method, Response, StatusCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-
 use tokio::sync::watch;
 
 use tracing::{debug, info, info_span, trace_span, Instrument};
@@ -524,8 +523,7 @@ pub fn parse_forwarded_host(req: &H2Request) -> Option<String> {
     req.headers()
         .get(http::header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
-        .and_then(|rh| http_types::proxies::Forwarded::parse(rh).ok())
-        .and_then(|ph| ph.host().map(|s| s.to_string()))
+        .and_then(proxy::parse_forwarded_host)
 }
 
 fn build_response(status: StatusCode) -> Response<()> {

@@ -21,11 +21,18 @@ use ztunnel::proxy::BAGGAGE_HEADER;
 
 fuzz_target!(|data: &[u8]| {
     let _ = run_baggage_header_parser(data);
+    let _ = run_forwarded_header_parser(data);
 });
 
 fn run_baggage_header_parser(data: &[u8]) -> anyhow::Result<()> {
     let mut hm = HeaderMap::new();
     hm.append(BAGGAGE_HEADER, HeaderValue::from_bytes(data)?);
     parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
+    Ok(())
+}
+
+fn run_forwarded_header_parser(data: &[u8]) -> anyhow::Result<()> {
+    let s = std::str::from_utf8(data)?;
+    let _ = ztunnel::proxy::parse_forwarded_host(s);
     Ok(())
 }
