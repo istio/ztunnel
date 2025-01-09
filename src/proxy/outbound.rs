@@ -38,6 +38,8 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::{NetworkAddress, Protocol, Workload, address::Address};
 use crate::{assertions, copy, proxy, socket};
 
+use super::inbound::HboneAddress;
+
 pub struct Outbound {
     pi: Arc<ProxyInputs>,
     drain: DrainWatcher,
@@ -183,7 +185,10 @@ impl OutboundConnection {
         );
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = req.hbone_target_destination;
+        let hbone_target = match req.hbone_target_destination {
+            Some(hbone_target) => Some(HboneAddress::SocketAddr(hbone_target)),
+            None => None,
+        };
         let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
             req.actual_destination,
