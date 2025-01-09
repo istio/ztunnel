@@ -243,6 +243,7 @@ impl Inbound {
         // Now we have enough context to properly report logs and metrics. Group everything else that
         // can fail before we send the OK response here.
         let rx = async {
+            // Define a connection guard to ensure rbac conditions are maintained for the duration of the connection
             let conn_guard = pi
                 .connection_manager
                 .assert_rbac(&pi.state, &ri.rbac_ctx, ri.for_host)
@@ -253,6 +254,8 @@ impl Inbound {
                 ))?;
 
             let orig_src = enable_original_source.then_some(ri.rbac_ctx.conn.src.ip());
+            // Establish upstream connection between original source and destination
+            // We are allowing a bind to the original source address locally even if the ip address isn't on this node.
             let stream =
                 super::freebind_connect(orig_src, ri.upstream_addr, pi.socket_factory.as_ref())
                     .await
@@ -264,6 +267,7 @@ impl Inbound {
             debug!("connected to: {}", ri.upstream_addr);
             Ok((conn_guard, stream))
         };
+        // Wait on establishing the upstream connection and connection guard before sending the 200 response to the client
         let (mut conn_guard, mut stream) = match rx.await {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
@@ -278,14 +282,35 @@ impl Inbound {
         // At this point, we established the upstream connection and need to send a 200 back to the client.
         // we may still have failures at this point during the proxying, but we don't need to send these
         // at the HTTP layer.
+        // After sending a 200 back to the client, write the proxy protocol to the stream. This ensures
+        // that the server has all of the necessary information about the connection regardless of the protocol
+        // See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt for more information about the
+        // proxy protocol.
+        //
+        // Why is the x-forwarded-for header not sufficient? Why do we need to write the proxy protocol?
         let send = req
             .send_response(build_response(StatusCode::OK))
             .and_then(|h2_stream| async {
+                // Required for a custom waypoint so that it doesn't have to support HBONE
                 if ri.inbound_protocol == AppProtocol::PROXY {
                     let Connection {
                         src, src_identity, ..
                     } = ri.rbac_ctx.conn;
-                    super::write_proxy_protocol(&mut stream, (src, ri.hbone_addr), src_identity)
+                    let protocol_addr = match ri.hbone_addr {
+                        HboneAddress::SocketAddr(addr) => addr,
+                        HboneAddress::SvcHostname(_, _) => {
+                            match ri.upstream_protocol_addr {
+                                Some(addr) => addr,
+                                None => {
+                                    // This should never happen, as we should have already validated the destination
+                                    // and resolved the hostname to an IP address.
+                                    return Err(Error::ConnectAddress(ri.hbone_addr.to_string()));
+                                }
+                            }
+                        }
+                    };
+                    let svc_hostname: Option<String> = ri.hbone_addr.svc_hostname();
+                    super::write_proxy_protocol(&mut stream, (src, protocol_addr), src_identity, svc_hostname)
                         .instrument(trace_span!("proxy protocol"))
                         .await?;
                 }
@@ -343,7 +368,7 @@ impl Inbound {
             Err(_) => HboneAddress::SvcHostname(hbone_host.to_string(), hbone_port),
         };
 
-        // Get the destination workload information of the destination ztunnel
+        // Get the destination workload information of the destination pods (wds) workload (not destination ztunnel)
         let destination_workload = pi
             .local_workload_information
             .get_workload()
@@ -352,7 +377,7 @@ impl Inbound {
             .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
 
         // Check the request is allowed by verifying the connection IP and the hbone address IP are the same
-        Self::validate_destination(&pi.cfg, &pi.state, &conn, &destination_workload, hbone_addr.clone())
+        let upstream_protocol_addr = Self::validate_destination(&pi.cfg, &pi.state, &conn, &destination_workload, hbone_addr.clone())
             .await
             .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
@@ -439,36 +464,8 @@ impl Inbound {
             upstream_addr,
             inbound_protocol,
             hbone_addr,
+            upstream_protocol_addr,
         })
-    }
-
-    fn convert_hostname_to_ip(
-        hbone_host: &str,
-        hbone_port: u16,
-        state: &DemandProxyState
-    ) -> Result<SocketAddr, Error> {
-        let parts: Vec<&str> = hbone_host.split('.').collect();
-        if parts.len() <= 1 {
-            return Err(Error::ConnectAddress(hbone_host.to_string()));
-        }
-        let namespace = parts[1];
-        let namespaced_name = &NamespacedHostname {
-            namespace: namespace.into(),
-            hostname: hbone_host.into(),
-        };
-        let ip_addr = state.read().find_hostname(namespaced_name).map(|addr| {
-            match addr {
-                Address::Service(svc) => svc.vips[0].address,
-                Address::Workload(wl) => wl.workload_ips[0],
-            }
-        });
-        
-        match ip_addr {
-            Some(_) => Ok(SocketAddr::new(ip_addr.unwrap(), hbone_port)),
-            None => {
-                return Err(Error::ConnectAddress(hbone_host.to_string()));
-            }
-        }
     }
 
     /// validate_destination ensures the destination is an allowed request.
@@ -478,13 +475,14 @@ impl Inbound {
         conn: &Connection,
         local_workload: &Workload,
         hbone_addr: HboneAddress,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<SocketAddr>, Error> {
         let illegal_call = cfg.illegal_ports.contains(&hbone_addr.port());
         if illegal_call {
             return Err(Error::SelfCall);
         }
 
         match hbone_addr {
+            // TODO(jaellio): Should we also validate the hbone_addr port?
             HboneAddress::SvcHostname(hbone_host, hbone_port) => {
                 // Validate a service or workload exists for the hostname
                 let parts: Vec<&str> = hbone_host.split('.').collect();
@@ -507,20 +505,29 @@ impl Inbound {
                 };
 
                 // Validate the destination pod is a member of the service
-                let upstream_addr = SocketAddr::new(conn.dst.ip(), hbone_port);
                 match addr {
                     Address::Service(svc) => {
                         if !svc.contains_endpoint(local_workload) {
-                            return Err(Error::IPMismatch(conn.dst.ip(), upstream_addr.ip()));
+                            // TODO(jaellio): Update error msg/type
+                            return Err(Error::NoResolvedAddresses(local_workload.to_string()));
                         }
+                        // TODO(jaellio): Intelligently select the VIP
+                        let svc_address = svc.vips[0].address.clone();
+                        let svc_socket_addr = format!("{}:{}", svc_address, hbone_port)
+                            .parse::<SocketAddr>()
+                            .map_err(|e| Error::ConnectAddress(e.to_string()))?;
+                        return Ok(Some(svc_socket_addr));
                     }
                     Address::Workload(wl) => {
+                        // conn.dst.ip is the destination pod ip
                         if !wl.workload_ips.contains(&conn.dst.ip()) {
-                            return Err(Error::IPMismatch(conn.dst.ip(), upstream_addr.ip()));
+                            // TODO(jaellio): Update error msg/type
+                            return Err(Error::NoResolvedAddresses(local_workload.to_string()));
                         }
+                        // TODO(jaellio): We don't have a VIP for a workload, so we just return None. Fix this.
+                        return Ok(None);
                     }
                 }
-                return Ok(());
             }
             HboneAddress::SocketAddr(_) => (),
         }
@@ -534,14 +541,14 @@ impl Inbound {
             // Normal case: both the connection destination IP and the HBONE address from the authority header are aligned.
             // This is allowed (we really only need the HBONE address for the port.)
             // TODO(jaellio): note - HBONE address contains the original port, so we need that to update the port from 15008.
-            return Ok(());
+            return Ok(None);
         }
-        // TODO(jaellio): What does application tunnel mean here?
+
         if local_workload.application_tunnel.is_some() {
             // In the case they have their own tunnel, they will get the HBONE target address in the PROXY
             // header, and their application can decide what to do with it; we don't validate this.
             // This is the case, for instance, with a waypoint using PROXY.
-            return Ok(());
+            return Ok(None);
         }
         // There still may be the case where we are doing a "waypoint sandwich" but not using any tunnel.
         // Presumably, the waypoint is only matching on L7 attributes.
@@ -598,7 +605,7 @@ impl Inbound {
         if res.is_none() || res == Some(false) {
             return Err(Error::IPMismatch(conn.dst.ip(), hbone_ip));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// find_inbound_upstream determines the next hop for an inbound request.
@@ -637,6 +644,9 @@ struct InboundRequest {
     upstream_addr: SocketAddr,
     hbone_addr: HboneAddress,
     inbound_protocol: AppProtocol,
+    // When the hbone_addr contains a hostname, we need to resolve it to an IP address
+    // None when hbone_addr is an IP address
+    upstream_protocol_addr: Option<SocketAddr>,
 }
 
 /// InboundError represents an error with an associated status code.
@@ -688,7 +698,7 @@ fn build_response(status: StatusCode) -> Response<()> {
 #[cfg(test)]
 mod tests {
     use super::Inbound;
-    use crate::{config, strng};
+    use crate::{config, strng, proxy::inbound::HboneAddress};
 
     use crate::{
         rbac::Connection,
@@ -731,27 +741,29 @@ mod tests {
     });
 
     // Regular zTunnel workload traffic inbound
-    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT)); "to workload no waypoint")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
     // to workload traffic
-    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by pod")]
-    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by vip")]
-    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, PROXY_PORT)); "to workload with app tunnel")]
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by pod")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by vip")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to workload with app tunnel")]
     // to service traffic
-    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to service with waypoint referenced by pod")]
-    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to service with waypint referenced by vip")]
-    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, PROXY_PORT)); "to service with app tunnel")]
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypoint referenced by pod")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypint referenced by vip")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to service with app tunnel")]
     // Override port via app_protocol
     // Error cases
     #[test_case(Waypoint::None, SERVER_POD_IP, CLIENT_POD_IP, None; "to server ip mismatch" )]
     #[test_case(Waypoint::None, WAYPOINT_POD_IP, CLIENT_POD_IP, None; "to waypoint without attachment" )]
     #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
+    // Svc hostname
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
     #[tokio::test]
     async fn test_find_inbound_upstream(
         target_waypoint: Waypoint<'_>,
         connection_dst: &str,
         hbone_dst: &str,
-        want: Option<(&str, u16)>,
+        want: Option<(&str, u16, Option<&str>)>,
     ) {
         let state = test_state(target_waypoint).expect("state setup");
         let cfg = config::parse_config().unwrap();
@@ -768,24 +780,38 @@ mod tests {
             })
             .await
             .unwrap();
-        let hbone_addr = format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap();
-        let res = Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr)
-            .await
-            .map(|_| Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr));
+        let hbone_addr = if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
+            HboneAddress::SocketAddr(addr)
+        } else {
+            HboneAddress::SvcHostname(hbone_dst.to_string(), TARGET_PORT)
+        };
+        // TODO(jaellio): Try not to clone the hbone_addr
+        let validate_destination = Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr.clone()).await;
+        let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr.clone());
 
         match want {
-            Some((ip, port)) => {
-                let got_addr = res.expect("found upstream").0;
-                assert_eq!(got_addr, SocketAddr::new(ip.parse().unwrap(), port))
+            Some((ip, port, protocol_addr)) => {
+                let got_addr = res.0;
+                assert_eq!(got_addr, SocketAddr::new(ip.parse().unwrap(), port));
+                let go_protocol_addr = validate_destination.expect("validate destination");
+                match hbone_addr {
+                    HboneAddress::SocketAddr(_) => assert_eq!(go_protocol_addr, None),
+                    HboneAddress::SvcHostname(_, _) => {
+                        match format!("{}:{}", protocol_addr.unwrap(), TARGET_PORT).parse::<SocketAddr>() {
+                            Ok(addr) => assert_eq!(go_protocol_addr, Some(addr)),
+                            Err(_) => assert!(false, "failed to parse protocol addr"),
+                        };
+                    }
+                };
             }
             None => {
-                res.expect_err("did not find upstream");
+                validate_destination.expect_err("did not find upstream");
             }
         }
     }
 
     // TODO(jaellio): Should we want SERVER_SVC_IP or SERVER_POD_IP?
-    #[test_case(Waypoint::None, SERVER_POD_HOSTNAME, Some((SERVER_SVC_IP, TARGET_PORT)); "to workload no waypoint")]
+    /*#[test_case(Waypoint::None, SERVER_POD_HOSTNAME, Some((SERVER_SVC_IP, TARGET_PORT)); "to workload no waypoint")]
     fn test_convert_hostname_to_ip<'a>(
         target_waypoint: Waypoint<'a>,
         hbone_dst: &str,
@@ -808,7 +834,7 @@ mod tests {
                 }
             }
         }
-    }
+    }*/
 
     fn test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
         let mut state = state::ProxyState::new(None);

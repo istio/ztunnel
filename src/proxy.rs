@@ -485,12 +485,16 @@ pub enum Error {
     DnsEmpty,
 }
 
+// Custom TLV for proxy protocol for the identity of the source
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
+//TODO(jaellio) - Create our own TLV 0
+const PROXY_PROTOCOL_SVC_HOSTNAME_TLV: u8 = 0xD1;
 
 pub async fn write_proxy_protocol<T>(
     stream: &mut TcpStream,
     addresses: T,
     src_id: Option<Identity>,
+    svc_hostname: Option<String>,
 ) -> io::Result<()>
 where
     T: Into<ppp::v2::Addresses> + std::fmt::Debug,
@@ -504,6 +508,13 @@ where
 
     if let Some(id) = src_id {
         builder = builder.write_tlv(PROXY_PROTOCOL_AUTHORITY_TLV, id.to_string().as_bytes())?;
+    }
+
+    if let Some(svc_hostname) = svc_hostname {
+        builder = builder.write_tlv(
+            PROXY_PROTOCOL_SVC_HOSTNAME_TLV,
+            svc_hostname.as_bytes(),
+        )?;
     }
 
     let header = builder.build()?;
