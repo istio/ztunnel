@@ -516,10 +516,7 @@ where
 
     // svc_hostname is None when the hbone_addr does not contain a svc hostname.
     if let Some(svc_host) = svc_hostname {
-        builder = builder.write_tlv(
-            PROXY_PROTOCOL_SVC_HOSTNAME_TLV,
-            svc_host.as_bytes(),
-        )?;
+        builder = builder.write_tlv(PROXY_PROTOCOL_SVC_HOSTNAME_TLV, svc_host.as_bytes())?;
     }
 
     let header = builder.build()?;

@@ -313,9 +313,14 @@ impl Inbound {
                     };
                     // TODO(jaellio): Also include port?
                     let svc_hostname: Option<Strng> = ri.hbone_addr.svc_hostname();
-                    super::write_proxy_protocol(&mut stream, (src, protocol_addr), src_identity, svc_hostname)
-                        .instrument(trace_span!("proxy protocol"))
-                        .await?;
+                    super::write_proxy_protocol(
+                        &mut stream,
+                        (src, protocol_addr),
+                        src_identity,
+                        svc_hostname,
+                    )
+                    .instrument(trace_span!("proxy protocol"))
+                    .await?;
                 }
                 copy::copy_bidirectional(
                     h2_stream,
@@ -344,25 +349,19 @@ impl Inbound {
         let start = Instant::now();
 
         // Extract the host or IP from the authority pseudo-header of the URI
-        let hbone_host = req
-            .uri()
-            .host()
-            .ok_or_else(|| {
-                InboundError(
-                    Error::ConnectAddress(req.uri().to_string()),
-                    StatusCode::BAD_REQUEST,
-                )
-            })?;
+        let hbone_host = req.uri().host().ok_or_else(|| {
+            InboundError(
+                Error::ConnectAddress(req.uri().to_string()),
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
 
-        let hbone_port = req
-            .uri()
-            .port_u16()
-            .ok_or_else(|| {
-                InboundError(
-                    Error::ConnectAddress(req.uri().to_string()),
-                    StatusCode::BAD_REQUEST,
-                )
-            })?;
+        let hbone_port = req.uri().port_u16().ok_or_else(|| {
+            InboundError(
+                Error::ConnectAddress(req.uri().to_string()),
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
 
         let hbone_authority = format!("{}:{}", hbone_host, hbone_port);
 
@@ -380,9 +379,15 @@ impl Inbound {
             .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
 
         // Check the request is allowed by verifying the connection IP and the hbone address IP are the same
-        let upstream_protocol_addr = Self::validate_destination(&pi.cfg, &pi.state, &conn, &destination_workload, hbone_addr.clone())
-            .await
-            .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
+        let upstream_protocol_addr = Self::validate_destination(
+            &pi.cfg,
+            &pi.state,
+            &conn,
+            &destination_workload,
+            hbone_addr.clone(),
+        )
+        .await
+        .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
         // Determine the next hop.
         let hbone_addr_clone = hbone_addr.clone();
@@ -502,7 +507,7 @@ impl Inbound {
                     namespace: namespace.into(),
                     hostname: hbone_host,
                 };
-                let addr = match state.read().find_hostname(namespaced_name){
+                let addr = match state.read().find_hostname(namespaced_name) {
                     Some(addr) => addr,
                     None => return Err(Error::ConnectAddress(namespaced_name.to_string())),
                 };
@@ -702,7 +707,7 @@ fn build_response(status: StatusCode) -> Response<()> {
 #[cfg(test)]
 mod tests {
     use super::Inbound;
-    use crate::{config, strng, proxy::inbound::HboneAddress};
+    use crate::{config, proxy::inbound::HboneAddress, strng};
 
     use crate::{
         rbac::Connection,
@@ -784,13 +789,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let hbone_addr = if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
-            HboneAddress::SocketAddr(addr)
-        } else {
-            HboneAddress::SvcHostname(hbone_dst.into(), TARGET_PORT)
-        };
+        let hbone_addr =
+            if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
+                HboneAddress::SocketAddr(addr)
+            } else {
+                HboneAddress::SvcHostname(hbone_dst.into(), TARGET_PORT)
+            };
         // TODO(jaellio): Try not to clone the hbone_addr
-        let validate_destination = Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr.clone()).await;
+        let validate_destination =
+            Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr.clone()).await;
         let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr.clone());
 
         match want {
@@ -801,7 +808,9 @@ mod tests {
                 match hbone_addr {
                     HboneAddress::SocketAddr(_) => assert_eq!(go_protocol_addr, None),
                     HboneAddress::SvcHostname(_, _) => {
-                        match format!("{}:{}", protocol_addr.unwrap(), TARGET_PORT).parse::<SocketAddr>() {
+                        match format!("{}:{}", protocol_addr.unwrap(), TARGET_PORT)
+                            .parse::<SocketAddr>()
+                        {
                             Ok(addr) => assert_eq!(go_protocol_addr, Some(addr)),
                             Err(_) => panic!("failed to parse protocol addr provided in test case"),
                         };
