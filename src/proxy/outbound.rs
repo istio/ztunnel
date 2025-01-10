@@ -185,10 +185,7 @@ impl OutboundConnection {
         );
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = match req.hbone_target_destination {
-            Some(hbone_target) => Some(HboneAddress::SocketAddr(hbone_target)),
-            None => None,
-        };
+        let hbone_target = req.hbone_target_destination.map(HboneAddress::SocketAddr);
         let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
             req.actual_destination,

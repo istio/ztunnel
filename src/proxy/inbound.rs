@@ -500,7 +500,7 @@ impl Inbound {
                 }
                 let namespaced_name = &NamespacedHostname {
                     namespace: namespace.into(),
-                    hostname: hbone_host.into(),
+                    hostname: hbone_host,
                 };
                 let addr = match state.read().find_hostname(namespaced_name){
                     Some(addr) => addr,
@@ -515,7 +515,7 @@ impl Inbound {
                             return Err(Error::NoResolvedAddresses(local_workload.to_string()));
                         }
                         // TODO(jaellio): Intelligently select the VIP
-                        let svc_address = svc.vips[0].address.clone();
+                        let svc_address = svc.vips[0].address;
                         let svc_socket_addr = format!("{}:{}", svc_address, hbone_port)
                             .parse::<SocketAddr>()
                             .map_err(|e| Error::ConnectAddress(e.to_string()))?;
