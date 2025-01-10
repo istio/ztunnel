@@ -494,7 +494,7 @@ pub async fn write_proxy_protocol<T>(
     stream: &mut TcpStream,
     addresses: T,
     src_id: Option<Identity>,
-    svc_hostname: Option<String>,
+    svc_hostname: Option<Strng>,
 ) -> io::Result<()>
 where
     T: Into<ppp::v2::Addresses> + std::fmt::Debug,
