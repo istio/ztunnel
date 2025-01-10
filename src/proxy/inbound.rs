@@ -35,6 +35,7 @@ use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
 use crate::state::workload::application_tunnel::Protocol as AppProtocol;
+use crate::strng::Strng;
 use crate::{assertions, copy, handle_connection, proxy, socket, strng, tls};
 
 use crate::drain::run_with_drain;
@@ -54,7 +55,7 @@ pub(super) struct Inbound {
 #[derive(Debug, Clone)]
 pub enum HboneAddress {
     SocketAddr(SocketAddr),
-    SvcHostname(String, u16),
+    SvcHostname(Strng, u16),
 }
 
 impl HboneAddress {
@@ -95,8 +96,8 @@ impl From<SocketAddr> for HboneAddress {
     }
 }
 
-impl From<(String, u16)> for HboneAddress {
-    fn from(svc_hostname: (String, u16)) -> Self {
+impl From<(Strng, u16)> for HboneAddress {
+    fn from(svc_hostname: (Strng, u16)) -> Self {
         HboneAddress::SvcHostname(svc_hostname.0, svc_hostname.1)
     }
 }
@@ -299,6 +300,7 @@ impl Inbound {
                     let protocol_addr = match ri.hbone_addr {
                         HboneAddress::SocketAddr(addr) => addr,
                         HboneAddress::SvcHostname(_, _) => {
+                            // If the hbone_addr includes service hostname, we need to use the resolved svc IP address
                             match ri.upstream_protocol_addr {
                                 Some(addr) => addr,
                                 None => {
@@ -309,6 +311,7 @@ impl Inbound {
                             }
                         }
                     };
+                    // TODO(jaellio): Also include port?
                     let svc_hostname: Option<String> = ri.hbone_addr.svc_hostname();
                     super::write_proxy_protocol(&mut stream, (src, protocol_addr), src_identity, svc_hostname)
                         .instrument(trace_span!("proxy protocol"))
@@ -365,7 +368,7 @@ impl Inbound {
 
         let hbone_addr = match hbone_authority.as_str().parse::<SocketAddr>() {
             Ok(addr) => HboneAddress::SocketAddr(addr),
-            Err(_) => HboneAddress::SvcHostname(hbone_host.to_string(), hbone_port),
+            Err(_) => HboneAddress::SvcHostname(hbone_host.into(), hbone_port),
         };
 
         // Get the destination workload information of the destination pods (wds) workload (not destination ztunnel)
@@ -522,10 +525,11 @@ impl Inbound {
                         // conn.dst.ip is the destination pod ip
                         if !wl.workload_ips.contains(&conn.dst.ip()) {
                             // TODO(jaellio): Update error msg/type
-                            return Err(Error::NoResolvedAddresses(local_workload.to_string()));
+                            return Err(Error::NoResolvedAddresses(wl.to_string()));
                         }
-                        // TODO(jaellio): We don't have a VIP for a workload, so we just return None. Fix this.
-                        return Ok(None);
+                        // TODO(jaellio): This scenario is currently not supported. When find_hostname returns
+                        // a workload rather than a service it is most likely a stateful set or headless service.
+                        return Err(Error::UnsupportedFeature(wl.to_string()));
                     }
                 }
             }
@@ -783,7 +787,7 @@ mod tests {
         let hbone_addr = if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
             HboneAddress::SocketAddr(addr)
         } else {
-            HboneAddress::SvcHostname(hbone_dst.to_string(), TARGET_PORT)
+            HboneAddress::SvcHostname(hbone_dst.into(), TARGET_PORT)
         };
         // TODO(jaellio): Try not to clone the hbone_addr
         let validate_destination = Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr.clone()).await;
