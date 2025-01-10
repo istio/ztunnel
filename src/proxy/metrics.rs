@@ -29,9 +29,9 @@ use tracing::event;
 use tracing_core::field::Value;
 
 use crate::identity::Identity;
-use crate::proxy::inbound::HboneAddress;
 use crate::metrics::DefaultedUnknown;
 use crate::proxy;
+use crate::proxy::inbound::HboneAddress;
 
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
