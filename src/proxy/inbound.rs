@@ -803,7 +803,7 @@ mod tests {
                     HboneAddress::SvcHostname(_, _) => {
                         match format!("{}:{}", protocol_addr.unwrap(), TARGET_PORT).parse::<SocketAddr>() {
                             Ok(addr) => assert_eq!(go_protocol_addr, Some(addr)),
-                            Err(_) => assert!(false, "failed to parse protocol addr"),
+                            Err(_) => panic!("failed to parse protocol addr provided in test case"),
                         };
                     }
                 };
@@ -813,32 +813,6 @@ mod tests {
             }
         }
     }
-
-    // TODO(jaellio): Should we want SERVER_SVC_IP or SERVER_POD_IP?
-    /*#[test_case(Waypoint::None, SERVER_POD_HOSTNAME, Some((SERVER_SVC_IP, TARGET_PORT)); "to workload no waypoint")]
-    fn test_convert_hostname_to_ip<'a>(
-        target_waypoint: Waypoint<'a>,
-        hbone_dst: &str,
-        want: Option<(&str, u16)>,
-    ) {
-        let state = test_state(target_waypoint).expect("state setup");
-        let res = Inbound::convert_hostname_to_ip(hbone_dst, TARGET_PORT, &state);
-
-        match want {
-            Some((ip, port)) => {
-                match res {
-                    Ok(got_addr) => assert_eq!(got_addr, SocketAddr::new(ip.parse().unwrap(), port)),
-                    Err(e) => assert!(false, "expected Ok, but got Err: {:?}", e),
-                }
-            }
-            None => {
-                match res {
-                    Ok(_) => assert!(false, "expected Err, but got Ok"),
-                    Err(_) => assert!(true, "failed to convert hostname in uri to ip"), // Expected error, test passes
-                }
-            }
-        }
-    }*/
 
     fn test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
         let mut state = state::ProxyState::new(None);
