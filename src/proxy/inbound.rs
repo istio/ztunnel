@@ -73,10 +73,10 @@ impl HboneAddress {
         }
     }
 
-    pub fn svc_hostname(&self) -> Option<String> {
+    pub fn svc_hostname(&self) -> Option<Strng> {
         match self {
             HboneAddress::SocketAddr(_) => None,
-            HboneAddress::SvcHostname(s, _) => Some(s.to_string()),
+            HboneAddress::SvcHostname(s, _) => Some(s.into()),
         }
     }
 }
@@ -312,7 +312,7 @@ impl Inbound {
                         }
                     };
                     // TODO(jaellio): Also include port?
-                    let svc_hostname: Option<String> = ri.hbone_addr.svc_hostname();
+                    let svc_hostname: Option<Strng> = ri.hbone_addr.svc_hostname();
                     super::write_proxy_protocol(&mut stream, (src, protocol_addr), src_identity, svc_hostname)
                         .instrument(trace_span!("proxy protocol"))
                         .await?;
