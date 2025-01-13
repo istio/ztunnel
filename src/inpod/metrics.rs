@@ -13,16 +13,15 @@
 // limitations under the License.
 
 use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 #[derive(Default)]
 pub struct Metrics {
-    pub(super) active_proxy_count: Family<(), Gauge>,
-    pub(super) pending_proxy_count: Family<(), Gauge>,
-    pub(super) proxies_started: Family<(), Counter>,
-    pub(super) proxies_stopped: Family<(), Counter>,
+    pub(super) active_proxy_count: Gauge,
+    pub(super) pending_proxy_count: Gauge,
+    pub(super) proxies_started: Counter,
+    pub(super) proxies_stopped: Counter,
 }
 
 impl Metrics {

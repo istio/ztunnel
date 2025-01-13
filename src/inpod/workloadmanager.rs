@@ -565,7 +565,7 @@ pub(crate) mod tests {
         assert_end_stream(res);
 
         assert_eq!(state.workload_states().len(), 0);
-        assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 0);
+        assert_eq!(m.active_proxy_count.get(), 0);
         assert!(readiness.ready.pending().is_empty());
 
         state.drain().await;
@@ -608,7 +608,7 @@ pub(crate) mod tests {
             .map(crate::inpod::WorkloadUid::from)
             .collect();
         assert_eq!(key_set, expected_key_set);
-        assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 2);
+        assert_eq!(m.active_proxy_count.get(), 2);
 
         // second connection - don't send the one of the proxies here, to see ztunnel reconciles and removes it:
         let (s1, mut s2) = UnixStream::pair().unwrap();
@@ -631,7 +631,7 @@ pub(crate) mod tests {
         // only second workload should remain
         assert_eq!(state.workload_states().len(), 1);
         assert_eq!(state.workload_states().keys().next(), Some(&uid(1)));
-        assert_eq!(m.active_proxy_count.get_or_create(&()).get(), 1);
+        assert_eq!(m.active_proxy_count.get(), 1);
         assert!(readiness.ready.pending().is_empty());
 
         state.drain().await;
