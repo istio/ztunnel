@@ -42,7 +42,10 @@ pub struct RichStrng(Strng);
 
 impl prometheus_client::encoding::EncodeLabelValue for RichStrng {
     fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), Error> {
-        prometheus_client::encoding::EncodeLabelValue::encode(&self.0.as_ref(), encoder)
+        prometheus_client::encoding::EncodeLabelValue::encode(
+            &<ArcStr as AsRef<str>>::as_ref(&self.0),
+            encoder,
+        )
     }
 }
 

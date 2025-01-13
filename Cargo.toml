@@ -68,7 +68,7 @@ log = "0.4"
 nix = { version = "0.29", features = ["socket", "sched", "uio", "fs", "ioctl", "user", "net", "mount"] }
 once_cell = "1.19"
 ppp = "2.2"
-prometheus-client = { version = "0.22" }
+prometheus-client = { version = "0.23" }
 prometheus-parse = "0.2"
 prost = "0.13"
 prost-types = "0.13"
@@ -101,7 +101,7 @@ flurry = "0.5"
 h2 = "0.4"
 http = "1.2"
 split-iter = "0.1"
-arcstr = { version = "1.1", features = ["serde"] }
+arcstr = { version = "1.2", features = ["serde"] }
 tracing-core = "0.1"
 tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
