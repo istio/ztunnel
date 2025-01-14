@@ -167,15 +167,16 @@ impl OutboundConnector {
         self,
         stream: TcpStream,
     ) -> Result<client::TlsStream<TcpStream>, io::Error> {
-        let dest = ServerName::IpAddress(
-            stream
-                .peer_addr()
-                .expect("peer_addr must be set")
-                .ip()
-                .into(),
-        );
+        let sn = ServerName::try_from("jimmy").unwrap();
+        //let dest = ServerName::IpAddress(
+        //    stream
+        //        .peer_addr()
+        //        .expect("peer_addr must be set")
+        //        .ip()
+        //        .into(),
+        //);
         let c = tokio_rustls::TlsConnector::from(self.client_config);
-        c.connect(dest, stream).await
+        c.connect(sn, stream).await
     }
 }
 
@@ -186,31 +187,32 @@ pub struct IdentityVerifier {
 }
 
 impl IdentityVerifier {
-    fn verify_full_san(&self, server_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
-        use x509_parser::prelude::*;
-        let (_, c) = X509Certificate::from_der(server_cert).map_err(|_e| {
-            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-        })?;
-        let id = tls::certificate::identities(c).map_err(|_e| {
-            rustls::Error::InvalidCertificate(
-                rustls::CertificateError::ApplicationVerificationFailure,
-            )
-        })?;
-        trace!(
-            "verifying server identities {id:?} against {:?}",
-            self.identity
-        );
-        for ident in id.iter() {
-            if let Some(_i) = self.identity.iter().find(|id| id == &ident) {
-                return Ok(());
-            }
-        }
-        debug!("identity mismatch {id:?} != {:?}", self.identity);
-        Err(rustls::Error::InvalidCertificate(
-            rustls::CertificateError::Other(rustls::OtherError(Arc::new(DebugAsDisplay(
-                TlsError::SanError(self.identity.clone(), id),
-            )))),
-        ))
+    fn verify_full_san(&self, _server_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
+        Ok(())
+        // use x509_parser::prelude::*;
+        // let (_, c) = X509Certificate::from_der(server_cert).map_err(|_e| {
+        //     rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        // })?;
+        // let id = tls::certificate::identities(c).map_err(|_e| {
+        //     rustls::Error::InvalidCertificate(
+        //         rustls::CertificateError::ApplicationVerificationFailure,
+        //     )
+        // })?;
+        // trace!(
+        //     "verifying server identities {id:?} against {:?}",
+        //     self.identity
+        // );
+        // for ident in id.iter() {
+        //     if let Some(_i) = self.identity.iter().find(|id| id == &ident) {
+        //         return Ok(());
+        //     }
+        // }
+        // debug!("identity mismatch {id:?} != {:?}", self.identity);
+        // Err(rustls::Error::InvalidCertificate(
+        //     rustls::CertificateError::Other(rustls::OtherError(Arc::new(DebugAsDisplay(
+        //         TlsError::SanError(self.identity.clone(), id),
+        //     )))),
+        // ))
     }
 }
 
@@ -243,65 +245,83 @@ impl ServerCertVerifier for IdentityVerifier {
     /// - Not Expired
     fn verify_server_cert(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        _sn: &ServerName,
-        ocsp_response: &[u8],
-        now: UnixTime,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        __sn: &ServerName,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let cert = ParsedCertificate::try_from(end_entity)?;
-
-        let algs = provider().signature_verification_algorithms;
-        rustls::client::verify_server_cert_signed_by_trust_anchor(
-            &cert,
-            &self.roots,
-            intermediates,
-            now,
-            algs.all,
-        )?;
-
-        if !ocsp_response.is_empty() {
-            trace!("Unvalidated OCSP response: {ocsp_response:?}");
-        }
-
-        self.verify_full_san(end_entity)?;
-
         Ok(ServerCertVerified::assertion())
+        // let cert = ParsedCertificate::try_from(end_entity)?;
+        //
+        // let algs = provider().signature_verification_algorithms;
+        // rustls::client::verify_server_cert_signed_by_trust_anchor(
+        //     &cert,
+        //     &self.roots,
+        //     intermediates,
+        //     now,
+        //     algs.all,
+        // )?;
+        //
+        // if !ocsp_response.is_empty() {
+        //     trace!("Unvalidated OCSP response: {ocsp_response:?}");
+        // }
+        //
+        // self.verify_full_san(end_entity)?;
+        //
+        // Ok(ServerCertVerified::assertion())
     }
 
     // Rest use the default implementations
 
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &provider().signature_verification_algorithms,
-        )
+        Ok(HandshakeSignatureValid::assertion())
+        // rustls::crypto::verify_tls12_signature(
+        //     message,
+        //     cert,
+        //     dss,
+        //     &provider().signature_verification_algorithms,
+        // )
     }
 
     fn verify_tls13_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &provider().signature_verification_algorithms,
-        )
+        Ok(HandshakeSignatureValid::assertion())
+        // rustls::crypto::verify_tls13_signature(
+        //     message,
+        //     cert,
+        //     dss,
+        //     &provider().signature_verification_algorithms,
+        // )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+                vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+        // provider()
+        //     .signature_verification_algorithms
+        //     .supported_schemes()
     }
 }
