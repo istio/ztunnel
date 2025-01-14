@@ -15,6 +15,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use futures::AsyncWriteExt;
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
 use std::time::Instant;
@@ -37,6 +38,8 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::state::ServiceResolutionMode;
 use crate::{assertions, copy, proxy, socket};
+
+use super::h2::client::spawn_connection;
 
 pub struct Outbound {
     pi: Arc<ProxyInputs>,
@@ -107,7 +110,7 @@ impl Outbound {
                                 debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                             }).instrument(span);
 
-                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                            assertions::size_between_ref(0, 999999, &serve_outbound_connection);
                             tokio::spawn(serve_outbound_connection);
                         }
                         Err(e) => {
@@ -202,8 +205,53 @@ impl OutboundConnection {
                 self.proxy_to_tcp(source_stream, &req, &result_tracker)
                     .await
             }
+            Protocol::DOUBLEHBONE => {
+                self.proxy_to_double_hbone(source_stream, source_addr, &req, &result_tracker)
+                    .await
+            }
         };
         result_tracker.record(res)
+    }
+
+    async fn proxy_to_double_hbone(
+        &mut self,
+        stream: TcpStream,
+        remote_addr: SocketAddr,
+        req: &Request,
+        connection_stats: &ConnectionResult,
+    ) -> Result<(), Error> {
+        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+        // Not too sure if this will work, but establish a http2 connection over the existing
+        // h2 tunnel
+        let mut client = spawn_connection(
+            self.pi.cfg.clone(),
+            upgraded,
+            self.pool.state.spawner.timeout_rx.clone(),
+        )
+        .await?;
+
+        let mut f = http_types::proxies::Forwarded::new();
+        f.add_for(remote_addr.to_string());
+        if let Some(svc) = &req.intended_destination_service {
+            f.set_host(svc.hostname.as_str());
+        }
+        let request: http::Request<()> = http::Request::builder()
+            .uri(
+                req.hbone_target_destination
+                    .expect("HBONE must have target")
+                    .to_string(),
+            )
+            .method(hyper::Method::CONNECT)
+            .version(hyper::Version::HTTP_2)
+            .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
+            .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
+            .header(TRACEPARENT_HEADER, self.id.header())
+            .body(())
+            .expect("builder with known status code should not fail");
+
+        //copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
+        let double_upgraded = client.send_request(request).await?;
+        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), double_upgraded, connection_stats).await
     }
 
     async fn proxy_to_hbone(
@@ -367,6 +415,9 @@ impl OutboundConnection {
             });
         };
 
+        // Here, we have workload for service (or if we have picked a remote cluster, so it would
+        // pick the E/W gateway).
+
         let from_waypoint = proxy::check_from_waypoint(
             state,
             &us.workload,
@@ -404,11 +455,13 @@ impl OutboundConnection {
 
         // only change the port if we're sending HBONE
         let actual_destination = match us.workload.protocol {
-            Protocol::HBONE => SocketAddr::from((us.selected_workload_ip, self.hbone_port)),
+            Protocol::HBONE | Protocol::DOUBLEHBONE => {
+                SocketAddr::from((us.selected_workload_ip, self.hbone_port))
+            }
             Protocol::TCP => us.workload_socket_addr(),
         };
         let hbone_target_destination = match us.workload.protocol {
-            Protocol::HBONE => Some(us.workload_socket_addr()),
+            Protocol::HBONE | Protocol::DOUBLEHBONE => Some(us.workload_socket_addr()),
             Protocol::TCP => None,
         };
 

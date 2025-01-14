@@ -36,18 +36,17 @@ pub trait BufferedSplitter: Unpin {
 }
 
 // Generic BufferedSplitter for anything that can Read/Write.
-impl<I> BufferedSplitter for I
-where
-    I: AsyncRead + AsyncWrite + Unpin,
-{
-    type R = BufReader<io::ReadHalf<I>>;
-    type W = WriteAdapter<io::WriteHalf<I>>;
-    fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
-        let (rh, wh) = tokio::io::split(self);
-        let rb = BufReader::new(rh);
-        (rb, WriteAdapter(wh))
-    }
-}
+// impl<I> BufferedSplitter for I where
+//     I: AsyncRead + AsyncWrite + Unpin,
+// {
+//     type R = BufReader<io::ReadHalf<I>>;
+//     type W = WriteAdapter<io::WriteHalf<I>>;
+//     fn split_into_buffered_reader(self) -> (Self::R, Self::W) {
+//         let (rh, wh) = tokio::io::split(self);
+//         let rb = BufReader::new(rh);
+//         (rb, WriteAdapter(wh))
+//     }
+// }
 
 // TcpStreamSplitter is a specialized BufferedSplitter for TcpStream, which is more efficient than the generic
 // `tokio::io::split`. The generic method involves locking to access the read and write halves

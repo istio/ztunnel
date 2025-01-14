@@ -19,10 +19,11 @@ use bytes::Bytes;
 use itertools::Itertools;
 
 use rustls::client::Resumption;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use rustls::server::WebPkiClientVerifier;
-use rustls::{server, ClientConfig, RootCertStore, ServerConfig};
+use rustls::{server, ClientConfig, KeyLogFile, RootCertStore, ServerConfig};
 use rustls_pemfile::Item;
 use std::io::Cursor;
 use std::str::FromStr;
@@ -30,8 +31,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
-use crate::tls;
+// use crate::tls;
 use x509_parser::certificate::X509Certificate;
+
+use super::TLS_VERSIONS;
 
 #[derive(Clone, Debug)]
 pub struct Certificate {
@@ -248,22 +251,29 @@ impl WorkloadCertificate {
     }
 
     pub fn server_config(&self) -> Result<ServerConfig, Error> {
-        let td = self.cert.identity().map(|i| match i {
+        let _td = self.cert.identity().map(|i| match i {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
-        let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
+        let _raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
             self.roots.clone(),
             crate::tls::lib::provider(),
         )
         .build()?;
 
-        let client_cert_verifier =
-            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
-        let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::TLS_VERSIONS)
-            .expect("server config must be valid")
-            .with_client_cert_verifier(client_cert_verifier)
-            .with_single_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
+        let mut sc = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![
+                    CertificateDer::from_pem_file("/home/sj/learning/openssl/c/jimmy.crt").unwrap(),
+                ],
+                PrivateKeyDer::from_pem_file("/home/sj/learning/openssl/c/jimmy.key").unwrap(),
+            )?;
+        //let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
+        //    .with_protocol_versions(TLS_VERSIONS)
+        //    .expect("server config must be valid")
+        //    .with_no_client_auth()
+        //    .with_single_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
+        sc.key_log = Arc::new(KeyLogFile::new());
         sc.alpn_protocols = vec![b"h2".into()];
         Ok(sc)
     }
@@ -271,15 +281,29 @@ impl WorkloadCertificate {
     pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
         let roots = self.roots.clone();
         let verifier = IdentityVerifier { roots, identity };
+        let mut root_cert_store = RootCertStore::empty();
+        root_cert_store.add_parsable_certificates(vec![CertificateDer::from_pem_file(
+            "/home/sj/learning/openssl/c/root.crt",
+        )
+        .unwrap()]);
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(tls::TLS_VERSIONS)
+            .with_protocol_versions(TLS_VERSIONS)
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_client_auth_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
+            .with_no_client_auth();
+
+        // let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
+        //     .with_protocol_versions(TLS_VERSIONS)
+        //     .expect("client config must be valid")
+        //     .dangerous() // Customer verifier is requires "dangerous" opt-in
+        //     .with_custom_certificate_verifier(Arc::new(verifier))
+        //     .with_no_client_auth();
+        // .with_client_auth_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;
+        cc.key_log = Arc::new(KeyLogFile::new());
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })

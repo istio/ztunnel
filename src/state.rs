@@ -865,6 +865,7 @@ impl DemandProxyState {
     pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
+        debug!(%network_addr.network, "fetch network");
         if let Some(address) = self.state.read().unwrap().find_address(network_addr) {
             return Some(address);
         }

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::copy;
-use bytes::Bytes;
+use crate::copy::{self, AsyncWriteBuf};
+use bytes::{BufMut, Bytes};
 use futures_core::ready;
 use h2::Reason;
 use std::io::Error;
@@ -138,6 +138,56 @@ impl Drop for DropCounter {
     }
 }
 
+impl tokio::io::AsyncRead for H2Stream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let pinned = std::pin::pin!(&mut self.read);
+        tokio::io::AsyncRead::poll_read(pinned, cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for H2Stream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, tokio::io::Error>> {
+        let pinned = std::pin::pin!(&mut self.write);
+        tokio::io::AsyncWrite::poll_write(pinned, cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        let pinned = std::pin::pin!(&mut self.write);
+        tokio::io::AsyncWrite::poll_flush(pinned, cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let pinned = std::pin::pin!(&mut self.write);
+        tokio::io::AsyncWrite::poll_shutdown(pinned, cx)
+    }
+}
+
+impl tokio::io::AsyncRead for H2StreamReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        copy::ResizeBufRead::poll_bytes(self, cx).map_ok(|bytes| buf.put(bytes))
+
+        // match copy::ResizeBufRead::poll_bytes(self, cx) {
+        //     Poll::Ready(Ok(bytes)) => {buf.put(bytes); Poll::Ready(Ok(()))},
+        //     e => {e.map_ok(|_| {})},
+        // }
+    }
+}
+
 impl copy::ResizeBufRead for H2StreamReadHalf {
     fn poll_bytes(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<Bytes>> {
         let this = self.get_mut();
@@ -170,6 +220,29 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
 
     fn resize(self: Pin<&mut Self>, _new_size: usize) {
         // NOP, we don't need to resize as we are abstracting the h2 buffer
+    }
+}
+
+impl tokio::io::AsyncWrite for H2StreamWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, tokio::io::Error>> {
+        // note this is pretty slow because it is a copy, but we can optimize later.
+        let buf = Bytes::copy_from_slice(buf);
+        return self.poll_write_buf(cx, buf);
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        copy::AsyncWriteBuf::poll_flush(self, cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        copy::AsyncWriteBuf::poll_shutdown(self, cx)
     }
 }
 

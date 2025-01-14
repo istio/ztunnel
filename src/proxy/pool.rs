@@ -54,12 +54,12 @@ use tokio::io;
 //   by flow control throttling.
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
-    state: Arc<PoolState>,
+    pub state: Arc<PoolState>,
     pool_watcher: watch::Receiver<bool>,
 }
 
 // PoolState is effectively the gnarly inner state stuff that needs thread/task sync, and should be wrapped in a Mutex.
-struct PoolState {
+pub struct PoolState {
     pool_notifier: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
     timeout_tx: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
@@ -71,14 +71,14 @@ struct PoolState {
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
-    spawner: ConnSpawner,
+    pub spawner: ConnSpawner,
 }
 
-struct ConnSpawner {
+pub struct ConnSpawner {
     cfg: Arc<config::Config>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     local_workload: Arc<LocalWorkloadInformation>,
-    timeout_rx: watch::Receiver<bool>,
+    pub timeout_rx: watch::Receiver<bool>,
 }
 
 // Does nothing but spawn new conns when asked
@@ -109,6 +109,10 @@ impl ConnSpawner {
 }
 
 impl PoolState {
+
+    // pub fn spawner(&self) -> &ConnSpawner {
+    //     &self.spawner
+    // }
     // This simply puts the connection back into the inner pool,
     // and sets up a timed popper, which will resolve
     // - when this reference is popped back out of the inner pool (doing nothing)
