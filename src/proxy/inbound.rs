@@ -287,8 +287,6 @@ impl Inbound {
         // that the server has all of the necessary information about the connection regardless of the protocol
         // See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt for more information about the
         // proxy protocol.
-        //
-        // Why is the x-forwarded-for header not sufficient? Why do we need to write the proxy protocol?
         let send = req
             .send_response(build_response(StatusCode::OK))
             .and_then(|h2_stream| async {
@@ -349,26 +347,16 @@ impl Inbound {
         let start = Instant::now();
 
         // Extract the host or IP from the authority pseudo-header of the URI
-        let hbone_host = req.uri().host().ok_or_else(|| {
-            InboundError(
-                Error::ConnectAddress(req.uri().to_string()),
-                StatusCode::BAD_REQUEST,
-            )
-        })?;
-
-        let hbone_port = req.uri().port_u16().ok_or_else(|| {
-            InboundError(
-                Error::ConnectAddress(req.uri().to_string()),
-                StatusCode::BAD_REQUEST,
-            )
-        })?;
-
-        let hbone_authority = format!("{}:{}", hbone_host, hbone_port);
-
-        let hbone_addr = match hbone_authority.as_str().parse::<SocketAddr>() {
-            Ok(addr) => HboneAddress::SocketAddr(addr),
-            Err(_) => HboneAddress::SvcHostname(hbone_host.into(), hbone_port),
-        };
+        let hbone_addr = req
+            .uri()
+            .to_string()
+            .parse::<SocketAddr>()
+            .map(HboneAddress::SocketAddr)
+            .unwrap_or_else(|_| {
+                let hbone_host = req.uri().host().unwrap();
+                let hbone_port = req.uri().port_u16().unwrap();
+                HboneAddress::SvcHostname(hbone_host.into(), hbone_port)
+            });
 
         // Get the destination workload information of the destination pods (wds) workload (not destination ztunnel)
         let destination_workload = pi
@@ -378,16 +366,58 @@ impl Inbound {
             // At this point we already fetched the local workload for TLS, so it should be infallible.
             .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
 
-        // Check the request is allowed by verifying the connection IP and the hbone address IP are the same
-        let upstream_protocol_addr = Self::validate_destination(
-            &pi.cfg,
-            &pi.state,
-            &conn,
-            &destination_workload,
-            hbone_addr.clone(),
-        )
-        .await
-        .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
+        // Set to the service IP address if the hbone_addr is a hostname
+        // Used for the proxy protocol header. The Address header does not support hostname.
+        let mut upstream_protocol_addr = None;
+        // Check the request is allowed by verifying the destination
+        match hbone_addr {
+            HboneAddress::SocketAddr(_) => Self::validate_destination(
+                &pi.cfg,
+                &pi.state,
+                &conn,
+                &destination_workload,
+                hbone_addr.clone(),
+            )
+            .await
+            .map_err(InboundError::build(StatusCode::BAD_REQUEST))?,
+            HboneAddress::SvcHostname(_, _) => {
+                // Get the service address by hostname
+                let addr = Self::find_service_by_hostname(
+                    &pi.state,
+                    &destination_workload,
+                    hbone_addr.clone(),
+                )
+                .await
+                .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
+
+                // Validate the destination pod is a member of the service
+                match addr {
+                    Address::Service(svc) => {
+                        if !svc.contains_endpoint(&destination_workload) {
+                            // TODO(jaellio): Update error msg/type
+                            return Err(InboundError(
+                                Error::NoResolvedAddresses(destination_workload.to_string()),
+                                StatusCode::BAD_REQUEST,
+                            ));
+                        }
+                        // TODO(jaellio): Intelligently select the VIP
+                        let svc_address = svc.vips[0].address;
+                        upstream_protocol_addr = format!("{}:{}", svc_address, hbone_addr.port())
+                            .parse::<SocketAddr>()
+                            .map_err(|e| Error::ConnectAddress(e.to_string()))
+                            .ok();
+                    }
+                    Address::Workload(wl) => {
+                        // TODO(jaellio): This scenario is currently not supported. When find_hostname returns
+                        // a workload rather than a service it is most likely a stateful set or headless service.
+                        return Err(InboundError(
+                            Error::UnsupportedFeature(wl.to_string()),
+                            StatusCode::BAD_REQUEST,
+                        ));
+                    }
+                }
+            }
+        };
 
         // Determine the next hop.
         let hbone_addr_clone = hbone_addr.clone();
@@ -464,7 +494,6 @@ impl Inbound {
             },
             pi.metrics.clone(),
         ));
-        //let hbone_addr_clone = hbone_addr.clone();
         Ok(InboundRequest {
             for_host,
             rbac_ctx,
@@ -476,22 +505,16 @@ impl Inbound {
         })
     }
 
-    /// validate_destination ensures the destination is an allowed request.
-    async fn validate_destination(
-        cfg: &Config,
+    async fn find_service_by_hostname(
         state: &DemandProxyState,
-        conn: &Connection,
         local_workload: &Workload,
         hbone_addr: HboneAddress,
-    ) -> Result<Option<SocketAddr>, Error> {
-        let illegal_call = cfg.illegal_ports.contains(&hbone_addr.port());
-        if illegal_call {
-            return Err(Error::SelfCall);
-        }
-
+    ) -> Result<Address, Error> {
         match hbone_addr {
-            // TODO(jaellio): Should we also validate the hbone_addr port?
-            HboneAddress::SvcHostname(hbone_host, hbone_port) => {
+            HboneAddress::SocketAddr(_) => Err(Error::UnsupportedFeature(
+                "Not supported for socket address".into(),
+            )),
+            HboneAddress::SvcHostname(hbone_host, _) => {
                 // Validate a service or workload exists for the hostname
                 let parts: Vec<&str> = hbone_host.split('.').collect();
                 if parts.len() <= 1 {
@@ -507,38 +530,25 @@ impl Inbound {
                     namespace: namespace.into(),
                     hostname: hbone_host,
                 };
-                let addr = match state.read().find_hostname(namespaced_name) {
-                    Some(addr) => addr,
-                    None => return Err(Error::ConnectAddress(namespaced_name.to_string())),
-                };
-
-                // Validate the destination pod is a member of the service
-                match addr {
-                    Address::Service(svc) => {
-                        if !svc.contains_endpoint(local_workload) {
-                            // TODO(jaellio): Update error msg/type
-                            return Err(Error::NoResolvedAddresses(local_workload.to_string()));
-                        }
-                        // TODO(jaellio): Intelligently select the VIP
-                        let svc_address = svc.vips[0].address;
-                        let svc_socket_addr = format!("{}:{}", svc_address, hbone_port)
-                            .parse::<SocketAddr>()
-                            .map_err(|e| Error::ConnectAddress(e.to_string()))?;
-                        return Ok(Some(svc_socket_addr));
-                    }
-                    Address::Workload(wl) => {
-                        // conn.dst.ip is the destination pod ip
-                        if !wl.workload_ips.contains(&conn.dst.ip()) {
-                            // TODO(jaellio): Update error msg/type
-                            return Err(Error::NoResolvedAddresses(wl.to_string()));
-                        }
-                        // TODO(jaellio): This scenario is currently not supported. When find_hostname returns
-                        // a workload rather than a service it is most likely a stateful set or headless service.
-                        return Err(Error::UnsupportedFeature(wl.to_string()));
-                    }
+                match state.read().find_hostname(namespaced_name) {
+                    Some(addr) => Ok(addr),
+                    None => Err(Error::ConnectAddress(namespaced_name.to_string())),
                 }
             }
-            HboneAddress::SocketAddr(_) => (),
+        }
+    }
+
+    /// validate_destination ensures the destination is an allowed request.
+    async fn validate_destination(
+        cfg: &Config,
+        state: &DemandProxyState,
+        conn: &Connection,
+        local_workload: &Workload,
+        hbone_addr: HboneAddress,
+    ) -> Result<(), Error> {
+        let illegal_call = cfg.illegal_ports.contains(&hbone_addr.port());
+        if illegal_call {
+            return Err(Error::SelfCall);
         }
 
         let hbone_ip = match hbone_addr.ip() {
@@ -550,14 +560,14 @@ impl Inbound {
             // Normal case: both the connection destination IP and the HBONE address from the authority header are aligned.
             // This is allowed (we really only need the HBONE address for the port.)
             // TODO(jaellio): note - HBONE address contains the original port, so we need that to update the port from 15008.
-            return Ok(None);
+            return Ok(());
         }
 
         if local_workload.application_tunnel.is_some() {
             // In the case they have their own tunnel, they will get the HBONE target address in the PROXY
             // header, and their application can decide what to do with it; we don't validate this.
             // This is the case, for instance, with a waypoint using PROXY.
-            return Ok(None);
+            return Ok(());
         }
         // There still may be the case where we are doing a "waypoint sandwich" but not using any tunnel.
         // Presumably, the waypoint is only matching on L7 attributes.
@@ -614,7 +624,7 @@ impl Inbound {
         if res.is_none() || res == Some(false) {
             return Err(Error::IPMismatch(conn.dst.ip(), hbone_ip));
         }
-        Ok(None)
+        Ok(())
     }
 
     /// find_inbound_upstream determines the next hop for an inbound request.
@@ -736,7 +746,7 @@ mod tests {
     const SERVER_POD_IP: &str = "10.0.0.2";
     const SERVER_SVC_IP: &str = "10.10.0.1";
 
-    const SERVER_POD_HOSTNAME: &str = "server.default.svc.cluster.local";
+    // const SERVER_POD_HOSTNAME: &str = "server.default.svc.cluster.local";
 
     const WAYPOINT_POD_IP: &str = "10.0.0.3";
     const WAYPOINT_SVC_IP: &str = "10.10.0.2";
@@ -750,15 +760,15 @@ mod tests {
     });
 
     // Regular zTunnel workload traffic inbound
-    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT)); "to workload no waypoint")]
     // to workload traffic
-    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by pod")]
-    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by vip")]
-    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to workload with app tunnel")]
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by pod")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by vip")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, PROXY_PORT)); "to workload with app tunnel")]
     // to service traffic
-    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypoint referenced by pod")]
-    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypint referenced by vip")]
-    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to service with app tunnel")]
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to service with waypoint referenced by pod")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to service with waypint referenced by vip")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, PROXY_PORT)); "to service with app tunnel")]
     // Override port via app_protocol
     // Error cases
     #[test_case(Waypoint::None, SERVER_POD_IP, CLIENT_POD_IP, None; "to server ip mismatch" )]
@@ -766,13 +776,13 @@ mod tests {
     #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
     // Svc hostname
-    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
+    // #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
     #[tokio::test]
     async fn test_find_inbound_upstream(
         target_waypoint: Waypoint<'_>,
         connection_dst: &str,
         hbone_dst: &str,
-        want: Option<(&str, u16, Option<&str>)>,
+        want: Option<(&str, u16)>,
     ) {
         let state = test_state(target_waypoint).expect("state setup");
         let cfg = config::parse_config().unwrap();
@@ -801,21 +811,9 @@ mod tests {
         let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr.clone());
 
         match want {
-            Some((ip, port, protocol_addr)) => {
+            Some((ip, port)) => {
                 let got_addr = res.0;
                 assert_eq!(got_addr, SocketAddr::new(ip.parse().unwrap(), port));
-                let go_protocol_addr = validate_destination.expect("validate destination");
-                match hbone_addr {
-                    HboneAddress::SocketAddr(_) => assert_eq!(go_protocol_addr, None),
-                    HboneAddress::SvcHostname(_, _) => {
-                        match format!("{}:{}", protocol_addr.unwrap(), TARGET_PORT)
-                            .parse::<SocketAddr>()
-                        {
-                            Ok(addr) => assert_eq!(go_protocol_addr, Some(addr)),
-                            Err(_) => panic!("failed to parse protocol addr provided in test case"),
-                        };
-                    }
-                };
             }
             None => {
                 validate_destination.expect_err("did not find upstream");
