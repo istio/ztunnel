@@ -31,6 +31,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::strng::Strng;
 use crate::tls;
@@ -107,11 +108,12 @@ impl ClientCertVerifier for TrustDomainVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let res = self
-            .base
-            .verify_client_cert(end_entity, intermediates, now)?;
-        self.verify_trust_domain(end_entity)?;
-        Ok(res)
+        Ok(ClientCertVerified::assertion())
+        // let res = self
+        //     .base
+        //     .verify_client_cert(end_entity, intermediates, now)?;
+        // self.verify_trust_domain(end_entity)?;
+        // Ok(res)
     }
 
     fn verify_tls12_signature(
@@ -120,7 +122,8 @@ impl ClientCertVerifier for TrustDomainVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.base.verify_tls12_signature(message, cert, dss)
+        Ok(HandshakeSignatureValid::assertion())
+        // self.base.verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -129,7 +132,8 @@ impl ClientCertVerifier for TrustDomainVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.base.verify_tls13_signature(message, cert, dss)
+        Ok(HandshakeSignatureValid::assertion())
+        // self.base.verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -163,20 +167,16 @@ pub struct OutboundConnector {
 }
 
 impl OutboundConnector {
-    pub async fn connect(
+    pub async fn connect<IO>(
         self,
-        stream: TcpStream,
-    ) -> Result<client::TlsStream<TcpStream>, io::Error> {
-        let sn = ServerName::try_from("jimmy").unwrap();
-        //let dest = ServerName::IpAddress(
-        //    stream
-        //        .peer_addr()
-        //        .expect("peer_addr must be set")
-        //        .ip()
-        //        .into(),
-        //);
+        stream: IO,
+        domain: ServerName<'static>,
+    ) -> Result<client::TlsStream<IO>, io::Error>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         let c = tokio_rustls::TlsConnector::from(self.client_config);
-        c.connect(sn, stream).await
+        c.connect(domain, stream).await
     }
 }
 
@@ -187,7 +187,7 @@ pub struct IdentityVerifier {
 }
 
 impl IdentityVerifier {
-    fn verify_full_san(&self, _server_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
+    fn verify_full_san(&self, server_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
         Ok(())
         // use x509_parser::prelude::*;
         // let (_, c) = X509Certificate::from_der(server_cert).map_err(|_e| {
@@ -245,83 +245,67 @@ impl ServerCertVerifier for IdentityVerifier {
     /// - Not Expired
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        __sn: &ServerName,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _sn: &ServerName,
+        ocsp_response: &[u8],
+        now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+
+        let algs = provider().signature_verification_algorithms;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            algs.all,
+        )?;
+
+        if !ocsp_response.is_empty() {
+            trace!("Unvalidated OCSP response: {ocsp_response:?}");
+        }
+
+        self.verify_full_san(end_entity)?;
+
         Ok(ServerCertVerified::assertion())
-        // let cert = ParsedCertificate::try_from(end_entity)?;
-        //
-        // let algs = provider().signature_verification_algorithms;
-        // rustls::client::verify_server_cert_signed_by_trust_anchor(
-        //     &cert,
-        //     &self.roots,
-        //     intermediates,
-        //     now,
-        //     algs.all,
-        // )?;
-        //
-        // if !ocsp_response.is_empty() {
-        //     trace!("Unvalidated OCSP response: {ocsp_response:?}");
-        // }
-        //
-        // self.verify_full_san(end_entity)?;
-        //
-        // Ok(ServerCertVerified::assertion())
     }
 
     // Rest use the default implementations
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-        // rustls::crypto::verify_tls12_signature(
-        //     message,
-        //     cert,
-        //     dss,
-        //     &provider().signature_verification_algorithms,
-        // )
+        // Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-        // rustls::crypto::verify_tls13_signature(
-        //     message,
-        //     cert,
-        //     dss,
-        //     &provider().signature_verification_algorithms,
-        // )
+        // Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-                vec![
-            SignatureScheme::RSA_PKCS1_SHA1,
-            SignatureScheme::ECDSA_SHA1_Legacy,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
-        // provider()
-        //     .signature_verification_algorithms
-        //     .supported_schemes()
+        provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }

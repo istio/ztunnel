@@ -114,7 +114,6 @@ pub async fn spawn_connection(
 ) -> Result<H2ConnectClient, Error> {
     let mut builder = h2::client::Builder::new();
     builder
-        .header_table_size(0)
         .initial_window_size(cfg.window_size)
         .initial_connection_window_size(cfg.connection_window_size)
         .max_frame_size(cfg.frame_size)

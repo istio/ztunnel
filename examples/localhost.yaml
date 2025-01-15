@@ -20,7 +20,7 @@ workloads:
   workloadIps: ["172.19.0.1"]
   protocol: DOUBLEHBONE
   node: remote
-  network: "remote"
+  network: ""
   services:
     "default/example2.com":
       80: 8081
