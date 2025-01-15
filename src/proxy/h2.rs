@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::copy::{self};
+use crate::copy;
 use bytes::{BufMut, Bytes};
 use futures_core::ready;
 use h2::Reason;

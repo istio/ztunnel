@@ -54,7 +54,7 @@ use tokio::io;
 //   by flow control throttling.
 #[derive(Clone)]
 pub struct WorkloadHBONEPool {
-    pub state: Arc<PoolState>,
+    state: Arc<PoolState>,
     pool_watcher: watch::Receiver<bool>,
 }
 
@@ -74,11 +74,11 @@ pub struct PoolState {
     pub spawner: ConnSpawner,
 }
 
-pub struct ConnSpawner {
+struct ConnSpawner {
     cfg: Arc<config::Config>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    pub local_workload: Arc<LocalWorkloadInformation>,
-    pub timeout_rx: watch::Receiver<bool>,
+    local_workload: Arc<LocalWorkloadInformation>,
+    timeout_rx: watch::Receiver<bool>,
 }
 
 // Does nothing but spawn new conns when asked
@@ -139,9 +139,6 @@ impl ConnSpawner {
 }
 
 impl PoolState {
-    // pub fn spawner(&self) -> &ConnSpawner {
-    //     &self.spawner
-    // }
     // This simply puts the connection back into the inner pool,
     // and sets up a timed popper, which will resolve
     // - when this reference is popped back out of the inner pool (doing nothing)
