@@ -31,10 +31,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
-// use crate::tls;
+use crate::tls;
 use x509_parser::certificate::X509Certificate;
-
-use super::TLS_VERSIONS;
 
 #[derive(Clone, Debug)]
 pub struct Certificate {
@@ -230,6 +228,10 @@ impl WorkloadCertificate {
 
         let mut roots = RootCertStore::empty();
         roots.add_parsable_certificates(chain.iter().last().map(|c| c.der.clone()));
+        roots.add_parsable_certificates(vec![CertificateDer::from_pem_file(
+            "/home/sj/learning/openssl/c/root.crt",
+        ).unwrap()]);
+
         Ok(WorkloadCertificate {
             cert,
             chain,
@@ -251,28 +253,26 @@ impl WorkloadCertificate {
     }
 
     pub fn server_config(&self) -> Result<ServerConfig, Error> {
-        let _td = self.cert.identity().map(|i| match i {
+        let td = self.cert.identity().map(|i| match i {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
-        let _raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
-            self.roots.clone(),
+        let mut roots = (*self.roots).clone();
+        roots.add_parsable_certificates(vec![CertificateDer::from_pem_file(
+            "/home/sj/learning/openssl/c/root.crt",
+        ).unwrap()]);
+        let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
             crate::tls::lib::provider(),
         )
         .build()?;
 
-        let mut sc = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![
-                    CertificateDer::from_pem_file("/home/sj/learning/openssl/c/jimmy.crt").unwrap(),
-                ],
-                PrivateKeyDer::from_pem_file("/home/sj/learning/openssl/c/jimmy.key").unwrap(),
-            )?;
-        //let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
-        //    .with_protocol_versions(TLS_VERSIONS)
-        //    .expect("server config must be valid")
-        //    .with_no_client_auth()
-        //    .with_single_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
+        let client_cert_verifier =
+            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
+        let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
+            .with_protocol_versions(tls::TLS_VERSIONS)
+            .expect("server config must be valid")
+            .with_client_cert_verifier(client_cert_verifier)
+            .with_single_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
         sc.key_log = Arc::new(KeyLogFile::new());
         sc.alpn_protocols = vec![b"h2".into()];
         Ok(sc)
@@ -287,19 +287,11 @@ impl WorkloadCertificate {
         )
         .unwrap()]);
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(TLS_VERSIONS)
+            .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
-
-        // let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
-        //     .with_protocol_versions(TLS_VERSIONS)
-        //     .expect("client config must be valid")
-        //     .dangerous() // Customer verifier is requires "dangerous" opt-in
-        //     .with_custom_certificate_verifier(Arc::new(verifier))
-        //     .with_no_client_auth();
-        // .with_client_auth_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;

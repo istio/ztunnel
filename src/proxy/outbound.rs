@@ -19,6 +19,7 @@ use futures::AsyncWriteExt;
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
 use std::time::Instant;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -40,6 +41,7 @@ use crate::state::ServiceResolutionMode;
 use crate::{assertions, copy, proxy, socket};
 
 use super::h2::client::spawn_connection;
+use super::h2::TokioH2Stream;
 
 pub struct Outbound {
     pi: Arc<ProxyInputs>,
@@ -221,37 +223,25 @@ impl OutboundConnection {
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        // Not too sure if this will work, but establish a http2 connection over the existing
-        // h2 tunnel
-        let mut client = spawn_connection(
-            self.pi.cfg.clone(),
-            upgraded,
-            self.pool.state.spawner.timeout_rx.clone(),
+
+        let upgraded = TokioH2Stream::new(upgraded);
+        let inner_workload = pool::WorkloadKey {
+            src_id: req.source.identity(),
+            // Clone here shouldn't be needed ideally, we could just take ownership of Request.
+            // But that
+            dst_id: req.upstream_sans.clone(),
+            src: remote_addr.ip(),
+            dst: req.actual_destination,
+        };
+        let request = self.create_hbone_request(remote_addr, req);
+
+        let inner_upgraded = self.pool.send_request_unpooled(upgraded, &inner_workload, request).await?;
+        copy::copy_bidirectional(
+            copy::TcpStreamSplitter(stream),
+            inner_upgraded,
+            connection_stats,
         )
-        .await?;
-
-        let mut f = http_types::proxies::Forwarded::new();
-        f.add_for(remote_addr.to_string());
-        if let Some(svc) = &req.intended_destination_service {
-            f.set_host(svc.hostname.as_str());
-        }
-        let request: http::Request<()> = http::Request::builder()
-            .uri(
-                req.hbone_target_destination
-                    .expect("HBONE must have target")
-                    .to_string(),
-            )
-            .method(hyper::Method::CONNECT)
-            .version(hyper::Version::HTTP_2)
-            .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
-            .header(FORWARDED, f.value().expect("Forwarded value is infallible"))
-            .header(TRACEPARENT_HEADER, self.id.header())
-            .body(())
-            .expect("builder with known status code should not fail");
-
-        //copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
-        let double_upgraded = client.send_request(request).await?;
-        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), double_upgraded, connection_stats).await
+        .await
     }
 
     async fn proxy_to_hbone(
@@ -265,12 +255,12 @@ impl OutboundConnection {
         copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
     }
 
-    async fn send_hbone_request(
+    fn create_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
-    ) -> Result<H2Stream, Error> {
-        let request = http::Request::builder()
+    ) -> http::Request<()> {
+        http::Request::builder()
             .uri(
                 req.hbone_target_destination
                     .expect("HBONE must have target")
@@ -285,8 +275,15 @@ impl OutboundConnection {
             )
             .header(TRACEPARENT_HEADER, self.id.header())
             .body(())
-            .expect("builder with known status code should not fail");
+            .expect("builder with known status code should not fail")
+    }
 
+    async fn send_hbone_request(
+        &mut self,
+        remote_addr: SocketAddr,
+        req: &Request,
+    ) -> Result<H2Stream, Error> {
+        let request = self.create_hbone_request(remote_addr, req);
         let pool_key = Box::new(pool::WorkloadKey {
             src_id: req.source.identity(),
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.

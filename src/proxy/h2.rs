@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::copy::{self, AsyncWriteBuf};
+use crate::copy::{self};
 use bytes::{BufMut, Bytes};
 use futures_core::ready;
 use h2::Reason;
@@ -85,6 +85,8 @@ pub struct H2StreamWriteHalf {
     _dropped: Option<DropCounter>,
 }
 
+pub struct TokioH2Stream(H2Stream);
+
 struct DropCounter {
     // Whether the other end of this shared counter has already dropped.
     // We only decrement if they have, so we do not double count
@@ -138,53 +140,50 @@ impl Drop for DropCounter {
     }
 }
 
-impl tokio::io::AsyncRead for H2Stream {
+// We can't directly implement tokio::io::{AsyncRead, AsyncWrite} for H2Stream because
+// then the specific implementation will conflict with the generic one.
+impl TokioH2Stream {
+    pub fn new(stream: H2Stream) -> Self {
+        Self(stream)
+    }
+}
+
+impl tokio::io::AsyncRead for TokioH2Stream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let pinned = std::pin::pin!(&mut self.read);
-        tokio::io::AsyncRead::poll_read(pinned, cx, buf)
+        let pinned = std::pin::Pin::new(&mut self.0.read);
+        copy::ResizeBufRead::poll_bytes(pinned, cx).map_ok(|bytes| buf.put(bytes))
     }
 }
 
-impl tokio::io::AsyncWrite for H2Stream {
+impl tokio::io::AsyncWrite for TokioH2Stream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, tokio::io::Error>> {
-        let pinned = std::pin::pin!(&mut self.write);
-        tokio::io::AsyncWrite::poll_write(pinned, cx, buf)
+        let pinned = std::pin::Pin::new(&mut self.0.write);
+        let buf = Bytes::copy_from_slice(buf);
+        copy::AsyncWriteBuf::poll_write_buf(pinned, cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        let pinned = std::pin::pin!(&mut self.write);
-        tokio::io::AsyncWrite::poll_flush(pinned, cx)
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let pinned = std::pin::Pin::new(&mut self.0.write);
+        copy::AsyncWriteBuf::poll_flush(pinned, cx)
     }
 
     fn poll_shutdown(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let pinned = std::pin::pin!(&mut self.write);
-        tokio::io::AsyncWrite::poll_shutdown(pinned, cx)
-    }
-}
-
-impl tokio::io::AsyncRead for H2StreamReadHalf {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        copy::ResizeBufRead::poll_bytes(self, cx).map_ok(|bytes| buf.put(bytes))
-
-        // match copy::ResizeBufRead::poll_bytes(self, cx) {
-        //     Poll::Ready(Ok(bytes)) => {buf.put(bytes); Poll::Ready(Ok(()))},
-        //     e => {e.map_ok(|_| {})},
-        // }
+        let pinned = std::pin::Pin::new(&mut self.0.write);
+        copy::AsyncWriteBuf::poll_shutdown(pinned, cx)
     }
 }
 
@@ -220,29 +219,6 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
 
     fn resize(self: Pin<&mut Self>, _new_size: usize) {
         // NOP, we don't need to resize as we are abstracting the h2 buffer
-    }
-}
-
-impl tokio::io::AsyncWrite for H2StreamWriteHalf {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, tokio::io::Error>> {
-        // note this is pretty slow because it is a copy, but we can optimize later.
-        let buf = Bytes::copy_from_slice(buf);
-        return self.poll_write_buf(cx, buf);
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        copy::AsyncWriteBuf::poll_flush(self, cx)
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        copy::AsyncWriteBuf::poll_shutdown(self, cx)
     }
 }
 

@@ -77,12 +77,35 @@ pub struct PoolState {
 pub struct ConnSpawner {
     cfg: Arc<config::Config>,
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
-    local_workload: Arc<LocalWorkloadInformation>,
+    pub local_workload: Arc<LocalWorkloadInformation>,
     pub timeout_rx: watch::Receiver<bool>,
 }
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
+    // creates new HBONE connection over existing stream.
+    // Useful for when we want the lifetime of the connection to be tied to the connection pool,
+    // but we don't want to pool the connection itself.
+    async fn new_unpooled_conn(
+        &self,
+        key: WorkloadKey,
+        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    ) -> Result<ConnClient, Error> {
+        let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
+
+        let cert = self.local_workload.fetch_certificate().await?;
+        let connector = cert.outbound_connector(vec![])?;
+        let tls_stream = connector.connect(stream, dest).await?;
+        let sender =
+            h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
+                .await?;
+        let client = ConnClient {
+            sender,
+            wl_key: key,
+        };
+        Ok(client)
+    }
+
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
@@ -95,7 +118,14 @@ impl ConnSpawner {
                 _ => e.into(),
             })?;
 
-        let tls_stream = connector.connect(tcp_stream).await?;
+        let dest = rustls::pki_types::ServerName::IpAddress(
+            tcp_stream
+                .peer_addr()
+                .expect("peer_addr must be set")
+                .ip()
+                .into(),
+        );
+        let tls_stream = connector.connect(tcp_stream, dest).await?;
         trace!("connector connected, handshaking");
         let sender =
             h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
@@ -109,7 +139,6 @@ impl ConnSpawner {
 }
 
 impl PoolState {
-
     // pub fn spawner(&self) -> &ConnSpawner {
     //     &self.spawner
     // }
@@ -373,6 +402,17 @@ impl WorkloadHBONEPool {
             }),
             pool_watcher: timeout_rx,
         }
+    }
+
+    pub async fn send_request_unpooled(
+        &mut self,
+        stream: impl tokio::io::AsyncWrite + tokio::io::AsyncRead + Send + Unpin + 'static,
+        workload_key: &WorkloadKey,
+        request: http::Request<()>,
+    ) -> Result<H2Stream, Error> {
+        let mut connection = self.state.spawner.new_unpooled_conn(workload_key.clone(), stream).await?;
+
+        connection.sender.send_request(request).await
     }
 
     pub async fn send_request_pooled(
