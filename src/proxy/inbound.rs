@@ -596,8 +596,8 @@ mod tests {
     #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
     #[tokio::test]
-    async fn test_find_inbound_upstream<'a>(
-        target_waypoint: Waypoint<'a>,
+    async fn test_find_inbound_upstream(
+        target_waypoint: Waypoint<'_>,
         connection_dst: &str,
         hbone_dst: &str,
         want: Option<(&str, u16)>,
