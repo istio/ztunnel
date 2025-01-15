@@ -112,7 +112,7 @@ impl Outbound {
                                 debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                             }).instrument(span);
 
-                            assertions::size_between_ref(0, 999999, &serve_outbound_connection);
+                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
                             tokio::spawn(serve_outbound_connection);
                         }
                         Err(e) => {
@@ -227,8 +227,6 @@ impl OutboundConnection {
         let upgraded = TokioH2Stream::new(upgraded);
         let inner_workload = pool::WorkloadKey {
             src_id: req.source.identity(),
-            // Clone here shouldn't be needed ideally, we could just take ownership of Request.
-            // But that
             dst_id: req.upstream_sans.clone(),
             src: remote_addr.ip(),
             dst: req.actual_destination,
@@ -411,9 +409,6 @@ impl OutboundConnection {
                 upstream_sans: vec![],
             });
         };
-
-        // Here, we have workload for service (or if we have picked a remote cluster, so it would
-        // pick the E/W gateway).
 
         let from_waypoint = proxy::check_from_waypoint(
             state,

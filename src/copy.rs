@@ -36,7 +36,8 @@ pub trait BufferedSplitter: Unpin {
 }
 
 // Generic BufferedSplitter for anything that can Read/Write.
-impl<I> BufferedSplitter for I where
+impl<I> BufferedSplitter for I
+where
     I: AsyncRead + AsyncWrite + Unpin,
 {
     type R = BufReader<io::ReadHalf<I>>;
