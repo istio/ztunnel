@@ -22,10 +22,8 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
-use tokio_rustls::client::TlsStream;
 use tracing::{debug, error, trace, warn, Instrument};
 
 #[derive(Debug, Clone)]

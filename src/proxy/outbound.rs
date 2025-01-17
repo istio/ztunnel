@@ -15,11 +15,9 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use futures::AsyncWriteExt;
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
 use std::time::Instant;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -40,7 +38,6 @@ use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workloa
 use crate::state::ServiceResolutionMode;
 use crate::{assertions, copy, proxy, socket};
 
-use super::h2::client::spawn_connection;
 use super::h2::TokioH2Stream;
 
 pub struct Outbound {
@@ -222,8 +219,10 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
+        // Outer HBONE
         let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
 
+        // Inner HBONE
         let upgraded = TokioH2Stream::new(upgraded);
         let inner_workload = pool::WorkloadKey {
             src_id: req.source.identity(),
@@ -233,7 +232,7 @@ impl OutboundConnection {
         };
         let request = self.create_hbone_request(remote_addr, req);
 
-        let (conn_client, inner_upgraded, drain_tx, driver_task) = self
+        let (_conn_client, inner_upgraded, drain_tx, driver_task) = self
             .pool
             .send_request_unpooled(upgraded, &inner_workload, request)
             .await?;
@@ -251,7 +250,7 @@ impl OutboundConnection {
         // drain_tx.send(true).unwrap();
         // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         drain_tx.send(true).unwrap();
-        driver_task.await;
+        let _ = driver_task.await;
         // this sleep is important, so we have a race condition somewhere
         // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         res
