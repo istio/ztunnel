@@ -59,7 +59,7 @@ pub struct WorkloadHBONEPool {
 }
 
 // PoolState is effectively the gnarly inner state stuff that needs thread/task sync, and should be wrapped in a Mutex.
-pub struct PoolState {
+struct PoolState {
     pool_notifier: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
     timeout_tx: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
@@ -83,9 +83,6 @@ struct ConnSpawner {
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
-    // creates new HBONE connection over existing stream.
-    // Useful for when we want the lifetime of the connection to be tied to the connection pool,
-    // but we don't want to pool the connection itself.
     async fn new_unpooled_conn(
         &self,
         key: WorkloadKey,
