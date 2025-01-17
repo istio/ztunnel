@@ -90,20 +90,20 @@ impl ConnSpawner {
         &self,
         key: WorkloadKey,
         stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-    ) -> Result<ConnClient, Error> {
+        driver_drain: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(ConnClient, tokio::task::JoinHandle<()>), Error> {
         let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
 
         let cert = self.local_workload.fetch_certificate().await?;
         let connector = cert.outbound_connector(vec![])?;
         let tls_stream = connector.connect(stream, dest).await?;
-        let sender =
-            h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
-                .await?;
+        let (sender, driver_drain) =
+            h2::client::spawn_connection(self.cfg.clone(), tls_stream, driver_drain).await?;
         let client = ConnClient {
             sender,
             wl_key: key,
         };
-        Ok(client)
+        Ok((client, driver_drain))
     }
 
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
@@ -127,7 +127,7 @@ impl ConnSpawner {
         );
         let tls_stream = connector.connect(tcp_stream, dest).await?;
         trace!("connector connected, handshaking");
-        let sender =
+        let (sender, _) =
             h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
                 .await?;
         let client = ConnClient {
@@ -406,10 +406,28 @@ impl WorkloadHBONEPool {
         stream: impl tokio::io::AsyncWrite + tokio::io::AsyncRead + Send + Unpin + 'static,
         workload_key: &WorkloadKey,
         request: http::Request<()>,
-    ) -> Result<H2Stream, Error> {
-        let mut connection = self.state.spawner.new_unpooled_conn(workload_key.clone(), stream).await?;
+    ) -> Result<
+        (
+            ConnClient,
+            Result<H2Stream, Error>,
+            tokio::sync::watch::Sender<bool>,
+            tokio::task::JoinHandle<()>,
+        ),
+        Error,
+    > {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let (mut connection, driver_task) = self
+            .state
+            .spawner
+            .new_unpooled_conn(workload_key.clone(), stream, rx)
+            .await?;
 
-        connection.sender.send_request(request).await
+        Ok((
+            connection.clone(),
+            connection.sender.send_request(request).await,
+            tx,
+            driver_task,
+        ))
     }
 
     pub async fn send_request_pooled(
@@ -552,7 +570,7 @@ impl WorkloadHBONEPool {
 #[derive(Debug, Clone)]
 // A sort of faux-client, that represents a single checked-out 'request sender' which might
 // send requests over some underlying stream using some underlying http/2 client
-struct ConnClient {
+pub struct ConnClient {
     sender: H2ConnectClient,
     // A WL key may have many clients, but every client has no more than one WL key
     wl_key: WorkloadKey, // the WL key associated with this client.
