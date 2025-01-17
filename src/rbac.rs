@@ -283,6 +283,7 @@ impl StringMatch {
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceAccountMatch {
     namespace: Strng,
     service_account: Strng,
