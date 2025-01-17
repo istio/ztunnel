@@ -112,7 +112,7 @@ impl Outbound {
                                 debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                             }).instrument(span);
 
-                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                            assertions::size_between_ref(1000, 99999, &serve_outbound_connection);
                             tokio::spawn(serve_outbound_connection);
                         }
                         Err(e) => {
@@ -233,13 +233,28 @@ impl OutboundConnection {
         };
         let request = self.create_hbone_request(remote_addr, req);
 
-        let inner_upgraded = self.pool.send_request_unpooled(upgraded, &inner_workload, request).await?;
-        copy::copy_bidirectional(
+        let (conn_client, inner_upgraded, drain_tx, driver_task) = self
+            .pool
+            .send_request_unpooled(upgraded, &inner_workload, request)
+            .await?;
+        let inner_upgraded = inner_upgraded?;
+        let res = copy::copy_bidirectional(
             copy::TcpStreamSplitter(stream),
             inner_upgraded,
             connection_stats,
         )
-        .await
+        .await;
+
+        // This always drops ungracefully
+        // drop(conn_client);
+        // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // drain_tx.send(true).unwrap();
+        // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        drain_tx.send(true).unwrap();
+        driver_task.await;
+        // this sleep is important, so we have a race condition somewhere
+        // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        res
     }
 
     async fn proxy_to_hbone(

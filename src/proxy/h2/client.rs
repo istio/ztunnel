@@ -111,7 +111,7 @@ pub async fn spawn_connection(
     cfg: Arc<config::Config>,
     s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     driver_drain: Receiver<bool>,
-) -> Result<H2ConnectClient, Error> {
+) -> Result<(H2ConnectClient, tokio::task::JoinHandle<()>), Error> {
     let mut builder = h2::client::Builder::new();
     builder
         .initial_window_size(cfg.window_size)
@@ -139,7 +139,7 @@ pub async fn spawn_connection(
     // spawn a task to poll the connection and drive the HTTP state
     // if we got a drain for that connection, respect it in a race
     // it is important to have a drain here, or this connection will never terminate
-    tokio::spawn(
+    let driver_handle = tokio::spawn(
         async move {
             drive_connection(connection, driver_drain).await;
         }
@@ -151,7 +151,7 @@ pub async fn spawn_connection(
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
     };
-    Ok(c)
+    Ok((c, driver_handle))
 }
 
 async fn drive_connection<S, B>(mut conn: Connection<S, B>, mut driver_drain: Receiver<bool>)
