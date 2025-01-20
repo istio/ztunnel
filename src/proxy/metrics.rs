@@ -29,6 +29,7 @@ use tracing_core::field::Value;
 use crate::identity::Identity;
 use crate::metrics::DefaultedUnknown;
 use crate::proxy;
+use crate::proxy::inbound::HboneAddress;
 
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
@@ -299,7 +300,7 @@ pub struct ConnectionResult {
     src: (SocketAddr, Option<RichStrng>),
     // Dst address and name
     dst: (SocketAddr, Option<RichStrng>),
-    hbone_target: Option<SocketAddr>,
+    hbone_target: Option<HboneAddress>,
     start: Instant,
 
     // TODO: storing CommonTrafficLabels adds ~600 bytes retained throughout a connection life time.
@@ -381,7 +382,7 @@ impl ConnectionResult {
         dst: SocketAddr,
         // If using hbone, the inner HBONE address
         // That is, dst is the L4 address, while is the :authority.
-        hbone_target: Option<SocketAddr>,
+        hbone_target: Option<HboneAddress>,
         start: Instant,
         conn: ConnectionOpen,
         metrics: Arc<Metrics>,
@@ -410,7 +411,7 @@ impl ConnectionResult {
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             dst.addr = %dst.0,
-            dst.hbone_addr = hbone_target.map(display),
+            dst.hbone_addr = hbone_target.as_ref().map(display),
             dst.service = tl.destination_service.to_value(),
             dst.workload = dst.1.as_deref().map(to_value),
             dst.namespace = tl.destination_workload_namespace.to_value(),
@@ -504,7 +505,7 @@ impl ConnectionResult {
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             dst.addr = %self.dst.0,
-            dst.hbone_addr = self.hbone_target.map(display),
+            dst.hbone_addr = self.hbone_target.as_ref().map(display),
             dst.service = tl.destination_service.to_value(),
             dst.workload = self.dst.1.as_deref().map(to_value),
             dst.namespace = tl.destination_workload_namespace.to_value(),

@@ -485,12 +485,16 @@ pub enum Error {
     DnsEmpty,
 }
 
+// Custom TLV for proxy protocol for the identity of the source
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
+// Custom TLV for including the svc hostname in the proxy protocol header
+const PROXY_PROTOCOL_SVC_HOSTNAME_TLV: u8 = 0xD1;
 
 pub async fn write_proxy_protocol<T>(
     stream: &mut TcpStream,
     addresses: T,
     src_id: Option<Identity>,
+    svc_hostname: Option<Strng>,
 ) -> io::Result<()>
 where
     T: Into<ppp::v2::Addresses> + std::fmt::Debug,
@@ -498,12 +502,21 @@ where
     use ppp::v2::{Builder, Command, Protocol, Version};
     use tokio::io::AsyncWriteExt;
 
+    // When the hbone_addr populated from the authority header contains a svc hostname, the address included
+    // with respect to the hbone_addr is the SocketAddr <dst svc IP>:<original dst port>.
+    // This is done since addresses doesn't support hostnames.
+    // See ref https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
     debug!("writing proxy protocol addresses: {:?}", addresses);
     let mut builder =
         Builder::with_addresses(Version::Two | Command::Proxy, Protocol::Stream, addresses);
 
     if let Some(id) = src_id {
         builder = builder.write_tlv(PROXY_PROTOCOL_AUTHORITY_TLV, id.to_string().as_bytes())?;
+    }
+
+    // svc_hostname is None when the hbone_addr does not contain a svc hostname.
+    if let Some(svc_host) = svc_hostname {
+        builder = builder.write_tlv(PROXY_PROTOCOL_SVC_HOSTNAME_TLV, svc_host.as_bytes())?;
     }
 
     let header = builder.build()?;
