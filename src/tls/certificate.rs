@@ -230,7 +230,8 @@ impl WorkloadCertificate {
         roots.add_parsable_certificates(chain.iter().last().map(|c| c.der.clone()));
         roots.add_parsable_certificates(vec![CertificateDer::from_pem_file(
             "/home/sj/learning/openssl/c/root.crt",
-        ).unwrap()]);
+        )
+        .unwrap()]);
 
         Ok(WorkloadCertificate {
             cert,
@@ -259,7 +260,8 @@ impl WorkloadCertificate {
         let mut roots = (*self.roots).clone();
         roots.add_parsable_certificates(vec![CertificateDer::from_pem_file(
             "/home/sj/learning/openssl/c/root.crt",
-        ).unwrap()]);
+        )
+        .unwrap()]);
         let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
             Arc::new(roots),
             crate::tls::lib::provider(),
@@ -291,7 +293,7 @@ impl WorkloadCertificate {
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_no_client_auth();
+            .with_client_auth_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;
