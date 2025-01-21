@@ -80,6 +80,45 @@ impl CsrOptions {
             private_key: private_key.into(),
         })
     }
+
+    #[cfg(feature = "tls-openssl")]
+    pub fn generate(&self) -> Result<CertSign, Error> {
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::PKey;
+        use openssl::stack::Stack;
+        use openssl::x509::extension::SubjectAlternativeName;
+        use openssl::x509::{self};
+        // TODO: https://github.com/rustls/rcgen/issues/228 can we always use rcgen?
+
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+        let ec_key = EcKey::generate(&group)?;
+        let pkey = PKey::from_ec_key(ec_key)?;
+
+        let mut csr = x509::X509ReqBuilder::new()?;
+        csr.set_pubkey(&pkey)?;
+        let mut extensions = Stack::new()?;
+        let subject_alternative_name = SubjectAlternativeName::new()
+            .uri(&self.san)
+            .critical()
+            .build(&csr.x509v3_context(None))?;
+
+        extensions.push(subject_alternative_name)?;
+        csr.add_extensions(&extensions)?;
+        csr.sign(&pkey, MessageDigest::sha256())?;
+
+        let csr = csr.build();
+        let pkey_pem = pkey.private_key_to_pem_pkcs8()?;
+        let csr_pem = csr.to_pem()?;
+        let csr_pem = std::str::from_utf8(&csr_pem)
+            .expect("CSR is valid string")
+            .to_string();
+        Ok(CertSign {
+            csr: csr_pem,
+            private_key: pkey_pem,
+        })
+    }
 }
 
 #[cfg(test)]
