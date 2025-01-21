@@ -10,6 +10,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"]
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen"]
 tls-aws-lc = ["dep:ring", "rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs", "hyper-rustls/aws-lc-rs", "dep:rcgen", "rcgen/aws_lc_rs"]
+tls-openssl = ["dep:rustls-openssl", "dep:openssl" ]
 testing = ["dep:rcgen", "rcgen/x509-parser"] # Enables utilities supporting tests.
 
 [lib]
@@ -37,6 +38,10 @@ boring-sys = { version = "4", optional = true }
 
 # Enabled with 'tls-ring'
 ring = { version = "0.17", optional = true }
+
+# Enabled with 'tls-openssl'
+rustls-openssl = { version = "0.2", optional = true }
+openssl = { version = "0.10", optional = true }
 
 anyhow = "1.0"
 async-stream = "0.3"

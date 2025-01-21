@@ -33,6 +33,8 @@ if [[ "$TLS_MODE" == "boring" ]]; then
   cargo build --release --no-default-features -F tls-boring
 elif [[ "$TLS_MODE" == "aws-lc" ]]; then
   cargo build --release --no-default-features -F tls-aws-lc
+elif [[ "$TLS_MODE" == "openssl" ]]; then
+  cargo build --release --no-default-features -F tls-openssl
 else
   cargo build --release
 fi
