@@ -238,8 +238,7 @@ impl OutboundConnection {
             .local_workload_information
             .fetch_certificate()
             .await?;
-        // FIXME The following isn't great because it will also contain the identity of the E/W gateways
-        let connector = cert.outbound_connector(req.upstream_sans.clone())?;
+        let connector = cert.outbound_connector(req.final_sans.clone())?;
 
         // Do actual IO as late as possible
         // Outer HBONE
@@ -407,6 +406,7 @@ impl OutboundConnection {
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination,
                     upstream_sans,
+                    final_sans: vec![],
                 });
             }
             // this was service addressed but we did not find a waypoint
@@ -437,6 +437,7 @@ impl OutboundConnection {
                 intended_destination_service: None,
                 actual_destination: target,
                 upstream_sans: vec![],
+                final_sans: vec![],
             });
         };
 
@@ -470,6 +471,7 @@ impl OutboundConnection {
                     intended_destination_service: us.destination_service.clone(),
                     actual_destination,
                     upstream_sans,
+                    final_sans: vec![],
                 });
             }
             // Workload doesn't have a waypoint; send directly
@@ -486,9 +488,12 @@ impl OutboundConnection {
             Protocol::HBONE | Protocol::DOUBLEHBONE => Some(us.workload_socket_addr()),
             Protocol::TCP => None,
         };
+        let (upstream_sans, final_sans) = match us.workload.protocol {
+            Protocol::DOUBLEHBONE => (vec![us.workload.identity()], us.service_sans()),
+            Protocol::TCP | Protocol::HBONE => (us.workload_and_services_san(), vec![]),
+        };
 
         // For case no waypoint for both side and direct to remote node proxy
-        let upstream_sans = us.workload_and_services_san();
         debug!("built request to workload");
         Ok(Request {
             protocol: us.workload.protocol,
@@ -498,6 +503,7 @@ impl OutboundConnection {
             intended_destination_service: us.destination_service.clone(),
             actual_destination,
             upstream_sans,
+            final_sans,
         })
     }
 }
@@ -546,6 +552,11 @@ struct Request {
     // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
     // in the case of proxies along the path.
     upstream_sans: Vec<Identity>,
+
+    // The identity of workload that will ultimately process this request.
+    // This field only matters if we need to know both the identity of the next hop, as well as the
+    // final hop (currently, this is only double HBONE).
+    final_sans: Vec<Identity>,
 }
 
 #[cfg(test)]
