@@ -71,7 +71,7 @@ struct PoolState {
     // This is merely a counter to track the overall number of conns this pool spawns
     // to ensure we get unique poolkeys-per-new-conn, it is not a limit
     pool_global_conn_count: AtomicI32,
-    pub spawner: ConnSpawner,
+    spawner: ConnSpawner,
 }
 
 struct ConnSpawner {
@@ -413,17 +413,28 @@ impl WorkloadHBONEPool {
         Error,
     > {
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let (mut connection, driver_task) = self
+        let key = workload_key.clone();
+        let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
+        let cert = self
             .state
             .spawner
-            .new_unpooled_conn(workload_key.clone(), stream, rx)
+            .local_workload
+            .fetch_certificate()
             .await?;
+        let connector = cert.outbound_connector(vec![])?;
+        let tls_stream = connector.connect(stream, dest).await?;
+        let (sender, driver_drain) =
+            h2::client::spawn_connection(self.state.spawner.cfg.clone(), tls_stream, rx).await?;
+        let mut connection = ConnClient {
+            sender,
+            wl_key: key,
+        };
 
         Ok((
             connection.clone(),
             connection.sender.send_request(request).await,
             tx,
-            driver_task,
+            driver_drain,
         ))
     }
 
@@ -568,9 +579,9 @@ impl WorkloadHBONEPool {
 // A sort of faux-client, that represents a single checked-out 'request sender' which might
 // send requests over some underlying stream using some underlying http/2 client
 pub struct ConnClient {
-    sender: H2ConnectClient,
+    pub sender: H2ConnectClient,
     // A WL key may have many clients, but every client has no more than one WL key
-    wl_key: WorkloadKey, // the WL key associated with this client.
+    pub wl_key: WorkloadKey, // the WL key associated with this client.
 }
 
 impl ConnClient {

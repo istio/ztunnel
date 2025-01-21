@@ -219,11 +219,7 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        // Outer HBONE
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-
-        // Inner HBONE
-        let upgraded = TokioH2Stream::new(upgraded);
+        // TODO: dst should take a hostname? and upstream_sans currently contains E/W Gateway certs
         let inner_workload = pool::WorkloadKey {
             src_id: req.source.identity(),
             dst_id: req.upstream_sans.clone(),
@@ -231,12 +227,34 @@ impl OutboundConnection {
             dst: req.actual_destination,
         };
         let request = self.create_hbone_request(remote_addr, req);
+        let workload_key = &inner_workload;
 
-        let (_conn_client, inner_upgraded, drain_tx, driver_task) = self
-            .pool
-            .send_request_unpooled(upgraded, &inner_workload, request)
+        // To shut down inner HTTP2 connection
+        let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+        let key = workload_key.clone();
+        let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
+        let cert = self
+            .pi
+            .local_workload_information
+            .fetch_certificate()
             .await?;
-        let inner_upgraded = inner_upgraded?;
+        // FIXME The following isn't great because it will also contain the identity of the E/W gateways
+        let connector = cert.outbound_connector(req.upstream_sans.clone())?;
+
+        // Do actual IO as late as possible
+        // Outer HBONE
+        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+        // Wrap upgraded to implement tokio's Async{Write,Read}
+        let upgraded = TokioH2Stream::new(upgraded);
+        let tls_stream = connector.connect(upgraded, dest).await?;
+
+        let (sender, driver_task) =
+            super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx).await?;
+        let mut connection = super::pool::ConnClient {
+            sender,
+            wl_key: key,
+        };
+        let inner_upgraded = connection.sender.send_request(request).await?;
         let res = copy::copy_bidirectional(
             copy::TcpStreamSplitter(stream),
             inner_upgraded,
@@ -244,15 +262,13 @@ impl OutboundConnection {
         )
         .await;
 
-        // This always drops ungracefully
-        // drop(conn_client);
-        // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        // drain_tx.send(true).unwrap();
-        // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        drain_tx.send(true).unwrap();
+        let _ = drain_tx.send(true);
         let _ = driver_task.await;
-        // this sleep is important, so we have a race condition somewhere
-        // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // Here, there is an implicit, drop(conn_client).
+        // Its really important that this happens AFTER driver_task finishes.
+        // Otherwise, TLS connections do not terminate gracefully.
+        //
+        // drop(conn_client);
         res
     }
 
