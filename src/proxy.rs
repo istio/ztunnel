@@ -446,6 +446,12 @@ pub enum Error {
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
 
+    #[error("no service or workload for hostname: {0}")]
+    NoHostname(String),
+
+    #[error("no valid authority pseudo header: {0}")]
+    NoValidAuthority(String),
+
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
 

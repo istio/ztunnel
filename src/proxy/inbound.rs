@@ -102,6 +102,29 @@ impl From<(Strng, u16)> for HboneAddress {
     }
 }
 
+/*
+impl TryFrom<&http::Uri> for HboneAddress {
+    type Error = InboundError;
+
+    fn try_from(value: &http::Uri) -> Result<Self, Self::Error> {
+        match value.to_string().parse::<SocketAddr>() {
+            Ok(addr) => Ok(HboneAddress::SocketAddr(addr)),
+            Err(_) => {
+                let hbone_host = value.host().ok_or_else(|| InboundError(
+                    Error::NoValidAuthority(value.to_string()),
+                    StatusCode::BAD_REQUEST
+                ))?;
+                let hbone_port = value.port_u16().ok_or_else(|| InboundError(
+                    Error::NoValidAuthority(value.to_string()),
+                    StatusCode::BAD_REQUEST
+                ))?;
+                Ok(HboneAddress::SvcHostname(hbone_host.into(), hbone_port))
+            }
+        }
+    }
+}
+*/
+
 impl Inbound {
     pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
@@ -366,58 +389,56 @@ impl Inbound {
             // At this point we already fetched the local workload for TLS, so it should be infallible.
             .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
 
+        // Check the request is allowed by verifying the destination
+        Self::validate_destination(
+            &pi.cfg,
+            &pi.state,
+            &conn,
+            &destination_workload,
+            hbone_addr.clone(),
+        )
+        .await
+        .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
+
         // Set to the service IP address if the hbone_addr is a hostname
         // Used for the proxy protocol header. The Address header does not support hostname.
         let mut upstream_protocol_addr = None;
-        // Check the request is allowed by verifying the destination
-        match hbone_addr {
-            HboneAddress::SocketAddr(_) => Self::validate_destination(
-                &pi.cfg,
+
+        if hbone_addr.svc_hostname().is_some() {
+            // Get the service address by hostname
+            // TODO(jaellio): update this since it won't work. There is no supported mapping from hostname to namespace.
+            let addr = Self::find_service_by_hostname(
                 &pi.state,
-                &conn,
                 &destination_workload,
-                hbone_addr.clone(),
+                hbone_addr.svc_hostname().unwrap(),
             )
             .await
-            .map_err(InboundError::build(StatusCode::BAD_REQUEST))?,
-            HboneAddress::SvcHostname(_, _) => {
-                // Get the service address by hostname
-                let addr = Self::find_service_by_hostname(
-                    &pi.state,
-                    &destination_workload,
-                    hbone_addr.clone(),
-                )
-                .await
-                .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
+            .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
-                // Validate the destination pod is a member of the service
-                match addr {
-                    Address::Service(svc) => {
-                        if !svc.contains_endpoint(&destination_workload) {
-                            // TODO(jaellio): Update error msg/type
-                            return Err(InboundError(
-                                Error::NoResolvedAddresses(destination_workload.to_string()),
-                                StatusCode::BAD_REQUEST,
-                            ));
-                        }
-                        // TODO(jaellio): Intelligently select the VIP
-                        let svc_address = svc.vips[0].address;
-                        upstream_protocol_addr = format!("{}:{}", svc_address, hbone_addr.port())
-                            .parse::<SocketAddr>()
-                            .map_err(|e| Error::ConnectAddress(e.to_string()))
-                            .ok();
-                    }
-                    Address::Workload(wl) => {
-                        // TODO(jaellio): This scenario is currently not supported. When find_hostname returns
-                        // a workload rather than a service it is most likely a stateful set or headless service.
+            // Validate the destination pod is a member of the service
+            match addr {
+                Address::Service(svc) => {
+                    if !svc.contains_endpoint(&destination_workload) {
+                        // TODO(jaellio): Update error msg/type
                         return Err(InboundError(
-                            Error::UnsupportedFeature(wl.to_string()),
+                            Error::NoResolvedAddresses(destination_workload.to_string()),
                             StatusCode::BAD_REQUEST,
                         ));
                     }
+                    // TODO(jaellio): Intelligently select the VIP
+                    let svc_address = svc.vips[0].address;
+                    upstream_protocol_addr = SocketAddr::new(svc_address, hbone_addr.port()).into();
+                }
+                Address::Workload(wl) => {
+                    // TODO(jaellio): This scenario is currently not supported. When find_hostname returns
+                    // a workload rather than a service it is most likely a stateful set or headless service.
+                    return Err(InboundError(
+                        Error::UnsupportedFeature(wl.to_string()),
+                        StatusCode::BAD_REQUEST,
+                    ));
                 }
             }
-        };
+        }
 
         // Determine the next hop.
         let hbone_addr_clone = hbone_addr.clone();
@@ -505,36 +526,31 @@ impl Inbound {
         })
     }
 
+    // Selects a service by hostname without the explicit knowledge of the namespace
+    // There is no explicit mapping from hostname to namespace (e.g. foo.com)
     async fn find_service_by_hostname(
         state: &DemandProxyState,
         local_workload: &Workload,
-        hbone_addr: HboneAddress,
+        hbone_host: Strng,
     ) -> Result<Address, Error> {
-        match hbone_addr {
-            HboneAddress::SocketAddr(_) => Err(Error::UnsupportedFeature(
-                "Not supported for socket address".into(),
-            )),
-            HboneAddress::SvcHostname(hbone_host, _) => {
-                // Validate a service or workload exists for the hostname
-                let parts: Vec<&str> = hbone_host.split('.').collect();
-                if parts.len() <= 1 {
-                    // TODO(jaellio): Update error msg/type
-                    return Err(Error::ConnectAddress(hbone_host.to_string()));
-                }
-                let namespace = parts[1];
-                if namespace != local_workload.namespace {
-                    //TODO(jaellio): Update error msg/type. This is a namespace scoping issue.
-                    return Err(Error::ConnectAddress(hbone_host.to_string()));
-                }
-                let namespaced_name = &NamespacedHostname {
-                    namespace: namespace.into(),
-                    hostname: hbone_host,
-                };
-                match state.read().find_hostname(namespaced_name) {
-                    Some(addr) => Ok(addr),
-                    None => Err(Error::ConnectAddress(namespaced_name.to_string())),
-                }
-            }
+        // Validate a service or workload exists for the hostname
+        let parts: Vec<&str> = hbone_host.split('.').collect();
+        if parts.len() <= 1 {
+            // TODO(jaellio): Update error msg/type
+            return Err(Error::ConnectAddress(hbone_host.to_string()));
+        }
+        let namespace = parts[1];
+        if namespace != local_workload.namespace {
+            //TODO(jaellio): Update error msg/type. This is a namespace scoping issue.
+            return Err(Error::ConnectAddress(hbone_host.to_string()));
+        }
+        let namespaced_name = &NamespacedHostname {
+            namespace: namespace.into(),
+            hostname: hbone_host,
+        };
+        match state.read().find_hostname(namespaced_name) {
+            Some(addr) => Ok(addr),
+            None => Err(Error::ConnectAddress(namespaced_name.to_string())),
         }
     }
 
@@ -553,7 +569,13 @@ impl Inbound {
 
         let hbone_ip = match hbone_addr.ip() {
             Some(ip) => ip,
-            None => return Err(Error::ConnectAddress(hbone_addr.to_string())),
+            None => {
+                if hbone_addr.svc_hostname().is_none() {
+                    // If the hbone_address doesn't have an IP, it must have a hostname
+                    return Err(Error::ConnectAddress(hbone_addr.to_string()));
+                }
+                return Ok(());
+            }
         };
 
         if conn.dst.ip() == hbone_ip {
