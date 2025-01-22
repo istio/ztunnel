@@ -28,7 +28,9 @@ use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult, DerivedWorkload};
-use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::proxy::{
+    util, Error, HboneAddress, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER,
+};
 
 use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
@@ -37,8 +39,6 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
 use crate::state::ServiceResolutionMode;
 use crate::{assertions, copy, proxy, socket};
-
-use super::inbound::HboneAddress;
 
 pub struct Outbound {
     pi: Arc<ProxyInputs>,
