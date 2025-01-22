@@ -1064,6 +1064,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1097,6 +1098,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1153,6 +1155,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1463,6 +1466,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1489,6 +1493,7 @@ mod tests {
                         health_policy: HealthPolicy::AllowAll as i32,
                     }),
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1539,6 +1544,7 @@ mod tests {
                 health_policy: HealthPolicy::AllowAll as i32,
             }),
             ip_families: 0,
+            extensions: Default::default(),
         };
         updater
             .insert_service(
@@ -1559,6 +1565,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
