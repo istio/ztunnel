@@ -15,7 +15,7 @@
 use futures::stream::StreamExt;
 use futures_util::TryFutureExt;
 use http::{Method, Response, StatusCode};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
-use crate::proxy::{BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
+use crate::proxy::{BAGGAGE_HEADER, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
@@ -51,79 +51,6 @@ pub(super) struct Inbound {
     pi: Arc<ProxyInputs>,
     enable_orig_src: bool,
 }
-
-#[derive(Debug, Clone)]
-pub enum HboneAddress {
-    SocketAddr(SocketAddr),
-    SvcHostname(Strng, u16),
-}
-
-impl HboneAddress {
-    pub fn port(&self) -> u16 {
-        match self {
-            HboneAddress::SocketAddr(s) => s.port(),
-            HboneAddress::SvcHostname(_, p) => *p,
-        }
-    }
-
-    pub fn ip(&self) -> Option<IpAddr> {
-        match self {
-            HboneAddress::SocketAddr(s) => Some(s.ip()),
-            HboneAddress::SvcHostname(_, _) => None,
-        }
-    }
-
-    pub fn svc_hostname(&self) -> Option<Strng> {
-        match self {
-            HboneAddress::SocketAddr(_) => None,
-            HboneAddress::SvcHostname(s, _) => Some(s.into()),
-        }
-    }
-}
-
-impl std::fmt::Display for HboneAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HboneAddress::SocketAddr(addr) => write!(f, "{}", addr),
-            HboneAddress::SvcHostname(host, port) => write!(f, "{}:{}", host, port),
-        }
-    }
-}
-
-impl From<SocketAddr> for HboneAddress {
-    fn from(socket_addr: SocketAddr) -> Self {
-        HboneAddress::SocketAddr(socket_addr)
-    }
-}
-
-impl From<(Strng, u16)> for HboneAddress {
-    fn from(svc_hostname: (Strng, u16)) -> Self {
-        HboneAddress::SvcHostname(svc_hostname.0, svc_hostname.1)
-    }
-}
-
-/*
-impl TryFrom<&http::Uri> for HboneAddress {
-    type Error = InboundError;
-
-    fn try_from(value: &http::Uri) -> Result<Self, Self::Error> {
-        match value.to_string().parse::<SocketAddr>() {
-            Ok(addr) => Ok(HboneAddress::SocketAddr(addr)),
-            Err(_) => {
-                let hbone_host = value.host().ok_or_else(|| InboundError(
-                    Error::NoValidAuthority(value.to_string()),
-                    StatusCode::BAD_REQUEST
-                ))?;
-                let hbone_port = value.port_u16().ok_or_else(|| InboundError(
-                    Error::NoValidAuthority(value.to_string()),
-                    StatusCode::BAD_REQUEST
-                ))?;
-                Ok(HboneAddress::SvcHostname(hbone_host.into(), hbone_port))
-            }
-        }
-    }
-}
-*/
 
 impl Inbound {
     pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {

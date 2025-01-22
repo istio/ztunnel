@@ -27,8 +27,13 @@ use tracing::{Instrument, debug, error, info, info_span, trace_span};
 use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
+<<<<<<< HEAD
 use crate::proxy::{BAGGAGE_HEADER, Error, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util};
 use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics};
+=======
+use crate::proxy::{BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util};
+use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics, pool};
+>>>>>>> b9bda55 (Move HboneAddress to proxy)
 
 use crate::drain::DrainWatcher;
 use crate::drain::run_with_drain;
@@ -37,8 +42,6 @@ use crate::state::ServiceResolutionMode;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::{NetworkAddress, Protocol, Workload, address::Address};
 use crate::{assertions, copy, proxy, socket};
-
-use super::inbound::HboneAddress;
 
 pub struct Outbound {
     pi: Arc<ProxyInputs>,

@@ -801,6 +801,79 @@ pub fn parse_forwarded_host(input: &str) -> Option<String> {
         .filter(|host| !host.is_empty())
 }
 
+#[derive(Debug, Clone)]
+pub enum HboneAddress {
+    SocketAddr(SocketAddr),
+    SvcHostname(Strng, u16),
+}
+
+impl HboneAddress {
+    pub fn port(&self) -> u16 {
+        match self {
+            HboneAddress::SocketAddr(s) => s.port(),
+            HboneAddress::SvcHostname(_, p) => *p,
+        }
+    }
+
+    pub fn ip(&self) -> Option<IpAddr> {
+        match self {
+            HboneAddress::SocketAddr(s) => Some(s.ip()),
+            HboneAddress::SvcHostname(_, _) => None,
+        }
+    }
+
+    pub fn svc_hostname(&self) -> Option<Strng> {
+        match self {
+            HboneAddress::SocketAddr(_) => None,
+            HboneAddress::SvcHostname(s, _) => Some(s.into()),
+        }
+    }
+}
+
+impl std::fmt::Display for HboneAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HboneAddress::SocketAddr(addr) => write!(f, "{}", addr),
+            HboneAddress::SvcHostname(host, port) => write!(f, "{}:{}", host, port),
+        }
+    }
+}
+
+impl From<SocketAddr> for HboneAddress {
+    fn from(socket_addr: SocketAddr) -> Self {
+        HboneAddress::SocketAddr(socket_addr)
+    }
+}
+
+impl From<(Strng, u16)> for HboneAddress {
+    fn from(svc_hostname: (Strng, u16)) -> Self {
+        HboneAddress::SvcHostname(svc_hostname.0, svc_hostname.1)
+    }
+}
+
+/*
+impl TryFrom<&http::Uri> for HboneAddress {
+    type Error = InboundError;
+
+    fn try_from(value: &http::Uri) -> Result<Self, Self::Error> {
+        match value.to_string().parse::<SocketAddr>() {
+            Ok(addr) => Ok(HboneAddress::SocketAddr(addr)),
+            Err(_) => {
+                let hbone_host = value.host().ok_or_else(|| InboundError(
+                    Error::NoValidAuthority(value.to_string()),
+                    StatusCode::BAD_REQUEST
+                ))?;
+                let hbone_port = value.port_u16().ok_or_else(|| InboundError(
+                    Error::NoValidAuthority(value.to_string()),
+                    StatusCode::BAD_REQUEST
+                ))?;
+                Ok(HboneAddress::SvcHostname(hbone_host.into(), hbone_port))
+            }
+        }
+    }
+}
+*/
+
 #[cfg(test)]
 mod tests {
     use super::*;
