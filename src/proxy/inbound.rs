@@ -41,7 +41,7 @@ use crate::{assertions, copy, handle_connection, proxy, socket, strng, tls};
 use crate::drain::run_with_drain;
 use crate::proxy::h2;
 use crate::state::workload::address::Address;
-use crate::state::workload::{self, NamespacedHostname, NetworkAddress, Workload};
+use crate::state::workload::{self, NetworkAddress, Workload};
 use crate::state::{DemandProxyState, ProxyRbacContext};
 use crate::tls::TlsError;
 
@@ -297,16 +297,10 @@ impl Inbound {
         let start = Instant::now();
 
         // Extract the host or IP from the authority pseudo-header of the URI
-        let hbone_addr = req
+        let hbone_addr: HboneAddress = req
             .uri()
-            .to_string()
-            .parse::<SocketAddr>()
-            .map(HboneAddress::SocketAddr)
-            .unwrap_or_else(|_| {
-                let hbone_host = req.uri().host().unwrap();
-                let hbone_port = req.uri().port_u16().unwrap();
-                HboneAddress::SvcHostname(hbone_host.into(), hbone_port)
-            });
+            .try_into()
+            .map_err(|e: Error| InboundError(e, StatusCode::BAD_REQUEST))?;
 
         // Get the destination workload information of the destination pods (wds) workload (not destination ztunnel)
         let destination_workload = pi
@@ -331,10 +325,10 @@ impl Inbound {
         // Used for the proxy protocol header. The Address header does not support hostname.
         let mut upstream_protocol_addr = None;
 
+        // Validate hostname if present
         if hbone_addr.svc_hostname().is_some() {
             // Get the service address by hostname
-            // TODO(jaellio): update this since it won't work. There is no supported mapping from hostname to namespace.
-            let addr = Self::find_service_by_hostname(
+            let svc = Self::find_service_by_hostname(
                 &pi.state,
                 &destination_workload,
                 hbone_addr.svc_hostname().unwrap(),
@@ -342,29 +336,29 @@ impl Inbound {
             .await
             .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
-            // Validate the destination pod is a member of the service
-            match addr {
-                Address::Service(svc) => {
-                    if !svc.contains_endpoint(&destination_workload) {
-                        // TODO(jaellio): Update error msg/type
-                        return Err(InboundError(
-                            Error::NoResolvedAddresses(destination_workload.to_string()),
-                            StatusCode::BAD_REQUEST,
-                        ));
-                    }
-                    // TODO(jaellio): Intelligently select the VIP
-                    let svc_address = svc.vips[0].address;
-                    upstream_protocol_addr = SocketAddr::new(svc_address, hbone_addr.port()).into();
-                }
-                Address::Workload(wl) => {
-                    // TODO(jaellio): This scenario is currently not supported. When find_hostname returns
-                    // a workload rather than a service it is most likely a stateful set or headless service.
-                    return Err(InboundError(
-                        Error::UnsupportedFeature(wl.to_string()),
-                        StatusCode::BAD_REQUEST,
-                    ));
-                }
+            // Validate the destination pod is a member of the selected service
+            if !svc.contains_endpoint(&destination_workload) {
+                // TODO(jaellio): Update error msg/type
+                return Err(InboundError(
+                    Error::NoHostname(destination_workload.to_string()),
+                    StatusCode::BAD_REQUEST,
+                ));
             }
+            // Select the VIP by network match
+            let svc_address = svc
+                .vips
+                .iter()
+                .max_by_key(|a| match a.network == conn.dst_network {
+                    true => 1,
+                    false => 0,
+                })
+                .ok_or_else(|| {
+                    InboundError(
+                        Error::NoResolvedAddresses(destination_workload.to_string()),
+                        StatusCode::BAD_REQUEST,
+                    )
+                })?;
+            upstream_protocol_addr = SocketAddr::new(svc_address.address, hbone_addr.port()).into();
         }
 
         // Determine the next hop.
@@ -459,26 +453,22 @@ impl Inbound {
         state: &DemandProxyState,
         local_workload: &Workload,
         hbone_host: Strng,
-    ) -> Result<Address, Error> {
-        // Validate a service or workload exists for the hostname
-        let parts: Vec<&str> = hbone_host.split('.').collect();
-        if parts.len() <= 1 {
-            // TODO(jaellio): Update error msg/type
-            return Err(Error::ConnectAddress(hbone_host.to_string()));
-        }
-        let namespace = parts[1];
-        if namespace != local_workload.namespace {
-            //TODO(jaellio): Update error msg/type. This is a namespace scoping issue.
-            return Err(Error::ConnectAddress(hbone_host.to_string()));
-        }
-        let namespaced_name = &NamespacedHostname {
-            namespace: namespace.into(),
-            hostname: hbone_host,
-        };
-        match state.read().find_hostname(namespaced_name) {
-            Some(addr) => Ok(addr),
-            None => Err(Error::ConnectAddress(namespaced_name.to_string())),
-        }
+    ) -> Result<Service, Error> {
+        // Validate a service exists for the hostname
+        // TODO(jaellio): Currently returns an error is no service is found. Workload lookup is not supported.
+        let services = state.read().find_service_by_hostname(&hbone_host)?;
+
+        services
+            .iter()
+            .max_by_key(|s| {
+                let is_local_namespace = s.namespace == local_workload.namespace;
+                match is_local_namespace {
+                    true => 1,
+                    false => 0,
+                }
+            })
+            .cloned()
+            .ok_or_else(|| Error::NoResolvedAddresses(hbone_host.to_string()))
     }
 
     /// validate_destination ensures the destination is an allowed request.
@@ -508,7 +498,7 @@ impl Inbound {
         if conn.dst.ip() == hbone_ip {
             // Normal case: both the connection destination IP and the HBONE address from the authority header are aligned.
             // This is allowed (we really only need the HBONE address for the port.)
-            // TODO(jaellio): note - HBONE address contains the original port, so we need that to update the port from 15008.
+            // Note: HBONE address contains the original port, so we need that to update the port from 15008.
             return Ok(());
         }
 
@@ -695,7 +685,7 @@ mod tests {
     const SERVER_POD_IP: &str = "10.0.0.2";
     const SERVER_SVC_IP: &str = "10.10.0.1";
 
-    // const SERVER_POD_HOSTNAME: &str = "server.default.svc.cluster.local";
+    const SERVER_POD_HOSTNAME: &str = "server.default.svc.cluster.local";
 
     const WAYPOINT_POD_IP: &str = "10.0.0.3";
     const WAYPOINT_SVC_IP: &str = "10.10.0.2";
@@ -725,7 +715,7 @@ mod tests {
     #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
     // Svc hostname
-    // #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT)); "svc hostname to workload no waypoint")]
     #[tokio::test]
     async fn test_find_inbound_upstream(
         target_waypoint: Waypoint<'_>,
@@ -754,7 +744,6 @@ mod tests {
             } else {
                 HboneAddress::SvcHostname(hbone_dst.into(), TARGET_PORT)
             };
-        // TODO(jaellio): Try not to clone the hbone_addr
         let validate_destination =
             Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr.clone()).await;
         let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr.clone());

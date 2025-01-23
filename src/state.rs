@@ -259,6 +259,14 @@ impl ProxyState {
             })
     }
 
+    /// Find services by hostname.
+    pub fn find_service_by_hostname(&self, hostname: &Strng) -> Result<Vec<Service>, Error> {
+        // Hostnames for services are more common, so lookup service first and fallback to workload.
+        self.services.get_by_host(hostname).ok_or_else(|| {
+            Error::NoHostname(format!("service with hostname {} not found", hostname))
+        })
+    }
+
     fn find_upstream(
         &self,
         network: Strng,
