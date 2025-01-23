@@ -851,28 +851,24 @@ impl From<(Strng, u16)> for HboneAddress {
     }
 }
 
-/*
 impl TryFrom<&http::Uri> for HboneAddress {
-    type Error = InboundError;
+    type Error = Error;
 
     fn try_from(value: &http::Uri) -> Result<Self, Self::Error> {
         match value.to_string().parse::<SocketAddr>() {
             Ok(addr) => Ok(HboneAddress::SocketAddr(addr)),
             Err(_) => {
-                let hbone_host = value.host().ok_or_else(|| InboundError(
-                    Error::NoValidAuthority(value.to_string()),
-                    StatusCode::BAD_REQUEST
-                ))?;
-                let hbone_port = value.port_u16().ok_or_else(|| InboundError(
-                    Error::NoValidAuthority(value.to_string()),
-                    StatusCode::BAD_REQUEST
-                ))?;
+                let hbone_host = value
+                    .host()
+                    .ok_or_else(|| Error::NoValidAuthority(value.to_string()))?;
+                let hbone_port = value
+                    .port_u16()
+                    .ok_or_else(|| Error::NoValidAuthority(value.to_string()))?;
                 Ok(HboneAddress::SvcHostname(hbone_host.into(), hbone_port))
             }
         }
     }
 }
-*/
 
 #[cfg(test)]
 mod tests {
