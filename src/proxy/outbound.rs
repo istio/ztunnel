@@ -439,12 +439,14 @@ fn build_forwarded(remote_addr: SocketAddr, server: &Option<ServiceDescription>)
 }
 
 fn baggage(r: &Request, cluster: String) -> String {
-    format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version}",
+    format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version},cloud.region={region},cloud.availability_zone={zone}",
             namespace = r.source.namespace,
             workload_type = r.source.workload_type,
             workload_name = r.source.workload_name,
             name = r.source.canonical_name,
             version = r.source.canonical_revision,
+            region = r.source.locality.region,
+            zone = r.source.locality.zone,
     )
 }
 
