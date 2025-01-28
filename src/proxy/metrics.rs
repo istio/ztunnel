@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{atomic, Arc};
 use std::time::Instant;
 
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
+use prometheus_client::encoding::{
+    EncodeLabelSet, EncodeLabelValue, LabelSetEncoder, LabelValueEncoder,
+};
 use prometheus_client::metrics::counter::{Atomic, Counter};
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
@@ -95,6 +97,8 @@ pub struct DerivedWorkload {
     pub namespace: Option<Strng>,
     pub identity: Option<Identity>,
     pub cluster_id: Option<Strng>,
+    pub region: Option<Strng>,
+    pub zone: Option<Strng>,
 }
 
 #[derive(Clone)]
@@ -123,6 +127,12 @@ impl CommonTrafficLabels {
         self.source_app = w.canonical_name.clone().into();
         self.source_version = w.canonical_revision.clone().into();
         self.source_cluster = w.cluster_id.to_string().into();
+
+        let mut local = self.locality.0.unwrap_or_default();
+        local.source_region = w.locality.region.clone().into();
+        local.source_zone = w.locality.zone.clone().into();
+        self.locality = OptionallyEncode(Some(local));
+
         self
     }
 
@@ -137,6 +147,12 @@ impl CommonTrafficLabels {
         self.source_cluster = w.cluster_id.clone().into();
         // This is the identity from the TLS handshake; this is the most trustworthy source so use it
         self.source_principal = w.identity.clone().into();
+
+        let mut local = self.locality.0.unwrap_or_default();
+        local.source_region = w.region.clone().into();
+        local.source_zone = w.zone.clone().into();
+        self.locality = OptionallyEncode(Some(local));
+
         self
     }
 
@@ -150,6 +166,12 @@ impl CommonTrafficLabels {
         self.destination_app = w.canonical_name.clone().into();
         self.destination_version = w.canonical_revision.clone().into();
         self.destination_cluster = w.cluster_id.to_string().into();
+
+        let mut local = self.locality.0.unwrap_or_default();
+        local.destination_region = w.locality.region.clone().into();
+        local.destination_zone = w.locality.zone.clone().into();
+        self.locality = OptionallyEncode(Some(local));
+
         self
     }
 
@@ -208,6 +230,30 @@ pub struct CommonTrafficLabels {
     request_protocol: RequestProtocol,
     response_flags: ResponseFlags,
     connection_security_policy: SecurityPolicy,
+
+    #[prometheus(flatten)]
+    locality: OptionallyEncode<LocalityLabels>,
+}
+
+/// OptionallyEncode is a wrapper that will optionally encode the entire label set.
+/// This differs from something like DefaultedUnknown which handles only the value - this makes the
+/// entire label not show up.
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq)]
+struct OptionallyEncode<T>(Option<T>);
+impl<T: EncodeLabelSet> EncodeLabelSet for OptionallyEncode<T> {
+    fn encode(&self, encoder: LabelSetEncoder) -> Result<(), std::fmt::Error> {
+        match &self.0 {
+            None => Ok(()),
+            Some(ll) => ll.encode(encoder),
+        }
+    }
+}
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
+struct LocalityLabels {
+    source_region: DefaultedUnknown<RichStrng>,
+    source_zone: DefaultedUnknown<RichStrng>,
+    destination_region: DefaultedUnknown<RichStrng>,
+    destination_zone: DefaultedUnknown<RichStrng>,
 }
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
