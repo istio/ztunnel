@@ -259,13 +259,12 @@ impl Inbound {
                             }
                         }
                     };
-                    // TODO(jaellio): Also include port?
-                    let svc_hostname: Option<Strng> = ri.hbone_addr.svc_hostname();
+                    let hostname_addr: Option<Strng> = ri.hbone_addr.hostname_addr();
                     super::write_proxy_protocol(
                         &mut stream,
                         (src, protocol_addr),
                         src_identity,
-                        svc_hostname,
+                        hostname_addr,
                     )
                     .instrument(trace_span!("proxy protocol"))
                     .await?;
@@ -362,9 +361,8 @@ impl Inbound {
         }
 
         // Determine the next hop.
-        let hbone_addr_clone = hbone_addr.clone();
         let (upstream_addr, inbound_protocol, upstream_service) =
-            Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, hbone_addr_clone);
+            Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, hbone_addr.port());
 
         let original_dst = conn.dst;
         // Connection has 15008, swap with the real port
@@ -571,9 +569,9 @@ impl Inbound {
         state: &DemandProxyState,
         conn: &Connection,
         local_workload: &Workload,
-        hbone_addr: HboneAddress,
+        hbone_port: u16,
     ) -> (SocketAddr, AppProtocol, Vec<Arc<Service>>) {
-        let upstream_addr = SocketAddr::new(conn.dst.ip(), hbone_addr.port());
+        let upstream_addr = SocketAddr::new(conn.dst.ip(), hbone_port);
 
         // Application tunnel may override the port.
         let (upstream_addr, inbound_protocol) = match local_workload.application_tunnel.clone() {
@@ -746,7 +744,7 @@ mod tests {
             };
         let validate_destination =
             Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr.clone()).await;
-        let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr.clone());
+        let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr.port());
 
         match want {
             Some((ip, port)) => {

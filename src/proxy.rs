@@ -500,7 +500,7 @@ pub async fn write_proxy_protocol<T>(
     stream: &mut TcpStream,
     addresses: T,
     src_id: Option<Identity>,
-    svc_hostname: Option<Strng>,
+    hostname_addr: Option<Strng>,
 ) -> io::Result<()>
 where
     T: Into<ppp::v2::Addresses> + std::fmt::Debug,
@@ -521,7 +521,7 @@ where
     }
 
     // svc_hostname is None when the hbone_addr does not contain a svc hostname.
-    if let Some(svc_host) = svc_hostname {
+    if let Some(svc_host) = hostname_addr {
         builder = builder.write_tlv(PROXY_PROTOCOL_SVC_HOSTNAME_TLV, svc_host.as_bytes())?;
     }
 
@@ -826,6 +826,13 @@ impl HboneAddress {
         match self {
             HboneAddress::SocketAddr(_) => None,
             HboneAddress::SvcHostname(s, _) => Some(s.into()),
+        }
+    }
+
+    pub fn hostname_addr(&self) -> Option<Strng> {
+        match self {
+            HboneAddress::SocketAddr(_) => None,
+            HboneAddress::SvcHostname(_, _) => Some(Strng::from(self.to_string())),
         }
     }
 }
