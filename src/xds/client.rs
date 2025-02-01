@@ -215,6 +215,8 @@ pub struct Config {
 
     /// alt_hostname provides an alternative accepted SAN for the control plane TLS verification
     alt_hostname: Option<String>,
+
+    xds_headers: HashMap<String, String>,
 }
 
 pub struct State {
@@ -262,6 +264,7 @@ impl Config {
             on_demand: config.xds_on_demand,
             proxy_metadata: config.proxy_metadata.clone(),
             alt_hostname: config.alt_xds_hostname.clone(),
+            xds_headers: config.xds_headers.clone(),
         }
     }
 
@@ -628,9 +631,17 @@ impl AdsClient {
                 .await?,
         )?;
 
+        let mut req = tonic::Request::new(outbound);
+        self.config.xds_headers.iter().for_each(|(k,v)| {
+            let key: tonic::metadata::MetadataKey<_> =  k.as_str().parse().unwrap();
+            let value: tonic::metadata::MetadataValue<_> = v.as_str().parse().unwrap();
+            req.metadata_mut().insert(key.clone(), value.clone());
+            debug!("XDS header added: {}={}", k, v);
+        });
+
         let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)
             .max_decoding_message_size(200 * 1024 * 1024)
-            .delta_aggregated_resources(tonic::Request::new(outbound))
+            .delta_aggregated_resources(req)
             .await;
 
         let mut response_stream = ads_connection
