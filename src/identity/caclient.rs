@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use prost_types::value::Kind;
 use prost_types::Struct;
-
-use tracing::{error, instrument, warn};
+use tonic::IntoRequest;
+use tracing::{debug, error, instrument, warn};
 
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
@@ -31,6 +31,7 @@ pub struct CaClient {
     pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
     pub enable_impersonated_identity: bool,
     pub secret_ttl: i64,
+    headers: HashMap<String, String>,
 }
 
 impl CaClient {
@@ -41,6 +42,7 @@ impl CaClient {
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
+        headers: HashMap<String, String>,
     ) -> Result<CaClient, Error> {
         let svc =
             tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
@@ -49,6 +51,7 @@ impl CaClient {
             client,
             enable_impersonated_identity,
             secret_ttl,
+            headers,
         })
     }
 }
@@ -63,7 +66,7 @@ impl CaClient {
         let csr = cs.csr;
         let private_key = cs.private_key;
 
-        let req = IstioCertificateRequest {
+        let mut req = tonic::Request::new(IstioCertificateRequest {
             csr,
             validity_duration: self.secret_ttl,
             metadata: {
@@ -80,11 +83,18 @@ impl CaClient {
                     None
                 }
             },
-        };
+        });
+        self.headers.iter().for_each(|(k, v)| {
+            let key: tonic::metadata::MetadataKey<_> = k.as_str().parse().unwrap();
+            let value: tonic::metadata::MetadataValue<_> = v.as_str().parse().unwrap();
+            req.metadata_mut().insert(key.clone(), value.clone());
+            debug!("CA header added: {}={}", k, v);
+        });
+
         let resp = self
             .client
             .clone()
-            .create_certificate(req)
+            .create_certificate(req.into_request())
             .await
             .map_err(Box::new)?
             .into_inner();

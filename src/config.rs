@@ -88,6 +88,9 @@ const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
 const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 
+const ISTIO_XDS_HEADER_PREFIX: &str = "XDS_HEADER_";
+const ISTIO_CA_HEADER_PREFIX: &str = "CA_HEADER_";
+
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
@@ -246,6 +249,12 @@ pub struct Config {
     pub packet_mark: Option<u32>,
 
     pub socket_config: SocketConfig,
+
+    // Headers to be added to XDS discovery request
+    pub xds_headers: HashMap<String, String>,
+
+    // Headers to be added to certificate request
+    pub ca_headers: HashMap<String, String>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -676,6 +685,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             }
         }),
         fake_self_inbound: false,
+        xds_headers: env::vars()
+            .filter(|(key, _)| key.starts_with(ISTIO_XDS_HEADER_PREFIX))
+            .map(|(key, val)| (key.trim_start_matches(ISTIO_XDS_HEADER_PREFIX).to_string(), val))
+            .collect(),
+        ca_headers: env::vars()
+            .filter(|(key, _)| key.starts_with(ISTIO_CA_HEADER_PREFIX))
+            .map(|(key, val)| (key.trim_start_matches(ISTIO_CA_HEADER_PREFIX).to_string(), val))
+            .collect(),
     })
 }
 
