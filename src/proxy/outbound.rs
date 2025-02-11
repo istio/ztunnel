@@ -28,11 +28,11 @@ use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{BAGGAGE_HEADER, Error, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util};
-use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics, pool};
+use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics};
 
 use crate::drain::DrainWatcher;
 use crate::drain::run_with_drain;
-use crate::proxy::h2::H2Stream;
+use crate::proxy::h2::{H2Stream, client::WorkloadKey};
 use crate::state::ServiceResolutionMode;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::{NetworkAddress, Protocol, Workload, address::Address};
@@ -239,7 +239,7 @@ impl OutboundConnection {
             .body(())
             .expect("builder with known status code should not fail");
 
-        let pool_key = Box::new(pool::WorkloadKey {
+        let pool_key = Box::new(WorkloadKey {
             src_id: req.source.identity(),
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
             // But that
@@ -485,8 +485,8 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::proxy::LocalWorkloadInformation;
     use crate::proxy::connection_manager::ConnectionManager;
+    use crate::proxy::{LocalWorkloadInformation, pool::WorkloadHBONEPool};
     use crate::state::WorkloadInfo;
     use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
@@ -582,7 +582,7 @@ mod tests {
                 resolver: None,
             }),
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(
+            pool: WorkloadHBONEPool::new(
                 cfg.clone(),
                 sock_fact,
                 local_workload_information.clone(),
