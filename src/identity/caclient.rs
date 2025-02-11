@@ -31,7 +31,7 @@ pub struct CaClient {
     pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
     pub enable_impersonated_identity: bool,
     pub secret_ttl: i64,
-    headers: HashMap<String, String>,
+    ca_headers: HashMap<String, String>,
 }
 
 impl CaClient {
@@ -42,7 +42,7 @@ impl CaClient {
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
-        headers: HashMap<String, String>,
+        ca_headers: HashMap<String, String>,
     ) -> Result<CaClient, Error> {
         let svc =
             tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
@@ -51,7 +51,7 @@ impl CaClient {
             client,
             enable_impersonated_identity,
             secret_ttl,
-            headers,
+            ca_headers,
         })
     }
 }
@@ -84,7 +84,7 @@ impl CaClient {
                 }
             },
         });
-        self.headers.iter().for_each(|(k, v)| {
+        self.ca_headers.iter().for_each(|(k, v)| {
             let key: tonic::metadata::MetadataKey<_> = k.as_str().parse().unwrap();
             let value: tonic::metadata::MetadataValue<_> = v.as_str().parse().unwrap();
             req.metadata_mut().insert(key.clone(), value.clone());

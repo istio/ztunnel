@@ -215,7 +215,6 @@ pub struct Config {
 
     /// alt_hostname provides an alternative accepted SAN for the control plane TLS verification
     alt_hostname: Option<String>,
-
     xds_headers: HashMap<String, String>,
 }
 

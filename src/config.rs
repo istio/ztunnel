@@ -250,10 +250,10 @@ pub struct Config {
 
     pub socket_config: SocketConfig,
 
-    // Headers to be added to XDS discovery request
+    // Headers to be added to XDS discovery requests
     pub xds_headers: HashMap<String, String>,
 
-    // Headers to be added to certificate request
+    // Headers to be added to certificate requests
     pub ca_headers: HashMap<String, String>,
 }
 
@@ -929,6 +929,9 @@ pub mod tests {
         env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
         env::set_var("NOT_INCLUDE", "not-include");
         env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
+        env::set_var("XDS_HEADER_HEADER_FOO", "foo");
+        env::set_var("XDS_HEADER_HEADER_BAR", "bar");
+        env::set_var("CA_HEADER_HEADER_BAZ", "baz");
 
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
@@ -942,7 +945,14 @@ pub mod tests {
         );
         assert_eq!(cfg.proxy_metadata["BAR"], "bar");
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
+        assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
+        assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata.get("NOT_INCLUDE"), None);
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
         assert_eq!(cfg.cluster_id, "test-cluster");
+        assert_eq!(cfg.xds_headers["HEADER_FOO"], "foo");
+        assert_eq!(cfg.xds_headers["HEADER_BAR"], "bar");
+        assert_eq!(cfg.ca_headers["HEADER_BAZ"], "baz");
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
@@ -957,5 +967,10 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
         assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
         assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
+        assert_eq!(cfg.cluster_id, "test-cluster");
+        assert_eq!(cfg.xds_headers["HEADER_FOO"], "foo");
+        assert_eq!(cfg.xds_headers["HEADER_BAR"], "bar");
+        assert_eq!(cfg.ca_headers["HEADER_BAZ"], "baz");
     }
 }
