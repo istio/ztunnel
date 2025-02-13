@@ -687,11 +687,21 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         fake_self_inbound: false,
         xds_headers: env::vars()
             .filter(|(key, _)| key.starts_with(ISTIO_XDS_HEADER_PREFIX))
-            .map(|(key, val)| (key.trim_start_matches(ISTIO_XDS_HEADER_PREFIX).to_string(), val))
+            .map(|(key, val)| {
+                (
+                    key.trim_start_matches(ISTIO_XDS_HEADER_PREFIX).to_string(),
+                    val,
+                )
+            })
             .collect(),
         ca_headers: env::vars()
             .filter(|(key, _)| key.starts_with(ISTIO_CA_HEADER_PREFIX))
-            .map(|(key, val)| (key.trim_start_matches(ISTIO_CA_HEADER_PREFIX).to_string(), val))
+            .map(|(key, val)| {
+                (
+                    key.trim_start_matches(ISTIO_CA_HEADER_PREFIX).to_string(),
+                    val,
+                )
+            })
             .collect(),
     })
 }

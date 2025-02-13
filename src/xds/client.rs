@@ -631,8 +631,8 @@ impl AdsClient {
         )?;
 
         let mut req = tonic::Request::new(outbound);
-        self.config.xds_headers.iter().for_each(|(k,v)| {
-            let key: tonic::metadata::MetadataKey<_> =  k.as_str().parse().unwrap();
+        self.config.xds_headers.iter().for_each(|(k, v)| {
+            let key: tonic::metadata::MetadataKey<_> = k.as_str().parse().unwrap();
             let value: tonic::metadata::MetadataValue<_> = v.as_str().parse().unwrap();
             req.metadata_mut().insert(key.clone(), value.clone());
             debug!("XDS header added: {}={}", k, v);
