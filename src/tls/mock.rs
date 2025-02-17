@@ -107,7 +107,7 @@ pub fn generate_test_certs_at(
     let serial_number = {
         let mut data = [0u8; 20];
         match rng {
-            None => rand::thread_rng().fill_bytes(&mut data),
+            None => rand::rng().fill_bytes(&mut data),
             Some(rng) => rng.fill_bytes(&mut data),
         }
         // Clear the most significant bit to make the resulting bignum effectively 159 bit long.
