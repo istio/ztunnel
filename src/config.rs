@@ -88,6 +88,9 @@ const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
 const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 
+const ISTIO_XDS_HEADER_PREFIX: &str = "XDS_HEADER_";
+const ISTIO_CA_HEADER_PREFIX: &str = "CA_HEADER_";
+
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
@@ -246,6 +249,12 @@ pub struct Config {
     pub packet_mark: Option<u32>,
 
     pub socket_config: SocketConfig,
+
+    // Headers to be added to XDS discovery requests
+    pub xds_headers: HashMap<String, String>,
+
+    // Headers to be added to certificate requests
+    pub ca_headers: HashMap<String, String>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -676,6 +685,24 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             }
         }),
         fake_self_inbound: false,
+        xds_headers: env::vars()
+            .filter(|(key, _)| key.starts_with(ISTIO_XDS_HEADER_PREFIX))
+            .map(|(key, val)| {
+                (
+                    key.trim_start_matches(ISTIO_XDS_HEADER_PREFIX).to_string(),
+                    val,
+                )
+            })
+            .collect(),
+        ca_headers: env::vars()
+            .filter(|(key, _)| key.starts_with(ISTIO_CA_HEADER_PREFIX))
+            .map(|(key, val)| {
+                (
+                    key.trim_start_matches(ISTIO_CA_HEADER_PREFIX).to_string(),
+                    val,
+                )
+            })
+            .collect(),
     })
 }
 
@@ -912,6 +939,9 @@ pub mod tests {
         env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
         env::set_var("NOT_INCLUDE", "not-include");
         env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
+        env::set_var("XDS_HEADER_HEADER_FOO", "foo");
+        env::set_var("XDS_HEADER_HEADER_BAR", "bar");
+        env::set_var("CA_HEADER_HEADER_BAZ", "baz");
 
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
@@ -925,7 +955,14 @@ pub mod tests {
         );
         assert_eq!(cfg.proxy_metadata["BAR"], "bar");
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
+        assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
+        assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata.get("NOT_INCLUDE"), None);
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
         assert_eq!(cfg.cluster_id, "test-cluster");
+        assert_eq!(cfg.xds_headers["HEADER_FOO"], "foo");
+        assert_eq!(cfg.xds_headers["HEADER_BAR"], "bar");
+        assert_eq!(cfg.ca_headers["HEADER_BAZ"], "baz");
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
@@ -940,5 +977,10 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
         assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
         assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
+        assert_eq!(cfg.cluster_id, "test-cluster");
+        assert_eq!(cfg.xds_headers["HEADER_FOO"], "foo");
+        assert_eq!(cfg.xds_headers["HEADER_BAR"], "bar");
+        assert_eq!(cfg.ca_headers["HEADER_BAZ"], "baz");
     }
 }

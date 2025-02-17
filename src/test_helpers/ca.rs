@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -86,6 +87,7 @@ impl CaServer {
             ),
             true,
             60 * 60 * 24,
+            HashMap::new(),
         )
         .await
         .unwrap();
