@@ -414,9 +414,9 @@ impl ProxyState {
                     .into_iter()
                     .filter(|(rank, _ep, _wl)| *rank == max)
                     .map(|(_, ep, wl)| (ep, wl))
-                    .choose(&mut rand::thread_rng())
+                    .choose(&mut rand::rng())
             }
-            _ => endpoints.choose(&mut rand::thread_rng()),
+            _ => endpoints.choose(&mut rand::rng()),
         }
     }
 }
@@ -636,8 +636,8 @@ impl DemandProxyState {
         // Without this, we run into trouble in pure v4 or pure v6 environments.
         matching
             .into_iter()
-            .choose(&mut rand::thread_rng())
-            .or_else(|| unmatching.into_iter().choose(&mut rand::thread_rng()))
+            .choose(&mut rand::rng())
+            .or_else(|| unmatching.into_iter().choose(&mut rand::rng()))
             .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
     }
 

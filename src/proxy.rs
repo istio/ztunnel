@@ -529,11 +529,11 @@ impl TraceParent {
 }
 impl TraceParent {
     fn new() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         Self {
             version: 0,
-            trace_id: rng.gen(),
-            parent_id: rng.gen(),
+            trace_id: rng.random(),
+            parent_id: rng.random(),
             flags: 0,
         }
     }

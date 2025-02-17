@@ -547,8 +547,8 @@ mod tests {
             if buf.is_empty() {
                 return Poll::Ready(Ok(0));
             }
-            let mut rng = rand::thread_rng();
-            let end = rng.gen_range(1..=buf.len()); // Ensure at least 1 byte is written
+            let mut rng = rand::rng();
+            let end = rng.random_range(1..=buf.len()); // Ensure at least 1 byte is written
             Pin::new(&mut self.0).poll_write(cx, &buf[0..end])
         }
 

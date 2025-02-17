@@ -23,8 +23,8 @@ use hickory_server::server::Request;
 use hickory_server::ServerFuture;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
+use rand::rng;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
@@ -457,7 +457,7 @@ impl Store {
         };
 
         // Randomize the order of the returned addresses.
-        addrs.shuffle(&mut thread_rng());
+        addrs.shuffle(&mut rng());
 
         addrs
     }
