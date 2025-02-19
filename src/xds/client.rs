@@ -635,11 +635,8 @@ impl AdsClient {
         self.config.xds_headers.iter().for_each(|(k, v)| {
             req.metadata_mut().insert(k.clone(), v.clone());
 
-            match v.to_str() {
-                Ok(v_str) => {
-                    debug!("XDS header added: {}={}", k, v_str);
-                }
-                _ => {}
+            if let Ok(v_str) = v.to_str() {
+                debug!("XDS header added: {}={}", k, v_str);
             }
         });
 

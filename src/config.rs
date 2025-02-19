@@ -380,7 +380,7 @@ fn parse_headers(prefix: &str) -> Result<MetadataVector, Error> {
         match stripped_key {
             Some(stripped_key) => {
                 // attempt to parse the stripped key
-                match AsciiMetadataKey::from_str(&stripped_key) {
+                match AsciiMetadataKey::from_str(stripped_key) {
                     Ok(metadata_key) => {
                         // attempt to parse the value
                         match AsciiMetadataValue::from_str(&value) {
