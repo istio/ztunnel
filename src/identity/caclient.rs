@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use prost_types::value::Kind;
 use prost_types::Struct;
-use tonic::IntoRequest;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
+use tonic::IntoRequest;
 use tracing::{debug, error, instrument, warn};
 
 use crate::identity::auth::AuthSource;
