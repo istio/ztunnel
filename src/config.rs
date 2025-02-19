@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::ser::SerializeSeq;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -20,7 +21,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, env, fs};
-use serde::ser::SerializeSeq;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 
 use anyhow::anyhow;
@@ -149,7 +149,8 @@ impl serde::Serialize for MetadataVector {
     where
         S: serde::Serializer,
     {
-        let mut seq: <S as serde::Serializer>::SerializeSeq = serializer.serialize_seq(Some(self.vec.len()))?;
+        let mut seq: <S as serde::Serializer>::SerializeSeq =
+            serializer.serialize_seq(Some(self.vec.len()))?;
 
         for (k, v) in &self.vec {
             let serialized_key = k.to_string();
@@ -159,7 +160,9 @@ impl serde::Serialize for MetadataVector {
                     seq.serialize_element(&(serialized_key, serialized_val))?;
                 }
                 Err(_) => {
-                    return Err(serde::ser::Error::custom("failed to serialize metadata value"));
+                    return Err(serde::ser::Error::custom(
+                        "failed to serialize metadata value",
+                    ));
                 }
             }
         }
@@ -369,7 +372,7 @@ fn parse_args() -> String {
     cli_args[1..].join(" ")
 }
 
-fn parse_headers(prefix: &str,) -> Result<MetadataVector, Error> {
+fn parse_headers(prefix: &str) -> Result<MetadataVector, Error> {
     let mut metadata: MetadataVector = MetadataVector { vec: Vec::new() };
 
     for (key, value) in env::vars() {
@@ -401,7 +404,6 @@ fn parse_headers(prefix: &str,) -> Result<MetadataVector, Error> {
     }
 
     Ok(metadata)
-
 }
 
 pub fn parse_config() -> Result<Config, Error> {
@@ -1021,15 +1023,9 @@ pub mod tests {
         let mut expected_ca_headers = HashMap::new();
         expected_ca_headers.insert("HEADER_BAZ".to_string(), "baz".to_string());
 
-        validate_metadata_vector(
-            &cfg.xds_headers,
-            expected_xds_headers.clone(),
-        );
+        validate_metadata_vector(&cfg.xds_headers, expected_xds_headers.clone());
 
-        validate_metadata_vector(
-            &cfg.ca_headers,
-            expected_ca_headers.clone(),
-        );
+        validate_metadata_vector(&cfg.ca_headers, expected_ca_headers.clone());
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
@@ -1047,15 +1043,9 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
         assert_eq!(cfg.cluster_id, "test-cluster");
 
-        validate_metadata_vector(
-            &cfg.xds_headers,
-            expected_xds_headers.clone(),
-        );
+        validate_metadata_vector(&cfg.xds_headers, expected_xds_headers.clone());
 
-        validate_metadata_vector(
-            &cfg.ca_headers,
-            expected_ca_headers.clone(),
-        );
+        validate_metadata_vector(&cfg.ca_headers, expected_ca_headers.clone());
     }
 
     fn validate_metadata_vector(metadata: &MetadataVector, header_map: HashMap<String, String>) {
