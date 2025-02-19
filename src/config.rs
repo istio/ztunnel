@@ -1052,7 +1052,7 @@ pub mod tests {
         for (k, v) in header_map {
             let key: AsciiMetadataKey = AsciiMetadataKey::from_str(&k).unwrap();
             let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
-            assert_eq!(metadata.vec.contains(&(key, value)), true);
+            assert!(metadata.vec.contains(&(key, value)));
         }
     }
 }
