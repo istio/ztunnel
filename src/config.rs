@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::ser::SerializeSeq;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -20,6 +21,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, env, fs};
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -88,6 +90,9 @@ const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
 const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 
+const ISTIO_XDS_HEADER_PREFIX: &str = "XDS_HEADER_";
+const ISTIO_CA_HEADER_PREFIX: &str = "CA_HEADER_";
+
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
@@ -132,6 +137,37 @@ pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
+}
+
+#[derive(Clone, Debug)]
+pub struct MetadataVector {
+    pub vec: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
+}
+
+impl serde::Serialize for MetadataVector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq: <S as serde::Serializer>::SerializeSeq =
+            serializer.serialize_seq(Some(self.vec.len()))?;
+
+        for (k, v) in &self.vec {
+            let serialized_key = k.to_string();
+
+            match v.to_str() {
+                Ok(serialized_val) => {
+                    seq.serialize_element(&(serialized_key, serialized_val))?;
+                }
+                Err(_) => {
+                    return Err(serde::ser::Error::custom(
+                        "failed to serialize metadata value",
+                    ));
+                }
+            }
+        }
+        seq.end()
+    }
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -246,6 +282,12 @@ pub struct Config {
     pub packet_mark: Option<u32>,
 
     pub socket_config: SocketConfig,
+
+    // Headers to be added to XDS discovery requests
+    pub xds_headers: MetadataVector,
+
+    // Headers to be added to certificate requests
+    pub ca_headers: MetadataVector,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -281,6 +323,10 @@ pub enum Error {
     InvalidUri(#[from] Arc<InvalidUri>),
     #[error("invalid configuration: {0}")]
     InvalidState(String),
+    #[error("failed to parse header key: {0}")]
+    InvalidHeaderKey(String),
+    #[error("failed to parse header value: {0}")]
+    InvalidHeaderValue(String),
 }
 
 impl From<InvalidUri> for Error {
@@ -324,6 +370,40 @@ fn parse_duration_default(env: &str, default: Duration) -> Result<Duration, Erro
 fn parse_args() -> String {
     let cli_args: Vec<String> = env::args().collect();
     cli_args[1..].join(" ")
+}
+
+fn parse_headers(prefix: &str) -> Result<MetadataVector, Error> {
+    let mut metadata: MetadataVector = MetadataVector { vec: Vec::new() };
+
+    for (key, value) in env::vars() {
+        let stripped_key: Option<&str> = key.strip_prefix(prefix);
+        match stripped_key {
+            Some(stripped_key) => {
+                // attempt to parse the stripped key
+                match AsciiMetadataKey::from_str(stripped_key) {
+                    Ok(metadata_key) => {
+                        // attempt to parse the value
+                        match AsciiMetadataValue::from_str(&value) {
+                            Ok(metadata_value) => {
+                                metadata.vec.push((metadata_key, metadata_value));
+                            }
+                            Err(_) => {
+                                return Err(Error::InvalidHeaderValue(value));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        return Err(Error::InvalidHeaderKey(key));
+                    }
+                }
+            }
+            None => {
+                continue;
+            }
+        }
+    }
+
+    Ok(metadata)
 }
 
 pub fn parse_config() -> Result<Config, Error> {
@@ -676,6 +756,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             }
         }),
         fake_self_inbound: false,
+        xds_headers: parse_headers(ISTIO_XDS_HEADER_PREFIX)?,
+        ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
     })
 }
 
@@ -912,6 +994,9 @@ pub mod tests {
         env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
         env::set_var("NOT_INCLUDE", "not-include");
         env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
+        env::set_var("XDS_HEADER_HEADER_FOO", "foo");
+        env::set_var("XDS_HEADER_HEADER_BAR", "bar");
+        env::set_var("CA_HEADER_HEADER_BAZ", "baz");
 
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
@@ -925,7 +1010,22 @@ pub mod tests {
         );
         assert_eq!(cfg.proxy_metadata["BAR"], "bar");
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
+        assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
+        assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata.get("NOT_INCLUDE"), None);
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
         assert_eq!(cfg.cluster_id, "test-cluster");
+
+        let mut expected_xds_headers = HashMap::new();
+        expected_xds_headers.insert("HEADER_FOO".to_string(), "foo".to_string());
+        expected_xds_headers.insert("HEADER_BAR".to_string(), "bar".to_string());
+
+        let mut expected_ca_headers = HashMap::new();
+        expected_ca_headers.insert("HEADER_BAZ".to_string(), "baz".to_string());
+
+        validate_metadata_vector(&cfg.xds_headers, expected_xds_headers.clone());
+
+        validate_metadata_vector(&cfg.ca_headers, expected_ca_headers.clone());
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
@@ -940,5 +1040,19 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
         assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
         assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
+        assert_eq!(cfg.cluster_id, "test-cluster");
+
+        validate_metadata_vector(&cfg.xds_headers, expected_xds_headers.clone());
+
+        validate_metadata_vector(&cfg.ca_headers, expected_ca_headers.clone());
+    }
+
+    fn validate_metadata_vector(metadata: &MetadataVector, header_map: HashMap<String, String>) {
+        for (k, v) in header_map {
+            let key: AsciiMetadataKey = AsciiMetadataKey::from_str(&k).unwrap();
+            let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
+            assert!(metadata.vec.contains(&(key, value)));
+        }
     }
 }
