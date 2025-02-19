@@ -20,6 +20,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, env, fs};
+use serde::ser::SerializeSeq;
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -137,6 +139,34 @@ pub enum ProxyMode {
     Dedicated,
 }
 
+#[derive(Clone, Debug)]
+pub struct MetadataVector {
+    pub vec: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
+}
+
+impl serde::Serialize for MetadataVector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq: <S as serde::Serializer>::SerializeSeq = serializer.serialize_seq(Some(self.vec.len()))?;
+
+        for (k, v) in &self.vec {
+            let serialized_key = k.to_string();
+
+            match v.to_str() {
+                Ok(serialized_val) => {
+                    seq.serialize_element(&(serialized_key, serialized_val))?;
+                }
+                Err(_) => {
+                    return Err(serde::ser::Error::custom("failed to serialize metadata value"));
+                }
+            }
+        }
+        seq.end()
+    }
+}
+
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -251,10 +281,10 @@ pub struct Config {
     pub socket_config: SocketConfig,
 
     // Headers to be added to XDS discovery requests
-    pub xds_headers: HashMap<String, String>,
+    pub xds_headers: MetadataVector,
 
     // Headers to be added to certificate requests
-    pub ca_headers: HashMap<String, String>,
+    pub ca_headers: MetadataVector,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -290,6 +320,10 @@ pub enum Error {
     InvalidUri(#[from] Arc<InvalidUri>),
     #[error("invalid configuration: {0}")]
     InvalidState(String),
+    #[error("failed to parse header key: {0}")]
+    InvalidHeaderKey(String),
+    #[error("failed to parse header value: {0}")]
+    InvalidHeaderValue(String),
 }
 
 impl From<InvalidUri> for Error {
@@ -333,6 +367,41 @@ fn parse_duration_default(env: &str, default: Duration) -> Result<Duration, Erro
 fn parse_args() -> String {
     let cli_args: Vec<String> = env::args().collect();
     cli_args[1..].join(" ")
+}
+
+fn parse_headers(prefix: &str,) -> Result<MetadataVector, Error> {
+    let mut metadata: MetadataVector = MetadataVector { vec: Vec::new() };
+
+    for (key, value) in env::vars() {
+        let stripped_key: Option<&str> = key.strip_prefix(prefix);
+        match stripped_key {
+            Some(stripped_key) => {
+                // attempt to parse the stripped key
+                match AsciiMetadataKey::from_str(&stripped_key) {
+                    Ok(metadata_key) => {
+                        // attempt to parse the value
+                        match AsciiMetadataValue::from_str(&value) {
+                            Ok(metadata_value) => {
+                                metadata.vec.push((metadata_key, metadata_value));
+                            }
+                            Err(_) => {
+                                return Err(Error::InvalidHeaderValue(value));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        return Err(Error::InvalidHeaderKey(key));
+                    }
+                }
+            }
+            None => {
+                continue;
+            }
+        }
+    }
+
+    Ok(metadata)
+
 }
 
 pub fn parse_config() -> Result<Config, Error> {
@@ -685,24 +754,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             }
         }),
         fake_self_inbound: false,
-        xds_headers: env::vars()
-            .filter(|(key, _)| key.starts_with(ISTIO_XDS_HEADER_PREFIX))
-            .map(|(key, val)| {
-                (
-                    key.trim_start_matches(ISTIO_XDS_HEADER_PREFIX).to_string(),
-                    val,
-                )
-            })
-            .collect(),
-        ca_headers: env::vars()
-            .filter(|(key, _)| key.starts_with(ISTIO_CA_HEADER_PREFIX))
-            .map(|(key, val)| {
-                (
-                    key.trim_start_matches(ISTIO_CA_HEADER_PREFIX).to_string(),
-                    val,
-                )
-            })
-            .collect(),
+        xds_headers: parse_headers(ISTIO_XDS_HEADER_PREFIX)?,
+        ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
     })
 }
 
@@ -960,9 +1013,23 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata.get("NOT_INCLUDE"), None);
         assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
         assert_eq!(cfg.cluster_id, "test-cluster");
-        assert_eq!(cfg.xds_headers["HEADER_FOO"], "foo");
-        assert_eq!(cfg.xds_headers["HEADER_BAR"], "bar");
-        assert_eq!(cfg.ca_headers["HEADER_BAZ"], "baz");
+
+        let mut expected_xds_headers = HashMap::new();
+        expected_xds_headers.insert("HEADER_FOO".to_string(), "foo".to_string());
+        expected_xds_headers.insert("HEADER_BAR".to_string(), "bar".to_string());
+
+        let mut expected_ca_headers = HashMap::new();
+        expected_ca_headers.insert("HEADER_BAZ".to_string(), "baz".to_string());
+
+        validate_metadata_vector(
+            &cfg.xds_headers,
+            expected_xds_headers.clone(),
+        );
+
+        validate_metadata_vector(
+            &cfg.ca_headers,
+            expected_ca_headers.clone(),
+        );
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
@@ -979,8 +1046,23 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
         assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
         assert_eq!(cfg.cluster_id, "test-cluster");
-        assert_eq!(cfg.xds_headers["HEADER_FOO"], "foo");
-        assert_eq!(cfg.xds_headers["HEADER_BAR"], "bar");
-        assert_eq!(cfg.ca_headers["HEADER_BAZ"], "baz");
+
+        validate_metadata_vector(
+            &cfg.xds_headers,
+            expected_xds_headers.clone(),
+        );
+
+        validate_metadata_vector(
+            &cfg.ca_headers,
+            expected_ca_headers.clone(),
+        );
+    }
+
+    fn validate_metadata_vector(metadata: &MetadataVector, header_map: HashMap<String, String>) {
+        for (k, v) in header_map {
+            let key: AsciiMetadataKey = AsciiMetadataKey::from_str(&k).unwrap();
+            let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
+            assert_eq!(metadata.vec.contains(&(key, value)), true);
+        }
     }
 }
