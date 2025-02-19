@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::IntoRequest;
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tracing::{debug, error, instrument, warn};
 
 use crate::identity::auth::AuthSource;
@@ -31,7 +32,7 @@ pub struct CaClient {
     pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
     pub enable_impersonated_identity: bool,
     pub secret_ttl: i64,
-    ca_headers: HashMap<String, String>,
+    ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
 }
 
 impl CaClient {
@@ -42,7 +43,7 @@ impl CaClient {
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
-        ca_headers: HashMap<String, String>,
+        ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
     ) -> Result<CaClient, Error> {
         let svc =
             tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
@@ -85,10 +86,14 @@ impl CaClient {
             },
         });
         self.ca_headers.iter().for_each(|(k, v)| {
-            let key: tonic::metadata::MetadataKey<_> = k.as_str().parse().unwrap();
-            let value: tonic::metadata::MetadataValue<_> = v.as_str().parse().unwrap();
-            req.metadata_mut().insert(key.clone(), value.clone());
-            debug!("CA header added: {}={}", k, v);
+            req.metadata_mut().insert(k.clone(), v.clone());
+
+            match v.to_str() {
+                Ok(v_str) => {
+                    debug!("CA header added: {}={}", k, v_str);
+                }
+                _ => {}
+            }
         });
 
         let resp = self
