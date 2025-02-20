@@ -4,7 +4,7 @@ targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
 ]
-features = ["tls-boring", "tls-ring"]
+features = ["tls-boring", "tls-ring", "tls-openssl" ]
 
 [advisories]
 version = 2

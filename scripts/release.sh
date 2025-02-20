@@ -31,6 +31,8 @@ if [[ "$TLS_MODE" == "boring" ]]; then
     sed -i 's/x86_64/arm64/g' .cargo/config.toml
   fi
   cargo build --release --no-default-features -F tls-boring
+elif [[ "$TLS_MODE" == "openssl" ]]; then
+  cargo build --release --no-default-features -F tls-openssl
 else
   cargo build --release
 fi
