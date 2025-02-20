@@ -31,6 +31,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::strng::Strng;
 use crate::tls;
@@ -163,19 +164,16 @@ pub struct OutboundConnector {
 }
 
 impl OutboundConnector {
-    pub async fn connect(
+    pub async fn connect<IO>(
         self,
-        stream: TcpStream,
-    ) -> Result<client::TlsStream<TcpStream>, io::Error> {
-        let dest = ServerName::IpAddress(
-            stream
-                .peer_addr()
-                .expect("peer_addr must be set")
-                .ip()
-                .into(),
-        );
+        stream: IO,
+        domain: ServerName<'static>,
+    ) -> Result<client::TlsStream<IO>, io::Error>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         let c = tokio_rustls::TlsConnector::from(self.client_config);
-        c.connect(dest, stream).await
+        c.connect(domain, stream).await
     }
 }
 
@@ -277,6 +275,7 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // Ok(HandshakeSignatureValid::assertion())
         rustls::crypto::verify_tls12_signature(
             message,
             cert,
@@ -291,6 +290,7 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // Ok(HandshakeSignatureValid::assertion())
         rustls::crypto::verify_tls13_signature(
             message,
             cert,

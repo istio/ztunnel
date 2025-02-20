@@ -48,6 +48,7 @@ pub enum Protocol {
     #[default]
     TCP,
     HBONE,
+    DOUBLEHBONE,
 }
 
 impl From<xds::istio::workload::TunnelProtocol> for Protocol {
