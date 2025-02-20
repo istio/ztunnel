@@ -380,26 +380,14 @@ fn parse_headers(prefix: &str) -> Result<MetadataVector, Error> {
         match stripped_key {
             Some(stripped_key) => {
                 // attempt to parse the stripped key
-                match AsciiMetadataKey::from_str(stripped_key) {
-                    Ok(metadata_key) => {
-                        // attempt to parse the value
-                        match AsciiMetadataValue::from_str(&value) {
-                            Ok(metadata_value) => {
-                                metadata.vec.push((metadata_key, metadata_value));
-                            }
-                            Err(_) => {
-                                return Err(Error::InvalidHeaderValue(value));
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        return Err(Error::InvalidHeaderKey(key));
-                    }
-                }
+                let metadata_key = AsciiMetadataKey::from_str(stripped_key)
+                    .map_err(|_| Error::InvalidHeaderKey(key))?;
+                // attempt to parse the value
+                let metadata_value = AsciiMetadataValue::from_str(&value)
+                    .map_err(|_| Error::InvalidHeaderValue(value))?;
+                metadata.vec.push((metadata_key, metadata_value));
             }
-            None => {
-                continue;
-            }
+            None => continue,
         }
     }
 
