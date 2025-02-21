@@ -21,6 +21,7 @@ use crate::{config, socket};
 pub struct InPodConfig {
     cur_namespace: u32,
     reuse_port: bool, // TODO: Not supported in windows so always must be false
+    socket_config: config::SocketConfig,
 }
 
 impl InPodConfig {
@@ -30,16 +31,22 @@ impl InPodConfig {
                 "SO_REUSEPORT is not supported in windows",
             ));
         }
+        let socket_config = config::SocketConfig {
+            user_timeout_enabled: false, // Not supported on windows
+            ..cfg.socket_config
+        };
         Ok(InPodConfig {
             cur_namespace: InpodNamespace::current()?,
             reuse_port: cfg.inpod_port_reuse,
+            socket_config,
         })
     }
     pub fn socket_factory(
         &self,
         netns: InpodNamespace,
     ) -> Box<dyn crate::proxy::SocketFactory + Send + Sync> {
-        let sf = InPodSocketFactory::from_cfg(self, netns);
+        let base = crate::proxy::DefaultSocketFactory(self.socket_config);
+        let sf = InPodSocketFactory::from_cfg(base, self, netns);
         if self.reuse_port {
             // We should never get here
             unreachable!("SO_REUSEPORT is not supported in windows");
@@ -54,14 +61,15 @@ impl InPodConfig {
 }
 
 struct InPodSocketFactory {
+    inner: DefaultSocketFactory,
     netns: InpodNamespace,
 }
 impl InPodSocketFactory {
-    fn from_cfg(inpod_config: &InPodConfig, netns: InpodNamespace) -> Self {
-        Self::new(netns)
+    fn from_cfg(inner: DefaultSocketFactory, _: &InPodConfig, netns: InpodNamespace) -> Self {
+        Self::new(inner, netns)
     }
-    fn new(netns: InpodNamespace) -> Self {
-        Self { netns }
+    fn new(inner: DefaultSocketFactory,netns: InpodNamespace) -> Self {
+        Self {inner, netns }
     }
 
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
@@ -80,15 +88,11 @@ impl InPodSocketFactory {
 
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(
-            || DefaultSocketFactory.new_tcp_v4(),
-        )
+        self.configure(|| self.inner.new_tcp_v4())
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
-        self.configure(
-            || DefaultSocketFactory.new_tcp_v6(),
-        )
+        self.configure(|| self.inner.new_tcp_v6())
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
@@ -107,20 +111,20 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
     }
 
     fn ipv6_enabled_localhost(&self) -> std::io::Result<bool> {
-        self.run_in_ns(|| DefaultSocketFactory.ipv6_enabled_localhost())
+        self.run_in_ns(|| self.inner.ipv6_enabled_localhost())
     }
 }
 
 // Same as socket factory, but sets SO_REUSEPORT
-struct InPodSocketPortReuseFactory {
-    sf: InPodSocketFactory,
-}
+// struct InPodSocketPortReuseFactory {
+//     sf: InPodSocketFactory,
+// }
 
-impl InPodSocketPortReuseFactory {
-    fn new(_: InPodSocketFactory) -> Self {
-        panic!("SO_REUSEPORT is not supported in windows");
-    }
-}
+// impl InPodSocketPortReuseFactory {
+//     fn new(_: InPodSocketFactory) -> Self {
+//         panic!("SO_REUSEPORT is not supported in windows");
+//     }
+// }
 
 // #[cfg(test)]
 // mod test {

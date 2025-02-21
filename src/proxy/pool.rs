@@ -398,7 +398,7 @@ impl WorkloadHBONEPool {
             hash_key,
             self.state
                 .pool_global_conn_count
-                .fetch_add(1, Ordering::SeqCst),
+                .fetch_add(1, Ordering::SeqCst).try_into().unwrap(), // TODO: Check
         );
         // First, see if we can naively take an inner lock for our specific key, and get a connection.
         // This should be the common case, except for the first establishment of a new connection/key.

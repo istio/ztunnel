@@ -52,7 +52,7 @@ spec:
           operator: Exists
       containers:
       - name: istio-proxy
-        image: "istiolocaltesting.azurecr.io/ztunnel-windows:test-21"
+        image: "istiolocaltesting.azurecr.io/ztunnel-windows:test-22"
         resources:
           requests:
             cpu: 200m
@@ -70,13 +70,13 @@ spec:
         - ztunnel
         env:
         - name: ALT_XDS_HOSTNAME
-          value: "istiod-1-23-0.istio-system.svc"
+          value: "istiod-1-25-0.istio-system.svc"
         - name: ALT_CA_HOSTNAME
-          value: "istiod-1-23-0.istio-system.svc"
+          value: "istiod-1-25-0.istio-system.svc"
         - name: USE_ENV_FOR_DEFAULT_ISTIOD_ADDR
           value: "true"
         - name: REVISION
-          value: "1-23-0"
+          value: "1-25-0"
         - name: RUST_LOG
           value: "debug"
         - name: RUST_BACKTRACE

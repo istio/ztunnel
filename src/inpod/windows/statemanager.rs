@@ -287,13 +287,13 @@ impl WorkloadProxyManagerState {
         let metrics = self.metrics.clone();
         let admin_handler = self.admin_handler.clone();
 
-        metrics.proxies_started.get_or_create(&()).inc();
+        metrics.proxies_started.inc();
         if let Some(proxy) = proxies.proxy {
             tokio::spawn(
                 async move {
                     proxy.run().await;
                     debug!("proxy for workload {:?} exited", uid);
-                    metrics.proxies_stopped.get_or_create(&()).inc();
+                    metrics.proxies_stopped.inc();
                     admin_handler.proxy_down(&uid);
                 }
                 .instrument(tracing::info_span!("proxy", wl=%format!("{}/{}", workload_info.namespace, workload_info.name))),
@@ -355,11 +355,9 @@ impl WorkloadProxyManagerState {
     fn update_proxy_count_metrics(&self) {
         self.metrics
             .active_proxy_count
-            .get_or_create(&())
             .set(self.workload_states.len().try_into().unwrap_or(-1));
         self.metrics
             .pending_proxy_count
-            .get_or_create(&())
             .set(self.pending_workloads.len().try_into().unwrap_or(-1));
     }
 }

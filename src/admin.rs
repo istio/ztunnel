@@ -257,7 +257,7 @@ async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<B
 }
 
 #[cfg(target_os = "windows")]
-async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
+async fn _handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
     Ok(Response::builder()
         .status(hyper::StatusCode::NOT_FOUND)
         .body("pprof not supported on non-Linux platforms".into())
@@ -435,7 +435,7 @@ async fn handle_jemalloc_pprof_heapgen(
 }
 
 #[cfg(not(feature = "jemalloc"))]
-async fn handle_jemalloc_pprof_heapgen(
+async fn _handle_jemalloc_pprof_heapgen(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     Ok(Response::builder()

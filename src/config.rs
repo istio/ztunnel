@@ -310,6 +310,7 @@ impl Default for SocketConfig {
             keepalive_retries: 9,
             keepalive_enabled: true,
             // Might be a good idea but for now we haven't proven this out enough.
+            // TODO: Compile out from windows if we turn this on
             user_timeout_enabled: false,
         }
     }
@@ -444,11 +445,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .or(pc.discovery_address)
             .or_else(|| Some(default_istiod_address.clone())),
     ))?;
-    let xds_host = xds_address.as_ref().map(|addr| {
-        addr.clone()
-            .replace("https://", "")
-            .replace("http://", "")
-    });
 
     let istio_meta_cluster_id = ISTIO_META_PREFIX.to_owned() + CLUSTER_ID;
     let cluster_id: String = match parse::<String>(&istio_meta_cluster_id)? {
@@ -462,8 +458,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     }))?;
-
-    let ca_host = ca_address.as_ref().map(|addr| addr.clone().replace("https://", ""));
 
     match parse::<bool>(USE_ENV_FOR_DEFAULT_ISTIOD_ADDR)? {
         Some(true) => {
