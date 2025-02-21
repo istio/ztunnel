@@ -801,7 +801,7 @@ pub fn parse_forwarded_host(input: &str) -> Option<String> {
         .filter(|host| !host.is_empty())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HboneAddress {
     SocketAddr(SocketAddr),
     SvcHostname(Strng, u16),
@@ -858,10 +858,10 @@ impl From<(Strng, u16)> for HboneAddress {
     }
 }
 
-impl TryFrom<&http::Uri> for HboneAddress {
+impl TryFrom<http::Uri> for HboneAddress {
     type Error = Error;
 
-    fn try_from(value: &http::Uri) -> Result<Self, Self::Error> {
+    fn try_from(value: http::Uri) -> Result<Self, Self::Error> {
         match value.to_string().parse::<SocketAddr>() {
             Ok(addr) => Ok(HboneAddress::SocketAddr(addr)),
             Err(_) => {
