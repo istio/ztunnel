@@ -36,6 +36,7 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
 use crate::strng::{RichStrng, Strng};
 
+#[derive(Debug)]
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
@@ -339,6 +340,7 @@ impl Metrics {
     }
 }
 
+#[derive(Debug)]
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
 pub struct ConnectionResult {
     // Src address and name

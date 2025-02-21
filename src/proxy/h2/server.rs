@@ -42,16 +42,6 @@ impl Debug for H2Request {
 }
 
 impl H2Request {
-    /// The request's method
-    pub fn method(&self) -> &http::Method {
-        &self.request.method
-    }
-
-    /// The request's URI
-    pub fn uri(&self) -> &http::Uri {
-        &self.request.uri
-    }
-
     /// The request's headers
     pub fn headers(&self) -> &http::HeaderMap<http::HeaderValue> {
         &self.request.headers
@@ -78,6 +68,10 @@ impl H2Request {
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok(h2)
+    }
+
+    pub fn get_request(&self) -> &Parts {
+        &self.request
     }
 }
 

@@ -14,6 +14,7 @@
 
 use futures::stream::StreamExt;
 use futures_util::TryFutureExt;
+use http::request::Parts as RequestParts;
 use http::{Method, Response, StatusCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -178,7 +179,7 @@ impl Inbound {
         // phases.
 
         // Initial phase, build up context about the request.
-        let ri = match Self::build_inbound_request(&pi, conn, &req).await {
+        let ri = match Self::build_inbound_request(&pi, conn, req.get_request()).await {
             Ok(i) => i,
             Err(InboundError(e, code)) => {
                 // At this point in processing, we never built up full context to log a complete access log.
@@ -286,10 +287,10 @@ impl Inbound {
         pi: &Arc<ProxyInputs>,
         // HBONE connection
         conn: Connection,
-        req: &H2Request,
+        req: &RequestParts,
     ) -> Result<InboundRequest, InboundError> {
-        if req.method() != Method::CONNECT {
-            let e = Error::NonConnectMethod(req.method().to_string());
+        if req.method != Method::CONNECT {
+            let e = Error::NonConnectMethod(req.method.to_string());
             return Err(InboundError(e, StatusCode::BAD_REQUEST));
         }
 
@@ -297,7 +298,8 @@ impl Inbound {
 
         // Extract the host or IP from the authority pseudo-header of the URI
         let hbone_addr: HboneAddress = req
-            .uri()
+            .uri
+            .clone()
             .try_into()
             .map_err(|e: Error| InboundError(e, StatusCode::BAD_REQUEST))?;
 
@@ -378,8 +380,7 @@ impl Inbound {
         };
 
         let for_host = parse_forwarded_host(req);
-        let baggage =
-            parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
+        let baggage = parse_baggage_header(req.headers.get_all(BAGGAGE_HEADER)).unwrap_or_default();
 
         let from_gateway = proxy::check_from_network_gateway(
             &pi.state,
@@ -593,6 +594,7 @@ impl Inbound {
     }
 }
 
+#[derive(Debug)]
 struct InboundRequest {
     for_host: Option<String>,
     rbac_ctx: ProxyRbacContext,
@@ -606,6 +608,7 @@ struct InboundRequest {
 }
 
 /// InboundError represents an error with an associated status code.
+#[derive(Debug)]
 struct InboundError(Error, StatusCode);
 impl InboundError {
     pub fn build(code: StatusCode) -> impl Fn(Error) -> Self {
@@ -637,8 +640,8 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
     }
 }
 
-pub fn parse_forwarded_host(req: &H2Request) -> Option<String> {
-    req.headers()
+pub fn parse_forwarded_host(req: &RequestParts) -> Option<String> {
+    req.headers
         .get(http::header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
         .and_then(proxy::parse_forwarded_host)
@@ -653,8 +656,8 @@ fn build_response(status: StatusCode) -> Response<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Inbound;
-    use crate::{config, proxy::inbound::HboneAddress, strng};
+    use super::{Inbound, ProxyInputs};
+    use crate::{config, proxy::inbound::HboneAddress, proxy::ConnectionManager, strng};
 
     use crate::{
         rbac::Connection,
@@ -671,10 +674,16 @@ mod tests {
     use std::{
         net::SocketAddr,
         sync::{Arc, RwLock},
+        time::Duration,
     };
 
+    use crate::identity::manager::mock::new_secret_manager;
+    use crate::proxy::DefaultSocketFactory;
+    use crate::proxy::LocalWorkloadInformation;
     use crate::state::workload::HealthStatus;
+    use crate::state::WorkloadInfo;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use http::request::Request;
     use prometheus_client::registry::Registry;
     use test_case::test_case;
 
@@ -757,6 +766,85 @@ mod tests {
         }
     }
 
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
+    #[tokio::test]
+    async fn test_build_inbound_request(
+        target_waypoint: Waypoint<'_>,
+        connection_dst: &str,
+        hbone_dst: &str,
+        want: Option<(&str, u16, Option<&str>)>,
+    ) {
+        let state = test_state(target_waypoint).expect("state setup");
+        let cfg = config::parse_config().unwrap();
+        let conn = Connection {
+            src_identity: None,
+            src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
+            dst_network: "".into(),
+            dst: format!("{connection_dst}:15008").parse().unwrap(),
+        };
+        let request = Request::builder()
+            .uri(format!("{hbone_dst}:{TARGET_PORT}"))
+            .method(http::Method::CONNECT)
+            .body(())
+            .unwrap();
+        let (request_parts, _) = request.into_parts();
+        let cm = ConnectionManager::default();
+        let metrics = Arc::new(crate::proxy::Metrics::new(&mut Registry::default()));
+        let sf = Arc::new(DefaultSocketFactory::default());
+        let wl = state
+            .fetch_workload_by_address(&NetworkAddress {
+                network: "".into(),
+                address: conn.dst.ip(),
+            })
+            .await
+            .unwrap();
+        let local_workload = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(WorkloadInfo {
+                name: wl.name.to_string(),
+                namespace: wl.namespace.to_string(),
+                service_account: wl.service_account.to_string(),
+            }),
+            state.clone(),
+            new_secret_manager(Duration::from_secs(10)),
+        ));
+        let pi = Arc::new(ProxyInputs::new(
+            Arc::new(cfg),
+            cm,
+            state.clone(),
+            metrics.clone(),
+            sf,
+            None,
+            local_workload,
+        ));
+        let hbone_addr =
+            if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
+                HboneAddress::SocketAddr(addr)
+            } else {
+                HboneAddress::SvcHostname(hbone_dst.into(), TARGET_PORT)
+            };
+        let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;
+        match want {
+            Some((ip, port, protocol_addr)) => {
+                let ir = inbound_request.unwrap();
+                assert_eq!(ir.upstream_addr, SocketAddr::new(ip.parse().unwrap(), port));
+                assert_eq!(ir.hbone_addr, hbone_addr);
+                match ir.upstream_protocol_addr {
+                    Some(addr) => assert_eq!(
+                        addr,
+                        SocketAddr::new(protocol_addr.unwrap().parse().unwrap(), port)
+                    ),
+                    None => assert_eq!(protocol_addr, None),
+                };
+            }
+            None => {
+                inbound_request.expect_err("could not build inbound request");
+            }
+        }
+    }
+
+    // Creates a test state for the `DemandProxyState` with predefined services and workloads.
+    // server_waypoint specifies the waypoint configuration for the server.
     fn test_state(server_waypoint: Waypoint) -> anyhow::Result<state::DemandProxyState> {
         let mut state = state::ProxyState::new(None);
 
