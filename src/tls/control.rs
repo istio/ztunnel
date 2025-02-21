@@ -253,6 +253,7 @@ impl tower::Service<http::Request<BoxBody>> for TlsGrpcChannel {
         Ok(()).into()
     }
 
+
     fn call(&mut self, mut req: http::Request<BoxBody>) -> Self::Future {
         let mut uri = Uri::builder();
         if let Some(scheme) = self.uri.scheme() {

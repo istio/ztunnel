@@ -24,7 +24,6 @@ use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 use zds::workload_request::Payload;
 
-// Not dead code, but automock confuses Rust otherwise when built with certain targets
 #[allow(dead_code)]
 pub struct WorkloadStreamProcessor {
     stream: UnixStream,
@@ -254,7 +253,7 @@ mod tests {
 
     use super::super::istio;
     use super::*;
-    use crate::inpod::test_helpers::uid;
+    use crate::inpod::linux::test_helpers::uid;
 
     use nix::sys::socket::MsgFlags;
     // Helpers to test get_workload_data_from_parts
@@ -294,6 +293,7 @@ mod tests {
             istio::zds::AddWorkload {
                 uid: uid.clone().into_string(),
                 workload_info: Some(wi.clone()),
+                windows_namespace: None,
             },
         ));
 

@@ -11,14 +11,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use ztunnel::test_helpers::inpod_linux::StartZtunnelMessage;
+#[cfg(target_os = "linux")]
+use ztunnel::test_helpers::inpod_linux::{start_ztunnel_server, Message};
 
-use ztunnel::test_helpers::inpod::StartZtunnelMessage;
-use ztunnel::{
-    inpod::istio::zds::WorkloadInfo,
-    test_helpers::inpod::{start_ztunnel_server, Message},
-};
+use ztunnel::inpod::istio::zds::WorkloadInfo;
 
 const PROXY_WORKLOAD_INFO: &str = "PROXY_WORKLOAD_INFO";
 
