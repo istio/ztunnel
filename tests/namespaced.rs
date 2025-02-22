@@ -28,7 +28,7 @@ mod namespaced {
     use std::time::Duration;
     use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 
-    use hyper::Method;
+    use hyper::{Method, StatusCode};
     use hyper_util::rt::TokioIo;
 
     use WorkloadMode::Uncaptured;
@@ -882,6 +882,72 @@ mod namespaced {
             .unwrap()?;
         let e = format!("ip mismatch: {} != {}", srv.ip(), clt.ip());
         telemetry::testing::assert_contains(HashMap::from([("scope", "access"), ("error", &e)]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_svc_hostname() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(Shared);
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        manager
+            .service_builder("service")
+            .addresses(vec![NetworkAddress {
+                network: strng::EMPTY,
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, 80u16)]))
+            .register()
+            .await?;
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .service("default/service.default.svc.cluster.local", 80, SERVER_PORT)
+            .register()
+            .await?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .uncaptured()
+            .register()
+            .await?;
+
+        run_tcp_server(server)?;
+        let srv = resolve_target(manager.resolver(), "server");
+        client
+            .run(move || async move {
+                let builder =
+                    hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
+
+                let request = hyper::Request::builder()
+                    .uri(format!("service.default.svc.cluster.local:{}", SERVER_PORT))
+                    .method(Method::CONNECT)
+                    .version(hyper::Version::HTTP_2)
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+
+                let id = &identity::Identity::default();
+                let dst_id =
+                    identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
+                        .unwrap();
+                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
+                    .await
+                    .unwrap();
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
+                // spawn a task to poll the connection and drive the HTTP state
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        error!("Error in HBONE connection handshake: {:?}", e);
+                    }
+                });
+
+                let response = request_sender.send_request(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
         Ok(())
     }
 

@@ -14,7 +14,6 @@
 
 use futures::stream::StreamExt;
 use futures_util::TryFutureExt;
-use http::request::Parts as RequestParts;
 use http::{Method, Response, StatusCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,7 +28,7 @@ use crate::identity::Identity;
 
 use crate::config::Config;
 use crate::drain::DrainWatcher;
-use crate::proxy::h2::server::H2Request;
+use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
 use crate::proxy::{BAGGAGE_HEADER, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
 use crate::rbac::Connection;
@@ -283,14 +282,14 @@ impl Inbound {
     }
 
     // build_inbound_request builds up the context for an inbound request.
-    async fn build_inbound_request(
+    async fn build_inbound_request<T: RequestParts>(
         pi: &Arc<ProxyInputs>,
         // HBONE connection
         conn: Connection,
-        req: &RequestParts,
+        req: &T,
     ) -> Result<InboundRequest, InboundError> {
-        if req.method != Method::CONNECT {
-            let e = Error::NonConnectMethod(req.method.to_string());
+        if req.method() != Method::CONNECT {
+            let e = Error::NonConnectMethod(req.method().to_string());
             return Err(InboundError(e, StatusCode::BAD_REQUEST));
         }
 
@@ -298,7 +297,7 @@ impl Inbound {
 
         // Extract the host or IP from the authority pseudo-header of the URI
         let hbone_addr: HboneAddress = req
-            .uri
+            .uri()
             .clone()
             .try_into()
             .map_err(|e: Error| InboundError(e, StatusCode::BAD_REQUEST))?;
@@ -380,7 +379,8 @@ impl Inbound {
         };
 
         let for_host = parse_forwarded_host(req);
-        let baggage = parse_baggage_header(req.headers.get_all(BAGGAGE_HEADER)).unwrap_or_default();
+        let baggage =
+            parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
 
         let from_gateway = proxy::check_from_network_gateway(
             &pi.state,
@@ -640,8 +640,8 @@ impl crate::tls::ServerCertProvider for InboundCertProvider {
     }
 }
 
-pub fn parse_forwarded_host(req: &RequestParts) -> Option<String> {
-    req.headers
+pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
+    req.headers()
         .get(http::header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
         .and_then(proxy::parse_forwarded_host)
@@ -678,12 +678,14 @@ mod tests {
     };
 
     use crate::identity::manager::mock::new_secret_manager;
+    use crate::proxy::h2::server::RequestParts;
     use crate::proxy::DefaultSocketFactory;
     use crate::proxy::LocalWorkloadInformation;
     use crate::state::workload::HealthStatus;
     use crate::state::WorkloadInfo;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use http::request::Request;
+    use http::{Method, Uri};
     use prometheus_client::registry::Registry;
     use test_case::test_case;
 
@@ -705,8 +707,31 @@ mod tests {
         protocol: AppProtocol::PROXY,
     });
 
+    struct MockParts {
+        method: Method,
+        uri: Uri,
+        headers: http::HeaderMap<http::HeaderValue>,
+    }
+
+    impl RequestParts for MockParts {
+        fn uri(&self) -> &http::Uri {
+            &self.uri
+        }
+
+        fn method(&self) -> &http::Method {
+            &self.method
+        }
+
+        fn headers(&self) -> &http::HeaderMap<http::HeaderValue> {
+            &self.headers
+        }
+    }
+
     // Regular zTunnel workload traffic inbound
     #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT)); "to workload no waypoint")]
+    // Svc hostname
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT)); "svc hostname to workload no waypoint")]
+    // Sandwiched Waypoint Cases
     // to workload traffic
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by pod")]
     #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT)); "to workload with waypoint referenced by vip")]
@@ -721,8 +746,6 @@ mod tests {
     #[test_case(Waypoint::None, WAYPOINT_POD_IP, CLIENT_POD_IP, None; "to waypoint without attachment" )]
     #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
-    // Svc hostname
-    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT)); "svc hostname to workload no waypoint")]
     #[tokio::test]
     async fn test_find_inbound_upstream(
         target_waypoint: Waypoint<'_>,
@@ -766,8 +789,25 @@ mod tests {
         }
     }
 
+    // Regular zTunnel workload traffic inbound
     #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
+    // Svc hostname
     #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
+    // Sandwiched Waypoint Cases
+    // to workload traffic
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by pod")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by vip")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to workload with app tunnel")]
+    // to service traffic
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypoint referenced by pod")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypint referenced by vip")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to service with app tunnel")]
+    // Override port via app_protocol
+    // Error cases
+    #[test_case(Waypoint::None, SERVER_POD_IP, CLIENT_POD_IP, None; "to server ip mismatch" )]
+    #[test_case(Waypoint::None, WAYPOINT_POD_IP, CLIENT_POD_IP, None; "to waypoint without attachment" )]
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
     #[tokio::test]
     async fn test_build_inbound_request(
         target_waypoint: Waypoint<'_>,
@@ -783,12 +823,11 @@ mod tests {
             dst_network: "".into(),
             dst: format!("{connection_dst}:15008").parse().unwrap(),
         };
-        let request = Request::builder()
-            .uri(format!("{hbone_dst}:{TARGET_PORT}"))
-            .method(http::Method::CONNECT)
-            .body(())
-            .unwrap();
-        let (request_parts, _) = request.into_parts();
+        let request_parts = MockParts {
+            method: Method::CONNECT,
+            uri: format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        };
         let cm = ConnectionManager::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut Registry::default()));
         let sf = Arc::new(DefaultSocketFactory::default());
