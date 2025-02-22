@@ -900,7 +900,11 @@ mod namespaced {
             .await?;
         let server = manager
             .workload_builder("server", DEFAULT_NODE)
-            .service("default/service.default.svc.cluster.local", 80, SERVER_PORT)
+            .service(
+                format!("default/{SERVER_HOSTNAME}").as_str(),
+                80,
+                SERVER_PORT,
+            )
             .register()
             .await?;
         let client = manager
@@ -917,7 +921,7 @@ mod namespaced {
                     hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
 
                 let request = hyper::Request::builder()
-                    .uri(format!("service.default.svc.cluster.local:{}", SERVER_PORT))
+                    .uri(format!("{SERVER_HOSTNAME}:{SERVER_PORT}"))
                     .method(Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .body(Empty::<Bytes>::new())
@@ -1145,6 +1149,7 @@ mod namespaced {
     const TEST_VIP: &str = "10.10.0.1";
 
     const SERVER_PORT: u16 = 8080;
+    const SERVER_HOSTNAME: &str = "server.default.svc.cluster.local";
     const PROXY_PROTOCOL_PORT: u16 = 15088;
 
     const DEFAULT_NODE: &str = "node";
