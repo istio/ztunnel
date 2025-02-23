@@ -113,7 +113,6 @@ fn get_workload_data(data: &[u8]) -> anyhow::Result<WorkloadMessage> {
         Payload::Add(a) => {
             let uid = a.uid;
             Ok(WorkloadMessage::AddWorkload(WorkloadData {
-                windows_namespace: a.windows_namespace,
                 workload_uid: WorkloadUid::new(uid),
                 workload_info: a.workload_info,
             }))
