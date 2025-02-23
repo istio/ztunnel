@@ -76,14 +76,14 @@ pub async fn start_ztunnel_server(bind_path: PathBuf) -> MpscAckSender<Message> 
                 }) => {
                     let orig_uid = uid.clone();
                     debug!(uid, %fd, "sending start message");
-                    let uid = crate::inpod::linux::WorkloadUid::new(uid);
+                    let uid = crate::inpod::WorkloadUid::new(uid);
                     send_workload_added(&mut ztun_sock, uid, workload_info, fd).await;
                     orig_uid
                 }
                 Message::Stop(uid) => {
                     let orig_uid = uid.clone();
                     debug!(uid, "sending delete message");
-                    let uid = crate::inpod::linux::WorkloadUid::new(uid);
+                    let uid = crate::inpod::WorkloadUid::new(uid);
                     send_workload_del(&mut ztun_sock, uid).await;
                     orig_uid
                 }

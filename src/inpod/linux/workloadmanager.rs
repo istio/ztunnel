@@ -417,6 +417,7 @@ pub(crate) mod tests {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            windows_namespace: None,
         })
     }
 
@@ -600,12 +601,12 @@ pub(crate) mod tests {
 
         // first proxy should be here:
         assert_eq!(state.workload_states().len(), 2);
-        let key_set: HashSet<crate::inpod::linux::WorkloadUid> =
+        let key_set: HashSet<crate::inpod::WorkloadUid> =
             state.workload_states().keys().cloned().collect();
-        let expected_key_set: HashSet<crate::inpod::linux::WorkloadUid> = [0, 1]
+        let expected_key_set: HashSet<crate::inpod::WorkloadUid> = [0, 1]
             .into_iter()
             .map(uid)
-            .map(crate::inpod::linux::WorkloadUid::from)
+            .map(crate::inpod::WorkloadUid::from)
             .collect();
         assert_eq!(key_set, expected_key_set);
         assert_eq!(m.active_proxy_count.get(), 2);

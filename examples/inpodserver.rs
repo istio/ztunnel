@@ -61,6 +61,7 @@ fn parse_proxy_workload_info() -> Result<WorkloadInfo, Error> {
                 name: "local".to_string(),
                 namespace: "default".to_string(),
                 service_account: "default".to_string(),
+                windows_namespace: None,
             });
         }
     };
@@ -76,6 +77,7 @@ fn parse_proxy_workload_info() -> Result<WorkloadInfo, Error> {
         name: name.to_string(),
         namespace: ns.to_string(),
         service_account: sa.to_string(),
+        windows_namespace: None,
     })
 }
 

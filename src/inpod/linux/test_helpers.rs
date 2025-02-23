@@ -36,8 +36,8 @@ use once_cell::sync::Lazy;
 use std::os::fd::{AsRawFd, OwnedFd};
 use tracing::debug;
 
-pub fn uid(i: usize) -> crate::inpod::linux::WorkloadUid {
-    crate::inpod::linux::WorkloadUid::new(format!("uid{}", i))
+pub fn uid(i: usize) -> crate::inpod::WorkloadUid {
+    crate::inpod::WorkloadUid::new(format!("uid{}", i))
 }
 
 pub struct Fixture {
@@ -176,7 +176,6 @@ pub async fn send_workload_added(
             crate::inpod::istio::zds::AddWorkload {
                 uid: uid.into_string(),
                 workload_info: info,
-                windows_namespace: None,
             },
         )),
     };

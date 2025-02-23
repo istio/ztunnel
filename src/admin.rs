@@ -26,10 +26,10 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
-#[cfg(not(target_os = "windows"))]
-use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use pprof::protos::Message;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -238,7 +238,6 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
 
 #[cfg(target_os = "linux")]
 async fn handle_pprof(_req: Request<Incoming>) -> anyhow::Result<Response<Full<Bytes>>> {
-    use pprof::protos::Message;
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(1000)
         // .blocklist(&["libc", "libgcc", "pthread", "vdso"])
@@ -435,7 +434,7 @@ async fn handle_jemalloc_pprof_heapgen(
 }
 
 #[cfg(not(feature = "jemalloc"))]
-async fn _handle_jemalloc_pprof_heapgen(
+async fn handle_jemalloc_pprof_heapgen(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     Ok(Response::builder()

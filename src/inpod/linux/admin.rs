@@ -57,14 +57,14 @@ where
 
 #[derive(Default)]
 pub struct WorkloadManagerAdminHandler {
-    state: RwLock<HashMap<crate::inpod::linux::WorkloadUid, ProxyState>>,
+    state: RwLock<HashMap<crate::inpod::WorkloadUid, ProxyState>>,
 }
 
 impl WorkloadManagerAdminHandler {
     pub fn proxy_pending(
         &self,
         uid: &crate::inpod::WorkloadUid,
-        workload_info: &Option<WorkloadInfo>,
+        workload_info: &WorkloadInfo,
     ) {
         let mut state = self.state.write().unwrap();
 
@@ -88,7 +88,7 @@ impl WorkloadManagerAdminHandler {
     }
     pub fn proxy_up(
         &self,
-        uid: &crate::inpod::linux::WorkloadUid,
+        uid: &crate::inpod::WorkloadUid,
         workload_info: &WorkloadInfo,
         cm: Option<ConnectionManager>,
     ) {
@@ -115,7 +115,7 @@ impl WorkloadManagerAdminHandler {
         }
     }
 
-    pub fn proxy_down(&self, uid: &crate::inpod::linux::WorkloadUid) {
+    pub fn proxy_down(&self, uid: &crate::inpod::WorkloadUid) {
         let mut state = self.state.write().unwrap();
 
         match state.get_mut(uid) {

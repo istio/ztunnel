@@ -17,7 +17,7 @@ use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, EndpointSet, Service};
 use crate::state::workload::Protocol::{HBONE, TCP};
 use crate::state::workload::{
-    gatewayaddress, GatewayAddress, NetworkAddress, Workload,
+    gatewayaddress, GatewayAddress, NetworkAddress, Workload, NamespacedHostname
 };
 use crate::state::workload::{HealthStatus, Protocol};
 use crate::state::{DemandProxyState, ProxyState};

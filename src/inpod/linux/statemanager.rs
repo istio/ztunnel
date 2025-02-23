@@ -406,6 +406,7 @@ mod tests {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            windows_namespace: None,
         })
     }
 
