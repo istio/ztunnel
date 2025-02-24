@@ -84,29 +84,42 @@ impl CsrOptions {
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
     use crate::tls;
 
     #[test]
     fn test_csr() {
-        use x509_parser::prelude::FromDer;
+        use x509_parser::prelude::*;
         let csr = tls::csr::CsrOptions {
             san: "spiffe://td/ns/ns1/sa/sa1".to_string(),
         }
         .generate()
         .unwrap();
+
         let (_, der) = x509_parser::pem::parse_x509_pem(csr.csr.as_bytes()).unwrap();
 
         let (_, cert) =
             x509_parser::certification_request::X509CertificationRequest::from_der(&der.contents)
                 .unwrap();
         cert.verify_signature().unwrap();
+        let subject = cert.certification_request_info.subject.iter().collect_vec();
+        assert_eq!(subject.len(), 0);
         let attr = cert
             .certification_request_info
             .iter_attributes()
             .next()
             .unwrap();
-        // SAN is encoded in some format I don't understand how to parse; this could be improved.
-        // but make sure it's there in a hacky manner
-        assert!(attr.value.ends_with(b"spiffe://td/ns/ns1/sa/sa1"));
+
+        let ParsedCriAttribute::ExtensionRequest(parsed) = attr.parsed_attribute() else {
+            panic!("not a ExtensionRequest")
+        };
+        let ext = parsed.clone().extensions;
+        assert_eq!(ext.len(), 1);
+        let ext = ext.into_iter().next().unwrap();
+        assert!(ext.critical);
+        let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() else {
+            panic!("not a SubjectAlternativeName")
+        };
+        assert_eq!(&format!("{san:?}"), "SubjectAlternativeName { general_names: [URI(\"spiffe://td/ns/ns1/sa/sa1\")] }")
     }
 }
