@@ -684,7 +684,6 @@ mod tests {
     use crate::state::workload::HealthStatus;
     use crate::state::WorkloadInfo;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-    use http::request::Request;
     use http::{Method, Uri};
     use prometheus_client::registry::Registry;
     use test_case::test_case;
