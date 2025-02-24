@@ -88,6 +88,19 @@ impl Upstream {
             .chain(std::iter::once(self.workload.identity()))
             .collect()
     }
+
+    pub fn service_sans(&self) -> Vec<Identity> {
+        self.service_sans
+            .iter()
+            .flat_map(|san| match Identity::from_str(san) {
+                Ok(id) => Some(id),
+                Err(err) => {
+                    warn!("ignoring invalid SAN {}: {}", san, err);
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 // Workload information that a specific proxy instance represents. This is used to cross check
