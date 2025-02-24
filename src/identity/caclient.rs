@@ -19,7 +19,7 @@ use prost_types::value::Kind;
 use prost_types::Struct;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tonic::IntoRequest;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
@@ -111,6 +111,7 @@ impl CaClient {
             warn!("no chain certs for: {}", id);
             vec![]
         };
+        info!("received certificate for {:?}", id);
         let certs = tls::WorkloadCertificate::new(&private_key, leaf, chain)?;
         // Make the certificate actually matches the identity we requested.
         if self.enable_impersonated_identity && certs.cert.identity().as_ref() != Some(id) {
