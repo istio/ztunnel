@@ -26,8 +26,8 @@ use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use anyhow::anyhow;
 use bytes::Bytes;
 use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
-use hyper::http::uri::InvalidUri;
 use hyper::Uri;
+use hyper::http::uri::InvalidUri;
 
 use crate::strng::Strng;
 use crate::{identity, state};
@@ -552,7 +552,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
                     format!(
                         "PROXY_MODE must be one of {PROXY_MODE_DEDICATED}, {PROXY_MODE_SHARED}"
                     ),
-                ))
+                ));
             }
         },
         None => ProxyMode::Shared,
@@ -586,7 +586,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         (Some(_), Some(_)) => {
             return Err(Error::InvalidState(format!(
                 "only one of {LOCAL_XDS_PATH} or {LOCAL_XDS} may be set"
-            )))
+            )));
         }
         (Some(f), _) => Some(ConfigSource::File(f)),
         (_, Some(d)) => Some(ConfigSource::Static(Bytes::from(d))),
@@ -602,7 +602,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         dns_proxy: pc
             .proxy_metadata
             .get(DNS_CAPTURE_METADATA)
-            .map_or(true, |value| value.to_lowercase() == "true"),
+            .is_none_or(|value| value.to_lowercase() == "true"),
 
         pool_max_streams_per_conn: parse_default(
             POOL_MAX_STREAMS_PER_CONNECTION,
@@ -979,12 +979,14 @@ pub mod tests {
         }"#,
         );
 
-        env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
-        env::set_var("NOT_INCLUDE", "not-include");
-        env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
-        env::set_var("XDS_HEADER_HEADER_FOO", "foo");
-        env::set_var("XDS_HEADER_HEADER_BAR", "bar");
-        env::set_var("CA_HEADER_HEADER_BAZ", "baz");
+        unsafe {
+            env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
+            env::set_var("NOT_INCLUDE", "not-include");
+            env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
+            env::set_var("XDS_HEADER_HEADER_FOO", "foo");
+            env::set_var("XDS_HEADER_HEADER_BAR", "bar");
+            env::set_var("CA_HEADER_HEADER_BAZ", "baz");
+        }
 
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
@@ -1019,8 +1021,11 @@ pub mod tests {
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
 
-        env::remove_var("ISTIO_META_INCLUDE_THIS");
-        env::remove_var("NOT_INCLUDE");
+        unsafe {
+            env::remove_var("ISTIO_META_INCLUDE_THIS");
+            env::remove_var("NOT_INCLUDE");
+        }
+
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
         assert_eq!(cfg.proxy_metadata["FOO"], "foo");

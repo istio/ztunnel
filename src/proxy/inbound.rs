@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
 
-use tracing::{debug, info, info_span, trace_span, Instrument};
+use tracing::{Instrument, debug, info, info_span, trace_span};
 
 use super::{ConnectionResult, Error, LocalWorkloadInformation, ResponseFlags};
 use crate::baggage::parse_baggage_header;
@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::H2Request;
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
-use crate::proxy::{metrics, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::proxy::{BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
@@ -541,13 +541,12 @@ mod tests {
     use crate::{
         rbac::Connection,
         state::{
-            self,
+            self, DemandProxyState,
             service::{Endpoint, EndpointSet, Service},
             workload::{
-                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
                 ApplicationTunnel, GatewayAddress, NetworkAddress, Protocol, Workload,
+                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
             },
-            DemandProxyState,
         },
         test_helpers,
     };

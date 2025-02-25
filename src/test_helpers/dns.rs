@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use crate::config::Address;
-use crate::dns::resolver::{Answer, Resolver};
 use crate::dns::Metrics;
+use crate::dns::resolver::{Answer, Resolver};
 use crate::drain::DrainTrigger;
 use crate::proxy::Error;
-use crate::state::workload::Workload;
 use crate::state::WorkloadInfo;
+use crate::state::workload::Workload;
 use crate::test_helpers::new_proxy_state;
 use crate::xds::istio::workload::Workload as XdsWorkload;
 use crate::{dns, drain, metrics};
@@ -26,6 +26,7 @@ use futures_util::ready;
 use futures_util::stream::{Stream, StreamExt};
 use hickory_client::client::{AsyncClient, ClientHandle};
 use hickory_client::error::ClientError;
+use hickory_proto::DnsHandle;
 use hickory_proto::error::{ProtoError, ProtoErrorKind};
 use hickory_proto::iocompat::AsyncIoTokioAsStd;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
@@ -35,7 +36,6 @@ use hickory_proto::serialize::binary::BinDecodable;
 use hickory_proto::tcp::TcpClientStream;
 use hickory_proto::udp::UdpClientStream;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
-use hickory_proto::DnsHandle;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_server::authority::{LookupError, MessageRequest};
 use hickory_server::server::{Protocol, Request};

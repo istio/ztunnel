@@ -27,13 +27,13 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::metrics::{IncrementRecorder, Recorder};
 use crate::strng::Strng;
 use crate::xds::metrics::{ConnectionTerminationReason, Metrics};
-use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::Resource as ProtoResource;
+use crate::xds::service::discovery::v3::aggregated_discovery_service_client::AggregatedDiscoveryServiceClient;
 use crate::xds::service::discovery::v3::*;
 use crate::{identity, strng, tls};
 
@@ -784,7 +784,7 @@ pub enum XdsUpdate<T: prost::Message> {
 impl<T: prost::Message> XdsUpdate<T> {
     pub fn name(&self) -> Strng {
         match self {
-            XdsUpdate::Update(ref r) => r.name.clone(),
+            XdsUpdate::Update(r) => r.name.clone(),
             XdsUpdate::Remove(n) => n.clone(),
         }
     }
@@ -826,16 +826,16 @@ mod tests {
     use textnonce::TextNonce;
     use tokio::time::sleep;
 
+    use crate::xds::ADDRESS_TYPE;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
     use crate::xds::istio::workload::Address as XdsAddress;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType;
-    use crate::xds::ADDRESS_TYPE;
-    use crate::xds::{istio::workload::address::Type as XdsType, AUTHORIZATION_TYPE};
+    use crate::xds::{AUTHORIZATION_TYPE, istio::workload::address::Type as XdsType};
     use workload::Workload;
 
     use crate::state::workload::NetworkAddress;
-    use crate::state::{workload, DemandProxyState};
+    use crate::state::{DemandProxyState, workload};
     use crate::test_helpers::{
         helpers::{self},
         test_default_workload,

@@ -15,7 +15,7 @@
 use std::fmt::Write;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{atomic, Arc};
+use std::sync::{Arc, atomic};
 use std::time::Instant;
 
 use prometheus_client::encoding::{

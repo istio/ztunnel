@@ -66,7 +66,7 @@ impl ShutdownTrigger {
 #[cfg(unix)]
 mod imp {
     use std::process;
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     use tokio::sync::mpsc::Receiver;
     use tracing::info;
 

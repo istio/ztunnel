@@ -28,12 +28,12 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
-use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
+use crate::drain::run_with_drain;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{util, Error, ProxyInputs, TraceParent};
+use crate::proxy::{Error, ProxyInputs, TraceParent, util};
 use crate::{assertions, socket};
 
 pub(super) struct Socks5 {
@@ -350,7 +350,7 @@ async fn send_response(
     // https://www.rfc-editor.org/rfc/rfc1928#section-6
     let mut buf: Vec<u8> = Vec::with_capacity(10);
     buf.push(0x05); // version
-                    // Status
+    // Status
     buf.push(match err {
         None => 0,
         Some(SocksError::General(_)) => 1,

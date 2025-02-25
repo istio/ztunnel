@@ -15,7 +15,7 @@
 use super::istio::zds::{self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello};
 use super::{WorkloadData, WorkloadMessage};
 use crate::drain::DrainWatcher;
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessageOwned, MsgFlags};
+use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg, sendmsg};
 use prost::Message;
 use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::OwnedFd;

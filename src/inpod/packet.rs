@@ -16,8 +16,8 @@
 // It is not implemented in rust, so this provides an implementation for it.
 
 use nix::sys::socket::{
-    bind as nixbind, connect as nixconnect, listen, socket, AddressFamily, SockFlag, SockType,
-    UnixAddr,
+    AddressFamily, SockFlag, SockType, UnixAddr, bind as nixbind, connect as nixconnect, listen,
+    socket,
 };
 use std::cmp;
 use std::os::fd::AsRawFd;

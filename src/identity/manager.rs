@@ -24,8 +24,8 @@ use crate::config::ProxyMode;
 use async_trait::async_trait;
 
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
-use tokio::sync::{mpsc, watch, Mutex};
-use tokio::time::{sleep_until, Duration, Instant};
+use tokio::sync::{Mutex, mpsc, watch};
+use tokio::time::{Duration, Instant, sleep_until};
 
 use crate::{strng, tls};
 
@@ -33,7 +33,7 @@ use super::CaClient;
 use super::Error::{self, Spiffe};
 
 use crate::strng::Strng;
-use backoff::{backoff::Backoff, ExponentialBackoff};
+use backoff::{ExponentialBackoff, backoff::Backoff};
 use keyed_priority_queue::KeyedPriorityQueue;
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
@@ -248,8 +248,8 @@ impl Worker {
     // Manages certificate updates. Since all the work is done in a single task, the code is
     // lock-free. This is OK as the code is I/O bound so we don't need the extra parallelism.
     async fn run(&self, mut requests: mpsc::Receiver<Request>) {
-        use futures::stream::FuturesUnordered;
         use futures::StreamExt;
+        use futures::stream::FuturesUnordered;
 
         #[derive(Eq, PartialEq)]
         enum Fetch {
@@ -473,7 +473,7 @@ fn push_increase<TKey: Hash + Eq, TPriority: Ord>(
     key: TKey,
     priority: TPriority,
 ) {
-    if kp.get_priority(&key).map_or(true, |p| priority > *p) {
+    if kp.get_priority(&key).is_none_or(|p| priority > *p) {
         kp.push(key, priority);
     }
 }

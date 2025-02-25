@@ -17,15 +17,15 @@ use crate::drain::DrainWatcher;
 use crate::proxy::Error;
 use bytes::Bytes;
 use futures_util::FutureExt;
-use http::request::Parts;
 use http::Response;
+use http::request::Parts;
 use std::fmt::Debug;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
-use tracing::{debug, Instrument};
+use tracing::{Instrument, debug};
 
 pub struct H2Request {
     request: Parts,

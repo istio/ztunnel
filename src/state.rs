@@ -21,8 +21,8 @@ use crate::state::service::{
 };
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
-    address::Address, gatewayaddress::Destination, network_addr, GatewayAddress,
-    NamespacedHostname, NetworkAddress, Workload, WorkloadStore,
+    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, WorkloadStore, address::Address,
+    gatewayaddress::Destination, network_addr,
 };
 use crate::strng::Strng;
 use crate::tls;
@@ -33,9 +33,9 @@ use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
 use educe::Educe;
 use futures_util::FutureExt;
+use hickory_resolver::TokioAsyncResolver;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::TokioAsyncResolver;
 use itertools::Itertools;
 use rand::prelude::IteratorRandom;
 use serde::Serializer;
@@ -348,8 +348,7 @@ impl ProxyState {
                         // Filter workload out, it doesn't have a matching port
                         trace!(
                             "filter endpoint {}, it does not have service port {}",
-                            ep.workload_uid,
-                            svc_port
+                            ep.workload_uid, svc_port
                         );
                         return None;
                     }
@@ -811,7 +810,7 @@ impl DemandProxyState {
                         return Err(Error::UnknownWaypoint(format!(
                             "waypoint {} not found",
                             host.hostname
-                        )))
+                        )));
                     }
                 }
             }
@@ -996,7 +995,7 @@ mod tests {
     use rbac::StringMatch;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
-    use self::workload::{application_tunnel::Protocol as AppProtocol, ApplicationTunnel};
+    use self::workload::{ApplicationTunnel, application_tunnel::Protocol as AppProtocol};
 
     use super::*;
     use crate::test_helpers::helpers::initialize_telemetry;
@@ -1379,10 +1378,12 @@ mod tests {
 
         // test workload in ns2. this should work as ns2 doesn't have any policies. this tests:
         // 3. If there are no ALLOW policies for the workload, allow the request.
-        assert!(mock_proxy_state
-            .assert_rbac(&get_rbac_context(&mock_proxy_state, 2, "not-defaultacct"))
-            .await
-            .is_ok());
+        assert!(
+            mock_proxy_state
+                .assert_rbac(&get_rbac_context(&mock_proxy_state, 2, "not-defaultacct"))
+                .await
+                .is_ok()
+        );
 
         let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
         // 4. if any allow policies match, allow

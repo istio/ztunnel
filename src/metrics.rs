@@ -18,7 +18,7 @@ use std::mem;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::registry::Registry;
 use tracing::error;
-use tracing::field::{display, DisplayValue};
+use tracing::field::{DisplayValue, display};
 use tracing_core::field::Value;
 
 use crate::identity::Identity;

@@ -22,9 +22,9 @@ use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use std::{cmp, io};
 
+use hyper::Response;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
-use hyper::Response;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};

@@ -20,15 +20,15 @@ use std::{env, fmt, io};
 
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
-use serde::ser::SerializeMap;
 use serde::Serializer;
+use serde::ser::SerializeMap;
 
 use thiserror::Error;
-use tracing::{error, field, info, warn, Event, Subscriber};
+use tracing::{Event, Subscriber, error, field, info, warn};
 use tracing_appender::non_blocking::NonBlocking;
+use tracing_core::Field;
 use tracing_core::field::Visit;
 use tracing_core::span::Record;
-use tracing_core::Field;
 use tracing_log::NormalizeEvent;
 
 use tracing_subscriber::fmt::format::{JsonVisitor, Writer};
@@ -37,7 +37,7 @@ use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{filter, prelude::*, reload, Layer, Registry};
+use tracing_subscriber::{Layer, Registry, filter, prelude::*, reload};
 
 pub static APPLICATION_START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 static LOG_HANDLE: OnceCell<LogHandle> = OnceCell::new();
@@ -412,7 +412,7 @@ impl<'a> FormatFields<'a> for IstioJsonFormat {
 /// Inspired by https://github.com/dbrgn/tracing-test
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use crate::telemetry::{fmt_layer, IstioJsonFormat, APPLICATION_START_TIME};
+    use crate::telemetry::{APPLICATION_START_TIME, IstioJsonFormat, fmt_layer};
     use itertools::Itertools;
     use once_cell::sync::Lazy;
     use serde_json::Value;

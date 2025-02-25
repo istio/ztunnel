@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use pin_project_lite::pin_project;
-use tonic::body::BoxBody;
 use tonic::Status;
+use tonic::body::BoxBody;
 use tower::{BoxError, ServiceExt};
 
 // Copied from https://github.com/hyperium/tonic/blob/34b863b1d2a204ef3dd871ec86860fc92aafb451/examples/src/tls_rustls/server.rs

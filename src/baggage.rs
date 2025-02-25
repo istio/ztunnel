@@ -59,7 +59,7 @@ pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToS
 
 #[cfg(test)]
 pub mod tests {
-    use hyper::{http::HeaderValue, HeaderMap};
+    use hyper::{HeaderMap, http::HeaderValue};
 
     use crate::proxy::BAGGAGE_HEADER;
 

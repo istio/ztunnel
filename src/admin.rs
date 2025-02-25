@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config::Config;
-use crate::hyper_util::{empty_response, plaintext_response, Server};
+use crate::hyper_util::{Server, empty_response, plaintext_response};
 use crate::identity::SecretManager;
 use crate::state::DemandProxyState;
 use crate::tls::Certificate;
@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
-use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
+use hyper::{Request, Response, header::CONTENT_TYPE, header::HeaderValue};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
@@ -441,17 +441,16 @@ fn base64_encode(data: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::ConfigDump;
     use super::change_log_level;
     use super::dump_certs;
     use super::handle_config_dump;
-    use super::ConfigDump;
     use crate::admin::HELP_STRING;
-    use crate::config::construct_config;
     use crate::config::ProxyConfig;
+    use crate::config::construct_config;
     use crate::identity;
     use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
-    use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
     use crate::xds::istio::security::Clause as XdsClause;
@@ -459,7 +458,7 @@ mod tests {
     use crate::xds::istio::security::Rule as XdsRule;
     use crate::xds::istio::security::ServiceAccountMatch as XdsServiceAccountMatch;
     use crate::xds::istio::security::StringMatch as XdsStringMatch;
-    use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
+    use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::workload::GatewayAddress as XdsGatewayAddress;
     use crate::xds::istio::workload::LoadBalancing as XdsLoadBalancing;
     use crate::xds::istio::workload::Locality as XdsLocality;
@@ -469,6 +468,7 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType as XdsWorkloadType;
+    use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
@@ -847,17 +847,23 @@ mod tests {
 
         let resp = change_log_level(true, "trace");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,trace\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,trace\n")
+        );
 
         let resp = change_log_level(true, "info");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,info\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,info\n")
+        );
 
         let resp = change_log_level(true, "off");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,off\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,off\n")
+        );
     }
 }

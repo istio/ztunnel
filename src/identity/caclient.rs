@@ -15,18 +15,18 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use prost_types::value::Kind;
 use prost_types::Struct;
-use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
+use prost_types::value::Kind;
 use tonic::IntoRequest;
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tracing::{debug, error, instrument, warn};
 
+use crate::identity::Error;
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
-use crate::identity::Error;
 use crate::tls::{self, TlsGrpcChannel};
-use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 use crate::xds::istio::ca::IstioCertificateRequest;
+use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
@@ -148,7 +148,7 @@ pub mod mock {
     struct ClientState {
         fetches: Vec<Identity>,
         error: bool,
-        gen: tls::mock::CertGenerator,
+        cert_gen: tls::mock::CertGenerator,
     }
 
     #[derive(Clone)]
@@ -233,7 +233,7 @@ pub mod mock {
                 return Err(Error::Spiffe("injected test error".into()));
             }
             let certs = state
-                .gen
+                .cert_gen
                 .new_certs(&id.to_owned().into(), not_before, not_after);
             state.fetches.push(id.to_owned());
             Ok(certs)

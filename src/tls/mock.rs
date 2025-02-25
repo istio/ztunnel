@@ -15,9 +15,9 @@
 use crate::identity::Identity;
 use std::fmt::{Display, Formatter};
 
-use rand::rngs::SmallRng;
 use rand::RngCore;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rcgen::{Certificate, CertificateParams, KeyPair};
 use std::net::IpAddr;
 use std::sync::Arc;

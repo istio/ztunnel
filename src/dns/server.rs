@@ -18,9 +18,9 @@ use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::system_conf::read_system_conf;
+use hickory_server::ServerFuture;
 use hickory_server::authority::LookupError;
 use hickory_server::server::Request;
-use hickory_server::ServerFuture;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::rng;
@@ -45,10 +45,10 @@ use crate::dns::resolver::{Answer, Resolver};
 use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
-use crate::state::service::IpFamily;
-use crate::state::workload::address::Address;
-use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
+use crate::state::service::IpFamily;
+use crate::state::workload::Workload;
+use crate::state::workload::address::Address;
 use crate::{config, dns};
 
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
@@ -1067,45 +1067,49 @@ mod tests {
                 name: "success: non k8s host with search namespace yields cname+A record",
                 host: "www.google.com.ns1.svc.cluster.local.",
                 expect_records: vec![
-                    cname(n("www.google.com.ns1.svc.cluster.local."), n("www.google.com.")),
-                    a(n("www.google.com."), ipv4("1.1.1.1"))],
+                    cname(
+                        n("www.google.com.ns1.svc.cluster.local."),
+                        n("www.google.com."),
+                    ),
+                    a(n("www.google.com."), ipv4("1.1.1.1")),
+                ],
                 ..Default::default()
             },
             Case {
                 name: "success: non k8s host not in local cache",
                 host: "www.bing.com",
                 expect_authoritative: false,
-                expect_records: vec![
-                    a(n("www.bing.com."), ipv4("1.1.1.1"))],
+                expect_records: vec![a(n("www.bing.com."), ipv4("1.1.1.1"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - fqdn",
                 host: "productpage.ns1.svc.cluster.local.",
-                expect_records: vec![
-                    a(n("productpage.ns1.svc.cluster.local."), ipv4("9.9.9.9"))],
+                expect_records: vec![a(n("productpage.ns1.svc.cluster.local."), ipv4("9.9.9.9"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - name.namespace",
                 host: "productpage.ns1.",
-                expect_records: vec![
-                    a(n("productpage.ns1."), ipv4("9.9.9.9"))],
+                expect_records: vec![a(n("productpage.ns1."), ipv4("9.9.9.9"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - shortname",
                 host: "productpage.",
-                expect_records: vec![
-                    a(n("productpage."), ipv4("9.9.9.9"))],
+                expect_records: vec![a(n("productpage."), ipv4("9.9.9.9"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host (name.namespace) with search namespace yields cname+A record",
                 host: "productpage.ns1.ns1.svc.cluster.local.",
                 expect_records: vec![
-                    cname(n("productpage.ns1.ns1.svc.cluster.local."), n("productpage.ns1.")),
-                    a(n("productpage.ns1."), ipv4("9.9.9.9"))],
+                    cname(
+                        n("productpage.ns1.ns1.svc.cluster.local."),
+                        n("productpage.ns1."),
+                    ),
+                    a(n("productpage.ns1."), ipv4("9.9.9.9")),
+                ],
                 ..Default::default()
             },
             Case {
@@ -1118,22 +1122,19 @@ mod tests {
             Case {
                 name: "success: k8s host - non local namespace - name.namespace",
                 host: "example.ns2.",
-                expect_records: vec![
-                    a(n("example.ns2."), ipv4("10.10.10.10"))],
+                expect_records: vec![a(n("example.ns2."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - non local namespace - fqdn",
                 host: "example.ns2.svc.cluster.local.",
-                expect_records: vec![
-                    a(n("example.ns2.svc.cluster.local."), ipv4("10.10.10.10"))],
+                expect_records: vec![a(n("example.ns2.svc.cluster.local."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
                 name: "success: k8s host - non local namespace - name.namespace.svc",
                 host: "example.ns2.svc.",
-                expect_records: vec![
-                    a(n("example.ns2.svc."), ipv4("10.10.10.10"))],
+                expect_records: vec![a(n("example.ns2.svc."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
@@ -1150,7 +1151,8 @@ mod tests {
                     a(n("details.ns2.svc.cluster.remote."), ipv4("11.11.11.11")),
                     a(n("details.ns2.svc.cluster.remote."), ipv4("12.12.12.12")),
                     a(n("details.ns2.svc.cluster.remote."), ipv4("13.13.13.13")),
-                    a(n("details.ns2.svc.cluster.remote."), ipv4("14.14.14.14"))],
+                    a(n("details.ns2.svc.cluster.remote."), ipv4("14.14.14.14")),
+                ],
                 ..Default::default()
             },
             Case {
@@ -1163,16 +1165,17 @@ mod tests {
             Case {
                 name: "success: TypeA query returns A records only",
                 host: "dual.localhost.",
-                expect_records: vec![
-                    a(n("dual.localhost."), ipv4("2.2.2.2"))],
+                expect_records: vec![a(n("dual.localhost."), ipv4("2.2.2.2"))],
                 ..Default::default()
             },
             Case {
                 name: "success: TypeAAAA query returns AAAA records only",
                 host: "dual.localhost.",
                 query_type: RecordType::AAAA,
-                expect_records: vec![
-                    aaaa(n("dual.localhost."), ipv6("2001:db8:0:0:0:ff00:42:8329"))],
+                expect_records: vec![aaaa(
+                    n("dual.localhost."),
+                    ipv6("2001:db8:0:0:0:ff00:42:8329"),
+                )],
                 ..Default::default()
             },
             Case {
@@ -1191,37 +1194,40 @@ mod tests {
             Case {
                 name: "success: wild card returns A record correctly",
                 host: "foo.wildcard.",
-                expect_records: vec![
-                    a(n("foo.wildcard."), ipv4("10.10.10.10"))],
+                expect_records: vec![a(n("foo.wildcard."), ipv4("10.10.10.10"))],
                 ..Default::default()
             },
             Case {
                 name: "success: specific wild card returns A record correctly",
                 host: "a.b.wildcard.",
-                expect_records: vec![
-                    a(n("a.b.wildcard."), ipv4("11.11.11.11"))],
+                expect_records: vec![a(n("a.b.wildcard."), ipv4("11.11.11.11"))],
                 ..Default::default()
             },
             Case {
                 name: "success: wild card with domain returns A record correctly",
                 host: "foo.svc.mesh.company.net.",
-                expect_records: vec![
-                    a(n("foo.svc.mesh.company.net."), ipv4("10.1.2.3"))],
+                expect_records: vec![a(n("foo.svc.mesh.company.net."), ipv4("10.1.2.3"))],
                 ..Default::default()
             },
             Case {
                 name: "success: wild card with namespace with domain returns A record correctly",
                 host: "foo.foons.svc.mesh.company.net.",
-                expect_records: vec![
-                    a(n("foo.foons.svc.mesh.company.net."), ipv4("10.1.2.3"))],
+                expect_records: vec![a(n("foo.foons.svc.mesh.company.net."), ipv4("10.1.2.3"))],
                 ..Default::default()
             },
             Case {
                 name: "success: wild card with search domain returns A record correctly",
                 host: "foo.svc.mesh.company.net.ns1.svc.cluster.local.",
                 expect_records: vec![
-                    cname(n("*.svc.mesh.company.net.ns1.svc.cluster.local."), n("*.svc.mesh.company.net.")),
-                    a(n("foo.svc.mesh.company.net.ns1.svc.cluster.local."), ipv4("10.1.2.3"))],
+                    cname(
+                        n("*.svc.mesh.company.net.ns1.svc.cluster.local."),
+                        n("*.svc.mesh.company.net."),
+                    ),
+                    a(
+                        n("foo.svc.mesh.company.net.ns1.svc.cluster.local."),
+                        ipv4("10.1.2.3"),
+                    ),
+                ],
                 ..Default::default()
             },
             Case {
@@ -1233,8 +1239,10 @@ mod tests {
             Case {
                 name: "success: return vip for client network only",
                 host: "both-networks.ns1.svc.cluster.local.",
-                expect_records: vec![
-                    a(n("both-networks.ns1.svc.cluster.local."), ipv4("21.21.21.21"))],
+                expect_records: vec![a(
+                    n("both-networks.ns1.svc.cluster.local."),
+                    ipv4("21.21.21.21"),
+                )],
                 ..Default::default()
             },
             Case {
@@ -1242,7 +1250,8 @@ mod tests {
                 host: "headless.ns1.svc.cluster.local.",
                 expect_records: vec![
                     a(n("headless.ns1.svc.cluster.local."), ipv4("30.30.30.30")),
-                    a(n("headless.ns1.svc.cluster.local."), ipv4("31.31.31.31"))],
+                    a(n("headless.ns1.svc.cluster.local."), ipv4("31.31.31.31")),
+                ],
                 ..Default::default()
             },
             Case {
@@ -1251,15 +1260,18 @@ mod tests {
                 query_type: RecordType::AAAA,
                 expect_records: vec![
                     aaaa(n("headless.ns1.svc.cluster.local."), ipv6("2001:db8::30")),
-                    aaaa(n("headless.ns1.svc.cluster.local."), ipv6("2001:db8::31"))],
+                    aaaa(n("headless.ns1.svc.cluster.local."), ipv6("2001:db8::31")),
+                ],
                 ..Default::default()
             },
             Case {
                 name: "success: headless-ipv6 service returns records for AAAA",
                 host: "headless-ipv6.ns1.svc.cluster.local.",
                 query_type: RecordType::AAAA,
-                expect_records: vec![
-                aaaa(n("headless-ipv6.ns1.svc.cluster.local."), ipv6("2001:db8::33"))],
+                expect_records: vec![aaaa(
+                    n("headless-ipv6.ns1.svc.cluster.local."),
+                    ipv6("2001:db8::33"),
+                )],
                 ..Default::default()
             },
             Case {

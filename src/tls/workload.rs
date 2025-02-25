@@ -22,8 +22,8 @@ use futures_util::TryFutureExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::ParsedCertificate;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{
     ClientConfig, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
 };
