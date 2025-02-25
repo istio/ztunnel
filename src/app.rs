@@ -22,10 +22,10 @@ use prometheus_client::registry::Registry;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use tokio::task::JoinSet;
-use tracing::{warn, Instrument};
+use tracing::{Instrument, warn};
 
 use crate::identity::SecretManager;
 use crate::state::ProxyStateManager;

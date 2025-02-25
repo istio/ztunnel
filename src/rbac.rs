@@ -18,16 +18,16 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use tracing::{instrument, trace};
-use xds::istio::security::string_match::MatchType;
 use xds::istio::security::Address as XdsAddress;
 use xds::istio::security::Authorization as XdsRbac;
 use xds::istio::security::Match;
 use xds::istio::security::ServiceAccountMatch as XdsServiceAccountMatch;
 use xds::istio::security::StringMatch as XdsStringMatch;
+use xds::istio::security::string_match::MatchType;
 
 use crate::identity::Identity;
 
-use crate::state::workload::{byte_to_ip, WorkloadError};
+use crate::state::workload::{WorkloadError, byte_to_ip};
 use crate::strng::Strng;
 use crate::{strng, xds};
 
@@ -523,13 +523,15 @@ mod tests {
 
     #[test]
     fn rbac_empty_policy() {
-        assert!(!allow_policy(
-            "empty",
-            vec![vec![vec![RbacMatch {
-                ..Default::default()
-            }]]]
-        )
-        .matches(&plaintext_conn()));
+        assert!(
+            !allow_policy(
+                "empty",
+                vec![vec![vec![RbacMatch {
+                    ..Default::default()
+                }]]]
+            )
+            .matches(&plaintext_conn())
+        );
         assert!(allow_policy("empty", vec![vec![vec![]]]).matches(&plaintext_conn()));
         assert!(allow_policy("empty", vec![vec![]]).matches(&plaintext_conn()));
         assert!(!allow_policy("empty", vec![]).matches(&plaintext_conn()));

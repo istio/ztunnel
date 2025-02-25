@@ -27,7 +27,7 @@ use rand::Rng;
 use socket2::TcpKeepalive;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
-use tracing::{debug, trace, warn, Instrument};
+use tracing::{Instrument, debug, trace, warn};
 
 use inbound::Inbound;
 pub use metrics::*;

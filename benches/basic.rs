@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use pprof::criterion::{Output, PProfProfiler};
 
 use ztunnel::state::ProxyState;

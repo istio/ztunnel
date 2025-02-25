@@ -22,7 +22,7 @@ use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use rustls::server::WebPkiClientVerifier;
-use rustls::{server, ClientConfig, RootCertStore, ServerConfig};
+use rustls::{ClientConfig, RootCertStore, ServerConfig, server};
 use rustls_pemfile::Item;
 use std::io::Cursor;
 use std::str::FromStr;

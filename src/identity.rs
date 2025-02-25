@@ -30,7 +30,7 @@ pub use auth::*;
 pub mod mock {
     pub use super::caclient::mock::CaClient;
     pub use super::manager::mock::{
-        new_secret_manager, new_secret_manager_cfg, Config as SecretManagerConfig,
+        Config as SecretManagerConfig, new_secret_manager, new_secret_manager_cfg,
     };
 }
 

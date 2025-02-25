@@ -15,18 +15,18 @@
 use crate::config;
 use crate::proxy::Error;
 use bytes::{Buf, Bytes};
-use h2::client::{Connection, SendRequest};
 use h2::SendStream;
+use h2::client::{Connection, SendRequest};
 use http::Request;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
 use tokio_rustls::client::TlsStream;
-use tracing::{debug, error, trace, warn, Instrument};
+use tracing::{Instrument, debug, error, trace, warn};
 
 #[derive(Debug, Clone)]
 // H2ConnectClient is a wrapper abstracting h2

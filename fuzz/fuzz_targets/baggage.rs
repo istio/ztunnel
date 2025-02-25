@@ -14,7 +14,7 @@
 
 #![no_main]
 
-use hyper::{http::HeaderValue, HeaderMap};
+use hyper::{HeaderMap, http::HeaderValue};
 use libfuzzer_sys::fuzz_target;
 use ztunnel::baggage::parse_baggage_header;
 use ztunnel::proxy::BAGGAGE_HEADER;

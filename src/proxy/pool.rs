@@ -13,8 +13,8 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::{h2, LocalWorkloadInformation};
 use super::{Error, SocketFactory};
+use super::{LocalWorkloadInformation, h2};
 use std::time::Duration;
 
 use std::collections::hash_map::DefaultHasher;
@@ -26,21 +26,21 @@ use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::net::SocketAddr;
 
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use tokio::sync::watch;
 
 use tokio::sync::Mutex;
-use tracing::{debug, trace, Instrument};
+use tracing::{Instrument, debug, trace};
 
 use crate::config;
 use crate::identity::Identity;
 
 use flurry;
 
-use crate::proxy::h2::client::H2ConnectClient;
 use crate::proxy::h2::H2Stream;
+use crate::proxy::h2::client::H2ConnectClient;
 use pingora_pool;
 use tokio::io;
 
@@ -293,8 +293,7 @@ impl PoolState {
 
         trace!(
             "checkout - got writelock for conn with key {} and hash {:?}",
-            workload_key,
-            pool_key.key
+            workload_key, pool_key.key
         );
         let returned_connection = loop {
             match self.guarded_get(&pool_key.key, workload_key)? {
@@ -329,7 +328,9 @@ impl PoolState {
 // which will terminate all connection driver spawns, as well as cancel all outstanding eviction timeout spawns
 impl Drop for PoolState {
     fn drop(&mut self) {
-        debug!("poolstate dropping, stopping all connection drivers and cancelling all outstanding eviction timeout spawns");
+        debug!(
+            "poolstate dropping, stopping all connection drivers and cancelling all outstanding eviction timeout spawns"
+        );
         let _ = self.timeout_tx.send(true);
     }
 }
@@ -488,7 +489,10 @@ impl WorkloadHBONEPool {
                                 .await?;
                             match existing_conn {
                                 None => {
-                                    trace!("woke up on pool notification, but didn't find a conn for {:?} yet", hash_key);
+                                    trace!(
+                                        "woke up on pool notification, but didn't find a conn for {:?} yet",
+                                        hash_key
+                                    );
                                     continue;
                                 }
                                 Some(e_conn) => {
@@ -566,15 +570,15 @@ mod test {
 
     use crate::{drain, identity, proxy};
 
-    use futures_util::{future, StreamExt};
+    use futures_util::{StreamExt, future};
     use hyper::body::Incoming;
 
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use prometheus_client::registry::Registry;
-    use std::sync::atomic::AtomicU32;
     use std::sync::RwLock;
+    use std::sync::atomic::AtomicU32;
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
@@ -582,7 +586,7 @@ mod test {
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
     use tokio::sync::oneshot;
 
-    use tracing::{error, Instrument};
+    use tracing::{Instrument, error};
 
     use crate::test_helpers::helpers::initialize_telemetry;
 
@@ -594,7 +598,7 @@ mod test {
     use ztunnel::test_helpers::*;
 
     macro_rules! assert_opens_drops {
-        ($srv:expr, $open:expr, $drops:expr) => {
+        ($srv:expr_2021, $open:expr_2021, $drops:expr_2021) => {
             assert_eq!(
                 $srv.conn_counter.load(Ordering::Relaxed),
                 $open,

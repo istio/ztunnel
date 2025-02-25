@@ -21,11 +21,11 @@ use std::future::Future;
 use std::io::{Error, IoSlice};
 use std::marker::PhantomPinned;
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::trace;
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer

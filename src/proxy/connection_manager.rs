@@ -345,8 +345,8 @@ mod tests {
     use crate::rbac::Connection;
     use crate::state::{DemandProxyState, ProxyState};
     use crate::test_helpers::test_default_workload;
-    use crate::xds::istio::security::{Action, Authorization, Scope};
     use crate::xds::ProxyStateUpdateMutator;
+    use crate::xds::istio::security::{Action, Authorization, Scope};
 
     use super::{ConnectionGuard, ConnectionManager, InboundConnection, PolicyWatcher};
 
