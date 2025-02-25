@@ -63,7 +63,7 @@ impl CsrOptions {
         })
     }
 
-    #[cfg(feature = "tls-ring")]
+    #[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
     pub fn generate(&self) -> Result<CertSign, Error> {
         use rcgen::{CertificateParams, DistinguishedName, SanType};
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
