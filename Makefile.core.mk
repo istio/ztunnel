@@ -23,7 +23,7 @@ inpodserver:
 # Test that all important features build
 check-features:
 	cargo check --no-default-features -F tls-boring
-	cargo check --no-default-features -F tls-openssl
+	cargo check --no-default-features -F tls-aws-lc
 	cargo check -F jemalloc
 	(cd fuzz; RUSTFLAGS="--cfg fuzzing" cargo check)
 

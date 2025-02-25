@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [features]
-default = ["tls-aws-lc"]
+default = ["tls-ring"]
 jemalloc = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"]
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen"]
