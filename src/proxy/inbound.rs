@@ -30,7 +30,9 @@ use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
-use crate::proxy::{BAGGAGE_HEADER, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
+use crate::proxy::{
+    BAGGAGE_HEADER, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics,
+};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
@@ -657,7 +659,7 @@ fn build_response(status: StatusCode) -> Response<()> {
 #[cfg(test)]
 mod tests {
     use super::{Inbound, ProxyInputs};
-    use crate::{config, proxy::inbound::HboneAddress, proxy::ConnectionManager, strng};
+    use crate::{config, proxy::ConnectionManager, proxy::inbound::HboneAddress, strng};
 
     use crate::{
         rbac::Connection,
@@ -678,11 +680,11 @@ mod tests {
     };
 
     use crate::identity::manager::mock::new_secret_manager;
-    use crate::proxy::h2::server::RequestParts;
     use crate::proxy::DefaultSocketFactory;
     use crate::proxy::LocalWorkloadInformation;
-    use crate::state::workload::HealthStatus;
+    use crate::proxy::h2::server::RequestParts;
     use crate::state::WorkloadInfo;
+    use crate::state::workload::HealthStatus;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use http::{Method, Uri};
     use prometheus_client::registry::Registry;
