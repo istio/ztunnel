@@ -53,6 +53,10 @@ pub enum Error {
     #[cfg(feature = "tls-boring")]
     SslError(#[from] boring::error::ErrorStack),
 
+    #[error("invalid operation: {0:?}")]
+    #[cfg(feature = "tls-openssl")]
+    SslError(#[from] openssl::error::ErrorStack),
+
     #[error("invalid certificate generation: {0:?}")]
     #[cfg(feature = "tls-ring")]
     RcgenError(Arc<rcgen::Error>),
