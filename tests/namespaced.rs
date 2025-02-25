@@ -890,7 +890,7 @@ mod namespaced {
         let mut manager = setup_netns_test!(Shared);
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         manager
-            .service_builder("service")
+            .service_builder("server")
             .addresses(vec![NetworkAddress {
                 network: strng::EMPTY,
                 address: TEST_VIP.parse::<IpAddr>()?,
