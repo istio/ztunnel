@@ -351,7 +351,13 @@ impl Inbound {
                 .vips
                 .iter()
                 .max_by_key(|a| match a.network == conn.dst_network {
-                    true => 1,
+                    true => {
+                        // Defer to IPv4 if present
+                        match a.address.is_ipv4() {
+                            true => 2,
+                            false => 1,
+                        }
+                    }
                     false => 0,
                 })
                 .ok_or_else(|| {
