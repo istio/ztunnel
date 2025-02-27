@@ -14,20 +14,20 @@ workloads:
       80: 8080
     "default/example2.com":
       80: 8080
-# Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
-- uid: cluster1//v1/Pod/default/local-tcp
-  name: local-tcp
+- uid: cluster1//v1/Pod/default/local2
+  name: local2
   namespace: default
   serviceAccount: default
   workloadIps: ["127.0.0.2"]
-  protocol: TCP
+  protocol: HBONE
   node: local
   network: ""
   services:
     "default/example.com":
-      80: 8080
+      80: 8081
     "default/example2.com":
       80: 8080
+
 policies:
   - action: Allow
     rules:

@@ -30,15 +30,15 @@ use tracing::trace;
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
 pub trait BufferedSplitter: Unpin {
-    type R: ResizeBufRead + Unpin;
-    type W: AsyncWriteBuf + Unpin;
+    type R: ResizeBufRead + Unpin + Send + Sync;
+    type W: AsyncWriteBuf + Unpin + Send + Sync;
     fn split_into_buffered_reader(self) -> (Self::R, Self::W);
 }
 
 // Generic BufferedSplitter for anything that can Read/Write.
 impl<I> BufferedSplitter for I
 where
-    I: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncRead + AsyncWrite + Unpin + Send + Sync,
 {
     type R = BufReader<io::ReadHalf<I>>;
     type W = WriteAdapter<io::WriteHalf<I>>;
