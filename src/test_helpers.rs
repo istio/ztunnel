@@ -220,6 +220,7 @@ pub fn test_default_workload() -> Workload {
         node: "".into(),
         status: Default::default(),
         cluster_id: "Kubernetes".into(),
+        capacity: 1,
 
         authorization_policies: Vec::new(),
         native_tunnel: false,
