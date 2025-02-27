@@ -348,7 +348,7 @@ checksum = "3e10058cf3b10c9eca798177ac6ee3c895c7312d094618de60a2bb6f2698f25f"
 dependencies = [
  "bitflags 2.8.0",
  "boring-sys",
- "foreign-types",
+ "foreign-types 0.5.0",
  "libc",
  "openssl-macros",
 ]
@@ -361,7 +361,7 @@ dependencies = [
  "aead",
  "boring",
  "boring-sys",
- "foreign-types",
+ "foreign-types 0.5.0",
 ]
 
 [[package]]
@@ -374,7 +374,7 @@ dependencies = [
  "boring-additions",
  "boring-sys",
  "boring-sys-additions",
- "foreign-types",
+ "foreign-types 0.5.0",
  "lazy_static",
  "once_cell",
  "rustls",
@@ -977,12 +977,21 @@ checksum = "a0d2fde1f7b3d48b8395d5f2de76c18a528bd6a9cdde438df747bfcba3e05d6f"
 
 [[package]]
 name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared 0.1.1",
+]
+
+[[package]]
+name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d737d9aa519fb7b749cbc3b962edcf310a8dd1f4b67c91c4f83975dbdd17d965"
 dependencies = [
  "foreign-types-macros",
- "foreign-types-shared",
+ "foreign-types-shared 0.3.1",
 ]
 
 [[package]]
@@ -995,6 +1004,12 @@ dependencies = [
  "quote",
  "syn 2.0.98",
 ]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "foreign-types-shared"
@@ -2172,6 +2187,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b410bbe7e14ab526a0e86877eb47c6996a2bd7746f027ba551028c925390e4e9"
 
 [[package]]
+name = "openssl"
+version = "0.10.68"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6174bc48f102d208783c2c84bf931bb75927a617866870de8a4ea85597f871f5"
+dependencies = [
+ "bitflags 2.8.0",
+ "cfg-if",
+ "foreign-types 0.3.2",
+ "libc",
+ "once_cell",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
 name = "openssl-macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2187,6 +2217,18 @@ name = "openssl-probe"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45abf306cbf99debc8195b66b7346498d7b10c210de50418b5ccd7ceba08c741"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "overload"
@@ -2308,6 +2350,12 @@ dependencies = [
  "thread_local",
  "tokio",
 ]
+
+[[package]]
+name = "pkg-config"
+version = "0.3.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2"
 
 [[package]]
 name = "plotters"
@@ -2847,6 +2895,20 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-openssl"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad6baac2596417ed1ac329842cc9ab22d90fbbc3c59612ecd74d783b1df26523"
+dependencies = [
+ "foreign-types-shared 0.1.1",
+ "once_cell",
+ "openssl",
+ "openssl-sys",
+ "rustls",
+ "rustls-webpki",
 ]
 
 [[package]]
@@ -3638,6 +3700,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4205,6 +4273,7 @@ dependencies = [
  "nix 0.29.0",
  "oid-registry 0.8.1",
  "once_cell",
+ "openssl",
  "pin-project-lite",
  "pingora-pool",
  "ppp",
@@ -4220,6 +4289,7 @@ dependencies = [
  "rustc_version",
  "rustls",
  "rustls-native-certs",
+ "rustls-openssl",
  "rustls-pemfile",
  "serde",
  "serde_json",

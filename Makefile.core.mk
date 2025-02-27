@@ -5,6 +5,8 @@ ifeq ($(TLS_MODE), boring)
 	FEATURES:=--no-default-features -F tls-boring
 else ifeq ($(TLS_MODE), aws-lc)
 	FEATURES:=--no-default-features -F tls-aws-lc
+else ifeq ($(TLS_MODE), openssl)
+	FEATURES:=--no-default-features -F tls-openssl
 endif
 
 test:
@@ -24,6 +26,7 @@ inpodserver:
 check-features:
 	cargo check --no-default-features -F tls-boring
 	cargo check --no-default-features -F tls-aws-lc
+	cargo check --no-default-features -F tls-openssl
 	cargo check -F jemalloc
 	(cd fuzz; RUSTFLAGS="--cfg fuzzing" cargo check)
 
