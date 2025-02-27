@@ -229,6 +229,13 @@ pub struct Workload {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub services: Vec<NamespacedHostname>,
+
+    #[serde(default = "default_capacity")]
+    pub capacity: u32,
+}
+
+fn default_capacity() -> u32 {
+    1
 }
 
 pub fn is_default<T: Default + PartialEq>(t: &T) -> bool {
@@ -450,6 +457,7 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
                 }
             },
 
+            capacity: resource.capacity.unwrap_or(1),
             services,
         };
         // Return back part we did not use (service) so it can be consumed without cloning
