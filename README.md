@@ -34,10 +34,11 @@ Ztunnel's TLS is built on [rustls](https://github.com/rustls/rustls).
 
 Rustls has support for plugging in various crypto providers to meet various needs (compliance, performance, etc).
 
-| Name                                          | How To Enable                                  |
-|-----------------------------------------------|------------------------------------------------|
-| [ring](https://github.com/briansmith/ring/)   | Default (or `--features tls-ring`)             |
-| [boring](https://github.com/cloudflare/boring) | `--features tls-boring --no-default-features` |
+| Name                                               | How To Enable                                  |
+|----------------------------------------------------|------------------------------------------------|
+| [ring](https://github.com/briansmith/ring/)        | Default (or `--features tls-ring`)             |
+| [boring](https://github.com/cloudflare/boring)     | `--features tls-boring --no-default-features`  |
+| [openssl](https://github.com/tofay/rustls-openssl) | `--features tls-openssl --no-default-features` |
 
 In all options, only TLS 1.3 with cipher suites `TLS13_AES_256_GCM_SHA384` and `TLS13_AES_128_GCM_SHA256` is used.
 

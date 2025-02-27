@@ -66,6 +66,18 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     })
 }
 
+#[cfg(feature = "tls-openssl")]
+pub(super) fn provider() -> Arc<CryptoProvider> {
+    Arc::new(CryptoProvider {
+        // Limit to only the subset of ciphers that are FIPS compatible
+        cipher_suites: vec![
+            rustls_openssl::cipher_suite::TLS13_AES_256_GCM_SHA384,
+            rustls_openssl::cipher_suite::TLS13_AES_128_GCM_SHA256,
+        ],
+        ..rustls_openssl::default_provider()
+    })
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum TlsError {
     #[error("tls handshake error: {0:?}")]
