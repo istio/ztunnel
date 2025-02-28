@@ -38,6 +38,7 @@ use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use itertools::Itertools;
 use rand::prelude::IteratorRandom;
+use rand::seq::IndexedRandom;
 use serde::Serializer;
 use std::collections::HashMap;
 use std::convert::Into;
@@ -370,7 +371,7 @@ impl ProxyState {
             Some((ep, wl))
         });
 
-        match svc.load_balancer {
+        let options = match svc.load_balancer {
             Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
                 let ranks = endpoints
                     .filter_map(|(ep, wl)| {
@@ -409,14 +410,21 @@ impl ProxyState {
                     })
                     .collect::<Vec<_>>();
                 let max = *ranks.iter().map(|(rank, _ep, _wl)| rank).max()?;
-                ranks
+                let options: Vec<_> = ranks
                     .into_iter()
                     .filter(|(rank, _ep, _wl)| *rank == max)
                     .map(|(_, ep, wl)| (ep, wl))
-                    .choose(&mut rand::rng())
+                    .collect();
+                options
             }
-            _ => endpoints.choose(&mut rand::rng()),
-        }
+            _ => endpoints.collect(),
+        };
+        options
+            .choose_weighted(&mut rand::rng(), |(_, wl)| wl.capacity as u64)
+            // This can fail if there are no weights, the sum is zero (not possible in our API), or if it overflows
+            // The API has u32 but we sum into an u64, so it would take ~4 billion entries of max weight to overflow
+            .ok()
+            .cloned()
     }
 }
 

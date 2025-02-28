@@ -897,6 +897,7 @@ mod tests {
             application_tunnel: None,
             locality: Default::default(),
             services: Default::default(),
+            capacity: Default::default(),
         }
     }
 
@@ -927,6 +928,7 @@ mod tests {
             application_tunnel: None,
             locality: Default::default(),
             services: Default::default(),
+            capacity: Default::default(),
         }
     }
 

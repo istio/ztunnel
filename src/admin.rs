@@ -659,6 +659,7 @@ mod tests {
                 subzone: "subezone".to_string(),
             }),
             extensions: Default::default(),
+            capacity: Default::default(),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
