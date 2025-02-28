@@ -13,11 +13,16 @@
 // limitations under the License.
 
 use crate::config;
+use crate::identity::Identity;
 use crate::proxy::Error;
 use bytes::{Buf, Bytes};
 use h2::SendStream;
 use h2::client::{Connection, SendRequest};
 use http::Request;
+use std::fmt;
+use std::fmt::{Display, Formatter};
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::task::{Context, Poll};
@@ -34,9 +39,42 @@ pub struct H2ConnectClient {
     sender: SendRequest<Bytes>,
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
+    wl_key: WorkloadKey,
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct WorkloadKey {
+    pub src_id: Identity,
+    pub dst_id: Vec<Identity>,
+    // In theory we can just use src,dst,node. However, the dst has a check that
+    // the L3 destination IP matches the HBONE IP. This could be loosened to just assert they are the same identity maybe.
+    pub dst: SocketAddr,
+    // Because we spoof the source IP, we need to key on this as well. Note: for in-pod its already per-pod
+    // pools anyways.
+    pub src: IpAddr,
+}
+
+impl Display for WorkloadKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}({})->{}[", self.src, &self.src_id, self.dst,)?;
+        for i in &self.dst_id {
+            write!(f, "{i}")?;
+        }
+        write!(f, "]")
+    }
 }
 
 impl H2ConnectClient {
+    pub fn is_for_workload(&self, wl_key: &WorkloadKey) -> Result<(), crate::proxy::Error> {
+        if !(self.wl_key == *wl_key) {
+            Err(crate::proxy::Error::Generic(
+                "connection does not match workload key!".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     // will_be_at_max_streamcount checks if a stream will be maxed out if we send one more request on it
     pub fn will_be_at_max_streamcount(&self) -> bool {
         let future_count = self.stream_count.load(Ordering::Relaxed) + 1;
@@ -111,6 +149,7 @@ pub async fn spawn_connection(
     cfg: Arc<config::Config>,
     s: TlsStream<TcpStream>,
     driver_drain: Receiver<bool>,
+    wl_key: WorkloadKey,
 ) -> Result<H2ConnectClient, Error> {
     let mut builder = h2::client::Builder::new();
     builder
@@ -150,6 +189,7 @@ pub async fn spawn_connection(
         sender: send_req,
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
+        wl_key,
     };
     Ok(c)
 }
