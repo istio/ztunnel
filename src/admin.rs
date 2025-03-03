@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config::Config;
-use crate::hyper_util::{empty_response, plaintext_response, Server};
+use crate::hyper_util::{Server, empty_response, plaintext_response};
 use crate::identity::SecretManager;
 use crate::state::DemandProxyState;
 use crate::tls::Certificate;
@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
-use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
+use hyper::{Request, Response, header::CONTENT_TYPE, header::HeaderValue};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
@@ -441,17 +441,16 @@ fn base64_encode(data: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::ConfigDump;
     use super::change_log_level;
     use super::dump_certs;
     use super::handle_config_dump;
-    use super::ConfigDump;
     use crate::admin::HELP_STRING;
-    use crate::config::construct_config;
     use crate::config::ProxyConfig;
+    use crate::config::construct_config;
     use crate::identity;
     use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
-    use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
     use crate::xds::istio::security::Clause as XdsClause;
@@ -459,7 +458,7 @@ mod tests {
     use crate::xds::istio::security::Rule as XdsRule;
     use crate::xds::istio::security::ServiceAccountMatch as XdsServiceAccountMatch;
     use crate::xds::istio::security::StringMatch as XdsStringMatch;
-    use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
+    use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::workload::GatewayAddress as XdsGatewayAddress;
     use crate::xds::istio::workload::LoadBalancing as XdsLoadBalancing;
     use crate::xds::istio::workload::Locality as XdsLocality;
@@ -469,6 +468,7 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType as XdsWorkloadType;
+    use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
@@ -554,8 +554,8 @@ mod tests {
             "certChain": [
               {
                 "expirationTime": "2023-03-11T12:57:26Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVWnlUOTI5c3d0QjhPSG1qUmFURWFENnlqcWc0d0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVTMKTWpaYUZ3MHlNekF6TVRFeE1qVTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEF3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFjTzNlMjAvK0ZrRkwKUmttMTNtQlFNYjVPUmpTOGhwWjBRMkZKd2wrSXV4TGY2MUJDZS9RVlhOVklpSUdlMXRVRTh5UTRoMXZrCjhVb01sSmpTQkdiM3VDdHVLRFVKN0xOM1VBUmV4YU1uQkZobC9mWmQxU3ZZcmhlWjU3WDlrTElVa2hkSQpDUVdxOFVFcXBWZEloNGxTZjhoYnFRQksvUWhCN0I2bUJOSW5uMThZTEhiOEpmU0N2aXBWYTRuNXByTlYKbVNWc1JPMUtpY1FQYVhpUzJta0xBWVFRanROYkVJdnJwQldCYytmVWZPaEQ0YmhwUFVmSVFIN1dFcUZLCm5TMnQwSmh1d08zM2FoUDhLZVBWWDRDRkJ4VXc2SDhrd1dJUkh5dW9YbGFwMmVST1EycFRyYmtmVjJZbgpmWjZxV0huREJ5ZjN6bkFQQVM1ZnZ4b1RoKzBYTHc9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
-                "serialNumber": "588850990443535479077311695632745359443207891470",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNYRENDQVVTZ0F3SUJBZ0lVTDVaZ0toTEI1YUt3YXRuZE1sR25CZWZ3Qkxnd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVTMKTWpaYUZ3MHlNekF6TVRFeE1qVTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJrd1p6QTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEF3RHdZRFZSMFBBUUgvQkFVREF3ZWdBREFkQmdOVkhTVUVGakFVQmdncgpCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBRWh6aFR1Sk5sY04KVTJZSlVGci9xRFp0SkZRdXU5d3hWZUtNcGRHTXNaWHhkM3RST0xNYzRxS1VuUHFiOGhQdDFXWWRhVTkwCjZnZFNMMnJOQnhSTjZHaXZwekhNNThrbHQ4Sk8zQzNtaCtpbEVsck9XbzRZQUJjRUJKWnZkVnlxL0JrYwo5dlBxMUQyK24xeU1SWjkzbHRDZnhWTXQwajBpV1ZwRkVGTGVkK3pKemEvb2czM0FiRDdtLzV4Rm1GVjYKUlpkK0NZZWV1cldkdU8zbmFGN2Y0eUQ3TnU2Rk9JaFZsdnY5ODV3eFFqeGxIeGZYbzE2N1VCY2Q0MVlpCjJjTE9peWk5SXlEWVhYamttVnFRUGJCZmdrZEZTNWV4VnpkdzMvbXpMMzNmVWErSmVhWFBEZms0eHFrMgpwcG1ZclJsRGRBckZiTG04UGxYcXdBRGUvS2pOMUNZPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serialNumber": "271676055104741785552467469040731750696653685944",
                 "validFrom": "2023-03-11T05:57:26Z"
               },
               {
@@ -572,8 +572,8 @@ mod tests {
             "certChain": [
               {
                 "expirationTime": "2023-03-11T13:57:26Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVWElQK29ySVF3dDZFUGRLSFdRU0VMOTM0bjdFd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTMKTWpaYUZ3MHlNekF6TVRFeE16VTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEV3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFHV2tCY1plUEhrZisKSEpoazY5NHhDaHZLVENkVlRoNE9QNTBvWC9TdE0vK3NsazU0Y2RkcnRpOG0rdEFnai8wK0FLaFhpSTJaCjBNRFZPaEpOWTVRT1VXdkVBUWNYVTlPR2NCWmsyRWNGVW9BOC9RRzFpcVB3ejJJRGluakYrb3lTWExEdApFRGxPdW1Sa3VETWtyME51TGNZTlJuYUI0LzMreDAvdVlRM2M3TXpvUEtUQmZQdW1DY0wzbG5mR1dGR3kKc1d3b1p5V01CK1ZFdjYzK2psdTZDZmwzUGN1NEtFNHVhQUJiWHVvRkhjeU8yMW5sZVVvT3Z2VXhLZDdGCkxvQWNsVDNaSUI3dzNUcXE2MFR3UlV6ZGZkQlA5UURabEVSL1JLTDZWbnBBUVZhbXZBWmNjZFVuTWZjOAppT0N6TWVqV2tweGxXL3MrMW1nMUxzQWxyYlJMdHc9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
-                "serialNumber": "528170730419860468572163268563070820131458817969",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNYRENDQVVTZ0F3SUJBZ0lVSlVGNVVGbU52OVhYQlFWaDFDbFk0VFNLRng4d0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTMKTWpaYUZ3MHlNekF6TVRFeE16VTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJrd1p6QTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEV3RHdZRFZSMFBBUUgvQkFVREF3ZWdBREFkQmdOVkhTVUVGakFVQmdncgpCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBSWJQa0ZHcG1oV1YKUjVnYmxPUU9kSjZJQ2w5YUpxN20zSVg2MUVBS3loTzZTc0I2aDNvVENRMC9VMEs0S0puS0czY2dPejNqClhPY2RFd25QNFVrcjJiOUxyVU5ES0E2eXN1UzRiejR1alZSN0QzSmUrVFdNMGpVQmJoQUIwY1pObE9ObgpEZUlDK1N0YU03NVAySTlJS0YwcG9QNXMrNnBWeWdkeGhiNTJKZ0FqRU1jRTI2V3lDSjJvOEh4RTcxSjIKREdtOCtaTFdEc2V4M3IrUHdQOTkyc3NFaEl5QUx5NDhKZ0xPTnQ4ZVcvQ296VlpnZURyNFFYVmVBS0NOCndFcisyOGFnSWJkbHZob3hSOTV3VmNIeUdXeHg1emlzS2xyek10andCbTRqdy93OGJ3eDN3RERJOFJNeQpUMnBabzRIaGs4UEdvTmJWUTBmc0tlWUJ2L0g5dE9JPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serialNumber": "212692774886610945930036647276614034927450199839",
                 "validFrom": "2023-03-11T06:57:26Z"
               },
               {
@@ -658,6 +658,8 @@ mod tests {
                 zone: "zone".to_string(),
                 subzone: "subezone".to_string(),
             }),
+            extensions: Default::default(),
+            capacity: Default::default(),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
@@ -681,6 +683,7 @@ mod tests {
                 health_policy: 1,
             }), // ..Default::default() // intentionally don't default. we want all fields populated
             ip_families: 0,
+            extensions: Default::default(),
         };
 
         let auth = XdsAuthorization {
@@ -845,17 +848,23 @@ mod tests {
 
         let resp = change_log_level(true, "trace");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,trace\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,trace\n")
+        );
 
         let resp = change_log_level(true, "info");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,info\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,info\n")
+        );
 
         let resp = change_log_level(true, "off");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,off\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,off\n")
+        );
     }
 }

@@ -56,7 +56,7 @@ impl Metrics {
         );
 
         let forwarded_duration = Family::<DnsLabels, Histogram>::new_with_constructor(|| {
-            Histogram::new(vec![0.005f64, 0.001, 0.01, 0.1, 1.0, 5.0].into_iter())
+            Histogram::new(vec![0.005f64, 0.001, 0.01, 0.1, 1.0, 5.0])
         });
         registry.register_with_unit(
             "dns_upstream_request_duration",

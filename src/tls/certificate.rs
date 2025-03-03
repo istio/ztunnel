@@ -23,7 +23,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use rustls::server::WebPkiClientVerifier;
-use rustls::{server, ClientConfig, KeyLogFile, RootCertStore, ServerConfig};
+use rustls::{ClientConfig, KeyLogFile, RootCertStore, ServerConfig, server};
 use rustls_pemfile::Item;
 use std::io::Cursor;
 use std::str::FromStr;
@@ -228,10 +228,9 @@ impl WorkloadCertificate {
 
         let mut roots = RootCertStore::empty();
         roots.add_parsable_certificates(chain.iter().last().map(|c| c.der.clone()));
-        roots.add_parsable_certificates(vec![CertificateDer::from_pem_file(
-            "/home/sj/learning/openssl/c/root.crt",
-        )
-        .unwrap()]);
+        roots.add_parsable_certificates(vec![
+            CertificateDer::from_pem_file("/home/sj/learning/openssl/c/root.crt").unwrap(),
+        ]);
 
         Ok(WorkloadCertificate {
             cert,
@@ -258,10 +257,9 @@ impl WorkloadCertificate {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
         let mut roots = (*self.roots).clone();
-        roots.add_parsable_certificates(vec![CertificateDer::from_pem_file(
-            "/home/sj/learning/openssl/c/root.crt",
-        )
-        .unwrap()]);
+        roots.add_parsable_certificates(vec![
+            CertificateDer::from_pem_file("/home/sj/learning/openssl/c/root.crt").unwrap(),
+        ]);
         let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
             Arc::new(roots),
             crate::tls::lib::provider(),
@@ -284,10 +282,9 @@ impl WorkloadCertificate {
         let roots = self.roots.clone();
         let verifier = IdentityVerifier { roots, identity };
         let mut root_cert_store = RootCertStore::empty();
-        root_cert_store.add_parsable_certificates(vec![CertificateDer::from_pem_file(
-            "/home/sj/learning/openssl/c/root.crt",
-        )
-        .unwrap()]);
+        root_cert_store.add_parsable_certificates(vec![
+            CertificateDer::from_pem_file("/home/sj/learning/openssl/c/root.crt").unwrap(),
+        ]);
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("client config must be valid")

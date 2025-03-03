@@ -18,8 +18,8 @@ use futures_core::ready;
 use h2::Reason;
 use std::io::Error;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -205,13 +205,13 @@ impl copy::ResizeBufRead for H2StreamReadHalf {
                 Some(Err(e)) => {
                     return Poll::Ready(match e.reason() {
                         Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => {
-                            return Poll::Ready(Ok(Bytes::new()))
+                            return Poll::Ready(Ok(Bytes::new()));
                         }
                         Some(Reason::STREAM_CLOSED) => {
                             Err(Error::new(std::io::ErrorKind::BrokenPipe, e))
                         }
                         _ => Err(h2_to_io_error(e)),
-                    })
+                    });
                 }
             }
         }
@@ -248,7 +248,7 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
         Poll::Ready(Err(h2_to_io_error(
             match ready!(self.send_stream.poll_reset(cx)) {
                 Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
-                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
                 }
                 Ok(reason) => reason.into(),
                 Err(e) => e,
@@ -273,7 +273,7 @@ impl copy::AsyncWriteBuf for H2StreamWriteHalf {
             match ready!(self.send_stream.poll_reset(cx)) {
                 Ok(Reason::NO_ERROR) => return Poll::Ready(Ok(())),
                 Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
-                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
                 }
                 Ok(reason) => reason.into(),
                 Err(e) => e,

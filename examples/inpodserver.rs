@@ -17,7 +17,7 @@ use std::os::fd::AsRawFd;
 use ztunnel::test_helpers::inpod::StartZtunnelMessage;
 use ztunnel::{
     inpod::istio::zds::WorkloadInfo,
-    test_helpers::inpod::{start_ztunnel_server, Message},
+    test_helpers::inpod::{Message, start_ztunnel_server},
 };
 
 const PROXY_WORKLOAD_INFO: &str = "PROXY_WORKLOAD_INFO";

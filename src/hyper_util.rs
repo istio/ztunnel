@@ -34,7 +34,7 @@ use hyper::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::Stream;
-use tracing::{debug, info, warn, Instrument};
+use tracing::{Instrument, debug, info, warn};
 
 use crate::tls::ServerCertProvider;
 

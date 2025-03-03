@@ -23,7 +23,7 @@ use std::{sync, thread};
 use itertools::Itertools;
 use netns_rs::NetNs;
 use tokio::runtime::{Handle, RuntimeFlavor};
-use tracing::{debug, error, warn, Instrument};
+use tracing::{Instrument, debug, error, warn};
 
 use crate::test_helpers::helpers;
 

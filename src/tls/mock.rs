@@ -15,9 +15,9 @@
 use crate::identity::Identity;
 use std::fmt::{Display, Formatter};
 
-use rand::rngs::SmallRng;
 use rand::RngCore;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rcgen::{Certificate, CertificateParams, KeyPair};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -107,7 +107,7 @@ pub fn generate_test_certs_at(
     let serial_number = {
         let mut data = [0u8; 20];
         match rng {
-            None => rand::thread_rng().fill_bytes(&mut data),
+            None => rand::rng().fill_bytes(&mut data),
             Some(rng) => rng.fill_bytes(&mut data),
         }
         // Clear the most significant bit to make the resulting bignum effectively 159 bit long.

@@ -19,11 +19,11 @@ use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
 use crate::{strng, xds};
 use bytes::Bytes;
-use serde::de::Visitor;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
+use serde::de::Visitor;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::convert::Into;
@@ -230,6 +230,13 @@ pub struct Workload {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub services: Vec<NamespacedHostname>,
+
+    #[serde(default = "default_capacity")]
+    pub capacity: u32,
+}
+
+fn default_capacity() -> u32 {
+    1
 }
 
 pub fn is_default<T: Default + PartialEq>(t: &T) -> bool {
@@ -451,6 +458,7 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
                 }
             },
 
+            capacity: resource.capacity.unwrap_or(1),
             services,
         };
         // Return back part we did not use (service) so it can be consumed without cloning
@@ -850,11 +858,11 @@ mod tests {
     use crate::config::ConfigSource;
     use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode};
     use crate::test_helpers::helpers::initialize_telemetry;
-    use crate::xds::istio::workload::load_balancing::HealthPolicy;
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::WorkloadStatus as XdsStatus;
     use crate::xds::istio::workload::WorkloadStatus;
+    use crate::xds::istio::workload::load_balancing::HealthPolicy;
     use crate::xds::istio::workload::{LoadBalancing, Port as XdsPort};
     use crate::xds::{LocalClient, ProxyStateUpdateMutator};
     use crate::{cert_fetcher, test_helpers};
@@ -1065,6 +1073,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1098,6 +1107,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1154,6 +1164,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1464,6 +1475,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1490,6 +1502,7 @@ mod tests {
                         health_policy: HealthPolicy::AllowAll as i32,
                     }),
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();
@@ -1540,6 +1553,7 @@ mod tests {
                 health_policy: HealthPolicy::AllowAll as i32,
             }),
             ip_families: 0,
+            extensions: Default::default(),
         };
         updater
             .insert_service(
@@ -1560,6 +1574,7 @@ mod tests {
                     waypoint: None,
                     load_balancing: None,
                     ip_families: 0,
+                    extensions: Default::default(),
                 },
             )
             .unwrap();

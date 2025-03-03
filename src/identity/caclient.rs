@@ -15,22 +15,24 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use prost_types::value::Kind;
 use prost_types::Struct;
+use prost_types::value::Kind;
+use tonic::IntoRequest;
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
+use tracing::{debug, error, instrument, warn};
 
-use tracing::{error, instrument, warn};
-
+use crate::identity::Error;
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
-use crate::identity::Error;
 use crate::tls::{self, TlsGrpcChannel};
-use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 use crate::xds::istio::ca::IstioCertificateRequest;
+use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 
 pub struct CaClient {
     pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
     pub enable_impersonated_identity: bool,
     pub secret_ttl: i64,
+    ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
 }
 
 impl CaClient {
@@ -41,6 +43,7 @@ impl CaClient {
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
+        ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
     ) -> Result<CaClient, Error> {
         let svc =
             tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
@@ -49,6 +52,7 @@ impl CaClient {
             client,
             enable_impersonated_identity,
             secret_ttl,
+            ca_headers,
         })
     }
 }
@@ -63,7 +67,7 @@ impl CaClient {
         let csr = cs.csr;
         let private_key = cs.private_key;
 
-        let req = IstioCertificateRequest {
+        let mut req = tonic::Request::new(IstioCertificateRequest {
             csr,
             validity_duration: self.secret_ttl,
             metadata: {
@@ -80,11 +84,19 @@ impl CaClient {
                     None
                 }
             },
-        };
+        });
+        self.ca_headers.iter().for_each(|(k, v)| {
+            req.metadata_mut().insert(k.clone(), v.clone());
+
+            if let Ok(v_str) = v.to_str() {
+                debug!("CA header added: {}={}", k, v_str);
+            }
+        });
+
         let resp = self
             .client
             .clone()
-            .create_certificate(req)
+            .create_certificate(req.into_request())
             .await
             .map_err(Box::new)?
             .into_inner();
@@ -136,7 +148,7 @@ pub mod mock {
     struct ClientState {
         fetches: Vec<Identity>,
         error: bool,
-        gen: tls::mock::CertGenerator,
+        cert_gen: tls::mock::CertGenerator,
     }
 
     #[derive(Clone)]
@@ -221,7 +233,7 @@ pub mod mock {
                 return Err(Error::Spiffe("injected test error".into()));
             }
             let certs = state
-                .gen
+                .cert_gen
                 .new_certs(&id.to_owned().into(), not_before, not_after);
             state.fetches.push(id.to_owned());
             Ok(certs)

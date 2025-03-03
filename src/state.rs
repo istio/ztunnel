@@ -21,8 +21,8 @@ use crate::state::service::{
 };
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
-    address::Address, gatewayaddress::Destination, network_addr, GatewayAddress,
-    NamespacedHostname, NetworkAddress, Workload, WorkloadStore,
+    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, WorkloadStore, address::Address,
+    gatewayaddress::Destination, network_addr,
 };
 use crate::strng::Strng;
 use crate::tls;
@@ -33,11 +33,12 @@ use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
 use educe::Educe;
 use futures_util::FutureExt;
+use hickory_resolver::TokioAsyncResolver;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::TokioAsyncResolver;
 use itertools::Itertools;
 use rand::prelude::IteratorRandom;
+use rand::seq::IndexedRandom;
 use serde::Serializer;
 use std::collections::HashMap;
 use std::convert::Into;
@@ -361,8 +362,7 @@ impl ProxyState {
                         // Filter workload out, it doesn't have a matching port
                         trace!(
                             "filter endpoint {}, it does not have service port {}",
-                            ep.workload_uid,
-                            svc_port
+                            ep.workload_uid, svc_port
                         );
                         return None;
                     }
@@ -384,7 +384,7 @@ impl ProxyState {
             Some((ep, wl))
         });
 
-        match svc.load_balancer {
+        let options = match svc.load_balancer {
             Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
                 let ranks = endpoints
                     .filter_map(|(ep, wl)| {
@@ -423,14 +423,21 @@ impl ProxyState {
                     })
                     .collect::<Vec<_>>();
                 let max = *ranks.iter().map(|(rank, _ep, _wl)| rank).max()?;
-                ranks
+                let options: Vec<_> = ranks
                     .into_iter()
                     .filter(|(rank, _ep, _wl)| *rank == max)
                     .map(|(_, ep, wl)| (ep, wl))
-                    .choose(&mut rand::thread_rng())
+                    .collect();
+                options
             }
-            _ => endpoints.choose(&mut rand::thread_rng()),
-        }
+            _ => endpoints.collect(),
+        };
+        options
+            .choose_weighted(&mut rand::rng(), |(_, wl)| wl.capacity as u64)
+            // This can fail if there are no weights, the sum is zero (not possible in our API), or if it overflows
+            // The API has u32 but we sum into an u64, so it would take ~4 billion entries of max weight to overflow
+            .ok()
+            .cloned()
     }
 }
 
@@ -649,8 +656,8 @@ impl DemandProxyState {
         // Without this, we run into trouble in pure v4 or pure v6 environments.
         matching
             .into_iter()
-            .choose(&mut rand::thread_rng())
-            .or_else(|| unmatching.into_iter().choose(&mut rand::thread_rng()))
+            .choose(&mut rand::rng())
+            .or_else(|| unmatching.into_iter().choose(&mut rand::rng()))
             .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
     }
 
@@ -824,7 +831,7 @@ impl DemandProxyState {
                         return Err(Error::UnknownWaypoint(format!(
                             "waypoint {} not found",
                             host.hostname
-                        )))
+                        )));
                     }
                 }
             }
@@ -1009,7 +1016,7 @@ mod tests {
     use rbac::StringMatch;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
-    use self::workload::{application_tunnel::Protocol as AppProtocol, ApplicationTunnel};
+    use self::workload::{ApplicationTunnel, application_tunnel::Protocol as AppProtocol};
 
     use super::*;
     use crate::test_helpers::helpers::initialize_telemetry;
@@ -1392,10 +1399,12 @@ mod tests {
 
         // test workload in ns2. this should work as ns2 doesn't have any policies. this tests:
         // 3. If there are no ALLOW policies for the workload, allow the request.
-        assert!(mock_proxy_state
-            .assert_rbac(&get_rbac_context(&mock_proxy_state, 2, "not-defaultacct"))
-            .await
-            .is_ok());
+        assert!(
+            mock_proxy_state
+                .assert_rbac(&get_rbac_context(&mock_proxy_state, 2, "not-defaultacct"))
+                .await
+                .is_ok()
+        );
 
         let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
         // 4. if any allow policies match, allow

@@ -52,7 +52,16 @@ impl BuildInfo {
 
 impl Display for BuildInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildProfile:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
-        self.version, self.git_revision, self.rust_version, self.build_profile, self.build_status, self.git_tag, self.istio_version)
+        write!(
+            f,
+            "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildProfile:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
+            self.version,
+            self.git_revision,
+            self.rust_version,
+            self.build_profile,
+            self.build_status,
+            self.git_tag,
+            self.istio_version
+        )
     }
 }

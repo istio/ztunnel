@@ -19,13 +19,13 @@ use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
-use tracing::{debug, error, info, trace, Instrument};
+use tracing::{Instrument, debug, error, info, trace};
 
-use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
-use crate::proxy::metrics::Reporter;
+use crate::drain::run_with_drain;
 use crate::proxy::Error;
-use crate::proxy::{metrics, util, ProxyInputs};
+use crate::proxy::metrics::Reporter;
+use crate::proxy::{ProxyInputs, metrics, util};
 use crate::state::workload::NetworkAddress;
 use crate::{assertions, copy, handle_connection, rbac, strng};
 use crate::{proxy, socket};

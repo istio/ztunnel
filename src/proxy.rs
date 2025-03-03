@@ -27,7 +27,7 @@ use rand::Rng;
 use socket2::TcpKeepalive;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
-use tracing::{debug, trace, warn, Instrument};
+use tracing::{Instrument, debug, trace, warn};
 
 use inbound::Inbound;
 pub use metrics::*;
@@ -529,11 +529,11 @@ impl TraceParent {
 }
 impl TraceParent {
     fn new() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         Self {
             version: 0,
-            trace_id: rng.gen(),
-            parent_id: rng.gen(),
+            trace_id: rng.random(),
+            parent_id: rng.random(),
             flags: 0,
         }
     }
@@ -897,6 +897,7 @@ mod tests {
             application_tunnel: None,
             locality: Default::default(),
             services: Default::default(),
+            capacity: Default::default(),
         }
     }
 
@@ -927,6 +928,7 @@ mod tests {
             application_tunnel: None,
             locality: Default::default(),
             services: Default::default(),
+            capacity: Default::default(),
         }
     }
 

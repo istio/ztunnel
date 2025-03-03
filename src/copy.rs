@@ -21,11 +21,11 @@ use std::future::Future;
 use std::io::{Error, IoSlice};
 use std::marker::PhantomPinned;
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::trace;
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
@@ -547,8 +547,8 @@ mod tests {
             if buf.is_empty() {
                 return Poll::Ready(Ok(0));
             }
-            let mut rng = rand::thread_rng();
-            let end = rng.gen_range(1..=buf.len()); // Ensure at least 1 byte is written
+            let mut rng = rand::rng();
+            let end = rng.random_range(1..=buf.len()); // Ensure at least 1 byte is written
             Pin::new(&mut self.0).poll_write(cx, &buf[0..end])
         }
 

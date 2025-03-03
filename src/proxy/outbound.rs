@@ -22,20 +22,20 @@ use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
-use tracing::{debug, error, info, info_span, trace_span, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, trace_span};
 
 use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
-use crate::proxy::{metrics, pool, ConnectionOpen, ConnectionResult, DerivedWorkload};
-use crate::proxy::{util, Error, ProxyInputs, TraceParent, BAGGAGE_HEADER, TRACEPARENT_HEADER};
+use crate::proxy::{BAGGAGE_HEADER, Error, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util};
+use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics};
 
-use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
-use crate::proxy::h2::H2Stream;
-use crate::state::service::ServiceDescription;
-use crate::state::workload::{address::Address, NetworkAddress, Protocol, Workload};
+use crate::drain::run_with_drain;
+use crate::proxy::h2::{H2Stream, client::WorkloadKey};
 use crate::state::ServiceResolutionMode;
+use crate::state::service::ServiceDescription;
+use crate::state::workload::{NetworkAddress, Protocol, Workload, address::Address};
 use crate::{assertions, copy, proxy, socket};
 
 use super::h2::TokioH2Stream;
@@ -314,7 +314,6 @@ impl OutboundConnection {
         let pool_key = Box::new(pool::WorkloadKey {
             src_id: req.source.identity(),
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
-            // But that
             dst_id: req.upstream_sans.clone(),
             src: remote_addr.ip(),
             dst: req.actual_destination,
@@ -520,12 +519,15 @@ fn build_forwarded(remote_addr: SocketAddr, server: &Option<ServiceDescription>)
 }
 
 fn baggage(r: &Request, cluster: String) -> String {
-    format!("k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version}",
-            namespace = r.source.namespace,
-            workload_type = r.source.workload_type,
-            workload_name = r.source.workload_name,
-            name = r.source.canonical_name,
-            version = r.source.canonical_revision,
+    format!(
+        "k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version},cloud.region={region},cloud.availability_zone={zone}",
+        namespace = r.source.namespace,
+        workload_type = r.source.workload_type,
+        workload_name = r.source.workload_name,
+        name = r.source.canonical_name,
+        version = r.source.canonical_revision,
+        region = r.source.locality.region,
+        zone = r.source.locality.zone,
     )
 }
 
@@ -569,13 +571,13 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::proxy::connection_manager::ConnectionManager;
-    use crate::proxy::LocalWorkloadInformation;
+    use crate::proxy::{LocalWorkloadInformation, pool::WorkloadHBONEPool};
     use crate::state::WorkloadInfo;
     use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
-    use crate::xds::istio::workload::address::Type as XdsAddressType;
     use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
+    use crate::xds::istio::workload::address::Type as XdsAddressType;
     use crate::xds::istio::workload::{IpFamilies, Port};
     use crate::xds::istio::workload::{NetworkAddress as XdsNetworkAddress, PortList};
     use crate::xds::istio::workload::{NetworkMode, Service as XdsService};
@@ -665,7 +667,7 @@ mod tests {
                 resolver: None,
             }),
             id: TraceParent::new(),
-            pool: pool::WorkloadHBONEPool::new(
+            pool: WorkloadHBONEPool::new(
                 cfg.clone(),
                 sock_fact,
                 local_workload_information.clone(),

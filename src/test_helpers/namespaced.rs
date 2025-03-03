@@ -67,8 +67,8 @@ macro_rules! setup_netns_test {
 /// The special ctor macro ensures this is run *before* any code. In particular, before tokio runtime.
 pub fn initialize_namespace_tests() {
     use libc::getuid;
-    use nix::mount::{mount, MsFlags};
-    use nix::sched::{unshare, CloneFlags};
+    use nix::mount::{MsFlags, mount};
+    use nix::sched::{CloneFlags, unshare};
     use std::io::Write;
 
     // First, drop into a new user namespace.

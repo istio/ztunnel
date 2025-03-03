@@ -31,11 +31,11 @@ mod namespaced {
     use hyper::Method;
     use hyper_util::rt::TokioIo;
 
+    use WorkloadMode::Uncaptured;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpStream;
     use tokio::time::timeout;
     use tracing::{error, info};
-    use WorkloadMode::Uncaptured;
 
     use ztunnel::state::workload::{ApplicationTunnel, NetworkAddress};
     use ztunnel::test_helpers::app::ParsedMetrics;
@@ -1455,9 +1455,9 @@ mod namespaced {
         /// Can connect, but get a HTTP error
         Http,
     }
-    use ztunnel::state::workload::application_tunnel::Protocol;
-    use ztunnel::state::WorkloadInfo;
     use Failure::*;
+    use ztunnel::state::WorkloadInfo;
+    use ztunnel::state::workload::application_tunnel::Protocol;
 
     async fn malicious_calls_test(
         client: Namespace,

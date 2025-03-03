@@ -17,15 +17,15 @@ use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, EndpointSet, Service};
 use crate::state::workload::Protocol::{HBONE, TCP};
 use crate::state::workload::{
-    gatewayaddress, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
+    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, gatewayaddress,
 };
 use crate::state::workload::{HealthStatus, Protocol};
 use crate::state::{DemandProxyState, ProxyState};
 use crate::xds::istio::security::Authorization as XdsAuthorization;
-use crate::xds::istio::workload::address;
 use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::istio::workload::Service as XdsService;
 use crate::xds::istio::workload::Workload as XdsWorkload;
+use crate::xds::istio::workload::address;
 use crate::xds::{Handler, LocalConfig, LocalWorkload, ProxyStateUpdater, XdsResource, XdsUpdate};
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes};
@@ -220,6 +220,7 @@ pub fn test_default_workload() -> Workload {
         node: "".into(),
         status: Default::default(),
         cluster_id: "Kubernetes".into(),
+        capacity: 1,
 
         authorization_policies: Vec::new(),
         native_tunnel: false,
