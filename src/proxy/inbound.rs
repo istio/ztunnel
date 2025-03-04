@@ -790,7 +790,7 @@ mod tests {
             if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
                 HboneAddress::SocketAddr(addr)
             } else {
-                HboneAddress::SvcHostname(hbone_dst.into(), 80)
+                HboneAddress::SvcHostname(hbone_dst.into(), SERVER_PORT)
             };
 
         let validate_destination =
