@@ -321,6 +321,7 @@ impl Inbound {
         // Used for the proxy protocol header. The Address header does not support hostname.
         let mut upstream_protocol_addr = None;
 
+        let mut dest_port = hbone_addr.port();
         // Validate hostname if present
         if hbone_addr.svc_hostname().is_some() {
             // Get the service address by hostname
@@ -359,12 +360,28 @@ impl Inbound {
                         StatusCode::BAD_REQUEST,
                     )
                 })?;
+            // Translate service port to target port
+            match svc.ports.get(&hbone_addr.port()) {
+                Some(port) => {
+                    dest_port = *port;
+                }
+                None => {
+                    return Err(InboundError(
+                        Error::NoValidSerivePort(
+                            hbone_addr.svc_hostname().unwrap().to_string(),
+                            hbone_addr.port(),
+                        ),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+            }
+
             upstream_protocol_addr = SocketAddr::new(svc_address.address, hbone_addr.port()).into();
         }
 
         // Determine the next hop.
         let (upstream_addr, inbound_protocol, upstream_service) =
-            Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, hbone_addr.port());
+            Self::find_inbound_upstream(&pi.state, &conn, &destination_workload, dest_port);
 
         let original_dst = conn.dst;
         // Connection has 15008, swap with the real port

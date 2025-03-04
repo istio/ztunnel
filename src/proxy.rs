@@ -452,6 +452,9 @@ pub enum Error {
     #[error("no valid authority pseudo header: {0}")]
     NoValidAuthority(String),
 
+    #[error("no valid service port in authority header: {0}")]
+    NoValidSerivePort(String, u16),
+
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
 

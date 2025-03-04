@@ -895,7 +895,7 @@ mod namespaced {
                 network: strng::EMPTY,
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
-            .ports(HashMap::from([(80u16, 80u16)]))
+            .ports(HashMap::from([(80u16, 8080u16)]))
             .register()
             .await?;
         let server = manager
@@ -921,7 +921,7 @@ mod namespaced {
                     hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
 
                 let request = hyper::Request::builder()
-                    .uri(format!("{SERVER_HOSTNAME}:{SERVER_PORT}"))
+                    .uri(format!("{SERVER_HOSTNAME}:80"))
                     .method(Method::CONNECT)
                     .version(hyper::Version::HTTP_2)
                     .body(Empty::<Bytes>::new())
