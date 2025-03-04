@@ -493,14 +493,11 @@ pub enum Error {
 
 // Custom TLV for proxy protocol for the identity of the source
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
-// Custom TLV for including the svc hostname in the proxy protocol header
-const PROXY_PROTOCOL_SVC_HOSTNAME_TLV: u8 = 0xD1;
 
 pub async fn write_proxy_protocol<T>(
     stream: &mut TcpStream,
     addresses: T,
     src_id: Option<Identity>,
-    hostname_addr: Option<Strng>,
 ) -> io::Result<()>
 where
     T: Into<ppp::v2::Addresses> + std::fmt::Debug,
@@ -518,11 +515,6 @@ where
 
     if let Some(id) = src_id {
         builder = builder.write_tlv(PROXY_PROTOCOL_AUTHORITY_TLV, id.to_string().as_bytes())?;
-    }
-
-    // svc_hostname is None when the hbone_addr does not contain a svc hostname.
-    if let Some(svc_host) = hostname_addr {
-        builder = builder.write_tlv(PROXY_PROTOCOL_SVC_HOSTNAME_TLV, svc_host.as_bytes())?;
     }
 
     let header = builder.build()?;

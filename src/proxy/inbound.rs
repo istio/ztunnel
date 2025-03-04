@@ -261,15 +261,9 @@ impl Inbound {
                             }
                         }
                     };
-                    let hostname_addr: Option<Strng> = ri.hbone_addr.hostname_addr();
-                    super::write_proxy_protocol(
-                        &mut stream,
-                        (src, protocol_addr),
-                        src_identity,
-                        hostname_addr,
-                    )
-                    .instrument(trace_span!("proxy protocol"))
-                    .await?;
+                    super::write_proxy_protocol(&mut stream, (src, protocol_addr), src_identity)
+                        .instrument(trace_span!("proxy protocol"))
+                        .await?;
                 }
                 copy::copy_bidirectional(
                     h2_stream,
@@ -340,7 +334,6 @@ impl Inbound {
 
             // Validate the destination pod is a member of the selected service
             if !svc.contains_endpoint(&destination_workload) {
-                // TODO(jaellio): Update error msg/type
                 return Err(InboundError(
                     Error::NoHostname(destination_workload.to_string()),
                     StatusCode::BAD_REQUEST,
@@ -798,6 +791,7 @@ mod tests {
 
     // Regular zTunnel workload traffic inbound
     #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
+    #[test_case(Waypoint::None, SERVER_SVC_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "to workload no waypoint fail")]
     // Svc hostname
     #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
     // Sandwiched Waypoint Cases
