@@ -716,6 +716,7 @@ mod tests {
     const WAYPOINT_POD_IP: &str = "10.0.0.3";
     const WAYPOINT_SVC_IP: &str = "10.10.0.2";
 
+    const SERVER_PORT: u16 = 80;
     const TARGET_PORT: u16 = 8080;
     const PROXY_PORT: u16 = 15088;
 
@@ -789,11 +790,12 @@ mod tests {
             if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
                 HboneAddress::SocketAddr(addr)
             } else {
-                HboneAddress::SvcHostname(hbone_dst.into(), TARGET_PORT)
+                HboneAddress::SvcHostname(hbone_dst.into(), 80)
             };
+
         let validate_destination =
             Inbound::validate_destination(&cfg, &state, &conn, &local_wl, hbone_addr.clone()).await;
-        let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, hbone_addr.port());
+        let res = Inbound::find_inbound_upstream(&state, &conn, &local_wl, TARGET_PORT);
 
         match want {
             Some((ip, port)) => {
@@ -807,29 +809,30 @@ mod tests {
     }
 
     // Regular zTunnel workload traffic inbound
-    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, TARGET_PORT, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
     // Svc hostname
-    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, SERVER_PORT, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
     // Sandwiched Waypoint Cases
     // to workload traffic
-    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by pod")]
-    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by vip")]
-    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to workload with app tunnel")]
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP, TARGET_PORT, Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by pod")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP, TARGET_PORT, Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to workload with waypoint referenced by vip")]
+    #[test_case(Waypoint::Workload(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_POD_IP, TARGET_PORT, Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to workload with app tunnel")]
     // to service traffic
-    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypoint referenced by pod")]
-    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypint referenced by vip")]
-    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP , Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to service with app tunnel")]
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP, TARGET_PORT, Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypoint referenced by pod")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP, TARGET_PORT, Some((WAYPOINT_POD_IP, TARGET_PORT, None)); "to service with waypint referenced by vip")]
+    #[test_case(Waypoint::Service(WAYPOINT_SVC_IP, APP_TUNNEL_PROXY), WAYPOINT_POD_IP, SERVER_SVC_IP, TARGET_PORT, Some((WAYPOINT_POD_IP, PROXY_PORT, None)); "to service with app tunnel")]
     // Override port via app_protocol
     // Error cases
-    #[test_case(Waypoint::None, SERVER_POD_IP, CLIENT_POD_IP, None; "to server ip mismatch" )]
-    #[test_case(Waypoint::None, WAYPOINT_POD_IP, CLIENT_POD_IP, None; "to waypoint without attachment" )]
-    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
-    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
+    #[test_case(Waypoint::None, SERVER_POD_IP, CLIENT_POD_IP, TARGET_PORT, None; "to server ip mismatch" )]
+    #[test_case(Waypoint::None, WAYPOINT_POD_IP, CLIENT_POD_IP, TARGET_PORT, None; "to waypoint without attachment" )]
+    #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP, TARGET_PORT, None; "to workload via waypoint with wrong attachment")]
+    #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP, TARGET_PORT, None; "to service via waypoint with wrong attachment")]
     #[tokio::test]
     async fn test_build_inbound_request(
         target_waypoint: Waypoint<'_>,
         connection_dst: &str,
         hbone_dst: &str,
+        hbobe_dst_port: u16,
         want: Option<(&str, u16, Option<&str>)>,
     ) {
         let state = test_state(target_waypoint).expect("state setup");
@@ -842,7 +845,7 @@ mod tests {
         };
         let request_parts = MockParts {
             method: Method::CONNECT,
-            uri: format!("{hbone_dst}:{TARGET_PORT}").parse().unwrap(),
+            uri: format!("{hbone_dst}:{hbobe_dst_port}").parse().unwrap(),
             headers: http::HeaderMap::new(),
         };
         let cm = ConnectionManager::default();
@@ -874,10 +877,10 @@ mod tests {
             local_workload,
         ));
         let hbone_addr =
-            if let Ok(addr) = format!("{hbone_dst}:{TARGET_PORT}").parse::<SocketAddr>() {
+            if let Ok(addr) = format!("{hbone_dst}:{hbobe_dst_port}").parse::<SocketAddr>() {
                 HboneAddress::SocketAddr(addr)
             } else {
-                HboneAddress::SvcHostname(hbone_dst.into(), TARGET_PORT)
+                HboneAddress::SvcHostname(hbone_dst.into(), hbobe_dst_port)
             };
         let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;
         match want {
@@ -888,7 +891,10 @@ mod tests {
                 match ir.upstream_protocol_addr {
                     Some(addr) => assert_eq!(
                         addr,
-                        SocketAddr::new(protocol_addr.unwrap().parse().unwrap(), port)
+                        SocketAddr::new(
+                            protocol_addr.unwrap().parse().unwrap(),
+                            ir.hbone_addr.port()
+                        )
                     ),
                     None => assert_eq!(protocol_addr, None),
                 };
@@ -917,7 +923,7 @@ mod tests {
                 address: vip.parse().unwrap(),
                 network: "".into(),
             }],
-            ports: std::collections::HashMap::new(),
+            ports: std::collections::HashMap::from([(80u16, 8080u16)]),
             endpoints: EndpointSet::from_list([Endpoint {
                 workload_uid: strng::format!("cluster1//v1/Pod/default/{name}"),
                 port: std::collections::HashMap::new(),
