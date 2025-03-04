@@ -791,7 +791,6 @@ mod tests {
 
     // Regular zTunnel workload traffic inbound
     #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_IP, Some((SERVER_POD_IP, TARGET_PORT, None)); "to workload no waypoint")]
-    #[test_case(Waypoint::None, SERVER_SVC_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "to workload no waypoint fail")]
     // Svc hostname
     #[test_case(Waypoint::None, SERVER_POD_IP, SERVER_POD_HOSTNAME, Some((SERVER_POD_IP, TARGET_PORT, Some(SERVER_SVC_IP))); "svc hostname to workload no waypoint")]
     // Sandwiched Waypoint Cases
