@@ -20,7 +20,7 @@ workloads:
   network: ""
   networkGateway:
     destination: "/172.19.0.1"
-    hboneMtlsPort: 15008
+    hboneMtlsPort: 15009
   workloadIps: []
   services:
     "default/google.com":

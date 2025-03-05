@@ -225,84 +225,44 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        // TODO: dst should take a hostname? and upstream_sans currently contains E/W Gateway certs
+        // Create the outer HBONE stream
+        let upgraded = Box::pin(self.send_hbone_request(remote_addr, &req)).await?;
+        // Wrap upgraded to implement tokio's Async{Write,Read}
+        let upgraded = TokioH2Stream::new(upgraded);
 
-        // we need two connection requests, one for the outer and one for the inner.
-        // The outer should have the network gateway as the destination.
-        //
-        let svc = req
-            .intended_destination_service
-            .as_ref()
-            .expect("Workloads with network gateways must be service addressed.");
-        let svc_uri = format!("{}.{}:{}", svc.namespace, svc.hostname, 80);
-        let mut outer_req = req.clone();
-        let network_gateway = req
-            .actual_destination_workload
-            .clone()
-            .unwrap()
-            .network_gateway
-            .clone()
-            .unwrap();
-
-        outer_req.actual_destination = SocketAddr::new(
-            match network_gateway.destination {
-                crate::state::workload::gatewayaddress::Destination::Address(network_address) => {
-                    network_address.address
-                }
-                crate::state::workload::gatewayaddress::Destination::Hostname(
-                    _namespaced_hostname,
-                ) => todo!(),
-            },
-            network_gateway.hbone_mtls_port,
-        );
-
-        let upgraded =
-            Box::pin(self.send_hbone_request(remote_addr, &outer_req, svc_uri.clone())).await?;
-
-        // For the inner one, we do it manually to avoid connection pool shenanigans.
-        let inner_workload = WorkloadKey {
+        // For the inner one, we do it manually to avoid connection pooling.
+        // Otherwise, we would only ever reach one workload in the remote cluster.
+        // We also need to abort tasks the right way to get graceful terminations.
+        let wl_key = WorkloadKey {
             src_id: req.source.identity(),
-            dst_id: req.upstream_sans.clone(),
+            dst_id: req.final_sans.clone(),
             src: remote_addr.ip(),
             dst: req.actual_destination,
         };
 
-        let http_request = self.create_hbone_request(remote_addr, req, svc_uri.clone());
-        // FIXME
-        //        *http_request.uri_mut() = Uri::from_str(
-        //            req.intended_destination_service
-        //                .as_ref()
-        //                .unwrap()
-        //                .hostname
-        //                .as_str(),
-        //        )
-        //        .unwrap();
-        let workload_key = &inner_workload;
-
-        // To shut down inner HTTP2 connection
-        let key = workload_key.clone();
-        let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
+        // Fetch certs and establish inner TLS connection.
         let cert = self
             .pi
             .local_workload_information
             .fetch_certificate()
             .await?;
-        let connector = cert.outbound_connector(req.final_sans.clone())?;
+        let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
+        let tls_stream = connector
+            .connect(
+                upgraded,
+                rustls::pki_types::ServerName::IpAddress(wl_key.dst.ip().into()),
+            )
+            .await?;
 
-        // Do actual IO as late as possible
-        // Outer HBONE
-        //
-        //
+        // Spawn inner CONNECT tunnel
         let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-
-        // Wrap upgraded to implement tokio's Async{Write,Read}
-        let upgraded = TokioH2Stream::new(upgraded);
-        let tls_stream = connector.connect(upgraded, dest).await?;
-
         let (mut sender, driver_task) =
-            super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, key)
+            super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, wl_key)
                 .await?;
+        let http_request = self.create_hbone_request(remote_addr, req);
         let inner_upgraded = sender.send_request(http_request).await?;
+
+        // Proxy
         let res = copy::copy_bidirectional(
             copy::TcpStreamSplitter(stream),
             inner_upgraded,
@@ -315,8 +275,7 @@ impl OutboundConnection {
         // Here, there is an implicit, drop(conn_client).
         // Its really important that this happens AFTER driver_task finishes.
         // Otherwise, TLS connections do not terminate gracefully.
-        //
-        // drop(conn_client);
+
         res
     }
 
@@ -327,12 +286,7 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        let uri = req
-            .hbone_target_destination
-            .as_ref()
-            .expect("HBONE must have target");
-
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req, uri.clone())).await?;
+        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
         copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
     }
 
@@ -340,11 +294,11 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
-        uri: String,
     ) -> http::Request<()> {
         http::Request::builder()
             .uri(
-                req.hbone_target_destination.as_ref()
+                req.hbone_target_destination
+                    .as_ref()
                     .expect("HBONE must have target")
                     .to_string(),
             )
@@ -364,9 +318,8 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
-        uri: String,
     ) -> Result<H2Stream, Error> {
-        let request = self.create_hbone_request(remote_addr, req, uri);
+        let request = self.create_hbone_request(remote_addr, req);
         let pool_key = Box::new(WorkloadKey {
             src_id: req.source.identity(),
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
@@ -747,9 +700,8 @@ mod tests {
                 Some(ExpectedRequest {
                     protocol: r.protocol,
                     hbone_destination: &r
-                        .hbone_target_destination
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
+                        .hbone_target_destination.as_ref()
+                        .unwrap_or(&String::new()),
                     destination: &r.actual_destination.to_string(),
                 })
             );
