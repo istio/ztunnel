@@ -485,7 +485,7 @@ impl Inbound {
                 }
             })
             .cloned()
-            .ok_or_else(|| Error::NoResolvedAddresses(hbone_host.to_string()))
+            .ok_or_else(|| Error::NoHostname(hbone_host.to_string()))
     }
 
     /// validate_destination ensures the destination is an allowed request.
