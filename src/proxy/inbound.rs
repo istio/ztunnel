@@ -496,7 +496,7 @@ impl Inbound {
         state: &DemandProxyState,
         local_workload: &Workload,
         hbone_host: Strng,
-    ) -> Result<Service, Error> {
+    ) -> Result<Arc<Service>, Error> {
         // Validate a service exists for the hostname
         // TODO(jaellio): Currently returns an error is no service is found. Workload lookup is not supported.
         let services = state.read().find_service_by_hostname(&hbone_host)?;
