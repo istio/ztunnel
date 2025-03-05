@@ -304,7 +304,7 @@ impl Inbound {
             .get_workload()
             .await
             // At this point we already fetched the local workload for TLS, so it should be infallible.
-            .map_err(InboundError::build(StatusCode::SERVICE_UNAVAILABLE))?;
+            .map_err(|e| InboundError(e, StatusCode::SERVICE_UNAVAILABLE))?;
 
         // Check the request is allowed by verifying the destination
         Self::validate_destination(
@@ -363,7 +363,33 @@ impl Inbound {
             // Translate service port to target port
             match svc.ports.get(&hbone_addr.port()) {
                 Some(port) => {
-                    dest_port = *port;
+                    // Support named target ports
+                    if *port == 0 {
+                        // Get endpoints from the destination workload uid
+                        let endpoint =
+                            svc.endpoints
+                                .get(&destination_workload.uid)
+                                .ok_or_else(|| {
+                                    InboundError(
+                                        Error::NoWorkloadEndpoints(
+                                            destination_workload.to_string(),
+                                        ),
+                                        StatusCode::BAD_REQUEST,
+                                    )
+                                })?;
+                        // Get the target port from the endpoint
+                        dest_port = *endpoint.port.get(&hbone_addr.port()).ok_or_else(|| {
+                            InboundError(
+                                Error::NoValidTargetPort(
+                                    hbone_addr.svc_hostname().unwrap().to_string(),
+                                    hbone_addr.port(),
+                                ),
+                                StatusCode::BAD_REQUEST,
+                            )
+                        })?;
+                    } else {
+                        dest_port = *port;
+                    }
                 }
                 None => {
                     return Err(InboundError(

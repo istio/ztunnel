@@ -886,7 +886,16 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn test_svc_hostname() -> anyhow::Result<()> {
+    async fn test_svc_hostname_port() -> anyhow::Result<()> {
+        test_svc_hostname(8080u16).await
+    }
+
+    #[tokio::test]
+    async fn test_svc_hostname_named_port() -> anyhow::Result<()> {
+        test_svc_hostname(0u16).await
+    }
+
+    async fn test_svc_hostname(svc_target_port: u16) -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(Shared);
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         manager
@@ -895,7 +904,7 @@ mod namespaced {
                 network: strng::EMPTY,
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
-            .ports(HashMap::from([(80u16, 8080u16)]))
+            .ports(HashMap::from([(80u16, svc_target_port)]))
             .register()
             .await?;
         let server = manager

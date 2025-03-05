@@ -449,11 +449,17 @@ pub enum Error {
     #[error("no service or workload for hostname: {0}")]
     NoHostname(String),
 
+    #[error("no endpoints for workload: {0}")]
+    NoWorkloadEndpoints(String),
+
     #[error("no valid authority pseudo header: {0}")]
     NoValidAuthority(String),
 
     #[error("no valid service port in authority header: {0}")]
     NoValidSerivePort(String, u16),
+
+    #[error("no valid target port for workload: {0}")]
+    NoValidTargetPort(String, u16),
 
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
