@@ -34,12 +34,13 @@ macro_rules! function {
 /// and automatically setups up a namespace based on the test name (to avoid conflicts).
 #[macro_export]
 macro_rules! setup_netns_test {
-    ($mode:expr) => {{
+    ($mode:expr) => {{ setup_netns_test!($mode, ztunnel::function!()) }};
+    ($mode:expr, $function:expr) => {{
         if unsafe { libc::getuid() } != 0 {
             panic!("CI tests should run as root; this is supposed to happen automatically?");
         }
         ztunnel::test_helpers::helpers::initialize_telemetry();
-        let function_name = ztunnel::function!()
+        let function_name = $function
             .strip_prefix(module_path!())
             .unwrap()
             .strip_prefix("::")

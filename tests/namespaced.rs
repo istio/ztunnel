@@ -887,16 +887,16 @@ mod namespaced {
 
     #[tokio::test]
     async fn test_svc_hostname_port() -> anyhow::Result<()> {
-        test_svc_hostname(8080u16).await
+        test_svc_hostname(8080u16, ztunnel::function!()).await
     }
 
     #[tokio::test]
     async fn test_svc_hostname_named_port() -> anyhow::Result<()> {
-        test_svc_hostname(0u16).await
+        test_svc_hostname(0u16, ztunnel::function!()).await
     }
 
-    async fn test_svc_hostname(svc_target_port: u16) -> anyhow::Result<()> {
-        let mut manager = setup_netns_test!(Shared);
+    async fn test_svc_hostname(svc_target_port: u16, function_name: &str) -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(Shared, function_name);
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         manager
             .service_builder("server")
