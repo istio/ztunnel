@@ -378,15 +378,17 @@ impl Inbound {
                                     )
                                 })?;
                         // Get the target port from the endpoint
-                        dest_port = *endpoint.port.get(&hbone_addr.port()).ok_or_else(|| {
-                            InboundError(
+                        if let Some(port) = endpoint.port.get(&hbone_addr.port()) {
+                            dest_port = *port;
+                        } else {
+                            return Err(InboundError(
                                 Error::NoValidTargetPort(
                                     hbone_addr.svc_hostname().unwrap().to_string(),
                                     hbone_addr.port(),
                                 ),
                                 StatusCode::BAD_REQUEST,
-                            )
-                        })?;
+                            ));
+                        }
                     } else {
                         dest_port = *port;
                     }
