@@ -346,7 +346,7 @@ impl Inbound {
             // For consistency with outbound logs, report the original destination (with 15008 port)
             // as dst.addr, and the target address as dst.hbone_addr
             original_dst,
-            Some(hbone_addr),
+            Some(hbone_addr.to_string()),
             start,
             ConnectionOpen {
                 reporter: Reporter::destination,

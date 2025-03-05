@@ -2,52 +2,36 @@
 # This allows local testing by sending requests through the local ztunnel to other servers running on localhost.
 workloads:
 - uid: cluster1//v1/Pod/default/local
-  name: local
+  name: local2
   namespace: default
   serviceAccount: default
   workloadIps: ["127.0.0.1"]
   protocol: HBONE
   node: local
   network: ""
-  services:
-    "default/example.com":
-      80: 8081
+  services: {}
 # Define another local address, but this one uses TCP. This allows testing HBONE and TCP with one config.
 - uid: cluster1//v1/Pod/default/local-tcp
-  name: local-tcp
+  name: local
   namespace: default
   serviceAccount: default
-  workloadIps: ["172.19.0.1"]
-  protocol: DOUBLEHBONE
-  node: remote
+  protocol: HBONE
+  node: local
   network: ""
+  networkGateway:
+    destination: "/172.19.0.1"
+    hboneMtlsPort: 15008
+  workloadIps: []
   services:
-    "default/example2.com":
-      80: 8081
-    "default/example3.com":
-      80: 8081
-
+    "default/google.com":
+      80: 80
 services:
-- name: local
+- name: google
   namespace: default
-  hostname: example.com
-  vips:
-    - /127.10.0.1
-  ports:
-    80: 8081
+  hostname: google.com
   subjectAltNames:
-   - spiffe://cluster.local/ns/default/sa/local
-- name: remote
-  namespace: default
-  hostname: example2.com
+    - spiffe:///ns/default/sa/default
   vips:
     - /1.2.3.4
-  ports:
-    80: 8081
-- name: remote
-  namespace: default
-  hostname: example3.com
-  vips:
-    - /1.1.1.1
   ports:
     80: 8081

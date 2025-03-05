@@ -70,9 +70,23 @@ pub struct Upstream {
     pub service_sans: Vec<Strng>,
     /// If this was from a service, the service info.
     pub destination_service: Option<ServiceDescription>,
+    /// Use this port instead of the default one for the proxy protocol.
+    pub proxy_protocol_port_override: Option<u16>,
 }
 
 impl Upstream {
+    /// If there is a network gateway, use <service hostname>:<port>.
+    /// Otherwise, use <ip address>:<port>
+    /// Fortunately, for double-hbone, the authority/host is the same for inner and outer
+    /// Connect request.
+    pub fn hbone_target(&self) -> String {
+        if let Some(_)  = self.workload.network_gateway.as_ref() {
+            let svc = self.destination_service.as_ref().expect("Workloads with network gateways must be service addressed.");
+            format!("{}.{}:{}", svc.namespace, svc.hostname, self.port)
+        } else {
+            self.workload_socket_addr().to_string()
+        }
+    }
     pub fn workload_socket_addr(&self) -> SocketAddr {
         SocketAddr::new(self.selected_workload_ip, self.port)
     }
@@ -767,20 +781,35 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
-        let selected_workload_ip = self
-            .pick_workload_destination_or_resolve(
-                &wl,
-                source_workload,
-                original_target_address,
-                ip_family_restriction,
-            )
-            .await?; // if we can't load balance just return the error
+        let (selected_workload_ip, proxy_protocol_port_override) =
+            if let Some(network_gateway) = wl.network_gateway.as_ref() {
+                match &network_gateway.destination {
+                    Destination::Address(network_address) => (
+                        network_address.address,
+                        Some(network_gateway.hbone_mtls_port),
+                    ),
+                    Destination::Hostname(_) => todo!(),
+                }
+            } else {
+                (
+                    self.pick_workload_destination_or_resolve(
+                        &wl,
+                        source_workload,
+                        original_target_address,
+                        ip_family_restriction,
+                    )
+                    .await?,
+                    None,
+                ) // if we can't load balance just return the error
+            };
+
         let res = Upstream {
             workload: wl,
             selected_workload_ip,
             port,
             service_sans: svc.map(|s| s.subject_alt_names.clone()).unwrap_or_default(),
             destination_service: svc_desc,
+            proxy_protocol_port_override,
         };
         tracing::trace!(?res, "finalize_upstream");
         Ok(Some(res))

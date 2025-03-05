@@ -249,6 +249,12 @@ pub struct ServiceDescription {
     pub namespace: Strng,
 }
 
+impl ServiceDescription {
+    pub fn uri(&self) -> String {
+        format!("https://{}.{}:80", self.namespace, self.hostname)
+    }
+}
+
 impl From<&Service> for ServiceDescription {
     fn from(value: &Service) -> Self {
         ServiceDescription {

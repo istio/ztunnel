@@ -82,19 +82,15 @@ impl ConnSpawner {
         key: WorkloadKey,
         stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         driver_drain: tokio::sync::watch::Receiver<bool>,
-    ) -> Result<(ConnClient, tokio::task::JoinHandle<()>), Error> {
+    ) -> Result<(H2ConnectClient, tokio::task::JoinHandle<()>), Error> {
         let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
 
         let cert = self.local_workload.fetch_certificate().await?;
         let connector = cert.outbound_connector(vec![])?;
         let tls_stream = connector.connect(stream, dest).await?;
         let (sender, driver_drain) =
-            h2::client::spawn_connection(self.cfg.clone(), tls_stream, driver_drain).await?;
-        let client = ConnClient {
-            sender,
-            wl_key: key,
-        };
-        Ok((client, driver_drain))
+            h2::client::spawn_connection(self.cfg.clone(), tls_stream, driver_drain, key).await?;
+        Ok((sender, driver_drain))
     }
 
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
@@ -118,17 +114,7 @@ impl ConnSpawner {
         );
         let tls_stream = connector.connect(tcp_stream, dest).await?;
         trace!("connector connected, handshaking");
-<<<<<<< HEAD
-        let (sender, _) =
-            h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
-                .await?;
-        let client = ConnClient {
-            sender,
-            wl_key: key,
-        };
-        Ok(client)
-=======
-        let sender = h2::client::spawn_connection(
+        let (sender, _) = h2::client::spawn_connection(
             self.cfg.clone(),
             tls_stream,
             self.timeout_rx.clone(),
@@ -136,7 +122,6 @@ impl ConnSpawner {
         )
         .await?;
         Ok(sender)
->>>>>>> master
     }
 }
 
@@ -411,7 +396,7 @@ impl WorkloadHBONEPool {
         request: http::Request<()>,
     ) -> Result<
         (
-            ConnClient,
+            H2ConnectClient,
             Result<H2Stream, Error>,
             tokio::sync::watch::Sender<bool>,
             tokio::task::JoinHandle<()>,
@@ -429,16 +414,17 @@ impl WorkloadHBONEPool {
             .await?;
         let connector = cert.outbound_connector(vec![])?;
         let tls_stream = connector.connect(stream, dest).await?;
-        let (sender, driver_drain) =
-            h2::client::spawn_connection(self.state.spawner.cfg.clone(), tls_stream, rx).await?;
-        let mut connection = ConnClient {
-            sender,
-            wl_key: key,
-        };
+        let (mut sender, driver_drain) = h2::client::spawn_connection(
+            self.state.spawner.cfg.clone(),
+            tls_stream,
+            rx,
+            workload_key.clone(),
+        )
+        .await?;
 
         Ok((
-            connection.clone(),
-            connection.sender.send_request(request).await,
+            sender.clone(),
+            sender.send_request(request).await,
             tx,
             driver_drain,
         ))
@@ -584,59 +570,6 @@ impl WorkloadHBONEPool {
     }
 }
 
-<<<<<<< HEAD
-#[derive(Debug, Clone)]
-// A sort of faux-client, that represents a single checked-out 'request sender' which might
-// send requests over some underlying stream using some underlying http/2 client
-pub struct ConnClient {
-    pub sender: H2ConnectClient,
-    // A WL key may have many clients, but every client has no more than one WL key
-    pub wl_key: WorkloadKey, // the WL key associated with this client.
-}
-
-impl ConnClient {
-    pub fn is_for_workload(&self, wl_key: &WorkloadKey) -> Result<(), crate::proxy::Error> {
-        if !(self.wl_key == *wl_key) {
-            Err(crate::proxy::Error::Generic(
-                "fetched connection does not match workload key!".into(),
-            ))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-// This is currently only for debugging
-impl Drop for ConnClient {
-    fn drop(&mut self) {
-        trace!("dropping ConnClient for key {}", self.wl_key,)
-    }
-}
-
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub struct WorkloadKey {
-    pub src_id: Identity,
-    pub dst_id: Vec<Identity>,
-    // In theory we can just use src,dst,node. However, the dst has a check that
-    // the L3 destination IP matches the HBONE IP. This could be loosened to just assert they are the same identity maybe.
-    pub dst: SocketAddr,
-    // Because we spoof the source IP, we need to key on this as well. Note: for in-pod its already per-pod
-    // pools anyways.
-    pub src: IpAddr,
-}
-
-impl Display for WorkloadKey {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})->{}[", self.src, &self.src_id, self.dst,)?;
-        for i in &self.dst_id {
-            write!(f, "{i}")?;
-        }
-        write!(f, "]")
-    }
-}
-
-=======
->>>>>>> master
 #[cfg(test)]
 mod test {
     use std::convert::Infallible;
