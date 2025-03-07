@@ -89,9 +89,16 @@ impl ConnSpawner {
                 _ => e.into(),
             })?;
 
-        let tls_stream = connector.connect(tcp_stream).await?;
+        let dest = rustls::pki_types::ServerName::IpAddress(
+            tcp_stream
+                .peer_addr()
+                .expect("peer_addr must be set")
+                .ip()
+                .into(),
+        );
+        let tls_stream = connector.connect(tcp_stream, dest).await?;
         trace!("connector connected, handshaking");
-        let sender = h2::client::spawn_connection(
+        let (sender, _) = h2::client::spawn_connection(
             self.cfg.clone(),
             tls_stream,
             self.timeout_rx.clone(),

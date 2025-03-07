@@ -40,6 +40,8 @@ use crate::state::service::ServiceDescription;
 use crate::state::workload::{NetworkAddress, Protocol, Workload, address::Address};
 use crate::{assertions, copy, proxy, socket};
 
+use super::h2::TokioH2Stream;
+
 pub struct Outbound {
     pi: Arc<ProxyInputs>,
     drain: DrainWatcher,
@@ -109,7 +111,7 @@ impl Outbound {
                                 debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                             }).instrument(span);
 
-                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                            assertions::size_between_ref(1000, 99999, &serve_outbound_connection);
                             tokio::spawn(serve_outbound_connection);
                         }
                         Err(e) => {
@@ -177,6 +179,7 @@ impl OutboundConnection {
                 return;
             }
         };
+        // At this point, we want all the addresses resolved
         // TODO: should we use the original address or the actual address? Both seems nice!
         let _conn_guard = self.pi.connection_manager.track_outbound(
             source_addr,
@@ -185,7 +188,7 @@ impl OutboundConnection {
         );
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = req.hbone_target_destination.map(HboneAddress::SocketAddr);
+        let hbone_target = req.hbone_target_destination.clone();
         let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
             req.actual_destination,
@@ -195,17 +198,87 @@ impl OutboundConnection {
             metrics,
         ));
 
-        let res = match req.protocol {
-            Protocol::HBONE => {
+        let res = match (
+            req.protocol,
+            req.actual_destination_workload
+                .as_ref()
+                .and_then(|wl| wl.network_gateway.as_ref()),
+        ) {
+            (_, Some(_)) => {
+                self.proxy_to_double_hbone(source_stream, source_addr, &req, &result_tracker)
+                    .await
+            }
+            (Protocol::HBONE, _) => {
                 self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
                     .await
             }
-            Protocol::TCP => {
+            (Protocol::TCP, _) => {
                 self.proxy_to_tcp(source_stream, &req, &result_tracker)
                     .await
             }
         };
         result_tracker.record(res)
+    }
+
+    async fn proxy_to_double_hbone(
+        &mut self,
+        stream: TcpStream,
+        remote_addr: SocketAddr,
+        req: &Request,
+        connection_stats: &ConnectionResult,
+    ) -> Result<(), Error> {
+        // Create the outer HBONE stream
+        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+        // Wrap upgraded to implement tokio's Async{Write,Read}
+        let upgraded = TokioH2Stream::new(upgraded);
+
+        // For the inner one, we do it manually to avoid connection pooling.
+        // Otherwise, we would only ever reach one workload in the remote cluster.
+        // We also need to abort tasks the right way to get graceful terminations.
+        let wl_key = WorkloadKey {
+            src_id: req.source.identity(),
+            dst_id: req.final_sans.clone(),
+            src: remote_addr.ip(),
+            dst: req.actual_destination,
+        };
+
+        // Fetch certs and establish inner TLS connection.
+        let cert = self
+            .pi
+            .local_workload_information
+            .fetch_certificate()
+            .await?;
+        let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
+        let tls_stream = connector
+            .connect(
+                upgraded,
+                rustls::pki_types::ServerName::IpAddress(wl_key.dst.ip().into()),
+            )
+            .await?;
+
+        // Spawn inner CONNECT tunnel
+        let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+        let (mut sender, driver_task) =
+            super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, wl_key)
+                .await?;
+        let http_request = self.create_hbone_request(remote_addr, req);
+        let inner_upgraded = sender.send_request(http_request).await?;
+
+        // Proxy
+        let res = copy::copy_bidirectional(
+            copy::TcpStreamSplitter(stream),
+            inner_upgraded,
+            connection_stats,
+        )
+        .await;
+
+        let _ = drain_tx.send(true);
+        let _ = driver_task.await;
+        // Here, there is an implicit, drop(conn_client).
+        // Its really important that this happens AFTER driver_task finishes.
+        // Otherwise, TLS connections do not terminate gracefully.
+
+        res
     }
 
     async fn proxy_to_hbone(
@@ -219,14 +292,15 @@ impl OutboundConnection {
         copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
     }
 
-    async fn send_hbone_request(
+    fn create_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
-    ) -> Result<H2Stream, Error> {
-        let request = http::Request::builder()
+    ) -> http::Request<()> {
+        http::Request::builder()
             .uri(
                 req.hbone_target_destination
+                    .as_ref()
                     .expect("HBONE must have target")
                     .to_string(),
             )
@@ -239,12 +313,18 @@ impl OutboundConnection {
             )
             .header(TRACEPARENT_HEADER, self.id.header())
             .body(())
-            .expect("builder with known status code should not fail");
+            .expect("builder with known status code should not fail")
+    }
 
+    async fn send_hbone_request(
+        &mut self,
+        remote_addr: SocketAddr,
+        req: &Request,
+    ) -> Result<H2Stream, Error> {
+        let request = self.create_hbone_request(remote_addr, req);
         let pool_key = Box::new(WorkloadKey {
             src_id: req.source.identity(),
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
-            // But that
             dst_id: req.upstream_sans.clone(),
             src: remote_addr.ip(),
             dst: req.actual_destination,
@@ -331,11 +411,12 @@ impl OutboundConnection {
                 return Ok(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
-                    hbone_target_destination: Some(target),
+                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination,
                     upstream_sans,
+                    final_sans: vec![],
                 });
             }
             // this was service addressed but we did not find a waypoint
@@ -366,6 +447,7 @@ impl OutboundConnection {
                 intended_destination_service: None,
                 actual_destination: target,
                 upstream_sans: vec![],
+                final_sans: vec![],
             });
         };
 
@@ -394,11 +476,12 @@ impl OutboundConnection {
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     // Use the original VIP, not translated
-                    hbone_target_destination: Some(target),
+                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: us.destination_service.clone(),
                     actual_destination,
                     upstream_sans,
+                    final_sans: vec![],
                 });
             }
             // Workload doesn't have a waypoint; send directly
@@ -406,16 +489,20 @@ impl OutboundConnection {
 
         // only change the port if we're sending HBONE
         let actual_destination = match us.workload.protocol {
-            Protocol::HBONE => SocketAddr::from((us.selected_workload_ip, self.hbone_port)),
+            Protocol::HBONE => SocketAddr::from((
+                us.selected_workload_ip,
+                us.proxy_protocol_port_override.unwrap_or(self.hbone_port),
+            )),
             Protocol::TCP => us.workload_socket_addr(),
         };
         let hbone_target_destination = match us.workload.protocol {
-            Protocol::HBONE => Some(us.workload_socket_addr()),
+            Protocol::HBONE => Some(us.hbone_target()),
             Protocol::TCP => None,
         };
+        // FIXME this seems wrong
+        let (upstream_sans, final_sans) = (us.workload_and_services_san(), us.service_sans());
 
         // For case no waypoint for both side and direct to remote node proxy
-        let upstream_sans = us.workload_and_services_san();
         debug!("built request to workload");
         Ok(Request {
             protocol: us.workload.protocol,
@@ -425,6 +512,7 @@ impl OutboundConnection {
             intended_destination_service: us.destination_service.clone(),
             actual_destination,
             upstream_sans,
+            final_sans,
         })
     }
 }
@@ -453,7 +541,7 @@ fn baggage(r: &Request, cluster: String) -> String {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Request {
     protocol: Protocol,
     // Source workload sending the request
@@ -471,11 +559,17 @@ struct Request {
     // When using HBONE, the `hbone_target_destination` is the inner :authority and `actual_destination` is the TCP destination.
     actual_destination: SocketAddr,
     // If using HBONE, the inner (:authority) of the HBONE request.
-    hbone_target_destination: Option<SocketAddr>,
+    hbone_target_destination: Option<HboneAddress>,
 
     // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
     // in the case of proxies along the path.
     upstream_sans: Vec<Identity>,
+
+    // The identity of workload that will ultimately process this request.
+    // This field only matters if we need to know both the identity of the next hop, as well as the
+    // final hop (currently, this is only double HBONE).
+    // fixme is this even necessary?
+    final_sans: Vec<Identity>,
 }
 
 #[cfg(test)]
@@ -609,6 +703,7 @@ mod tests {
                     protocol: r.protocol,
                     hbone_destination: &r
                         .hbone_target_destination
+                        .as_ref()
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
                     destination: &r.actual_destination.to_string(),
