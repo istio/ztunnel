@@ -27,7 +27,9 @@ use tracing::{Instrument, debug, error, info, info_span, trace_span};
 use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
-use crate::proxy::{BAGGAGE_HEADER, Error, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util};
+use crate::proxy::{
+    BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util,
+};
 use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics};
 
 use crate::drain::DrainWatcher;
@@ -183,7 +185,7 @@ impl OutboundConnection {
         );
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = req.hbone_target_destination;
+        let hbone_target = req.hbone_target_destination.map(HboneAddress::SocketAddr);
         let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
             req.actual_destination,

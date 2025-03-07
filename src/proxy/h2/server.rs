@@ -42,21 +42,6 @@ impl Debug for H2Request {
 }
 
 impl H2Request {
-    /// The request's method
-    pub fn method(&self) -> &http::Method {
-        &self.request.method
-    }
-
-    /// The request's URI
-    pub fn uri(&self) -> &http::Uri {
-        &self.request.uri
-    }
-
-    /// The request's headers
-    pub fn headers(&self) -> &http::HeaderMap<http::HeaderValue> {
-        &self.request.headers
-    }
-
     pub fn send_error(mut self, resp: Response<()>) -> Result<(), Error> {
         let _ = self.send.send_response(resp, true)?;
         Ok(())
@@ -78,6 +63,34 @@ impl H2Request {
         };
         let h2 = crate::proxy::h2::H2Stream { read, write };
         Ok(h2)
+    }
+
+    pub fn get_request(&self) -> &Parts {
+        &self.request
+    }
+
+    pub fn headers(&self) -> &http::HeaderMap<http::HeaderValue> {
+        self.request.headers()
+    }
+}
+
+pub trait RequestParts {
+    fn uri(&self) -> &http::Uri;
+    fn method(&self) -> &http::Method;
+    fn headers(&self) -> &http::HeaderMap<http::HeaderValue>;
+}
+
+impl RequestParts for Parts {
+    fn uri(&self) -> &http::Uri {
+        &self.uri
+    }
+
+    fn method(&self) -> &http::Method {
+        &self.method
+    }
+
+    fn headers(&self) -> &http::HeaderMap<http::HeaderValue> {
+        &self.headers
     }
 }
 
