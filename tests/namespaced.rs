@@ -50,6 +50,8 @@ mod namespaced {
     use ztunnel::test_helpers::netns::{Namespace, Resolver};
     use ztunnel::test_helpers::*;
 
+    const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
+
     /// initialize_namespace_tests sets up the namespace tests.
     #[ctor::ctor]
     fn initialize_namespace_tests() {
@@ -137,7 +139,12 @@ mod namespaced {
 
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
         let waypoint_ip = waypoint.ip();
-        run_hbone_server(waypoint, "waypoint")?;
+        run_hbone_server(
+            waypoint,
+            "waypoint",
+            tcp::Mode::ReadWrite,
+            WAYPOINT_MESSAGE.into(),
+        )?;
 
         manager
             .workload_builder("server", DEFAULT_NODE)
@@ -188,6 +195,53 @@ mod namespaced {
     }
 
     #[tokio::test]
+    async fn double_hbone() -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(Shared);
+
+        let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+
+        manager
+            .service_builder("remote")
+            .addresses(vec![NetworkAddress {
+                network: strng::EMPTY,
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .subject_alt_names(vec!["spiffe://cluster.local/ns/default/sa/echo".into()])
+            .ports(HashMap::from([(15008u16, 15008u16)]))
+            .register()
+            .await?;
+
+        let ew_gtw = manager
+            .workload_builder("ew-gtw", "remote-node")
+            .hbone()
+            .network_gateway()
+            .service(
+                "default/remote.default.svc.cluster.local",
+                15008u16,
+                15008u16,
+            )
+            .register()
+            .await?;
+
+        let echo = manager
+            .workload_builder("echo", "remote-node2")
+            .register()
+            .await?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+        let echo_addr = SocketAddr::new(echo.ip(), 15008);
+        run_hbone_server(echo, "echo", tcp::Mode::ReadWrite, WAYPOINT_MESSAGE.into())?;
+        run_hbone_server(ew_gtw, "ew-gtw", tcp::Mode::Forward(echo_addr), b"".into())?;
+
+        run_tcp_to_hbone_client(client, manager.resolver(), &format!("{TEST_VIP}:15008"))?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn service_waypoint() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(Shared);
 
@@ -195,7 +249,12 @@ mod namespaced {
 
         let waypoint = manager.register_waypoint("waypoint", DEFAULT_NODE).await?;
         let waypoint_ip = waypoint.ip();
-        run_hbone_server(waypoint, "waypoint")?;
+        run_hbone_server(
+            waypoint,
+            "waypoint",
+            tcp::Mode::ReadWrite,
+            WAYPOINT_MESSAGE.into(),
+        )?;
 
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
@@ -275,7 +334,12 @@ mod namespaced {
             )
             .register()
             .await?;
-        run_hbone_server(waypoint, "waypoint")?;
+        run_hbone_server(
+            waypoint,
+            "waypoint",
+            tcp::Mode::ReadWrite,
+            WAYPOINT_MESSAGE.into(),
+        )?;
 
         manager
             .workload_builder("server", DEFAULT_NODE)
@@ -338,7 +402,7 @@ mod namespaced {
             .mutate_workload(|w| w.hostname = "waypoint.example.com".into())
             .register()
             .await?;
-        run_hbone_server(waypoint, "waypoint")?;
+        run_hbone_server(waypoint, "waypoint", tcp::Mode::ReadWrite, WAYPOINT_MESSAGE.into())?;
 
         manager
             .workload_builder("server", DEFAULT_NODE)
@@ -1416,10 +1480,15 @@ mod namespaced {
     }
 
     /// run_hbone_server deploys a simple echo server, deployed over HBONE, in the provided namespace
-    fn run_hbone_server(server: Namespace, name: &str) -> anyhow::Result<()> {
+    fn run_hbone_server(
+        server: Namespace,
+        name: &str,
+        mode: tcp::Mode,
+        waypoint_message: Vec<u8>,
+    ) -> anyhow::Result<()> {
         let name = name.to_string();
         server.run_ready(move |ready| async move {
-            let echo = tcp::HboneTestServer::new(tcp::Mode::ReadWrite, &name).await;
+            let echo = tcp::HboneTestServer::new(mode, &name, waypoint_message).await;
             info!("Running hbone echo server at {}", echo.address());
             ready.set_ready();
             echo.run().await;
@@ -1439,7 +1508,6 @@ mod namespaced {
 
     async fn hbone_read_write_stream(stream: &mut TcpStream) {
         const BODY: &[u8] = b"hello world";
-        const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
         stream.write_all(BODY).await.unwrap();
         let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
         stream.read_exact(&mut buf).await.unwrap();

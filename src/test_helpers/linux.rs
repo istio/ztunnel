@@ -26,6 +26,7 @@ use crate::inpod::istio::zds::WorkloadInfo;
 use crate::signal::ShutdownTrigger;
 use crate::test_helpers::inpod::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
+use arcstr::ArcStr;
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
 use std::net::IpAddr;
@@ -350,6 +351,11 @@ impl<'a> TestServiceBuilder<'a> {
         self
     }
 
+    pub fn subject_alt_names(mut self, mut sans: Vec<ArcStr>) -> Self {
+        self.s.subject_alt_names.append(&mut sans);
+        self
+    }
+
     /// Set the service waypoint
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
         self.s.waypoint = Some(GatewayAddress {
@@ -387,6 +393,7 @@ impl<'a> TestServiceBuilder<'a> {
 pub struct TestWorkloadBuilder<'a> {
     w: LocalWorkload,
     captured: bool,
+    is_network_gateway: bool,
     manager: &'a mut WorkloadManager,
 }
 
@@ -394,6 +401,7 @@ impl<'a> TestWorkloadBuilder<'a> {
     pub fn new(name: &str, manager: &'a mut WorkloadManager) -> TestWorkloadBuilder<'a> {
         TestWorkloadBuilder {
             captured: false,
+            is_network_gateway: false,
             w: LocalWorkload {
                 workload: Workload {
                     name: name.into(),
@@ -453,9 +461,14 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    /// Set a waypoint to the workload
+    /// Mutate the workload
     pub fn mutate_workload(mut self, f: impl FnOnce(&mut Workload)) -> Self {
         f(&mut self.w.workload);
+        self
+    }
+
+    pub fn network_gateway(mut self) -> Self {
+        self.is_network_gateway = true;
         self
     }
 
@@ -505,7 +518,18 @@ impl<'a> TestWorkloadBuilder<'a> {
                 .namespaces
                 .child(&self.w.workload.node, &self.w.workload.name)?
         };
-        self.w.workload.workload_ips = vec![network_namespace.ip()];
+        if self.is_network_gateway {
+            self.w.workload.workload_ips = vec![];
+            self.w.workload.network_gateway = Some(GatewayAddress {
+                destination: gatewayaddress::Destination::Address(NetworkAddress {
+                    network: "".into(),
+                    address: network_namespace.ip(),
+                }),
+                hbone_mtls_port: 15008, // FIXME
+            })
+        } else {
+            self.w.workload.workload_ips = vec![network_namespace.ip()];
+        }
         self.w.workload.uid = format!(
             "cluster1//v1/Pod/{}/{}",
             self.w.workload.namespace, self.w.workload.name,

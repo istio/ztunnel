@@ -77,22 +77,6 @@ struct ConnSpawner {
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
-    async fn new_unpooled_conn(
-        &self,
-        key: WorkloadKey,
-        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-        driver_drain: tokio::sync::watch::Receiver<bool>,
-    ) -> Result<(H2ConnectClient, tokio::task::JoinHandle<()>), Error> {
-        let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
-
-        let cert = self.local_workload.fetch_certificate().await?;
-        let connector = cert.outbound_connector(vec![])?;
-        let tls_stream = connector.connect(stream, dest).await?;
-        let (sender, driver_drain) =
-            h2::client::spawn_connection(self.cfg.clone(), tls_stream, driver_drain, key).await?;
-        Ok((sender, driver_drain))
-    }
-
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
@@ -387,47 +371,6 @@ impl WorkloadHBONEPool {
             }),
             pool_watcher: timeout_rx,
         }
-    }
-
-    pub async fn send_request_unpooled(
-        &mut self,
-        stream: impl tokio::io::AsyncWrite + tokio::io::AsyncRead + Send + Unpin + 'static,
-        workload_key: &WorkloadKey,
-        request: http::Request<()>,
-    ) -> Result<
-        (
-            H2ConnectClient,
-            Result<H2Stream, Error>,
-            tokio::sync::watch::Sender<bool>,
-            tokio::task::JoinHandle<()>,
-        ),
-        Error,
-    > {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let key = workload_key.clone();
-        let dest = rustls::pki_types::ServerName::IpAddress(key.dst.ip().into());
-        let cert = self
-            .state
-            .spawner
-            .local_workload
-            .fetch_certificate()
-            .await?;
-        let connector = cert.outbound_connector(vec![])?;
-        let tls_stream = connector.connect(stream, dest).await?;
-        let (mut sender, driver_drain) = h2::client::spawn_connection(
-            self.state.spawner.cfg.clone(),
-            tls_stream,
-            rx,
-            workload_key.clone(),
-        )
-        .await?;
-
-        Ok((
-            sender.clone(),
-            sender.send_request(request).await,
-            tx,
-            driver_drain,
-        ))
     }
 
     pub async fn send_request_pooled(

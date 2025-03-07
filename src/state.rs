@@ -80,8 +80,11 @@ impl Upstream {
     /// for inner and outer CONNECT request, so we can reuse this for inner double hbone,
     /// outer double hbone, and normal hbone.
     pub fn hbone_target(&self) -> String {
-        if let Some(_)  = self.workload.network_gateway.as_ref() {
-            let svc = self.destination_service.as_ref().expect("Workloads with network gateways must be service addressed.");
+        if let Some(_) = self.workload.network_gateway.as_ref() {
+            let svc = self
+                .destination_service
+                .as_ref()
+                .expect("Workloads with network gateways must be service addressed.");
             format!("{}.{}:{}", svc.namespace, svc.hostname, self.port)
         } else {
             self.workload_socket_addr().to_string()
@@ -650,7 +653,13 @@ impl DemandProxyState {
         original_target_address: SocketAddr,
     ) -> Result<IpAddr, Error> {
         let workload_uid = workload.uid.clone();
-        let hostname = workload.hostname.clone();
+        // FIXME(stevenjin8) Throw a error if this a network gateway without a hostname?
+        let hostname = match workload.network_gateway.as_ref().map(|g| g.destination.clone()) {
+            Some(Destination::Hostname(hostname)) => hostname.hostname.clone(),
+            _ => workload.hostname.clone(),
+        };
+
+        // = workload.hostname.clone();
         trace!(%hostname, "starting DNS lookup");
 
         let resp = match self.dns_resolver.lookup_ip(hostname.as_str()).await {
@@ -789,7 +798,11 @@ impl DemandProxyState {
                         network_address.address,
                         Some(network_gateway.hbone_mtls_port),
                     ),
-                    Destination::Hostname(_) => todo!(),
+                    Destination::Hostname(_) => (
+                        self.resolve_workload_address(&wl, source_workload, original_target_address)
+                            .await?,
+                        Some(network_gateway.hbone_mtls_port),
+                    ),
                 }
             } else {
                 (

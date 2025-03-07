@@ -275,7 +275,6 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        // Ok(HandshakeSignatureValid::assertion())
         rustls::crypto::verify_tls12_signature(
             message,
             cert,
@@ -290,7 +289,6 @@ impl ServerCertVerifier for IdentityVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        // Ok(HandshakeSignatureValid::assertion())
         rustls::crypto::verify_tls13_signature(
             message,
             cert,

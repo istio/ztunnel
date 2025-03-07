@@ -196,11 +196,12 @@ impl OutboundConnection {
             metrics,
         ));
 
+
         let res = match (
             req.protocol,
             req.actual_destination_workload
                 .as_ref()
-                .map(|wl| &wl.network_gateway),
+                .and_then(|wl| wl.network_gateway.as_ref()),
         ) {
             (_, Some(_)) => {
                 self.proxy_to_double_hbone(source_stream, source_addr, &req, &result_tracker)

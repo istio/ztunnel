@@ -19,11 +19,10 @@ use bytes::Bytes;
 use itertools::Itertools;
 
 use rustls::client::Resumption;
-use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, KeyLogFile, RootCertStore, ServerConfig, server};
+use rustls::{ClientConfig, RootCertStore, ServerConfig, server};
 use rustls_pemfile::Item;
 use std::io::Cursor;
 use std::str::FromStr;
@@ -228,10 +227,6 @@ impl WorkloadCertificate {
 
         let mut roots = RootCertStore::empty();
         roots.add_parsable_certificates(chain.iter().last().map(|c| c.der.clone()));
-        roots.add_parsable_certificates(vec![
-            CertificateDer::from_pem_file("/home/sj/learning/openssl/c/root.crt").unwrap(),
-        ]);
-
         Ok(WorkloadCertificate {
             cert,
             chain,
@@ -256,12 +251,8 @@ impl WorkloadCertificate {
         let td = self.cert.identity().map(|i| match i {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
-        let mut roots = (*self.roots).clone();
-        roots.add_parsable_certificates(vec![
-            CertificateDer::from_pem_file("/home/sj/learning/openssl/c/root.crt").unwrap(),
-        ]);
         let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
-            Arc::new(roots),
+            self.roots.clone(),
             crate::tls::lib::provider(),
         )
         .build()?;
@@ -273,7 +264,6 @@ impl WorkloadCertificate {
             .expect("server config must be valid")
             .with_client_cert_verifier(client_cert_verifier)
             .with_single_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
-        sc.key_log = Arc::new(KeyLogFile::new());
         sc.alpn_protocols = vec![b"h2".into()];
         Ok(sc)
     }
@@ -281,10 +271,6 @@ impl WorkloadCertificate {
     pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
         let roots = self.roots.clone();
         let verifier = IdentityVerifier { roots, identity };
-        let mut root_cert_store = RootCertStore::empty();
-        root_cert_store.add_parsable_certificates(vec![
-            CertificateDer::from_pem_file("/home/sj/learning/openssl/c/root.crt").unwrap(),
-        ]);
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("client config must be valid")
@@ -294,7 +280,6 @@ impl WorkloadCertificate {
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;
-        cc.key_log = Arc::new(KeyLogFile::new());
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })
