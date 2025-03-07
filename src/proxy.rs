@@ -446,6 +446,21 @@ pub enum Error {
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
 
+    #[error("no service or workload for hostname: {0}")]
+    NoHostname(String),
+
+    #[error("no endpoints for workload: {0}")]
+    NoWorkloadEndpoints(String),
+
+    #[error("no valid authority pseudo header: {0}")]
+    NoValidAuthority(String),
+
+    #[error("no valid service port in authority header: {0}")]
+    NoValidSerivePort(String, u16),
+
+    #[error("no valid target port for workload: {0}")]
+    NoValidTargetPort(String, u16),
+
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
 
@@ -485,6 +500,7 @@ pub enum Error {
     DnsEmpty,
 }
 
+// Custom TLV for proxy protocol for the identity of the source
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
 
 pub async fn write_proxy_protocol<T>(
@@ -498,6 +514,10 @@ where
     use ppp::v2::{Builder, Command, Protocol, Version};
     use tokio::io::AsyncWriteExt;
 
+    // When the hbone_addr populated from the authority header contains a svc hostname, the address included
+    // with respect to the hbone_addr is the SocketAddr <dst svc IP>:<original dst port>.
+    // This is done since addresses doesn't support hostnames.
+    // See ref https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
     debug!("writing proxy protocol addresses: {:?}", addresses);
     let mut builder =
         Builder::with_addresses(Version::Two | Command::Proxy, Protocol::Stream, addresses);
@@ -780,6 +800,82 @@ pub fn parse_forwarded_host(input: &str) -> Option<String> {
                 .map(|s| s.to_string())
         })
         .filter(|host| !host.is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HboneAddress {
+    SocketAddr(SocketAddr),
+    SvcHostname(Strng, u16),
+}
+
+impl HboneAddress {
+    pub fn port(&self) -> u16 {
+        match self {
+            HboneAddress::SocketAddr(s) => s.port(),
+            HboneAddress::SvcHostname(_, p) => *p,
+        }
+    }
+
+    pub fn ip(&self) -> Option<IpAddr> {
+        match self {
+            HboneAddress::SocketAddr(s) => Some(s.ip()),
+            HboneAddress::SvcHostname(_, _) => None,
+        }
+    }
+
+    pub fn svc_hostname(&self) -> Option<Strng> {
+        match self {
+            HboneAddress::SocketAddr(_) => None,
+            HboneAddress::SvcHostname(s, _) => Some(s.into()),
+        }
+    }
+
+    pub fn hostname_addr(&self) -> Option<Strng> {
+        match self {
+            HboneAddress::SocketAddr(_) => None,
+            HboneAddress::SvcHostname(_, _) => Some(Strng::from(self.to_string())),
+        }
+    }
+}
+
+impl std::fmt::Display for HboneAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HboneAddress::SocketAddr(addr) => write!(f, "{}", addr),
+            HboneAddress::SvcHostname(host, port) => write!(f, "{}:{}", host, port),
+        }
+    }
+}
+
+impl From<SocketAddr> for HboneAddress {
+    fn from(socket_addr: SocketAddr) -> Self {
+        HboneAddress::SocketAddr(socket_addr)
+    }
+}
+
+impl From<(Strng, u16)> for HboneAddress {
+    fn from(svc_hostname: (Strng, u16)) -> Self {
+        HboneAddress::SvcHostname(svc_hostname.0, svc_hostname.1)
+    }
+}
+
+impl TryFrom<http::Uri> for HboneAddress {
+    type Error = Error;
+
+    fn try_from(value: http::Uri) -> Result<Self, Self::Error> {
+        match value.to_string().parse::<SocketAddr>() {
+            Ok(addr) => Ok(HboneAddress::SocketAddr(addr)),
+            Err(_) => {
+                let hbone_host = value
+                    .host()
+                    .ok_or_else(|| Error::NoValidAuthority(value.to_string()))?;
+                let hbone_port = value
+                    .port_u16()
+                    .ok_or_else(|| Error::NoValidAuthority(value.to_string()))?;
+                Ok(HboneAddress::SvcHostname(hbone_host.into(), hbone_port))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::identity::{Identity, SecretManager};
-use crate::proxy::{Error, OnDemandDnsLabels};
+use crate::proxy::{Error, HboneAddress, OnDemandDnsLabels};
 use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
 use crate::state::service::{
@@ -79,15 +79,18 @@ impl Upstream {
     /// <ip address>:<port>. Fortunately, for double-hbone, the authority/host is the same
     /// for inner and outer CONNECT request, so we can reuse this for inner double hbone,
     /// outer double hbone, and normal hbone.
-    pub fn hbone_target(&self) -> String {
-        if let Some(_) = self.workload.network_gateway.as_ref() {
+    pub fn hbone_target(&self) -> HboneAddress {
+        if self.workload.network_gateway.is_some() {
             let svc = self
                 .destination_service
                 .as_ref()
                 .expect("Workloads with network gateways must be service addressed.");
-            format!("{}.{}:{}", svc.namespace, svc.hostname, self.port)
+            HboneAddress::SvcHostname(
+                format!("{}.{}", svc.namespace, svc.hostname).into(),
+                self.port,
+            )
         } else {
-            self.workload_socket_addr().to_string()
+            HboneAddress::SocketAddr(self.workload_socket_addr())
         }
     }
 
@@ -288,6 +291,14 @@ impl ProxyState {
                     .cloned()
                     .map(Address::Workload)
             })
+    }
+
+    /// Find services by hostname.
+    pub fn find_service_by_hostname(&self, hostname: &Strng) -> Result<Vec<Arc<Service>>, Error> {
+        // Hostnames for services are more common, so lookup service first and fallback to workload.
+        self.services.get_by_host(hostname).ok_or_else(|| {
+            Error::NoHostname(format!("service with hostname {} not found", hostname))
+        })
     }
 
     fn find_upstream(

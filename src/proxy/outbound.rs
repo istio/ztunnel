@@ -27,7 +27,9 @@ use tracing::{Instrument, debug, error, info, info_span, trace_span};
 use crate::identity::Identity;
 
 use crate::proxy::metrics::Reporter;
-use crate::proxy::{BAGGAGE_HEADER, Error, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util};
+use crate::proxy::{
+    BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util,
+};
 use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics};
 
 use crate::drain::DrainWatcher;
@@ -186,11 +188,11 @@ impl OutboundConnection {
         );
 
         let metrics = self.pi.metrics.clone();
-        let hbone_target = &req.hbone_target_destination;
+        let hbone_target = req.hbone_target_destination.clone();
         let result_tracker = Box::new(ConnectionResult::new(
             source_addr,
             req.actual_destination,
-            hbone_target.clone(),
+            hbone_target,
             start,
             Self::conn_metrics_from_request(&req),
             metrics,
@@ -410,7 +412,7 @@ impl OutboundConnection {
                 return Ok(Request {
                     protocol: Protocol::HBONE,
                     source: source_workload,
-                    hbone_target_destination: Some(target.to_string()),
+                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
                     actual_destination,
@@ -475,7 +477,7 @@ impl OutboundConnection {
                     protocol: Protocol::HBONE,
                     source: source_workload,
                     // Use the original VIP, not translated
-                    hbone_target_destination: Some(target.to_string()),
+                    hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: us.destination_service.clone(),
                     actual_destination,
@@ -558,7 +560,7 @@ struct Request {
     // When using HBONE, the `hbone_target_destination` is the inner :authority and `actual_destination` is the TCP destination.
     actual_destination: SocketAddr,
     // If using HBONE, the inner (:authority) of the HBONE request.
-    hbone_target_destination: Option<String>,
+    hbone_target_destination: Option<HboneAddress>,
 
     // The identity we will assert for the next hop; this may not be the same as actual_destination_workload
     // in the case of proxies along the path.

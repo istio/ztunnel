@@ -387,7 +387,7 @@ impl Store {
                 // First, lookup the host as a service.
                 if let Some(service) = service {
                     return Some(ServerMatch {
-                        server: Address::Service(Arc::new(service)),
+                        server: Address::Service(service),
                         name: search_name,
                         alias,
                     });

@@ -17,7 +17,6 @@ use itertools::Itertools;
 use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::ops::Deref;
 use std::sync::Arc;
 use tracing::trace;
 
@@ -358,13 +357,8 @@ impl ServiceStore {
     /// # Arguments
     ///
     /// * `hostname` - the hostname of the service.
-    pub fn get_by_host(&self, hostname: &Strng) -> Option<Vec<Service>> {
-        self.by_host.get(hostname).map(|services| {
-            services
-                .iter()
-                .map(|service| service.deref().clone())
-                .collect()
-        })
+    pub fn get_by_host(&self, hostname: &Strng) -> Option<Vec<Arc<Service>>> {
+        self.by_host.get(hostname).map(|v| v.to_vec())
     }
 
     pub fn get_by_workload(&self, workload: &Workload) -> Vec<Arc<Service>> {
