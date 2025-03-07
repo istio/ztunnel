@@ -29,7 +29,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
-use tracing::{debug, error, trace, warn, Instrument};
+use tracing::{Instrument, debug, error, trace, warn};
 
 #[derive(Debug, Clone)]
 // H2ConnectClient is a wrapper abstracting h2

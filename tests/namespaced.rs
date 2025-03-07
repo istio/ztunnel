@@ -402,7 +402,12 @@ mod namespaced {
             .mutate_workload(|w| w.hostname = "waypoint.example.com".into())
             .register()
             .await?;
-        run_hbone_server(waypoint, "waypoint", tcp::Mode::ReadWrite, WAYPOINT_MESSAGE.into())?;
+        run_hbone_server(
+            waypoint,
+            "waypoint",
+            tcp::Mode::ReadWrite,
+            WAYPOINT_MESSAGE.into(),
+        )?;
 
         manager
             .workload_builder("server", DEFAULT_NODE)

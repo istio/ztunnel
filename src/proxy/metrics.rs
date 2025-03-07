@@ -458,7 +458,7 @@ impl ConnectionResult {
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             dst.addr = %dst.0,
-            dst.hbone_addr = hbone_target.as_ref(),
+            dst.hbone_addr = hbone_target.as_ref().map(display),
             dst.service = tl.destination_service.to_value(),
             dst.workload = dst.1.as_deref().map(to_value),
             dst.namespace = tl.destination_workload_namespace.to_value(),

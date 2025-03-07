@@ -198,7 +198,6 @@ impl OutboundConnection {
             metrics,
         ));
 
-
         let res = match (
             req.protocol,
             req.actual_destination_workload
@@ -229,7 +228,7 @@ impl OutboundConnection {
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
         // Create the outer HBONE stream
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, &req)).await?;
+        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
         // Wrap upgraded to implement tokio's Async{Write,Read}
         let upgraded = TokioH2Stream::new(upgraded);
 
@@ -703,8 +702,10 @@ mod tests {
                 Some(ExpectedRequest {
                     protocol: r.protocol,
                     hbone_destination: &r
-                        .hbone_target_destination.as_ref()
-                        .unwrap_or(&String::new()),
+                        .hbone_target_destination
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
                     destination: &r.actual_destination.to_string(),
                 })
             );

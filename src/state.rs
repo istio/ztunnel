@@ -665,7 +665,11 @@ impl DemandProxyState {
     ) -> Result<IpAddr, Error> {
         let workload_uid = workload.uid.clone();
         // FIXME(stevenjin8) Throw a error if this a network gateway without a hostname?
-        let hostname = match workload.network_gateway.as_ref().map(|g| g.destination.clone()) {
+        let hostname = match workload
+            .network_gateway
+            .as_ref()
+            .map(|g| g.destination.clone())
+        {
             Some(Destination::Hostname(hostname)) => hostname.hostname.clone(),
             _ => workload.hostname.clone(),
         };
@@ -802,31 +806,32 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
-        let (selected_workload_ip, proxy_protocol_port_override) =
-            if let Some(network_gateway) = wl.network_gateway.as_ref() {
-                match &network_gateway.destination {
-                    Destination::Address(network_address) => (
-                        network_address.address,
-                        Some(network_gateway.hbone_mtls_port),
-                    ),
-                    Destination::Hostname(_) => (
-                        self.resolve_workload_address(&wl, source_workload, original_target_address)
-                            .await?,
-                        Some(network_gateway.hbone_mtls_port),
-                    ),
-                }
-            } else {
-                (
-                    self.pick_workload_destination_or_resolve(
-                        &wl,
-                        source_workload,
-                        original_target_address,
-                        ip_family_restriction,
-                    )
-                    .await?,
-                    None,
-                ) // if we can't load balance just return the error
-            };
+        let (selected_workload_ip, proxy_protocol_port_override) = if let Some(network_gateway) =
+            wl.network_gateway.as_ref()
+        {
+            match &network_gateway.destination {
+                Destination::Address(network_address) => (
+                    network_address.address,
+                    Some(network_gateway.hbone_mtls_port),
+                ),
+                Destination::Hostname(_) => (
+                    self.resolve_workload_address(&wl, source_workload, original_target_address)
+                        .await?,
+                    Some(network_gateway.hbone_mtls_port),
+                ),
+            }
+        } else {
+            (
+                self.pick_workload_destination_or_resolve(
+                    &wl,
+                    source_workload,
+                    original_target_address,
+                    ip_family_restriction,
+                )
+                .await?,
+                None,
+            ) // if we can't load balance just return the error
+        };
 
         let res = Upstream {
             workload: wl,
