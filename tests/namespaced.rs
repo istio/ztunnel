@@ -28,7 +28,7 @@ mod namespaced {
     use std::time::Duration;
     use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 
-    use hyper::Method;
+    use hyper::{Method, StatusCode};
     use hyper_util::rt::TokioIo;
 
     use WorkloadMode::Uncaptured;
@@ -904,6 +904,92 @@ mod namespaced {
     }
 
     #[tokio::test]
+    async fn test_svc_hostname_port() -> anyhow::Result<()> {
+        test_svc_hostname(8080u16, ztunnel::function!()).await
+    }
+
+    #[tokio::test]
+    async fn test_svc_hostname_named_port() -> anyhow::Result<()> {
+        test_svc_hostname(0u16, ztunnel::function!()).await
+    }
+
+    async fn test_svc_hostname(svc_target_port: u16, function_name: &str) -> anyhow::Result<()> {
+        let mut manager = setup_netns_test!(Shared, function_name);
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        manager
+            .service_builder("server")
+            .addresses(vec![NetworkAddress {
+                network: strng::EMPTY,
+                address: TEST_VIP.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(80u16, svc_target_port)]))
+            .register()
+            .await?;
+        let server = manager
+            .workload_builder("server", DEFAULT_NODE)
+            .service(
+                format!("default/{SERVER_HOSTNAME}").as_str(),
+                80,
+                SERVER_PORT,
+            )
+            .register()
+            .await?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .uncaptured()
+            .register()
+            .await?;
+
+        run_tcp_server(server)?;
+        let srv = resolve_target(manager.resolver(), "server");
+        client
+            .run(move || async move {
+                let builder =
+                    hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor);
+
+                let request = hyper::Request::builder()
+                    .uri(format!("{SERVER_HOSTNAME}:80"))
+                    .method(Method::CONNECT)
+                    .version(hyper::Version::HTTP_2)
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+
+                let id = &identity::Identity::default();
+                let dst_id =
+                    identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
+                        .unwrap();
+                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let connector = cert.outbound_connector(vec![dst_id]).unwrap();
+                let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
+                    .await
+                    .unwrap();
+                let dest = rustls::pki_types::ServerName::IpAddress(
+                    tcp_stream
+                        .peer_addr()
+                        .expect("peer_addr must be set")
+                        .ip()
+                        .into(),
+                );
+                let tls_stream = connector.connect(tcp_stream, dest).await.unwrap();
+                let (mut request_sender, connection) =
+                    builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
+                // spawn a task to poll the connection and drive the HTTP state
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        error!("Error in HBONE connection handshake: {:?}", e);
+                    }
+                });
+
+                let response = request_sender.send_request(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn malicious_calls_inpod() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(Shared);
         let _ztunnel = manager.deploy_ztunnel(DEFAULT_NODE).await?;
@@ -1097,6 +1183,7 @@ mod namespaced {
     const TEST_VIP: &str = "10.10.0.1";
 
     const SERVER_PORT: u16 = 8080;
+    const SERVER_HOSTNAME: &str = "server.default.svc.cluster.local";
     const PROXY_PROTOCOL_PORT: u16 = 15088;
 
     const DEFAULT_NODE: &str = "node";
