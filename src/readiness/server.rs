@@ -26,7 +26,7 @@ use crate::hyper_util;
 use crate::{config, readiness};
 
 pub struct Server {
-    s: hyper_util::Server<readiness::Ready>,
+    s: hyper_util::HTTPServer<readiness::Ready>,
     ready: readiness::Ready,
 }
 
@@ -36,7 +36,7 @@ impl Server {
         drain_rx: DrainWatcher,
         ready: readiness::Ready,
     ) -> anyhow::Result<Self> {
-        hyper_util::Server::<readiness::Ready>::bind(
+        hyper_util::HTTPServer::<readiness::Ready>::bind(
             "readiness",
             config.readiness_addr,
             drain_rx,

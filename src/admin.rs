@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config::Config;
-use crate::hyper_util::{Server, empty_response, plaintext_response};
+use crate::hyper_util::{HTTPServer, empty_response, plaintext_response};
 use crate::identity::SecretManager;
 use crate::state::DemandProxyState;
 use crate::tls::Certificate;
@@ -56,7 +56,7 @@ struct State {
 }
 
 pub struct Service {
-    s: Server<State>,
+    s: HTTPServer<State>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -96,7 +96,7 @@ impl Service {
         drain_rx: DrainWatcher,
         cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<Self> {
-        Server::<State>::bind(
+        HTTPServer::<State>::bind(
             "admin",
             config.admin_addr,
             drain_rx,
@@ -113,7 +113,7 @@ impl Service {
     }
 
     pub fn address(&self) -> SocketAddr {
-        self.s.address()
+        self.s.address()    
     }
 
     pub fn add_handler(&mut self, handler: Arc<dyn AdminHandler>) {
