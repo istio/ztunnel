@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::Bytes;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
 
+use anyhow::Result;
+use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
@@ -25,22 +27,63 @@ use prometheus_client::registry::Registry;
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::hyper_util;
+use crate::tls::{Error, ServerCertProvider, TlsError, WorkloadCertificate};
+use rustls::ServerConfig;
 
+/// SecretBasedCertProvider loads certificates from Kubernetes secrets for the mTLS metrics server
+pub struct SecretBasedCertProvider {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+}
+
+impl SecretBasedCertProvider {
+    pub fn new(cert_path: PathBuf, key_path: PathBuf) -> Self {
+        Self {
+            cert_path,
+            key_path,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ServerCertProvider for SecretBasedCertProvider {
+    async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
+        let cert = tokio::fs::read(&self.cert_path)
+            .await
+            .map_err(|e| TlsError::SslError(Error::CertificateParseError(format!("failed to read cert from k8s secret: {}", e))))?;
+        let key = tokio::fs::read(&self.key_path)
+            .await
+            .map_err(|e| TlsError::SslError(Error::CertificateParseError(format!("failed to read key from k8s secret: {}", e))))?;
+        let cert = WorkloadCertificate::new(&key, &cert, vec![])?;
+        Ok(Arc::new(cert.server_config()?))
+    }
+}
+
+impl Clone for SecretBasedCertProvider {
+    fn clone(&self) -> Self {
+        Self {
+            cert_path: self.cert_path.clone(),
+            key_path: self.key_path.clone(),
+        }
+    }
+}
+
+/// Regular HTTP metrics server
 pub struct Server {
-    s: hyper_util::Server<Mutex<Registry>>,
+    s: hyper_util::HTTPServer<Arc<Mutex<Registry>>>,
 }
 
 impl Server {
     pub async fn new(
         config: Arc<Config>,
         drain_rx: DrainWatcher,
-        registry: Registry,
+        registry: Arc<Mutex<Registry>>,
     ) -> anyhow::Result<Self> {
-        hyper_util::Server::<Mutex<Registry>>::bind(
+        hyper_util::HTTPServer::<Arc<Mutex<Registry>>>::bind(
             "stats",
             config.stats_addr,
             drain_rx,
-            Mutex::new(registry),
+            registry,
         )
         .await
         .map(|s| Server { s })
@@ -53,7 +96,49 @@ impl Server {
     pub fn spawn(self) {
         self.s.spawn(|registry, req| async move {
             match req.uri().path() {
-                "/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
+                "/metrics" | "/stats/prometheus" => Ok(handle_metrics((*registry).clone(), req).await),
+                _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
+            }
+        })
+    }
+}
+
+/// MtlsMetricsServer serves metrics over HBONE with mTLS
+pub struct MtlsMetricsServer {
+    s: hyper_util::TLSServer<Arc<Mutex<Registry>>>,
+    cert_provider: SecretBasedCertProvider,
+}
+
+impl MtlsMetricsServer {
+    pub async fn new(
+        config: Arc<Config>,
+        drain_rx: DrainWatcher,
+        registry: Arc<Mutex<Registry>>,
+    ) -> anyhow::Result<Self> {
+        let cert_provider = SecretBasedCertProvider::new(
+            PathBuf::from(&config.mtls_metrics_cert_path),
+            PathBuf::from(&config.mtls_metrics_key_path),
+        );
+
+        hyper_util::TLSServer::<Arc<Mutex<Registry>>>::bind(
+            "mtls-stats",
+            config.mtls_metrics_addr,
+            drain_rx,
+            registry,
+            cert_provider.clone(),
+        )
+        .await
+        .map(|s| MtlsMetricsServer { s, cert_provider })
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.s.address()
+    }
+
+    pub fn spawn(self) {
+        self.s.spawn(self.cert_provider, |registry, req| async move {
+            match req.uri().path() {
+                "/metrics" | "/stats/prometheus" => Ok(handle_metrics((*registry).clone(), req).await),
                 _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
@@ -120,8 +205,8 @@ fn content_type<T>(req: &Request<T>) -> &str {
         .into()
 }
 
+#[cfg(test)]
 mod test {
-
     #[test]
     fn test_content_type() {
         let plain_text_req = http::Request::new("I want some plain text");

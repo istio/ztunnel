@@ -106,6 +106,23 @@ const CERT_SYSTEM: &str = "SYSTEM";
 const PROXY_MODE_DEDICATED: &str = "dedicated";
 const PROXY_MODE_SHARED: &str = "shared";
 
+/// Environment variable for enabling mTLS metrics server
+pub const MTLS_METRICS_ENABLED: &str = "MTLS_METRICS_ENABLED";
+
+/// Environment variable for mTLS metrics server address
+pub const MTLS_METRICS_ADDR: &str = "MTLS_METRICS_ADDR";
+
+/// Environment variable for mTLS metrics server certificate path
+pub const MTLS_METRICS_CERT_PATH: &str = "MTLS_METRICS_CERT_PATH";
+
+/// Environment variable for mTLS metrics server key path
+pub const MTLS_METRICS_KEY_PATH: &str = "MTLS_METRICS_KEY_PATH";
+
+/// Default values
+const DEFAULT_MTLS_METRICS_PORT: u16 = 15888;
+const DEFAULT_MTLS_CERT_PATH: &str = "/var/run/secrets/metrics/tls.crt";
+const DEFAULT_MTLS_KEY_PATH: &str = "/var/run/secrets/metrics/tls.key";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -288,6 +305,17 @@ pub struct Config {
 
     // Headers to be added to certificate requests
     pub ca_headers: MetadataVector,
+
+    /// Whether the mTLS metrics server is enabled
+    /// Defaults to false
+    pub mtls_metrics_enabled: bool,
+    /// The address where the mTLS metrics server will listen
+    /// This is separate from the regular metrics server
+    pub mtls_metrics_addr: Address,
+    /// The path to the mTLS metrics server certificate
+    pub mtls_metrics_cert_path: String,
+    /// The path to the mTLS metrics server's private key
+    pub mtls_metrics_key_path: String,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -746,6 +774,22 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         fake_self_inbound: false,
         xds_headers: parse_headers(ISTIO_XDS_HEADER_PREFIX)?,
         ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
+
+        mtls_metrics_enabled: parse_default(MTLS_METRICS_ENABLED, false)?,
+        
+        mtls_metrics_addr: Address::SocketAddr(SocketAddr::new(
+            bind_wildcard,
+            match std::env::var(MTLS_METRICS_ADDR) {
+                Ok(addr) => addr.parse().map_err(|e| Error::EnvVar(MTLS_METRICS_ADDR.to_string(), addr, format!("invalid mTLS metrics address: {}", e)))?,
+                Err(_) => DEFAULT_MTLS_METRICS_PORT,
+            },
+        )),
+        
+        mtls_metrics_cert_path: std::env::var(MTLS_METRICS_CERT_PATH)
+            .unwrap_or_else(|_| DEFAULT_MTLS_CERT_PATH.to_string()),
+            
+        mtls_metrics_key_path: std::env::var(MTLS_METRICS_KEY_PATH)
+            .unwrap_or_else(|_| DEFAULT_MTLS_KEY_PATH.to_string()),
     })
 }
 

@@ -179,17 +179,17 @@ pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Ful
         .unwrap()
 }
 
-/// Server implements a generic HTTP server with the follow behavior:
+/// HTTPServer implements a generic HTTP server with the following behavior:
 /// * HTTP/1.1 plaintext only
 /// * Draining
-pub struct Server<S> {
+pub struct HTTPServer<S> {
     name: String,
     binds: Vec<TcpListener>,
     drain_rx: DrainWatcher,
     state: S,
 }
 
-impl<S> Server<S> {
+impl<S> HTTPServer<S> {
     pub async fn bind(
         name: &str,
         addrs: config::Address,
@@ -200,7 +200,7 @@ impl<S> Server<S> {
         for addr in addrs.into_iter() {
             binds.push(TcpListener::bind(&addr).await?)
         }
-        Ok(Server {
+        Ok(HTTPServer {
             name: name.to_string(),
             binds,
             drain_rx,
@@ -234,7 +234,7 @@ impl<S> Server<S> {
         info!(
             %address,
             component=self.name,
-            "listener established",
+            "HTTP listener established",
         );
         for bind in self.binds {
             let drain_stream = drain.clone();
@@ -250,6 +250,7 @@ impl<S> Server<S> {
                     let drain = drain_connections.clone();
                     let f = f.clone();
                     let state = state.clone();
+                    let name = name.clone();
                     tokio::spawn(async move {
                         let serve =
                             http1_server()
@@ -271,25 +272,158 @@ impl<S> Server<S> {
                                     }),
                                 );
                         // Wait for drain to signal or connection serving to complete
-                        match futures_util::future::select(Box::pin(drain.wait_for_drain()), serve)
-                            .await
-                        {
-                            // We got a shutdown request. Start gracful shutdown and wait for the pending requests to complete.
-                            futures_util::future::Either::Left((_shutdown, mut serve)) => {
-                                let drain = std::pin::Pin::new(&mut serve);
+                        let recv = async move {
+                            let _ = drain.wait_for_drain().await;
+                        };
+                        let res = match futures_util::future::select(Box::pin(recv), serve).await {
+                            futures_util::future::Either::Left((_shutdown, mut server)) => {
+                                debug!("server drain starting...");
+                                let drain = std::pin::Pin::new(&mut server);
                                 drain.graceful_shutdown();
-                                serve.await
+                                let _res = server.await;
+                                debug!("server drain done");
+                                Ok(())
                             }
                             // Serving finished, just return the result.
-                            futures_util::future::Either::Right((serve, _shutdown)) => serve,
+                            futures_util::future::Either::Right((res, _shutdown)) => {
+                                debug!("inbound serve done {:?}", res);
+                                res
+                            }
+                        };
+                        if let Err(err) = res {
+                            warn!(
+                                error=%err,
+                                component=%name,
+                                "server error",
+                            );
                         }
                     });
                 }
-                info!(
-                    %address,
-                    component=name,
-                    "listener drained",
-                );
+            });
+        }
+    }
+}
+
+/// TLSServer implements a generic HTTPS server with the following behavior:
+/// * HTTP/2 with TLS
+/// * Draining
+pub struct TLSServer<S> {
+    name: String,
+    binds: Vec<TcpListener>,
+    drain_rx: DrainWatcher,
+    state: S,
+}
+
+impl<S> TLSServer<S> {
+    pub async fn bind<T>(
+        name: &str,
+        addrs: config::Address,
+        drain_rx: DrainWatcher,
+        s: S,
+        _cert_provider: T,
+    ) -> anyhow::Result<Self>
+    where
+        T: ServerCertProvider + Clone + Send + Sync + 'static,
+    {
+        let mut binds = vec![];
+        for addr in addrs.into_iter() {
+            binds.push(TcpListener::bind(&addr).await?)
+        }
+        Ok(TLSServer {
+            name: name.to_string(),
+            binds,
+            drain_rx,
+            state: s,
+        })
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.binds
+            .first()
+            .expect("must have at least one address")
+            .local_addr()
+            .expect("local address must be ready")
+    }
+
+    pub fn spawn<F, R, T>(self, cert_provider: T, f: F)
+    where
+        S: Send + Sync + 'static,
+        F: Fn(Arc<S>, Request<hyper::body::Incoming>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<Response<Full<Bytes>>, anyhow::Error>> + Send + Sync + 'static,
+        T: ServerCertProvider + Clone + Send + Sync + 'static,
+    {
+        use futures_util::StreamExt as OtherStreamExt;
+        let address = self.address();
+        let drain = self.drain_rx;
+        let state = Arc::new(self.state);
+        let f = Arc::new(f);
+        info!(
+            %address,
+            component=self.name,
+            "TLS listener established",
+        );
+        for bind in self.binds {
+            let drain_stream = drain.clone();
+            let drain_connections = drain.clone();
+            let state = state.clone();
+            let name = self.name.clone();
+            let f = f.clone();
+            let cert_provider = cert_provider.clone();
+            tokio::spawn(async move {
+                let tls_stream = tls_server(cert_provider, bind);
+                let mut stream = tls_stream.take_until(Box::pin(drain_stream.wait_for_drain()));
+                while let Some(socket) = stream.next().await {
+                    let drain = drain_connections.clone();
+                    let f = f.clone();
+                    let state = state.clone();
+                    let name = name.clone();
+                    tokio::spawn(async move {
+                        let serve =
+                            http2_server()
+                                .max_frame_size(1024 * 1024)
+                                .max_header_list_size(65536)
+                                .serve_connection(
+                                    hyper_util::rt::TokioIo::new(socket),
+                                    hyper::service::service_fn(move |req| {
+                                        let state = state.clone();
+
+                                        // Failures would abort the whole connection; we just want to return an HTTP error
+                                        f(state, req).or_else(|err| async move {
+                                            Ok::<Response<Full<Bytes>>, Infallible>(Response::builder()
+                                                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                                                .body(err.to_string().into())
+                                                .expect("builder with known status code should not fail"))
+                                        })
+                                    }),
+                                );
+                        // Wait for drain to signal or connection serving to complete
+                        let recv = async move {
+                            let _ = drain.wait_for_drain().await;
+                        };
+                        let res = match futures_util::future::select(Box::pin(recv), serve).await {
+                            futures_util::future::Either::Left((_shutdown, mut server)) => {
+                                debug!("server drain starting...");
+                                let drain = std::pin::Pin::new(&mut server);
+                                drain.graceful_shutdown();
+                                let _res = server.await;
+                                debug!("server drain done");
+                                Ok(())
+                            }
+                            // Serving finished, just return the result.
+                            futures_util::future::Either::Right((res, _shutdown)) => {
+                                debug!("inbound serve done {:?}", res);
+                                res
+                            }
+                        };
+                        if let Err(err) = res {
+                            warn!(
+                                error=%err,
+                                component=%name,
+                                "server error",
+                            );
+                        }
+                    });
+                }
             });
         }
     }
