@@ -32,7 +32,10 @@ use hyper::rt::Sleep;
 use hyper::server::conn::{http1, http2};
 use hyper::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
+use prometheus_client::{encoding, registry::Registry};
+use std::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
 use tokio_stream::Stream;
 use tracing::{Instrument, debug, info, warn};
 
@@ -179,6 +182,21 @@ pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Ful
         .unwrap()
 }
 
+// Helper function to generate metrics from state for HBONE implementation
+// This is used in the TLSServer implementation for HBONE tunneling
+fn generate_metrics_from_state<S>(state: &Arc<S>) -> Result<String, String> 
+where 
+    S: AsRef<Mutex<Registry>> + ?Sized
+{
+    let mut buf = String::new();
+    let registry = state.as_ref().as_ref().lock().expect("mutex poisoned");
+    
+    encoding::text::encode(&mut buf, &registry)
+        .map_err(|e| e.to_string())?;
+    
+    Ok(buf)
+}
+
 /// HTTPServer implements a generic HTTP server with the following behavior:
 /// * HTTP/1.1 plaintext only
 /// * Draining
@@ -307,6 +325,7 @@ impl<S> HTTPServer<S> {
 /// TLSServer implements a generic HTTPS server with the following behavior:
 /// * HTTP/2 with TLS
 /// * Draining
+/// * Optional HBONE support (HTTP CONNECT tunneling)
 pub struct TLSServer<S> {
     name: String,
     binds: Vec<TcpListener>,
@@ -347,16 +366,15 @@ impl<S> TLSServer<S> {
 
     pub fn spawn<F, R, T>(self, cert_provider: T, f: F)
     where
-        S: Send + Sync + 'static,
-        F: Fn(Arc<S>, Request<hyper::body::Incoming>) -> R + Send + Sync + 'static,
-        R: Future<Output = Result<Response<Full<Bytes>>, anyhow::Error>> + Send + Sync + 'static,
+        S: Send + Sync + 'static + AsRef<Mutex<Registry>>,
+        F: Fn(Arc<S>, Request<hyper::body::Incoming>) -> R + Clone + Send + Sync + 'static,
+        R: Future<Output = Result<Response<Full<Bytes>>, anyhow::Error>> + Send + 'static,
         T: ServerCertProvider + Clone + Send + Sync + 'static,
     {
         use futures_util::StreamExt as OtherStreamExt;
         let address = self.address();
         let drain = self.drain_rx;
         let state = Arc::new(self.state);
-        let f = Arc::new(f);
         info!(
             %address,
             component=self.name,
@@ -378,24 +396,95 @@ impl<S> TLSServer<S> {
                     let state = state.clone();
                     let name = name.clone();
                     tokio::spawn(async move {
-                        let serve =
-                            http2_server()
+                        let serve = http2_server()
                                 .max_frame_size(1024 * 1024)
                                 .max_header_list_size(65536)
                                 .serve_connection(
                                     hyper_util::rt::TokioIo::new(socket),
                                     hyper::service::service_fn(move |req| {
                                         let state = state.clone();
-
-                                        // Failures would abort the whole connection; we just want to return an HTTP error
-                                        f(state, req).or_else(|err| async move {
-                                            Ok::<Response<Full<Bytes>>, Infallible>(Response::builder()
+                                    let f = f.clone();
+                                    async move {
+                                        if req.method() == hyper::Method::CONNECT {
+                                            debug!("Received HBONE CONNECT request: {:?}", req.uri());
+                                            
+                                            // For CONNECT requests, upgrade the connection
+                                            let response = Response::builder()
+                                                .status(hyper::StatusCode::OK)
+                                                .body(Full::default())
+                                                .unwrap();
+                                                
+                                            let state = state.clone();
+                                            
+                                            let uri_path = req.uri().path().to_string();
+                                            
+                                            // Perform the connection upgrade
+                                            tokio::task::spawn(async move {
+                                                match hyper::upgrade::on(req).await {
+                                                    Ok(upgraded) => {
+                                                        debug!("HBONE tunnel established");
+                                                        
+                                                        let mut upgraded_io = hyper_util::rt::TokioIo::new(upgraded);
+                                                        
+                                                        // Access the metrics directly via the state reference
+                                                        let response_body = match uri_path.as_str() {
+                                                            "/metrics" | "/stats/prometheus" => {
+                                                                let metrics_result = if let Ok(metrics_str) = generate_metrics_from_state(&state) {
+                                                                    debug!("Successfully encoded metrics data");
+                                                                    let mut resp = format!(
+                                                                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+                                                                        metrics_str.len()
+                                                                    ).into_bytes();
+                                                                    resp.extend_from_slice(metrics_str.as_bytes());
+                                                                    resp
+                                                                } else {
+                                                                    let err_str = "Error encoding metrics";
+                                                                    debug!("Error encoding metrics");
+                                                                    format!(
+                                                                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                                                                        err_str.len(),
+                                                                        err_str
+                                                                    ).into_bytes()
+                                                                };
+                                                                
+                                                                metrics_result
+                                                            },
+                                                            _ => {
+                                                                // For any other path, return 404
+                                                                debug!("Path not found: {}", uri_path);
+                                                                "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nNot Found".as_bytes().to_vec()
+                                                            }
+                                                        };
+                                                        
+                                                        debug!("Writing response ({} bytes) to HBONE tunnel", response_body.len());
+                                                        if let Err(e) = upgraded_io.write_all(&response_body).await {
+                                                            debug!("Error writing response to HBONE tunnel: {}", e);
+                                                        } else {
+                                                            debug!("HBONE response sent successfully");
+                                                        }
+                                                        
+                                                        debug!("HBONE tunnel connection complete");
+                                                    }
+                                                    Err(e) => {
+                                                        debug!("Failed to upgrade HBONE connection: {}", e);
+                                                    }
+                                                }
+                                            });
+                                            
+                                            Ok::<_, Infallible>(response)
+                                        } else {
+                                            // For non-CONNECT requests, use the original handler
+                                            f(state, req).await.or_else(|err| {
+                                                Ok::<_, Infallible>(Response::builder()
                                                 .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
                                                 .body(err.to_string().into())
                                                 .expect("builder with known status code should not fail"))
                                         })
+                                        }
+                                    }
                                     }),
                                 );
+                        
                         // Wait for drain to signal or connection serving to complete
                         let recv = async move {
                             let _ = drain.wait_for_drain().await;

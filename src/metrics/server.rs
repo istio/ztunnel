@@ -103,13 +103,31 @@ impl Server {
     }
 }
 
-/// MtlsMetricsServer serves metrics over HBONE with mTLS
+/// MtlsMetricsServer serves metrics over mTLS with support for both direct connections and HBONE tunneling
+/// 
+/// Supports two connection modes:
+/// 1. Direct mTLS: TCP → TLS → HTTP Request/Response
+///    Client establishes TLS connection with mTLS authentication and sends HTTP/2 requests directly
+/// 
+/// 2. HBONE: TCP → TLS → HTTP/2 → CONNECT Tunnel → HTTP/1.1 Request/Response
+///    Client establishes TLS connection with mTLS authentication
+///    Client sends HTTP/2 CONNECT request to establish a tunnel
+///    Once tunnel is established, client sends HTTP/1.1 requests through the tunnel
+///    Server processes these requests through the same handler function and returns responses
+///    through the established tunnel
+///
+/// The HBONE protocol provides an additional layer of HTTP-based tunneling which can be useful
+/// for traversing certain network environments where direct connections might be restricted.
 pub struct MtlsMetricsServer {
     s: hyper_util::TLSServer<Arc<Mutex<Registry>>>,
     cert_provider: SecretBasedCertProvider,
 }
 
 impl MtlsMetricsServer {
+    /// Creates a new MtlsMetricsServer instance that supports both direct mTLS and HBONE connections
+    ///
+    /// The server uses TLS certificates from Kubernetes secrets for authenticating clients
+    /// and is configured to handle both direct HTTP/2 requests and HTTP CONNECT tunneling (HBONE)
     pub async fn new(
         config: Arc<Config>,
         drain_rx: DrainWatcher,
@@ -135,6 +153,12 @@ impl MtlsMetricsServer {
         self.s.address()
     }
 
+    /// Spawns the server to handle both direct mTLS and HBONE connections
+    ///
+    /// The server will:
+    /// 1. Accept TLS connections with mutual authentication
+    /// 2. Process both direct HTTP/2 requests and HTTP CONNECT requests for HBONE tunneling
+    /// 3. Serve metrics through both connection types
     pub fn spawn(self) {
         self.s.spawn(self.cert_provider, |registry, req| async move {
             match req.uri().path() {
