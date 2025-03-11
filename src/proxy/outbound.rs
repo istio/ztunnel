@@ -205,8 +205,13 @@ impl OutboundConnection {
                 .and_then(|wl| wl.network_gateway.as_ref()),
         ) {
             (_, Some(_)) => {
-                self.proxy_to_double_hbone(source_stream, source_addr, &req, &result_tracker)
-                    .await
+                Box::pin(self.proxy_to_double_hbone(
+                    source_stream,
+                    source_addr,
+                    &req,
+                    &result_tracker,
+                ))
+                .await
             }
             (Protocol::HBONE, _) => {
                 self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
