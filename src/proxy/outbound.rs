@@ -15,6 +15,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
 use std::time::Instant;
@@ -204,7 +205,7 @@ impl OutboundConnection {
                 .as_ref()
                 .and_then(|wl| wl.network_gateway.as_ref()),
         ) {
-            (_, Some(_)) => {
+            (Protocol::HBONE, Some(_)) => {
                 Box::pin(self.proxy_to_double_hbone(
                     source_stream,
                     source_addr,
@@ -213,14 +214,18 @@ impl OutboundConnection {
                 ))
                 .await
             }
-            (Protocol::HBONE, _) => {
+            (Protocol::HBONE, None) => {
                 self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
                     .await
             }
-            (Protocol::TCP, _) => {
+            (Protocol::TCP, None) => {
                 self.proxy_to_tcp(source_stream, &req, &result_tracker)
                     .await
             }
+            (_, Some(_)) => Err(Error::Anyhow(anyhow!(
+                "Cannot proxy to workload with protocol {:?} and network gateway",
+                req.protocol
+            ))),
         };
         result_tracker.record(res)
     }
