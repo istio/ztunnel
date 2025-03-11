@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::identity::{Identity, SecretManager};
-use crate::proxy::{Error, OnDemandDnsLabels};
+use crate::proxy::{Error, HboneAddress, OnDemandDnsLabels};
 use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
 use crate::state::service::{
@@ -70,9 +70,30 @@ pub struct Upstream {
     pub service_sans: Vec<Strng>,
     /// If this was from a service, the service info.
     pub destination_service: Option<ServiceDescription>,
+    /// Use this port instead of the default one for the proxy protocol.
+    pub proxy_protocol_port_override: Option<u16>,
 }
 
 impl Upstream {
+    /// If there is a network gateway, use <service hostname>:<port>. Otherwise, use
+    /// <ip address>:<port>. Fortunately, for double-hbone, the authority/host is the same
+    /// for inner and outer CONNECT request, so we can reuse this for inner double hbone,
+    /// outer double hbone, and normal hbone.
+    pub fn hbone_target(&self) -> HboneAddress {
+        if self.workload.network_gateway.is_some() {
+            let svc = self
+                .destination_service
+                .as_ref()
+                .expect("Workloads with network gateways must be service addressed.");
+            HboneAddress::SvcHostname(
+                format!("{}.{}", svc.namespace, svc.hostname).into(),
+                self.port,
+            )
+        } else {
+            HboneAddress::SocketAddr(self.workload_socket_addr())
+        }
+    }
+
     pub fn workload_socket_addr(&self) -> SocketAddr {
         SocketAddr::new(self.selected_workload_ip, self.port)
     }
@@ -87,6 +108,19 @@ impl Upstream {
                 }
             })
             .chain(std::iter::once(self.workload.identity()))
+            .collect()
+    }
+
+    pub fn service_sans(&self) -> Vec<Identity> {
+        self.service_sans
+            .iter()
+            .flat_map(|san| match Identity::from_str(san) {
+                Ok(id) => Some(id),
+                Err(err) => {
+                    warn!("ignoring invalid SAN {}: {}", san, err);
+                    None
+                }
+            })
             .collect()
     }
 }
@@ -630,7 +664,17 @@ impl DemandProxyState {
         original_target_address: SocketAddr,
     ) -> Result<IpAddr, Error> {
         let workload_uid = workload.uid.clone();
-        let hostname = workload.hostname.clone();
+        // FIXME(stevenjin8) Throw a error if this a network gateway without a hostname?
+        let hostname = match workload
+            .network_gateway
+            .as_ref()
+            .map(|g| g.destination.clone())
+        {
+            Some(Destination::Hostname(hostname)) => hostname.hostname.clone(),
+            _ => workload.hostname.clone(),
+        };
+
+        // = workload.hostname.clone();
         trace!(%hostname, "starting DNS lookup");
 
         let resp = match self.dns_resolver.lookup_ip(hostname.as_str()).await {
@@ -762,20 +806,40 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
-        let selected_workload_ip = self
-            .pick_workload_destination_or_resolve(
-                &wl,
-                source_workload,
-                original_target_address,
-                ip_family_restriction,
-            )
-            .await?; // if we can't load balance just return the error
+        let (selected_workload_ip, proxy_protocol_port_override) = if let Some(network_gateway) =
+            wl.network_gateway.as_ref()
+        {
+            match &network_gateway.destination {
+                Destination::Address(network_address) => (
+                    network_address.address,
+                    Some(network_gateway.hbone_mtls_port),
+                ),
+                Destination::Hostname(_) => (
+                    self.resolve_workload_address(&wl, source_workload, original_target_address)
+                        .await?,
+                    Some(network_gateway.hbone_mtls_port),
+                ),
+            }
+        } else {
+            (
+                self.pick_workload_destination_or_resolve(
+                    &wl,
+                    source_workload,
+                    original_target_address,
+                    ip_family_restriction,
+                )
+                .await?,
+                None,
+            ) // if we can't load balance just return the error
+        };
+
         let res = Upstream {
             workload: wl,
             selected_workload_ip,
             port,
             service_sans: svc.map(|s| s.subject_alt_names.clone()).unwrap_or_default(),
             destination_service: svc_desc,
+            proxy_protocol_port_override,
         };
         tracing::trace!(?res, "finalize_upstream");
         Ok(Some(res))
