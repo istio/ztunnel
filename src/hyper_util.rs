@@ -25,6 +25,7 @@ use std::{
 use crate::drain::DrainWatcher;
 use crate::{config, proxy};
 use bytes::Bytes;
+use bytes::BytesMut;
 use futures_util::TryFutureExt;
 use http_body_util::Full;
 use hyper::client;
@@ -40,6 +41,9 @@ use tokio_stream::Stream;
 use tracing::{Instrument, debug, info, warn};
 
 use crate::tls::ServerCertProvider;
+use http_body_util::BodyExt;
+use bytes::BufMut;
+use std::io::Write;
 
 pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
     cert_provider: T,
@@ -429,30 +433,57 @@ impl<S> TLSServer<S> {
                                                         // Access the metrics directly via the state reference
                                                         let response_body = match uri_path.as_str() {
                                                             "/metrics" | "/stats/prometheus" => {
-                                                                let metrics_result = if let Ok(metrics_str) = generate_metrics_from_state(&state) {
+                                                                if let Ok(metrics_str) = generate_metrics_from_state(&state) {
                                                                     debug!("Successfully encoded metrics data");
-                                                                    let mut resp = format!(
-                                                                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
-                                                                        metrics_str.len()
-                                                                    ).into_bytes();
-                                                                    resp.extend_from_slice(metrics_str.as_bytes());
-                                                                    resp
+                                                                    
+                                                                    let response = Response::builder()
+                                                                        .status(hyper::StatusCode::OK)
+                                                                        .header("Content-Type", "text/plain")
+                                                                        .body(Full::new(Bytes::from(metrics_str)))
+                                                                        .expect("Failed to build metrics response");
+                                                                    
+                                                                    match serialize_http_response(response).await {
+                                                                        Ok(bytes) => bytes.to_vec(),
+                                                                        Err(e) => {
+                                                                            debug!("Error serializing metrics response: {}", e);
+                                                                            let error_response = Response::builder()
+                                                                                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                                                                                .header("Content-Type", "text/plain")
+                                                                                .body(Full::new(Bytes::from("Error serializing response")))
+                                                                                .expect("Failed to build error response");
+                                                                                
+                                                                            serialize_http_response(error_response).await
+                                                                                .unwrap_or_else(|_| Bytes::from("HTTP/1.1 500 Internal Server Error\r\n\r\n"))
+                                                                                .to_vec()
+                                                                        }
+                                                                    }
                                                                 } else {
-                                                                    let err_str = "Error encoding metrics";
                                                                     debug!("Error encoding metrics");
-                                                                    format!(
-                                                                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                                                                        err_str.len(),
-                                                                        err_str
-                                                                    ).into_bytes()
-                                                                };
-                                                                
-                                                                metrics_result
+                                                                    
+                                                                    let response = Response::builder()
+                                                                        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                                                                        .header("Content-Type", "text/plain")
+                                                                        .body(Full::new(Bytes::from("Error encoding metrics")))
+                                                                        .expect("Failed to build error response");
+                                                                        
+                                                                    serialize_http_response(response).await
+                                                                        .unwrap_or_else(|_| Bytes::from("HTTP/1.1 500 Internal Server Error\r\n\r\n"))
+                                                                        .to_vec()
+                                                                }
                                                             },
                                                             _ => {
                                                                 // For any other path, return 404
                                                                 debug!("Path not found: {}", uri_path);
-                                                                "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nNot Found".as_bytes().to_vec()
+                                                                
+                                                                let response = Response::builder()
+                                                                    .status(hyper::StatusCode::NOT_FOUND)
+                                                                    .header("Content-Type", "text/plain")
+                                                                    .body(Full::new(Bytes::from("Not Found")))
+                                                                    .expect("Failed to build 404 response");
+                                                                    
+                                                                serialize_http_response(response).await
+                                                                    .unwrap_or_else(|_| Bytes::from("HTTP/1.1 404 Not Found\r\n\r\n"))
+                                                                    .to_vec()
                                                             }
                                                         };
                                                         
@@ -516,4 +547,58 @@ impl<S> TLSServer<S> {
             });
         }
     }
+}
+
+// Helper function to properly serialize an HTTP/1.1 response to bytes
+async fn serialize_http_response<B>(response: Response<B>) -> Result<Bytes, String> 
+where 
+    B: http_body::Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    // Create a buffer to store the serialized response
+    let mut buf = BytesMut::with_capacity(1024).writer();
+    
+    // Write the status line
+    write!(
+        &mut buf, 
+        "HTTP/1.1 {} {}\r\n", 
+        response.status().as_u16(),
+        response.status().canonical_reason().unwrap_or("")
+    )
+    .map_err(|e| e.to_string())?;
+    
+    // Write the headers
+    for (name, value) in response.headers() {
+        write!(&mut buf, "{}: ", name)
+            .map_err(|e| e.to_string())?;
+        buf.write_all(value.as_bytes())
+            .map_err(|e| e.to_string())?;
+        buf.write_all(b"\r\n")
+            .map_err(|e| e.to_string())?;
+    }
+    
+    // End of headers
+    buf.write_all(b"\r\n")
+        .map_err(|e| e.to_string())?;
+    
+    // Get the buffer so far
+    let bytes = buf.into_inner().freeze();
+    
+    // Get the body
+    let mut body = response.into_body();
+    
+    // Create a new buffer for the complete response
+    let mut buffer = BytesMut::with_capacity(bytes.len() + 1024);
+    buffer.extend_from_slice(&bytes);
+    
+    // Add the body data
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| e.to_string())?;
+        if let Some(data) = frame.data_ref() {
+            buffer.extend_from_slice(data);
+        }
+    }
+    
+    // Return the complete response as bytes
+    Ok(buffer.freeze())
 }
