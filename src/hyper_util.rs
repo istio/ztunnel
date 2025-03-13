@@ -470,11 +470,33 @@ impl<S> TLSServer<S> {
                                     // Extract just the path from the request
                                     let path = parts.uri.path().to_string();
                                     
+                                    // Generate metrics data based on path before sending response
+                                    let metrics_data = if path == METRICS_PATH || path == PROMETHEUS_PATH {
+                                        generate_metrics_from_state(&state_clone)
+                                    } else {
+                                        // For any other path, prepare an error
+                                        debug!(
+                                            path = %path,
+                                            "Path not found in metrics request"
+                                        );
+                                        Err(format!("Path not found: {}", path))
+                                    };
+                                    
                                     match h2_req.send_response(response).await {
-                                        Ok(h2_stream) => {
-                                            // Pass the path string directly instead of creating a MetricsRequest
-                                            if let Err(e) = serve_metrics_connect(h2_stream, path, &state_clone).await {
-                                                debug!("HBONE tunnel handling error: {}", e);
+                                        Ok(mut h2_stream) => {
+                                            if path == METRICS_PATH || path == PROMETHEUS_PATH {
+                                                if let Err(e) = serve_metrics_connect(h2_stream, metrics_data, &state_clone).await {
+                                                    debug!(path = %path, error = %e, "HBONE tunnel handling error");
+                                                }
+                                            } else {
+                                                // For invalid paths, send 404 response
+                                                let response_bytes = create_error_http1_response(
+                                                    hyper::StatusCode::NOT_FOUND,
+                                                    &format!("Path not found: {}", path)
+                                                );
+                                                
+                                                let _ = h2_stream.write.send_stream.send_data(response_bytes, true);
+                                                debug!(path = %path, "Sent 404 response for invalid path");
                                             }
                                         }
                                         Err(e) => {
@@ -570,7 +592,7 @@ impl<S> TLSServer<S> {
 /// Process a metrics request through an HBONE tunnel
 async fn serve_metrics_connect<S>(
     h2_stream: crate::proxy::h2_public::H2Stream,
-    path: String,
+    metrics_data: Result<String, String>,
     state: &Arc<S>
 ) -> Result<(), String>
 where
@@ -578,59 +600,38 @@ where
 {
     let mut write = h2_stream.write;
     
-    // Process the request through the tunnel based on path
-    if path == METRICS_PATH || path == PROMETHEUS_PATH {
-        // Generate metrics from registry
-        match generate_metrics_from_state(state) {
-            Ok(metrics_str) => {
-                debug!("Successfully encoded metrics data");
-                
-                // Create a proper HTTP/1.1 response
-                let response_bytes = create_metrics_http1_response(&metrics_str);
-                
-                // Write the response to the tunnel
-                if let Err(e) = write.send_stream.send_data(response_bytes, true) {
-                    debug!(error = %e, "Error writing response to HBONE tunnel");
-                    return Err(format!("Failed to send metrics response: {}", e));
-                }
-                
-                debug!(
-                    path = %path,
-                    "HBONE metrics response sent successfully"
-                );
+    // Process the metrics data
+    match metrics_data {
+        Ok(metrics_str) => {
+            debug!("Successfully encoded metrics data");
+            
+            // Create a proper HTTP/1.1 response
+            let response_bytes = create_metrics_http1_response(&metrics_str);
+            
+            // Write the response to the tunnel
+            if let Err(e) = write.send_stream.send_data(response_bytes, true) {
+                debug!(error = %e, "Error writing response to HBONE tunnel");
+                return Err(format!("Failed to send metrics response: {}", e));
             }
-            Err(e) => {
-                // Log the error with structured information
-                debug!(
-                    error = %e,
-                    path = %path,
-                    "Error encoding metrics"
-                );
-                
-                // Send error response using the helper function
-                let response_bytes = create_error_http1_response(
-                    hyper::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Error encoding metrics: {}", e)
-                );
-                
-                let _ = write.send_stream.send_data(response_bytes, true);
-                return Err(format!("Failed to encode metrics: {}", e));
-            }
+            
+            debug!("HBONE metrics response sent successfully");
         }
-    } else {
-        // For any other path, return 404
-        debug!(
-            path = %path,
-            "Path not found in metrics request"
-        );
-        
-        let response_bytes = create_error_http1_response(
-            hyper::StatusCode::NOT_FOUND,
-            &format!("Path not found: {}", path)
-        );
-        
-        let _ = write.send_stream.send_data(response_bytes, true);
-        return Err(format!("Path not found: {}", path));
+        Err(e) => {
+            // Log the error with structured information
+            debug!(
+                error = %e,
+                "Error encoding metrics"
+            );
+            
+            // Send error response using the helper function
+            let response_bytes = create_error_http1_response(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Error encoding metrics: {}", e)
+            );
+            
+            let _ = write.send_stream.send_data(response_bytes, true);
+            return Err(format!("Failed to encode metrics: {}", e));
+        }
     }
     
     // Read any remaining data from the client to properly complete the HTTP exchange
@@ -644,9 +645,6 @@ where
         }
     }
     
-    debug!(
-        path = %path,
-        "HBONE tunnel connection complete"
-    );
+    debug!("HBONE tunnel connection complete");
     Ok(())
 }

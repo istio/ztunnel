@@ -51,7 +51,6 @@ impl MetricsError {
 
 /// Builds a standard HTTP response, similar to build_response in inbound.rs
 pub fn build_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
-    // Convert &str to owned String to avoid borrowing issues
     let body_bytes = Bytes::from(body.to_string());
     
     Response::builder()
@@ -59,7 +58,6 @@ pub fn build_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
         .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Full::new(body_bytes))
         .unwrap_or_else(|_| {
-            // Fallback in case the builder fails
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Full::new(Bytes::from("Error building response")))
