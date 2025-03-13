@@ -25,7 +25,6 @@ use std::{
 use crate::drain::DrainWatcher;
 use crate::{config, proxy};
 use bytes::Bytes;
-use bytes::BytesMut;
 use futures_util::TryFutureExt;
 use http_body_util::Full;
 use hyper::client;
@@ -36,14 +35,14 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use prometheus_client::{encoding, registry::Registry};
 use std::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::AsyncWriteExt;
 use tokio_stream::Stream;
 use tracing::{Instrument, debug, info, warn};
 
 use crate::tls::ServerCertProvider;
-use http_body_util::BodyExt;
-use bytes::BufMut;
-use std::io::Write;
+
+// Constants for metric paths
+const METRICS_PATH: &str = "/metrics";
+const PROMETHEUS_PATH: &str = "/stats/prometheus";
 
 pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
     cert_provider: T,
@@ -57,7 +56,6 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
             !matches!(item, Err(tls_listener::Error::ListenerError(e)) if proxy::util::is_runtime_shutdown(e))
         })
         .filter_map(|conn| {
-            // Avoid 'By default, if a client fails the TLS handshake, that is treated as an error, and the TlsListener will return an Err'
             match conn {
                 Err(err) => {
                     warn!("TLS handshake error: {}", err);
@@ -186,8 +184,45 @@ pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Ful
         .unwrap()
 }
 
-// Helper function to generate metrics from state for HBONE implementation
-// This is used in the TLSServer implementation for HBONE tunneling
+/// Helper function to serialize an HTTP/1.1 response to bytes
+fn serialize_http1_response(status: hyper::StatusCode, body: &str, content_type: &str) -> Bytes {
+    let len = body.len();
+    let mut bytes = Vec::with_capacity(len + 128); // Allocate some extra space for headers
+    
+    // Write the status line
+    bytes.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or("")).as_bytes());
+    
+    // Write the headers
+    bytes.extend_from_slice(format!("Content-Type: {}\r\n", content_type).as_bytes());
+    bytes.extend_from_slice(format!("Content-Length: {}\r\n", len).as_bytes());
+    bytes.extend_from_slice(b"\r\n");
+    
+    // Write the body
+    bytes.extend_from_slice(body.as_bytes());
+    
+    Bytes::from(bytes)
+}
+
+/// Helper function to create HTTP/1.1 response for metrics
+fn create_metrics_http1_response(metrics_data: &str) -> Bytes {
+    serialize_http1_response(
+        hyper::StatusCode::OK,
+        metrics_data,
+        "text/plain; charset=utf-8"
+    )
+}
+
+/// Helper function to create HTTP/1.1 error response
+fn create_error_http1_response(status: hyper::StatusCode, message: &str) -> Bytes {
+    serialize_http1_response(
+        status,
+        message,
+        "text/plain; charset=utf-8"
+    )
+}
+
+/// Helper function to generate metrics from state for HBONE implementation
+/// This is used in the TLSServer implementation for HBONE tunneling
 fn generate_metrics_from_state<S>(state: &Arc<S>) -> Result<String, String> 
 where 
     S: AsRef<Mutex<Registry>> + ?Sized
@@ -335,6 +370,7 @@ pub struct TLSServer<S> {
     binds: Vec<TcpListener>,
     drain_rx: DrainWatcher,
     state: S,
+    config: Arc<config::Config>,
 }
 
 impl<S> TLSServer<S> {
@@ -344,6 +380,7 @@ impl<S> TLSServer<S> {
         drain_rx: DrainWatcher,
         s: S,
         _cert_provider: T,
+        config: Arc<config::Config>,
     ) -> anyhow::Result<Self>
     where
         T: ServerCertProvider + Clone + Send + Sync + 'static,
@@ -357,6 +394,7 @@ impl<S> TLSServer<S> {
             binds,
             drain_rx,
             state: s,
+            config,
         })
     }
 
@@ -371,7 +409,7 @@ impl<S> TLSServer<S> {
     pub fn spawn<F, R, T>(self, cert_provider: T, f: F)
     where
         S: Send + Sync + 'static + AsRef<Mutex<Registry>>,
-        F: Fn(Arc<S>, Request<hyper::body::Incoming>) -> R + Clone + Send + Sync + 'static,
+        F: Fn(Arc<S>, Request<Full<Bytes>>) -> R + Clone + Send + Sync + 'static,
         R: Future<Output = Result<Response<Full<Bytes>>, anyhow::Error>> + Send + 'static,
         T: ServerCertProvider + Clone + Send + Sync + 'static,
     {
@@ -379,11 +417,17 @@ impl<S> TLSServer<S> {
         let address = self.address();
         let drain = self.drain_rx;
         let state = Arc::new(self.state);
+        let config = self.config;
+        
         info!(
             %address,
             component=self.name,
             "TLS listener established",
         );
+        
+        // Create shutdown signal channel
+        let (_force_shutdown_tx, force_shutdown_rx) = tokio::sync::watch::channel(());
+        
         for bind in self.binds {
             let drain_stream = drain.clone();
             let drain_connections = drain.clone();
@@ -391,151 +435,125 @@ impl<S> TLSServer<S> {
             let name = self.name.clone();
             let f = f.clone();
             let cert_provider = cert_provider.clone();
+            let force_shutdown_rx = force_shutdown_rx.clone();
+            let config = config.clone();
+            
             tokio::spawn(async move {
                 let tls_stream = tls_server(cert_provider, bind);
                 let mut stream = tls_stream.take_until(Box::pin(drain_stream.wait_for_drain()));
+                
                 while let Some(socket) = stream.next().await {
                     let drain = drain_connections.clone();
                     let f = f.clone();
                     let state = state.clone();
                     let name = name.clone();
+                    let config = config.clone();
+                    let force_shutdown_rx = force_shutdown_rx.clone();
+                    
                     tokio::spawn(async move {
-                        let serve = http2_server()
-                                .max_frame_size(1024 * 1024)
-                                .max_header_list_size(65536)
-                                .serve_connection(
-                                    hyper_util::rt::TokioIo::new(socket),
-                                    hyper::service::service_fn(move |req| {
-                                        let state = state.clone();
-                                    let f = f.clone();
-                                    async move {
-                                        if req.method() == hyper::Method::CONNECT {
-                                            debug!("Received HBONE CONNECT request: {:?}", req.uri());
-                                            
-                                            // For CONNECT requests, upgrade the connection
-                                            let response = Response::builder()
-                                                .status(hyper::StatusCode::OK)
-                                                .body(Full::default())
-                                                .unwrap();
-                                                
-                                            let state = state.clone();
-                                            
-                                            let uri_path = req.uri().path().to_string();
-                                            
-                                            // Perform the connection upgrade
-                                            tokio::task::spawn(async move {
-                                                match hyper::upgrade::on(req).await {
-                                                    Ok(upgraded) => {
-                                                        debug!("HBONE tunnel established");
-                                                        
-                                                        let mut upgraded_io = hyper_util::rt::TokioIo::new(upgraded);
-                                                        
-                                                        // Access the metrics directly via the state reference
-                                                        let response_body = match uri_path.as_str() {
-                                                            "/metrics" | "/stats/prometheus" => {
-                                                                if let Ok(metrics_str) = generate_metrics_from_state(&state) {
-                                                                    debug!("Successfully encoded metrics data");
-                                                                    
-                                                                    let response = Response::builder()
-                                                                        .status(hyper::StatusCode::OK)
-                                                                        .header("Content-Type", "text/plain")
-                                                                        .body(Full::new(Bytes::from(metrics_str)))
-                                                                        .expect("Failed to build metrics response");
-                                                                    
-                                                                    match serialize_http_response(response).await {
-                                                                        Ok(bytes) => bytes.to_vec(),
-                                                                        Err(e) => {
-                                                                            debug!("Error serializing metrics response: {}", e);
-                                                                            let error_response = Response::builder()
-                                                                                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                                                                                .header("Content-Type", "text/plain")
-                                                                                .body(Full::new(Bytes::from("Error serializing response")))
-                                                                                .expect("Failed to build error response");
-                                                                                
-                                                                            serialize_http_response(error_response).await
-                                                                                .unwrap_or_else(|_| Bytes::from("HTTP/1.1 500 Internal Server Error\r\n\r\n"))
-                                                                                .to_vec()
-                                                                        }
-                                                                    }
-                                                                } else {
-                                                                    debug!("Error encoding metrics");
-                                                                    
-                                                                    let response = Response::builder()
-                                                                        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                                                                        .header("Content-Type", "text/plain")
-                                                                        .body(Full::new(Bytes::from("Error encoding metrics")))
-                                                                        .expect("Failed to build error response");
-                                                                        
-                                                                    serialize_http_response(response).await
-                                                                        .unwrap_or_else(|_| Bytes::from("HTTP/1.1 500 Internal Server Error\r\n\r\n"))
-                                                                        .to_vec()
-                                                                }
-                                                            },
-                                                            _ => {
-                                                                // For any other path, return 404
-                                                                debug!("Path not found: {}", uri_path);
-                                                                
-                                                                let response = Response::builder()
-                                                                    .status(hyper::StatusCode::NOT_FOUND)
-                                                                    .header("Content-Type", "text/plain")
-                                                                    .body(Full::new(Bytes::from("Not Found")))
-                                                                    .expect("Failed to build 404 response");
-                                                                    
-                                                                serialize_http_response(response).await
-                                                                    .unwrap_or_else(|_| Bytes::from("HTTP/1.1 404 Not Found\r\n\r\n"))
-                                                                    .to_vec()
-                                                            }
-                                                        };
-                                                        
-                                                        debug!("Writing response ({} bytes) to HBONE tunnel", response_body.len());
-                                                        if let Err(e) = upgraded_io.write_all(&response_body).await {
-                                                            debug!("Error writing response to HBONE tunnel: {}", e);
-                                                        } else {
-                                                            debug!("HBONE response sent successfully");
-                                                        }
-                                                        
-                                                        debug!("HBONE tunnel connection complete");
-                                                    }
-                                                    Err(e) => {
-                                                        debug!("Failed to upgrade HBONE connection: {}", e);
-                                                    }
-                                                }
-                                            });
-                                            
-                                            Ok::<_, Infallible>(response)
-                                        } else {
-                                            // For non-CONNECT requests, use the original handler
-                                            f(state, req).await.or_else(|err| {
-                                                Ok::<_, Infallible>(Response::builder()
-                                                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(err.to_string().into())
-                                                .expect("builder with known status code should not fail"))
-                                        })
+                        let h2_handler = move |h2_req: crate::proxy::h2_public::server::H2Request| {
+                            let state_clone = state.clone();
+                            let f_clone = f.clone();
+                            
+                            async move {
+                                // Check if this is a CONNECT request (HBONE)
+                                let parts = h2_req.get_request();
+                                if parts.method == hyper::Method::CONNECT {
+                                    debug!("Received HBONE CONNECT request: {:?}", parts.uri);
+                                    
+                                    // For CONNECT requests, send 200 OK to establish the tunnel
+                                    let response = http::Response::builder()
+                                        .status(hyper::StatusCode::OK)
+                                        .body(())
+                                        .unwrap();
+                                    
+                                    // Extract just the path from the request
+                                    let path = parts.uri.path().to_string();
+                                    
+                                    match h2_req.send_response(response).await {
+                                        Ok(h2_stream) => {
+                                            // Pass the path string directly instead of creating a MetricsRequest
+                                            if let Err(e) = serve_metrics_connect(h2_stream, path, &state_clone).await {
+                                                debug!("HBONE tunnel handling error: {}", e);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug!("Failed to send response for HBONE: {}", e);
                                         }
                                     }
-                                    }),
-                                );
+                                } else {
+                                    // For regular HTTP/2 requests (non-CONNECT), adapt to hyper Request and call the handler
+                                    // Build a hyper Request from the h2 request
+                                    let mut builder = hyper::Request::builder()
+                                        .method(parts.method.clone())
+                                        .uri(parts.uri.clone())
+                                        .version(parts.version);
+                                    
+                                    // Add headers from original request
+                                    for (name, value) in parts.headers.iter() {
+                                        builder = builder.header(name, value);
+                                    }
+                                    
+                                    let req = builder.body(Full::new(Bytes::new()))
+                                        .expect("Failed to build request");
+                                    
+                                    // Call the handler with the concrete type
+                                    match f_clone(state_clone, req).await {
+                                        Ok(response) => {
+                                            // Convert hyper Response to http::Response
+                                            let (parts, body) = response.into_parts();
+                                            
+                                            // Collect the body bytes
+                                            let body_bytes = match http_body_util::BodyExt::collect(body).await {
+                                                Ok(collected) => collected.to_bytes(),
+                                                Err(_) => Bytes::new(),
+                                            };
+                                            
+                                            // Build http::Response
+                                            let mut builder = http::Response::builder()
+                                                .status(parts.status)
+                                                .version(parts.version);
+                                            
+                                            // Add headers
+                                            for (name, value) in parts.headers {
+                                                if let Some(name) = name {
+                                                    builder = builder.header(name, value);
+                                                }
+                                            }
+                                            
+                                            let response = builder.body(()).unwrap();
+                                            
+                                            // Send the response through h2
+                                            if let Ok(stream) = h2_req.send_response(response).await {
+                                                let mut write = stream.write;
+                                                let _ = write.send_stream.send_data(body_bytes, true);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            // Build error response
+                                            let response = http::Response::builder()
+                                                .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                                                .body(())
+                                                .expect("Failed to build error response");
+                                            
+                                            // Send error response
+                                            if let Ok(stream) = h2_req.send_response(response).await {
+                                                let mut write = stream.write;
+                                                let _ = write.send_stream.send_data(Bytes::from(err.to_string()), true);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        };
                         
-                        // Wait for drain to signal or connection serving to complete
-                        let recv = async move {
-                            let _ = drain.wait_for_drain().await;
-                        };
-                        let res = match futures_util::future::select(Box::pin(recv), serve).await {
-                            futures_util::future::Either::Left((_shutdown, mut server)) => {
-                                debug!("server drain starting...");
-                                let drain = std::pin::Pin::new(&mut server);
-                                drain.graceful_shutdown();
-                                let _res = server.await;
-                                debug!("server drain done");
-                                Ok(())
-                            }
-                            // Serving finished, just return the result.
-                            futures_util::future::Either::Right((res, _shutdown)) => {
-                                debug!("inbound serve done {:?}", res);
-                                res
-                            }
-                        };
-                        if let Err(err) = res {
+                        if let Err(err) = crate::proxy::h2_public::server::serve_connection(
+                            config,
+                            socket,
+                            drain,
+                            force_shutdown_rx,
+                            h2_handler,
+                        ).await {
                             warn!(
                                 error=%err,
                                 component=%name,
@@ -549,56 +567,86 @@ impl<S> TLSServer<S> {
     }
 }
 
-// Helper function to properly serialize an HTTP/1.1 response to bytes
-async fn serialize_http_response<B>(response: Response<B>) -> Result<Bytes, String> 
-where 
-    B: http_body::Body<Data = Bytes> + Unpin,
-    B::Error: std::fmt::Display,
+/// Process a metrics request through an HBONE tunnel
+async fn serve_metrics_connect<S>(
+    h2_stream: crate::proxy::h2_public::H2Stream,
+    path: String,
+    state: &Arc<S>
+) -> Result<(), String>
+where
+    S: AsRef<Mutex<Registry>> + ?Sized
 {
-    // Create a buffer to store the serialized response
-    let mut buf = BytesMut::with_capacity(1024).writer();
+    let mut write = h2_stream.write;
     
-    // Write the status line
-    write!(
-        &mut buf, 
-        "HTTP/1.1 {} {}\r\n", 
-        response.status().as_u16(),
-        response.status().canonical_reason().unwrap_or("")
-    )
-    .map_err(|e| e.to_string())?;
-    
-    // Write the headers
-    for (name, value) in response.headers() {
-        write!(&mut buf, "{}: ", name)
-            .map_err(|e| e.to_string())?;
-        buf.write_all(value.as_bytes())
-            .map_err(|e| e.to_string())?;
-        buf.write_all(b"\r\n")
-            .map_err(|e| e.to_string())?;
+    // Process the request through the tunnel based on path
+    if path == METRICS_PATH || path == PROMETHEUS_PATH {
+        // Generate metrics from registry
+        match generate_metrics_from_state(state) {
+            Ok(metrics_str) => {
+                debug!("Successfully encoded metrics data");
+                
+                // Create a proper HTTP/1.1 response
+                let response_bytes = create_metrics_http1_response(&metrics_str);
+                
+                // Write the response to the tunnel
+                if let Err(e) = write.send_stream.send_data(response_bytes, true) {
+                    debug!(error = %e, "Error writing response to HBONE tunnel");
+                    return Err(format!("Failed to send metrics response: {}", e));
+                }
+                
+                debug!(
+                    path = %path,
+                    "HBONE metrics response sent successfully"
+                );
+            }
+            Err(e) => {
+                // Log the error with structured information
+                debug!(
+                    error = %e,
+                    path = %path,
+                    "Error encoding metrics"
+                );
+                
+                // Send error response using the helper function
+                let response_bytes = create_error_http1_response(
+                    hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Error encoding metrics: {}", e)
+                );
+                
+                let _ = write.send_stream.send_data(response_bytes, true);
+                return Err(format!("Failed to encode metrics: {}", e));
+            }
+        }
+    } else {
+        // For any other path, return 404
+        debug!(
+            path = %path,
+            "Path not found in metrics request"
+        );
+        
+        let response_bytes = create_error_http1_response(
+            hyper::StatusCode::NOT_FOUND,
+            &format!("Path not found: {}", path)
+        );
+        
+        let _ = write.send_stream.send_data(response_bytes, true);
+        return Err(format!("Path not found: {}", path));
     }
     
-    // End of headers
-    buf.write_all(b"\r\n")
-        .map_err(|e| e.to_string())?;
-    
-    // Get the buffer so far
-    let bytes = buf.into_inner().freeze();
-    
-    // Get the body
-    let mut body = response.into_body();
-    
-    // Create a new buffer for the complete response
-    let mut buffer = BytesMut::with_capacity(bytes.len() + 1024);
-    buffer.extend_from_slice(&bytes);
-    
-    // Add the body data
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| e.to_string())?;
-        if let Some(data) = frame.data_ref() {
-            buffer.extend_from_slice(data);
+    // Read any remaining data from the client to properly complete the HTTP exchange
+    let mut read = h2_stream.read;
+    let remaining = &mut read.recv_stream;
+    while let Some(chunk) = remaining.data().await {
+        if let Ok(chunk) = chunk {
+            if let Err(e) = remaining.flow_control().release_capacity(chunk.len()) {
+                debug!(error = %e, "Error releasing capacity in HBONE tunnel");
+            }
         }
     }
     
-    // Return the complete response as bytes
-    Ok(buffer.freeze())
+    debug!(
+        path = %path,
+        "HBONE tunnel connection complete"
+    );
+    Ok(())
 }

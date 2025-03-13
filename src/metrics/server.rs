@@ -19,16 +19,53 @@ use std::{net::SocketAddr, sync::Arc};
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::body::Incoming;
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
+use tracing::{debug, warn};
 
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::hyper_util;
 use crate::tls::{Error, ServerCertProvider, TlsError, WorkloadCertificate};
 use rustls::ServerConfig;
+
+// Add constants for metric paths to match those in hyper_util
+const METRICS_PATH: &str = "/metrics";
+const PROMETHEUS_PATH: &str = "/stats/prometheus";
+
+/// Specialized error type for metrics server, following InboundError pattern
+pub struct MetricsError(anyhow::Error, StatusCode);
+
+impl MetricsError {
+    /// Creates a builder function that wraps errors with the specified status code
+    pub fn build(code: StatusCode) -> impl Fn(anyhow::Error) -> Self {
+        move |err| MetricsError(err, code)
+    }
+    
+    /// Converts the error to a Response
+    pub fn to_response(&self) -> Response<Full<Bytes>> {
+        build_response(self.1, &self.0.to_string())
+    }
+}
+
+/// Builds a standard HTTP response, similar to build_response in inbound.rs
+pub fn build_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
+    // Convert &str to owned String to avoid borrowing issues
+    let body_bytes = Bytes::from(body.to_string());
+    
+    Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Full::new(body_bytes))
+        .unwrap_or_else(|_| {
+            // Fallback in case the builder fails
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from("Error building response")))
+                .unwrap()
+        })
+}
 
 /// SecretBasedCertProvider loads certificates from Kubernetes secrets for the mTLS metrics server
 pub struct SecretBasedCertProvider {
@@ -48,14 +85,35 @@ impl SecretBasedCertProvider {
 #[async_trait::async_trait]
 impl ServerCertProvider for SecretBasedCertProvider {
     async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
-        let cert = tokio::fs::read(&self.cert_path)
-            .await
-            .map_err(|e| TlsError::SslError(Error::CertificateParseError(format!("failed to read cert from k8s secret: {}", e))))?;
-        let key = tokio::fs::read(&self.key_path)
-            .await
-            .map_err(|e| TlsError::SslError(Error::CertificateParseError(format!("failed to read key from k8s secret: {}", e))))?;
+        debug!("Loading TLS certificate for metrics server from {:?} and {:?}", 
+               self.cert_path, self.key_path);
+               
+        // Read cert file
+        let cert = match tokio::fs::read(&self.cert_path).await {
+            Ok(data) => data,
+            Err(e) => {
+                let msg = format!("Failed to read certificate from path {:?}: {}", self.cert_path, e);
+                warn!("{}", msg);
+                return Err(TlsError::SslError(Error::CertificateParseError(msg)));
+            }
+        };
+        
+        // Read key file 
+        let key = match tokio::fs::read(&self.key_path).await {
+            Ok(data) => data,
+            Err(e) => {
+                let msg = format!("Failed to read private key from path {:?}: {}", self.key_path, e);
+                warn!("{}", msg);
+                return Err(TlsError::SslError(Error::CertificateParseError(msg)));
+            }
+        };
+        
+        // Create workload certificate
         let cert = WorkloadCertificate::new(&key, &cert, vec![])?;
-        Ok(Arc::new(cert.server_config()?))
+        let server_config = Arc::new(cert.server_config()?);
+        
+        debug!("Successfully loaded TLS certificate for metrics server");
+        Ok(server_config)
     }
 }
 
@@ -96,7 +154,7 @@ impl Server {
     pub fn spawn(self) {
         self.s.spawn(|registry, req| async move {
             match req.uri().path() {
-                "/metrics" | "/stats/prometheus" => Ok(handle_metrics((*registry).clone(), req).await),
+                METRICS_PATH | PROMETHEUS_PATH => Ok(handle_metrics((*registry).clone(), req).await),
                 _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
@@ -144,6 +202,7 @@ impl MtlsMetricsServer {
             drain_rx,
             registry,
             cert_provider.clone(),
+            config.clone(),
         )
         .await
         .map(|s| MtlsMetricsServer { s, cert_provider })
@@ -162,33 +221,41 @@ impl MtlsMetricsServer {
     pub fn spawn(self) {
         self.s.spawn(self.cert_provider, |registry, req| async move {
             match req.uri().path() {
-                "/metrics" | "/stats/prometheus" => Ok(handle_metrics((*registry).clone(), req).await),
+                METRICS_PATH | PROMETHEUS_PATH => Ok(handle_metrics((*registry).clone(), req).await),
                 _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
     }
 }
 
-async fn handle_metrics(
+async fn handle_metrics<B>(
     reg: Arc<Mutex<Registry>>,
-    req: Request<Incoming>,
-) -> Response<Full<Bytes>> {
+    req: Request<B>,
+) -> Response<Full<Bytes>> 
+where
+    B: http_body::Body,
+{
     let mut buf = String::new();
     let reg = reg.lock().expect("mutex");
     if let Err(err) = encode(&mut buf, &reg) {
-        return Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(err.to_string().into())
-            .expect("builder with known status code should not fail");
+        return build_response(
+            StatusCode::INTERNAL_SERVER_ERROR, 
+            &format!("Failed to encode metrics: {}", err)
+        );
     }
 
     let response_content_type = content_type(&req);
 
     Response::builder()
-        .status(hyper::StatusCode::OK)
+        .status(StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, response_content_type)
         .body(buf.into())
-        .expect("builder with known status code should not fail")
+        .unwrap_or_else(|_| {
+            build_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Error building metrics response"
+            )
+        })
 }
 
 #[derive(Default)]

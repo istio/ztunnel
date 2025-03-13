@@ -116,7 +116,19 @@ impl crate::copy::BufferedSplitter for H2Stream {
     }
 }
 
+impl H2StreamReadHalf {
+    // Accessor method to convert the private H2StreamReadHalf to public RecvStream
+    pub fn into_recv_stream(self) -> h2::RecvStream {
+        self.recv_stream
+    }
+}
+
 impl H2StreamWriteHalf {
+    // Accessor method to convert the private H2StreamWriteHalf to public SendStream
+    pub fn into_send_stream(self) -> h2::SendStream<Bytes> {
+        self.send_stream
+    }
+
     fn write_slice(&mut self, buf: Bytes, end_of_stream: bool) -> Result<(), std::io::Error> {
         self.send_stream
             .send_data(buf, end_of_stream)
