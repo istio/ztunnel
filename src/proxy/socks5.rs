@@ -76,46 +76,44 @@ impl Socks5 {
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
         );
-        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            async move {
-                loop {
-                    // Asynchronously wait for an inbound socket.
-                    let socket = self.listener.accept().await;
-                    let start = Instant::now();
-                    let drain = drain.clone();
-                    let mut force_shutdown = force_shutdown.clone();
-                    match socket {
-                        Ok((stream, _remote)) => {
-                            let oc = OutboundConnection {
-                                pi: self.pi.clone(),
-                                id: TraceParent::new(),
-                                pool: pool.clone(),
-                                hbone_port: self.pi.cfg.inbound_addr.port(),
-                            };
-                            let span = info_span!("socks5", id=%oc.id);
-                            let serve = (async move {
-                                debug!(component="socks5", "connection started");
-                                // Since this task is spawned, make sure we are guaranteed to terminate
-                                tokio::select! {
-                                    _ = force_shutdown.changed() => {
-                                        debug!(component="socks5", "connection forcefully terminated");
-                                    }
-                                    _ = handle_socks_connection(oc, stream) => {}
+        let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                let start = Instant::now();
+                let drain = drain.clone();
+                let mut force_shutdown = force_shutdown.clone();
+                match socket {
+                    Ok((stream, _remote)) => {
+                        let oc = OutboundConnection {
+                            pi: self.pi.clone(),
+                            id: TraceParent::new(),
+                            pool: pool.clone(),
+                            hbone_port: self.pi.cfg.inbound_addr.port(),
+                        };
+                        let span = info_span!("socks5", id=%oc.id);
+                        let serve = (async move {
+                            debug!(component="socks5", "connection started");
+                            // Since this task is spawned, make sure we are guaranteed to terminate
+                            tokio::select! {
+                                _ = force_shutdown.changed() => {
+                                    debug!(component="socks5", "connection forcefully terminated");
                                 }
-                                // Mark we are done with the connection, so drain can complete
-                                drop(drain);
-                                debug!(component="socks5", dur=?start.elapsed(), "connection completed");
-                            }).instrument(span);
-
-                            assertions::size_between_ref(1000, 2000, &serve);
-                            tokio::spawn(serve);
-                        }
-                        Err(e) => {
-                            if util::is_runtime_shutdown(&e) {
-                                return;
+                                _ = handle_socks_connection(oc, stream) => {}
                             }
-                            error!("Failed TCP handshake {}", e);
+                            // Mark we are done with the connection, so drain can complete
+                            drop(drain);
+                            debug!(component="socks5", dur=?start.elapsed(), "connection completed");
+                        }).instrument(span);
+
+                        assertions::size_between_ref(1000, 2000, &serve);
+                        tokio::spawn(serve);
+                    }
+                    Err(e) => {
+                        if util::is_runtime_shutdown(&e) {
+                            return;
                         }
+                        error!("Failed TCP handshake {}", e);
                     }
                 }
             }

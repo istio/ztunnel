@@ -14,7 +14,6 @@
 
 use anyhow::anyhow;
 use std::collections::HashMap;
-use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Deref;
@@ -71,10 +70,9 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
     }
 }
 
-pub async fn with_app<F, Fut, FO>(cfg: config::Config, f: F)
+pub async fn with_app<F, FO>(cfg: config::Config, f: F)
 where
-    F: Fn(TestApp) -> Fut,
-    Fut: Future<Output = FO>,
+    F: AsyncFn(TestApp) -> FO,
 {
     initialize_telemetry();
     let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
