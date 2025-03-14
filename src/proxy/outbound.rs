@@ -112,7 +112,7 @@ impl Outbound {
                                 debug!(component="outbound", dur=?start.elapsed(), "connection completed");
                             }).instrument(span);
 
-                            assertions::size_between_ref(1000, 99999, &serve_outbound_connection);
+                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
                             tokio::spawn(serve_outbound_connection);
                         }
                         Err(e) => {
@@ -206,6 +206,7 @@ impl OutboundConnection {
                 .and_then(|wl| wl.network_gateway.as_ref()),
         ) {
             (Protocol::HBONE, Some(_)) => {
+                // We box this since its not a common path and it would make the future really big.
                 Box::pin(self.proxy_to_double_hbone(
                     source_stream,
                     source_addr,

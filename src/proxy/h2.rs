@@ -155,7 +155,20 @@ impl tokio::io::AsyncRead for TokioH2Stream {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let pinned = std::pin::Pin::new(&mut self.0.read);
-        copy::ResizeBufRead::poll_bytes(pinned, cx).map_ok(|bytes| buf.put(bytes))
+        copy::ResizeBufRead::poll_bytes(pinned, cx).map(|r| match r {
+            Ok(bytes) => {
+                if buf.remaining() < bytes.len() {
+                    Err(Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Would overflow buffer of with {} remaining", buf.remaining()),
+                    ))
+                } else {
+                    buf.put(bytes);
+                    Ok(())
+                }
+            }
+            Err(e) => Err(e),
+        })
     }
 }
 
@@ -289,3 +302,4 @@ fn h2_to_io_error(e: h2::Error) -> std::io::Error {
         std::io::Error::new(std::io::ErrorKind::Other, e)
     }
 }
+
