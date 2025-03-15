@@ -30,11 +30,11 @@ use crate::hyper_util;
 use crate::tls::{Error, ServerCertProvider, TlsError, WorkloadCertificate};
 use rustls::ServerConfig;
 
-// Add constants for metric paths to match those in hyper_util
+// Constants for metric paths 
 const METRICS_PATH: &str = "/metrics";
 const PROMETHEUS_PATH: &str = "/stats/prometheus";
 
-/// Specialized error type for metrics server, following InboundError pattern
+/// Specialized error type for metrics server
 pub struct MetricsError(anyhow::Error, StatusCode);
 
 impl MetricsError {
@@ -49,7 +49,7 @@ impl MetricsError {
     }
 }
 
-/// Builds a standard HTTP response, similar to build_response in inbound.rs
+/// Builds a standard HTTP response
 pub fn build_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
     let body_bytes = Bytes::from(body.to_string());
     
