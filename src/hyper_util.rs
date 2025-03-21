@@ -186,18 +186,49 @@ pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Ful
 
 /// Helper function to serialize an HTTP/1.1 response to bytes
 fn serialize_http1_response(status: hyper::StatusCode, body: &str, content_type: &str) -> Bytes {
-    let len = body.len();
-    let mut bytes = Vec::with_capacity(len + 128); // Allocate some extra space for headers
+    // Use Hyper's Response builder for proper HTTP/1.1 formatting
+    let response = hyper::Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, content_type)
+        .header(hyper::header::CONTENT_LENGTH, body.len())
+        .header(hyper::header::CONNECTION, "close")
+        .header(hyper::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .header(hyper::header::PRAGMA, "no-cache")
+        .header("Expires", "0")
+        .header(hyper::header::SERVER, "ztunnel")
+        .header(hyper::header::DATE, chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+        .body(body.to_string())
+        .expect("Failed to build response");
+
+    // Serialize to bytes using http crate functionality
+    serialize_response_to_bytes(response)
+}
+
+/// Helper function to serialize a Hyper Response to raw bytes
+fn serialize_response_to_bytes(response: hyper::Response<String>) -> Bytes {
+    let (parts, body) = response.into_parts();
     
-    // Write the status line
-    bytes.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or("")).as_bytes());
+    // Start with status line
+    let mut bytes = Vec::with_capacity(body.len() + 512);
+    let status_line = format!("HTTP/1.1 {} {}\r\n", 
+                             parts.status.as_u16(), 
+                             parts.status.canonical_reason().unwrap_or(""));
+    bytes.extend_from_slice(status_line.as_bytes());
     
-    // Write the headers
-    bytes.extend_from_slice(format!("Content-Type: {}\r\n", content_type).as_bytes());
-    bytes.extend_from_slice(format!("Content-Length: {}\r\n", len).as_bytes());
+    // Add headers
+    for (name, value) in parts.headers {
+        if let Some(name) = name {
+            if let Ok(value_str) = value.to_str() {
+                let header_line = format!("{}: {}\r\n", name.as_str(), value_str);
+                bytes.extend_from_slice(header_line.as_bytes());
+            }
+        }
+    }
+    
+    // End headers
     bytes.extend_from_slice(b"\r\n");
     
-    // Write the body
+    // Add body
     bytes.extend_from_slice(body.as_bytes());
     
     Bytes::from(bytes)
@@ -208,7 +239,7 @@ fn create_metrics_http1_response(metrics_data: &str) -> Bytes {
     serialize_http1_response(
         hyper::StatusCode::OK,
         metrics_data,
-        "text/plain; charset=utf-8"
+        "text/plain; version=0.0.4; charset=utf-8" // OpenMetrics content type
     )
 }
 
@@ -222,16 +253,15 @@ fn create_error_http1_response(status: hyper::StatusCode, message: &str) -> Byte
 }
 
 /// Helper function to generate metrics from state for HBONE implementation
-/// This is used in the TLSServer implementation for HBONE tunneling
 fn generate_metrics_from_state<S>(state: &Arc<S>) -> Result<String, String> 
 where 
     S: AsRef<Mutex<Registry>> + ?Sized
 {
     let mut buf = String::new();
-    let registry = state.as_ref().as_ref().lock().expect("mutex poisoned");
+    let registry = state.as_ref().as_ref().lock().map_err(|e| format!("Failed to lock registry: {}", e))?;
     
     encoding::text::encode(&mut buf, &registry)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Failed to encode metrics: {}", e))?;
     
     Ok(buf)
 }
@@ -618,33 +648,59 @@ where
         }
         Err(e) => {
             // Log the error with structured information
-            debug!(
-                error = %e,
-                "Error encoding metrics"
-            );
+            debug!(error = %e, "Error encoding metrics");
             
-            // Send error response using the helper function
+            // Send error response
             let response_bytes = create_error_http1_response(
                 hyper::StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Error encoding metrics: {}", e)
             );
             
-            let _ = write.send_stream.send_data(response_bytes, true);
+            if let Err(send_err) = write.send_stream.send_data(response_bytes, true) {
+                debug!(error = %send_err, "Error sending error response");
+                return Err(format!("Failed to send error response: {}", send_err));
+            }
             return Err(format!("Failed to encode metrics: {}", e));
         }
     }
     
-    // Read any remaining data from the client to properly complete the HTTP exchange
+    // Drain the client stream for connection termination
     let mut read = h2_stream.read;
     let remaining = &mut read.recv_stream;
-    while let Some(chunk) = remaining.data().await {
-        if let Ok(chunk) = chunk {
-            if let Err(e) = remaining.flow_control().release_capacity(chunk.len()) {
-                debug!(error = %e, "Error releasing capacity in HBONE tunnel");
+    
+    // Create a bounded drain future with a timeout
+    let timeout_duration = tokio::time::Duration::from_millis(500);
+    let drain_future = async {
+        let mut buffer = [0u8; 8192];
+        while let Some(result) = remaining.data().await {
+            match result {
+                Ok(chunk) => {
+                    if let Err(e) = remaining.flow_control().release_capacity(chunk.len()) {
+                        debug!(error = %e, "Error releasing capacity in HBONE tunnel");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    debug!(error = %e, "Error reading from HBONE tunnel");
+                    break;
+                }
             }
         }
+        
+        if let Ok(Some(trailers)) = remaining.trailers().await {
+            debug!(
+                trailers_count = %trailers.len(),
+                "Received trailers from HBONE tunnel"
+            );
+        }
+    };
+    
+    // Use timeout to ensure we don't hang forever draining the connection
+    match tokio::time::timeout(timeout_duration, drain_future).await {
+        Ok(_) => debug!("HBONE tunnel drained successfully"),
+        Err(_) => debug!("Timeout while draining HBONE tunnel - this is normal with Connection: close"),
     }
     
-    debug!("HBONE tunnel connection complete");
+    debug!("HBONE metrics exchange completed successfully with proper HTTP/1.1 connection closure");
     Ok(())
 }

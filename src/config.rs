@@ -306,15 +306,13 @@ pub struct Config {
     // Headers to be added to certificate requests
     pub ca_headers: MetadataVector,
 
-    /// Whether the mTLS metrics server is enabled
-    /// Defaults to false
-    pub mtls_metrics_enabled: bool,
-    /// The address where the mTLS metrics server will listen
-    /// This is separate from the regular metrics server
+    /// Address to serve mTLS metrics on
     pub mtls_metrics_addr: Address,
-    /// The path to the mTLS metrics server certificate
+
+    /// Path to the certificate file for mTLS metrics
     pub mtls_metrics_cert_path: String,
-    /// The path to the mTLS metrics server's private key
+
+    /// Path to the private key file for mTLS metrics
     pub mtls_metrics_key_path: String,
 }
 
@@ -775,8 +773,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         xds_headers: parse_headers(ISTIO_XDS_HEADER_PREFIX)?,
         ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
 
-        mtls_metrics_enabled: parse_default(MTLS_METRICS_ENABLED, false)?,
-        
         mtls_metrics_addr: Address::SocketAddr(SocketAddr::new(
             bind_wildcard,
             match std::env::var(MTLS_METRICS_ADDR) {

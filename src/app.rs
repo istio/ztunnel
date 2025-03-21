@@ -219,8 +219,16 @@ pub async fn build_with_cert(
     admin_server.spawn();
 
     // Create and start the metrics servers
-    let metrics_address = if config.mtls_metrics_enabled {
-        // When mTLS is enabled, we serve metrics over HTTPS/mTLS
+    let (metrics_address, mtls_metrics_addr) = {
+        // Create and start the plain HTTP metrics server
+        let metrics_server = metrics::Server::new(config.clone(), drain_rx.clone(), registry.clone())
+            .await
+            .context("stats server starts")?;
+        let metrics_addr = metrics_server.address();
+        // spawns in current tokio worker pool
+        metrics_server.spawn();
+
+        // Create and start the mTLS metrics server
         let mtls_metrics_server = metrics::MtlsMetricsServer::new(
             config.clone(),
             drain_rx.clone(),
@@ -228,19 +236,11 @@ pub async fn build_with_cert(
         )
         .await
         .context("mTLS metrics server starts")?;
-        let addr = mtls_metrics_server.address();
+        let mtls_addr = mtls_metrics_server.address();
         // spawns in current tokio worker pool
-        mtls_metrics_server.spawn(); 
-        addr
-    } else {
-        // When mTLS is disabled, we serve metrics over plain HTTP
-        let metrics_server = metrics::Server::new(config.clone(), drain_rx.clone(), registry.clone())
-            .await
-            .context("stats server starts")?;
-        let addr = metrics_server.address();
-        // spawns in current tokio worker pool
-        metrics_server.spawn();
-        addr
+        mtls_metrics_server.spawn();
+
+        (metrics_addr, mtls_addr)
     };
 
     Ok(Bound {
@@ -249,6 +249,7 @@ pub async fn build_with_cert(
         readiness_address,
         admin_address,
         metrics_address,
+        mtls_metrics_addr,
         proxy_addresses,
         tcp_dns_proxy_address,
         udp_dns_proxy_address,
@@ -371,6 +372,7 @@ pub struct Bound {
     pub admin_address: SocketAddr,
     pub metrics_address: SocketAddr,
     pub readiness_address: SocketAddr,
+    pub mtls_metrics_addr: SocketAddr,
 
     pub proxy_addresses: Option<proxy::Addresses>,
     pub tcp_dns_proxy_address: Option<SocketAddr>,
