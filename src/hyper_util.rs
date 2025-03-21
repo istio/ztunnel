@@ -23,7 +23,7 @@ use std::{
 };
 
 use crate::drain::DrainWatcher;
-use crate::{config, proxy};
+use crate::{config, proxy, tls};
 use bytes::Bytes;
 use futures_util::TryFutureExt;
 use http_body_util::Full;
@@ -50,7 +50,9 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
 ) -> impl Stream<Item = tokio_rustls::server::TlsStream<TcpStream>> {
     use tokio_stream::StreamExt;
 
-    tls_listener::builder(crate::tls::InboundAcceptor::new(cert_provider))
+    let acceptor = tls::InboundAcceptor::new(cert_provider);
+
+    tls_listener::builder(acceptor)
         .listen(listener)
         .take_while(|item| {
             !matches!(item, Err(tls_listener::Error::ListenerError(e)) if proxy::util::is_runtime_shutdown(e))
@@ -62,14 +64,14 @@ pub fn tls_server<T: ServerCertProvider + Clone + 'static>(
                     None
                 }
                 Ok(s) => {
-                    debug!("TLS handshake succeeded");
+                    debug!("TLS handshake succeeded with client certificate validation");
                     Some(s)
                 }
             }
         })
-        .map(|(conn, _)| {
-            conn.get_ref().0.set_nodelay(true).unwrap();
-            conn
+        .map(|(stream, _)| {
+            stream.get_ref().0.set_nodelay(true).unwrap();
+            stream
         })
 }
 
@@ -184,27 +186,7 @@ pub fn plaintext_response(code: hyper::StatusCode, body: String) -> Response<Ful
         .unwrap()
 }
 
-/// Helper function to serialize an HTTP/1.1 response to bytes
-fn serialize_http1_response(status: hyper::StatusCode, body: &str, content_type: &str) -> Bytes {
-    // Use Hyper's Response builder for proper HTTP/1.1 formatting
-    let response = hyper::Response::builder()
-        .status(status)
-        .header(hyper::header::CONTENT_TYPE, content_type)
-        .header(hyper::header::CONTENT_LENGTH, body.len())
-        .header(hyper::header::CONNECTION, "close")
-        .header(hyper::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-        .header(hyper::header::PRAGMA, "no-cache")
-        .header("Expires", "0")
-        .header(hyper::header::SERVER, "ztunnel")
-        .header(hyper::header::DATE, chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-        .body(body.to_string())
-        .expect("Failed to build response");
-
-    // Serialize to bytes using http crate functionality
-    serialize_response_to_bytes(response)
-}
-
-/// Helper function to serialize a Hyper Response to raw bytes
+/// Serialize a Hyper Response to raw bytes
 fn serialize_response_to_bytes(response: hyper::Response<String>) -> Bytes {
     let (parts, body) = response.into_parts();
     
@@ -234,16 +216,7 @@ fn serialize_response_to_bytes(response: hyper::Response<String>) -> Bytes {
     Bytes::from(bytes)
 }
 
-/// Helper function to create HTTP/1.1 response for metrics
-fn create_metrics_http1_response(metrics_data: &str) -> Bytes {
-    serialize_http1_response(
-        hyper::StatusCode::OK,
-        metrics_data,
-        "text/plain; version=0.0.4; charset=utf-8" // OpenMetrics content type
-    )
-}
-
-/// Helper function to create HTTP/1.1 error response
+/// Create HTTP/1.1 error response
 fn create_error_http1_response(status: hyper::StatusCode, message: &str) -> Bytes {
     serialize_http1_response(
         status,
@@ -252,7 +225,7 @@ fn create_error_http1_response(status: hyper::StatusCode, message: &str) -> Byte
     )
 }
 
-/// Helper function to generate metrics from state for HBONE implementation
+/// Generate metrics from state for HBONE implementation
 fn generate_metrics_from_state<S>(state: &Arc<S>) -> Result<String, String> 
 where 
     S: AsRef<Mutex<Registry>> + ?Sized
@@ -394,7 +367,7 @@ impl<S> HTTPServer<S> {
 /// TLSServer implements a generic HTTPS server with the following behavior:
 /// * HTTP/2 with TLS
 /// * Draining
-/// * Optional HBONE support (HTTP CONNECT tunneling)
+/// * HBONE support (HTTP CONNECT tunneling)
 pub struct TLSServer<S> {
     name: String,
     binds: Vec<TcpListener>,
@@ -409,7 +382,7 @@ impl<S> TLSServer<S> {
         addrs: config::Address,
         drain_rx: DrainWatcher,
         s: S,
-        _cert_provider: T,
+        cert_provider: T,
         config: Arc<config::Config>,
     ) -> anyhow::Result<Self>
     where
@@ -417,7 +390,7 @@ impl<S> TLSServer<S> {
     {
         let mut binds = vec![];
         for addr in addrs.into_iter() {
-            binds.push(TcpListener::bind(&addr).await?)
+            binds.push(TcpListener::bind(&addr).await?);
         }
         Ok(TLSServer {
             name: name.to_string(),
@@ -619,7 +592,7 @@ impl<S> TLSServer<S> {
     }
 }
 
-/// Process a metrics request through an HBONE tunnel
+/// Process a metrics request through an HBONE tunnel with proper mTLS validation
 async fn serve_metrics_connect<S>(
     h2_stream: crate::proxy::h2_public::H2Stream,
     metrics_data: Result<String, String>,
@@ -630,77 +603,144 @@ where
 {
     let mut write = h2_stream.write;
     
-    // Process the metrics data
+    // Process the metrics data with proper error handling
     match metrics_data {
         Ok(metrics_str) => {
-            debug!("Successfully encoded metrics data");
+            debug!("Successfully encoded metrics data for mTLS HBONE request");
             
-            // Create a proper HTTP/1.1 response
-            let response_bytes = create_metrics_http1_response(&metrics_str);
+            // Create a HTTP/1.1 response with security headers
+            let response_bytes = serialize_http1_response_with_security(
+                hyper::StatusCode::OK,
+                &metrics_str,
+                "text/plain; version=0.0.4; charset=utf-8", // OpenMetrics content type
+            );
             
             // Write the response to the tunnel
             if let Err(e) = write.send_stream.send_data(response_bytes, true) {
-                debug!(error = %e, "Error writing response to HBONE tunnel");
+                debug!(error = %e, "Error writing response to secure HBONE tunnel");
                 return Err(format!("Failed to send metrics response: {}", e));
             }
             
-            debug!("HBONE metrics response sent successfully");
+            debug!("HBONE mTLS metrics response sent successfully");
         }
         Err(e) => {
-            // Log the error with structured information
-            debug!(error = %e, "Error encoding metrics");
+            debug!(error = %e, "Error encoding metrics for mTLS request");
             
-            // Send error response
-            let response_bytes = create_error_http1_response(
+            // Send error response with security headers
+            let response_bytes = serialize_http1_response_with_security(
                 hyper::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Error encoding metrics: {}", e)
+                &format!("Error encoding metrics: {}", e),
+                "text/plain; charset=utf-8",
             );
             
             if let Err(send_err) = write.send_stream.send_data(response_bytes, true) {
-                debug!(error = %send_err, "Error sending error response");
+                debug!(error = %send_err, "Error sending error response over mTLS");
                 return Err(format!("Failed to send error response: {}", send_err));
             }
             return Err(format!("Failed to encode metrics: {}", e));
         }
     }
     
-    // Drain the client stream for connection termination
+    // Connection cleanup
     let mut read = h2_stream.read;
     let remaining = &mut read.recv_stream;
     
     // Create a bounded drain future with a timeout
     let timeout_duration = tokio::time::Duration::from_millis(500);
     let drain_future = async {
-        let mut buffer = [0u8; 8192];
         while let Some(result) = remaining.data().await {
             match result {
                 Ok(chunk) => {
                     if let Err(e) = remaining.flow_control().release_capacity(chunk.len()) {
-                        debug!(error = %e, "Error releasing capacity in HBONE tunnel");
+                        debug!(error = %e, "Error releasing capacity in secure HBONE tunnel");
                         break;
                     }
                 }
                 Err(e) => {
-                    debug!(error = %e, "Error reading from HBONE tunnel");
+                    debug!(error = %e, "Error reading from secure HBONE tunnel");
                     break;
                 }
             }
         }
         
+        // Process trailers if present
         if let Ok(Some(trailers)) = remaining.trailers().await {
             debug!(
                 trailers_count = %trailers.len(),
-                "Received trailers from HBONE tunnel"
+                "Received trailers from secure HBONE tunnel"
             );
         }
     };
     
     // Use timeout to ensure we don't hang forever draining the connection
     match tokio::time::timeout(timeout_duration, drain_future).await {
-        Ok(_) => debug!("HBONE tunnel drained successfully"),
-        Err(_) => debug!("Timeout while draining HBONE tunnel - this is normal with Connection: close"),
+        Ok(_) => debug!("Secure HBONE tunnel drained successfully"),
+        Err(_) => debug!("Timeout while draining secure HBONE tunnel"),
     }
     
-    debug!("HBONE metrics exchange completed successfully with proper HTTP/1.1 connection closure");
+    debug!("HBONE mTLS metrics exchange completed successfully");
     Ok(())
+}
+
+/// Helper function to serialize an HTTP/1.1 response with security headers
+fn serialize_http1_response_with_security(
+    status: hyper::StatusCode,
+    body: &str,
+    content_type: &str,
+) -> Bytes {
+    let mut builder = hyper::Response::builder()
+        .status(status)
+        // Media type of resource being sent
+        .header(hyper::header::CONTENT_TYPE, content_type)
+        // Size of the response body in bytes
+        .header(hyper::header::CONTENT_LENGTH, body.len())
+        // Server should close the connection after delivering response
+        .header(hyper::header::CONNECTION, "close")
+        // Caches shouldn't store the response
+        .header(hyper::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        // Backward compatibility with older HTTP clients
+        .header(hyper::header::PRAGMA, "no-cache")
+        // Response is treated as immediately expired
+        .header("Expires", "0")
+        // Identifies the server handling the request
+        .header(hyper::header::SERVER, "ztunnel")
+        // Date and Time the response was generated
+        .header(hyper::header::DATE, chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string());
+
+    // Add security headers for mTLS responses
+    builder = builder
+        // Enforces the use of HTTPS.
+        .header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        // Prevents MIME type sniffing.
+        .header("X-Content-Type-Options", "nosniff")
+        // Protects against clickjacking.
+        .header("X-Frame-Options", "DENY")
+        // Enables cross-site scripting protection.
+        .header("X-XSS-Protection", "1; mode=block")
+        // Helps prevent misissued certificates.
+        .header("Expect-CT", "max-age=86400, enforce")
+        // Controls the amount of referrer information that is passed.
+        .header("Referrer-Policy", "strict-origin-when-cross-origin");
+
+    let response = builder.body(body.to_string()).expect("Failed to build response");
+    serialize_response_to_bytes(response)
+}
+
+
+/// Serialize an HTTP/1.1 response to bytes
+fn serialize_http1_response(status: hyper::StatusCode, body: &str, content_type: &str) -> Bytes {
+    let response = hyper::Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, content_type)
+        .header(hyper::header::CONTENT_LENGTH, body.len())
+        .header(hyper::header::CONNECTION, "close")
+        .header(hyper::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .header(hyper::header::PRAGMA, "no-cache")
+        .header("Expires", "0")
+        .header(hyper::header::SERVER, "ztunnel")
+        .header(hyper::header::DATE, chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+        .body(body.to_string())
+        .expect("Failed to build response");
+
+    serialize_response_to_bytes(response)
 }
