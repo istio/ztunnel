@@ -12,35 +12,75 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::Bytes;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
 
+use anyhow::Result;
+use bytes::Bytes;
 use http_body_util::Full;
-use hyper::body::Incoming;
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
+use tracing::{debug, warn};
 
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::hyper_util;
+use crate::identity::{Identity, SecretManager};
+use crate::tls::{Error, ServerCertProvider, TlsError, WorkloadCertificate};
+use rustls::ServerConfig;
 
+// Constants for metric paths 
+const METRICS_PATH: &str = "/metrics";
+const PROMETHEUS_PATH: &str = "/stats/prometheus";
+
+/// Specialized error type for metrics server
+pub struct MetricsError(anyhow::Error, StatusCode);
+
+impl MetricsError {
+    /// Creates a builder function that wraps errors with the specified status code
+    pub fn build(code: StatusCode) -> impl Fn(anyhow::Error) -> Self {
+        move |err| MetricsError(err, code)
+    }
+    
+    /// Converts the error to a Response
+    pub fn to_response(&self) -> Response<Full<Bytes>> {
+        build_response(self.1, &self.0.to_string())
+    }
+}
+
+/// Builds a standard HTTP response
+pub fn build_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
+    let body_bytes = Bytes::from(body.to_string());
+    
+    Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Full::new(body_bytes))
+        .unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from("Error building response")))
+                .unwrap()
+        })
+}
+/// Regular HTTP metrics server
 pub struct Server {
-    s: hyper_util::Server<Mutex<Registry>>,
+    s: hyper_util::HTTPServer<Arc<Mutex<Registry>>>,
 }
 
 impl Server {
     pub async fn new(
         config: Arc<Config>,
         drain_rx: DrainWatcher,
-        registry: Registry,
+        registry: Arc<Mutex<Registry>>,
     ) -> anyhow::Result<Self> {
-        hyper_util::Server::<Mutex<Registry>>::bind(
+        hyper_util::HTTPServer::<Arc<Mutex<Registry>>>::bind(
             "stats",
             config.stats_addr,
             drain_rx,
-            Mutex::new(registry),
+            registry,
         )
         .await
         .map(|s| Server { s })
@@ -53,33 +93,146 @@ impl Server {
     pub fn spawn(self) {
         self.s.spawn(|registry, req| async move {
             match req.uri().path() {
-                "/metrics" | "/stats/prometheus" => Ok(handle_metrics(registry, req).await),
+                METRICS_PATH | PROMETHEUS_PATH => Ok(handle_metrics((*registry).clone(), req).await),
                 _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
     }
 }
 
-async fn handle_metrics(
+/// MtlsMetricsServer serves metrics over mTLS with support for both direct connections and HBONE tunneling
+/// 
+/// Supports two connection modes:
+/// 1. Direct mTLS: TCP → TLS → HTTP Request/Response
+///    Client establishes TLS connection with mTLS authentication and sends HTTP/2 requests directly
+/// 
+/// 2. HBONE: TCP → TLS → HTTP/2 → CONNECT Tunnel → HTTP/1.1 Request/Response
+///    Client establishes TLS connection with mTLS authentication
+///    Client sends HTTP/2 CONNECT request to establish a tunnel
+///    Once tunnel is established, client sends HTTP/1.1 requests through the tunnel
+///    Server processes these requests through the same handler function and returns responses
+///    through the established tunnel
+///
+/// The HBONE protocol provides an additional layer of HTTP-based tunneling which can be useful
+/// for traversing certain network environments where direct connections might be restricted.
+pub struct MtlsMetricsServer {
+    s: hyper_util::TLSServer<Arc<Mutex<Registry>>>,
+    cert_provider: SecretManagerCertProvider,
+}
+
+impl MtlsMetricsServer {
+    /// Creates a new MtlsMetricsServer instance that supports both direct mTLS and HBONE connections
+    ///
+    /// The server uses TLS certificates from the SecretManager for authenticating clients
+    /// and is configured to handle both direct HTTP/2 requests and HTTP CONNECT tunneling (HBONE)
+    pub async fn new(
+        config: Arc<Config>,
+        drain_rx: DrainWatcher,
+        registry: Arc<Mutex<Registry>>,
+        cert_manager: Arc<SecretManager>,
+    ) -> anyhow::Result<Self> {
+        let cert_provider = SecretManagerCertProvider::new(cert_manager);
+
+        hyper_util::TLSServer::<Arc<Mutex<Registry>>>::bind(
+            "mtls-stats",
+            config.mtls_metrics_addr,
+            drain_rx,
+            registry,
+            cert_provider.clone(),
+            config.clone(),
+        )
+        .await
+        .map(|s| MtlsMetricsServer { s, cert_provider })
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.s.address()
+    }
+
+    /// Spawns the server to handle both direct mTLS and HBONE connections
+    ///
+    /// The server will:
+    /// 1. Accept TLS connections with mutual authentication
+    /// 2. Process both direct HTTP/2 requests and HTTP CONNECT requests for HBONE tunneling
+    /// 3. Serve metrics through both connection types
+    pub fn spawn(self) {
+        self.s.spawn(self.cert_provider, |registry, req| async move {
+            match req.uri().path() {
+                METRICS_PATH | PROMETHEUS_PATH => Ok(handle_metrics((*registry).clone(), req).await),
+                _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
+            }
+        })
+    }
+}
+
+/// SecretManagerCertProvider uses the SecretManager to load certificates for the mTLS metrics server
+#[derive(Clone)]
+pub struct SecretManagerCertProvider {
+    cert_manager: Arc<SecretManager>,
+}
+
+impl SecretManagerCertProvider {
+    /// Creates a new certificate provider that uses the SecretManager
+    pub fn new(cert_manager: Arc<SecretManager>) -> Self {
+        Self { cert_manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl ServerCertProvider for SecretManagerCertProvider {
+    async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
+        // For mTLS metrics server, use the ztunnel's own identity
+        let ztunnel_identity = Identity::from_parts(
+            "cluster.local".into(), // Standard trust domain
+            "istio-system".into(),  // Namespace where ztunnel runs
+            "ztunnel".into(),       // Service account name
+        );
+        
+        debug!("Fetching certificate for metrics server: {}", ztunnel_identity);
+        
+        let server_cert = self.cert_manager.fetch_certificate(&ztunnel_identity)
+            .await
+            .map_err(|e| {
+                warn!("Failed to fetch certificate for metrics server: {}", e);
+                TlsError::SigningError(e)
+            })?;
+
+        let tls_config = server_cert.server_config()
+            .map_err(|e| TlsError::SslError(e))?;
+
+        debug!("Successfully loaded TLS certificate for mTLS metrics server");
+        Ok(Arc::new(tls_config))
+    }
+}
+
+async fn handle_metrics<B>(
     reg: Arc<Mutex<Registry>>,
-    req: Request<Incoming>,
-) -> Response<Full<Bytes>> {
+    req: Request<B>,
+) -> Response<Full<Bytes>> 
+where
+    B: http_body::Body,
+{
     let mut buf = String::new();
     let reg = reg.lock().expect("mutex");
     if let Err(err) = encode(&mut buf, &reg) {
-        return Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(err.to_string().into())
-            .expect("builder with known status code should not fail");
+        return build_response(
+            StatusCode::INTERNAL_SERVER_ERROR, 
+            &format!("Failed to encode metrics: {}", err)
+        );
     }
 
     let response_content_type = content_type(&req);
 
     Response::builder()
-        .status(hyper::StatusCode::OK)
+        .status(StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, response_content_type)
         .body(buf.into())
-        .expect("builder with known status code should not fail")
+        .unwrap_or_else(|_| {
+            build_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Error building metrics response"
+            )
+        })
 }
 
 #[derive(Default)]
@@ -120,8 +273,8 @@ fn content_type<T>(req: &Request<T>) -> &str {
         .into()
 }
 
+#[cfg(test)]
 mod test {
-
     #[test]
     fn test_content_type() {
         let plain_text_req = http::Request::new("I want some plain text");

@@ -57,6 +57,7 @@ mod outbound;
 pub mod pool;
 mod socks5;
 pub mod util;
+pub mod h2_public;
 
 pub trait SocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<TcpSocket>;

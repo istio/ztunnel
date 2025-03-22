@@ -22,7 +22,7 @@ use prometheus_client::registry::Registry;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, mpsc, Mutex};
 use std::thread;
 use tokio::task::JoinSet;
 use tracing::{Instrument, warn};
@@ -134,17 +134,24 @@ pub async fn build_with_cert(
     )
     .map_err(|e| anyhow::anyhow!("failed to start proxy factory {:?}", e))?;
 
-    if config.proxy_mode == config::ProxyMode::Shared {
+    let run_future = if config.proxy_mode == config::ProxyMode::Shared {
         tracing::info!("shared proxy mode - in-pod mode enabled");
-        let run_future = init_inpod_proxy_mgr(
+        Some(init_inpod_proxy_mgr(
             &mut registry,
             &mut admin_server,
             &config,
-            proxy_gen,
+            proxy_gen.clone(),
             ready.clone(),
             drain_rx.clone(),
-        )?;
+        )?)
+    } else {
+        None
+    };
 
+    // Wrap registry in Arc<Mutex> for sharing after inpod manager initialization
+    let registry = Arc::new(Mutex::new(registry));
+
+    if let Some(run_future) = run_future {
         let mut xds_rx_for_proxy = xds_rx.clone();
         data_plane_pool.send(DataPlaneTask {
             block_shutdown: true,
@@ -211,13 +218,31 @@ pub async fn build_with_cert(
     // Run the admin server in the current tokio worker pool.
     admin_server.spawn();
 
-    // Create and start the metrics server.
-    let metrics_server = metrics::Server::new(config.clone(), drain_rx.clone(), registry)
+    // Create and start the metrics servers
+    let (metrics_address, mtls_metrics_addr) = {
+        // Create and start the plain HTTP metrics server
+        let metrics_server = metrics::Server::new(config.clone(), drain_rx.clone(), registry.clone())
+            .await
+            .context("stats server starts")?;
+        let metrics_addr = metrics_server.address();
+        // spawns in current tokio worker pool
+        metrics_server.spawn();
+
+        // Create and start the mTLS metrics server
+        let mtls_metrics_server = metrics::MtlsMetricsServer::new(
+            config.clone(),
+            drain_rx.clone(),
+            registry.clone(),
+            cert_manager.clone(),
+        )
         .await
-        .context("stats server starts")?;
-    let metrics_address = metrics_server.address();
-    // Run the metrics sever in the current tokio worker pool.
-    metrics_server.spawn();
+        .context("mTLS metrics server starts")?;
+        let mtls_addr = mtls_metrics_server.address();
+        // spawns in current tokio worker pool
+        mtls_metrics_server.spawn();
+
+        (metrics_addr, mtls_addr)
+    };
 
     Ok(Bound {
         drain_tx,
@@ -225,6 +250,7 @@ pub async fn build_with_cert(
         readiness_address,
         admin_address,
         metrics_address,
+        mtls_metrics_addr,
         proxy_addresses,
         tcp_dns_proxy_address,
         udp_dns_proxy_address,
@@ -347,6 +373,7 @@ pub struct Bound {
     pub admin_address: SocketAddr,
     pub metrics_address: SocketAddr,
     pub readiness_address: SocketAddr,
+    pub mtls_metrics_addr: SocketAddr,
 
     pub proxy_addresses: Option<proxy::Addresses>,
     pub tcp_dns_proxy_address: Option<SocketAddr>,
