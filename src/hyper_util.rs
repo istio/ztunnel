@@ -596,7 +596,7 @@ impl<S> TLSServer<S> {
 async fn serve_metrics_connect<S>(
     h2_stream: crate::proxy::h2_public::H2Stream,
     metrics_data: Result<String, String>,
-    state: &Arc<S>
+    _state: &Arc<S>
 ) -> Result<(), String>
 where
     S: AsRef<Mutex<Registry>> + ?Sized

@@ -27,6 +27,7 @@ use tracing::{debug, warn};
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::hyper_util;
+use crate::identity::{Identity, SecretManager};
 use crate::tls::{Error, ServerCertProvider, TlsError, WorkloadCertificate};
 use rustls::ServerConfig;
 
@@ -64,66 +65,6 @@ pub fn build_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
                 .unwrap()
         })
 }
-
-/// SecretBasedCertProvider loads certificates from Kubernetes secrets for the mTLS metrics server
-pub struct SecretBasedCertProvider {
-    cert_path: PathBuf,
-    key_path: PathBuf,
-}
-
-impl SecretBasedCertProvider {
-    pub fn new(cert_path: PathBuf, key_path: PathBuf) -> Self {
-        Self {
-            cert_path,
-            key_path,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ServerCertProvider for SecretBasedCertProvider {
-    async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
-        debug!("Loading TLS certificate for metrics server from {:?} and {:?}", 
-               self.cert_path, self.key_path);
-               
-        // Read cert file
-        let cert = match tokio::fs::read(&self.cert_path).await {
-            Ok(data) => data,
-            Err(e) => {
-                let msg = format!("Failed to read certificate from path {:?}: {}", self.cert_path, e);
-                warn!("{}", msg);
-                return Err(TlsError::SslError(Error::CertificateParseError(msg)));
-            }
-        };
-        
-        // Read key file 
-        let key = match tokio::fs::read(&self.key_path).await {
-            Ok(data) => data,
-            Err(e) => {
-                let msg = format!("Failed to read private key from path {:?}: {}", self.key_path, e);
-                warn!("{}", msg);
-                return Err(TlsError::SslError(Error::CertificateParseError(msg)));
-            }
-        };
-        
-        // Create workload certificate
-        let cert = WorkloadCertificate::new(&key, &cert, vec![])?;
-        let server_config = Arc::new(cert.server_config()?);
-        
-        debug!("Successfully loaded TLS certificate for metrics server");
-        Ok(server_config)
-    }
-}
-
-impl Clone for SecretBasedCertProvider {
-    fn clone(&self) -> Self {
-        Self {
-            cert_path: self.cert_path.clone(),
-            key_path: self.key_path.clone(),
-        }
-    }
-}
-
 /// Regular HTTP metrics server
 pub struct Server {
     s: hyper_util::HTTPServer<Arc<Mutex<Registry>>>,
@@ -176,23 +117,21 @@ impl Server {
 /// for traversing certain network environments where direct connections might be restricted.
 pub struct MtlsMetricsServer {
     s: hyper_util::TLSServer<Arc<Mutex<Registry>>>,
-    cert_provider: SecretBasedCertProvider,
+    cert_provider: SecretManagerCertProvider,
 }
 
 impl MtlsMetricsServer {
     /// Creates a new MtlsMetricsServer instance that supports both direct mTLS and HBONE connections
     ///
-    /// The server uses TLS certificates from Kubernetes secrets for authenticating clients
+    /// The server uses TLS certificates from the SecretManager for authenticating clients
     /// and is configured to handle both direct HTTP/2 requests and HTTP CONNECT tunneling (HBONE)
     pub async fn new(
         config: Arc<Config>,
         drain_rx: DrainWatcher,
         registry: Arc<Mutex<Registry>>,
+        cert_manager: Arc<SecretManager>,
     ) -> anyhow::Result<Self> {
-        let cert_provider = SecretBasedCertProvider::new(
-            PathBuf::from(&config.mtls_metrics_cert_path),
-            PathBuf::from(&config.mtls_metrics_key_path),
-        );
+        let cert_provider = SecretManagerCertProvider::new(cert_manager);
 
         hyper_util::TLSServer::<Arc<Mutex<Registry>>>::bind(
             "mtls-stats",
@@ -223,6 +162,46 @@ impl MtlsMetricsServer {
                 _ => Ok(hyper_util::empty_response(hyper::StatusCode::NOT_FOUND)),
             }
         })
+    }
+}
+
+/// SecretManagerCertProvider uses the SecretManager to load certificates for the mTLS metrics server
+#[derive(Clone)]
+pub struct SecretManagerCertProvider {
+    cert_manager: Arc<SecretManager>,
+}
+
+impl SecretManagerCertProvider {
+    /// Creates a new certificate provider that uses the SecretManager
+    pub fn new(cert_manager: Arc<SecretManager>) -> Self {
+        Self { cert_manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl ServerCertProvider for SecretManagerCertProvider {
+    async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
+        // For mTLS metrics server, use the ztunnel's own identity
+        let ztunnel_identity = Identity::from_parts(
+            "cluster.local".into(), // Standard trust domain
+            "istio-system".into(),  // Namespace where ztunnel runs
+            "ztunnel".into(),       // Service account name
+        );
+        
+        debug!("Fetching certificate for metrics server: {}", ztunnel_identity);
+        
+        let server_cert = self.cert_manager.fetch_certificate(&ztunnel_identity)
+            .await
+            .map_err(|e| {
+                warn!("Failed to fetch certificate for metrics server: {}", e);
+                TlsError::SigningError(e)
+            })?;
+
+        let tls_config = server_cert.server_config()
+            .map_err(|e| TlsError::SslError(e))?;
+
+        debug!("Successfully loaded TLS certificate for mTLS metrics server");
+        Ok(Arc::new(tls_config))
     }
 }
 

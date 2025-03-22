@@ -233,6 +233,7 @@ pub async fn build_with_cert(
             config.clone(),
             drain_rx.clone(),
             registry.clone(),
+            cert_manager.clone(),
         )
         .await
         .context("mTLS metrics server starts")?;
