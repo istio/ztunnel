@@ -561,7 +561,9 @@ impl Inbound {
                         // PROXY cannot currently send to hostnames, so we will need to select an IP to
                         // use instead
                         // We ensure a service is set above.
-                        let vip = services.first().expect("service must exist")
+                        let vip = services
+                            .first()
+                            .expect("service must exist")
                             .vips
                             .iter()
                             .max_by_key(|a| match a.network == conn.dst_network {
