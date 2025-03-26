@@ -711,7 +711,7 @@ mod tests {
             self, DemandProxyState,
             service::{Endpoint, EndpointSet, Service},
             workload::{
-                ApplicationTunnel, GatewayAddress, NetworkAddress, Protocol, Workload,
+                ApplicationTunnel, GatewayAddress, NetworkAddress, ServerProtocol, Workload,
                 application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
             },
         },
@@ -978,7 +978,7 @@ mod tests {
         .map(|(name, ip, waypoint, app_tunnel)| Workload {
             workload_ips: vec![ip.parse().unwrap()],
             waypoint: waypoint.workload_attached(),
-            protocol: Protocol::HBONE,
+            protocol: ServerProtocol::HBONE,
             uid: strng::format!("cluster1//v1/Pod/default/{name}"),
             name: strng::format!("workload-{name}"),
             namespace: "default".into(),

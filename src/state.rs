@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::identity::{Identity, SecretManager};
-use crate::proxy::{Error, HboneAddress, OnDemandDnsLabels};
+use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
 use crate::state::service::{
@@ -62,7 +62,8 @@ pub struct Upstream {
     pub workload: Arc<Workload>,
     /// selected_workload_ip defines the IP address we should actually use to connect to this workload
     /// This handles multiple IPs (dual stack) or Hostname destinations (DNS resolution)
-    pub selected_workload_ip: IpAddr,
+    /// The workload IP might be empty if we have to go through a network gateway.
+    pub selected_workload_ip: Option<IpAddr>,
     /// Port is the port we should connect to
     pub port: u16,
     /// Service SANs defines SANs defined at the service level *only*. A complete view of things requires
@@ -75,27 +76,28 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    /// If there is a network gateway, use <service hostname>:<port>. Otherwise, use
-    /// <ip address>:<port>. Fortunately, for double-hbone, the authority/host is the same
-    /// for inner and outer CONNECT request, so we can reuse this for inner double hbone,
-    /// outer double hbone, and normal hbone.
-    pub fn hbone_target(&self) -> HboneAddress {
-        if self.workload.network_gateway.is_some() {
-            let svc = self
-                .destination_service
-                .as_ref()
-                .expect("Workloads with network gateways must be service addressed.");
-            HboneAddress::SvcHostname(
-                format!("{}.{}", svc.namespace, svc.hostname).into(),
-                self.port,
-            )
-        } else {
-            HboneAddress::SocketAddr(self.workload_socket_addr())
-        }
-    }
+    //    /// If there is a network gateway, use <service hostname>:<port>. Otherwise, use
+    //    /// <ip address>:<port>. Fortunately, for double-hbone, the authority/host is the same
+    //    /// for inner and outer CONNECT request, so we can reuse this for inner double hbone,
+    //    /// outer double hbone, and normal hbone.
+    //    pub fn hbone_target(&self) -> HboneAddress {
+    //        if self.workload.network_gateway.is_some() {
+    //            let svc = self
+    //                .destination_service
+    //                .as_ref()
+    //                .expect("Workloads with network gateways must be service addressed.");
+    //            HboneAddress::SvcHostname(
+    //                format!("{}.{}", svc.namespace, svc.hostname).into(),
+    //                self.port,
+    //            )
+    //        } else {
+    //            HboneAddress::SocketAddr(self.workload_socket_addr())
+    //        }
+    //    }
 
-    pub fn workload_socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.selected_workload_ip, self.port)
+    pub fn workload_socket_addr(&self) -> Option<SocketAddr> {
+        self.selected_workload_ip
+            .map(|ip| SocketAddr::new(ip, self.port))
     }
     pub fn workload_and_services_san(&self) -> Vec<Identity> {
         self.service_sans
@@ -301,6 +303,23 @@ impl ProxyState {
         })
     }
 
+    fn find_upstream_from_host(
+        &self,
+        source_workload: &Workload,
+        host: &NamespacedHostname,
+        port: u16,
+        resolution_mode: ServiceResolutionMode,
+    ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
+        let address = self.find_hostname(host)?;
+        match address {
+            Address::Service(svc) => {
+                self.find_upstream_from_service(source_workload, port, resolution_mode, svc)
+            }
+            Address::Workload(wl) => Some((wl, port, None)),
+        };
+        todo!()
+    }
+
     fn find_upstream(
         &self,
         network: Strng,
@@ -328,7 +347,7 @@ impl ProxyState {
         None
     }
 
-    fn find_upstream_from_service(
+    pub fn find_upstream_from_service(
         &self,
         source_workload: &Workload,
         svc_port: u16,
@@ -601,39 +620,13 @@ impl DemandProxyState {
         src_workload: &Workload,
         original_target_address: SocketAddr,
         ip_family_restriction: Option<IpFamily>,
-    ) -> Result<(IpAddr, Option<u16>), Error> {
-        // If the wl has a network gateway, use it
-        // if let Some(network_gateway) = dst_workload.network_gateway.as_ref() {
-        //     return match &network_gateway.destination {
-        //         Destination::Address(network_address) => Ok((
-        //             // Use network address if it exists
-        //             network_address.address,
-        //             Some(network_gateway.hbone_mtls_port),
-        //         )),
-        //         Destination::Hostname(hostname) => {
-        //             // Look in the service registry for this.
-        //             // HERE FIXME do an SVC lookup
-        //             let svc = self.read().find_hostname(&hostname).ok_or(Error::NoHealthyUpstream(SocketAddr::from_str("1.1.1.1:50").unwrap()))?;
-        //             Ok((
-        //                 self.resolve_workload_address(
-        //                     &dst_workload,
-        //                     src_workload,
-        //                     original_target_address,
-        //                 )
-        //                 .await?,
-        //                 Some(network_gateway.hbone_mtls_port),
-        //             ))
-        //         }
-        //     };
-        // }
-        //
-        //
+    ) -> Result<(Option<IpAddr>, Option<u16>), Error> {
         // If the user requested the pod by a specific IP, use that directly.
         if dst_workload
             .workload_ips
             .contains(&original_target_address.ip())
         {
-            return Ok((original_target_address.ip(), None));
+            return Ok((Some(original_target_address.ip()), None));
         }
         // They may have 1 or 2 IPs (single/dual stack)
         // Ensure we are meeting the Service family restriction (if any is defined).
@@ -648,14 +641,19 @@ impl DemandProxyState {
             })
             .find_or_first(|ip| ip.is_ipv6() == original_target_address.is_ipv6())
         {
-            return Ok((*ip, None));
+            return Ok((Some(*ip), None));
         }
         if dst_workload.hostname.is_empty() {
-            debug!(
-                "workload {} has no suitable workload IPs for routing",
-                dst_workload.name
-            );
-            return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
+            if dst_workload.network_gateway.is_none() {
+                debug!(
+                    "workload {} has no suitable workload IPs for routing",
+                    dst_workload.name
+                );
+                return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
+            } else {
+                // We can route through network gateway
+                return Ok((None, None));
+            }
         }
         let ip = Box::pin(self.resolve_workload_address(
             dst_workload,
@@ -663,7 +661,7 @@ impl DemandProxyState {
             original_target_address,
         ))
         .await?;
-        Ok((ip, None))
+        Ok((Some(ip), None))
     }
 
     async fn resolve_workload_address(
@@ -792,6 +790,28 @@ impl DemandProxyState {
         self.read().workloads.find_uid(uid)
     }
 
+    pub async fn fetch_upstream_by_host(
+        &self,
+        source_workload: &Workload,
+        host: &NamespacedHostname,
+        port: u16,
+        original_target_address: SocketAddr,
+        resolution_mode: ServiceResolutionMode,
+    ) -> Result<Option<Upstream>, Error> {
+        let upstream = {
+            self.read().find_upstream_from_host(
+                source_workload,
+                host,
+                port,
+                resolution_mode,
+            )
+            // Drop the lock
+        };
+        // tracing::trace!(%addr, ?upstream, "fetch_upstream");
+        self.finalize_upstream(source_workload, original_target_address, upstream)
+            .await
+    }
+
     // Find/resolve all information about the target workload (or have it passthrough).
     pub async fn fetch_upstream(
         &self,
@@ -837,7 +857,7 @@ impl DemandProxyState {
     //     }
     // }
 
-    async fn finalize_upstream(
+    pub async fn finalize_upstream(
         &self,
         source_workload: &Workload,
         original_target_address: SocketAddr,
@@ -849,7 +869,7 @@ impl DemandProxyState {
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
 
-        let (selected_workload_ip, proxy_protocol_port_override) = self
+        let (selected_workload_ip, _) = self
             .pick_workload_destination_or_resolve(
                 &wl,
                 source_workload,
@@ -902,7 +922,7 @@ impl DemandProxyState {
             port,
             service_sans: svc.map(|s| s.subject_alt_names.clone()).unwrap_or_default(),
             destination_service: svc_desc,
-            proxy_protocol_port_override,
+            proxy_protocol_port_override: None,
         };
         tracing::trace!(?res, "finalize_upstream");
         Ok(Some(res))

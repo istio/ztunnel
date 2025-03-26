@@ -217,7 +217,7 @@ mod namespaced {
             .network_gateway()
             .service(
                 "default/remote.default.svc.cluster.local",
-                15008u16,
+                15008u16,  // These can't be right
                 15008u16,
             )
             .register()
