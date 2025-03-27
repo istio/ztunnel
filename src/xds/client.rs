@@ -26,6 +26,7 @@ use split_iter::Splittable;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::metrics::{IncrementRecorder, Recorder};
@@ -215,6 +216,7 @@ pub struct Config {
 
     /// alt_hostname provides an alternative accepted SAN for the control plane TLS verification
     alt_hostname: Option<String>,
+    xds_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
 }
 
 pub struct State {
@@ -262,6 +264,7 @@ impl Config {
             on_demand: config.xds_on_demand,
             proxy_metadata: config.proxy_metadata.clone(),
             alt_hostname: config.alt_xds_hostname.clone(),
+            xds_headers: config.xds_headers.vec.clone(),
         }
     }
 
@@ -628,9 +631,18 @@ impl AdsClient {
                 .await?,
         )?;
 
+        let mut req = tonic::Request::new(outbound);
+        self.config.xds_headers.iter().for_each(|(k, v)| {
+            req.metadata_mut().insert(k.clone(), v.clone());
+
+            if let Ok(v_str) = v.to_str() {
+                debug!("XDS header added: {}={}", k, v_str);
+            }
+        });
+
         let ads_connection = AggregatedDiscoveryServiceClient::new(tls_grpc_channel)
             .max_decoding_message_size(200 * 1024 * 1024)
-            .delta_aggregated_resources(tonic::Request::new(outbound))
+            .delta_aggregated_resources(req)
             .await;
 
         let mut response_stream = ads_connection
