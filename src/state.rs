@@ -76,24 +76,6 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    //    /// If there is a network gateway, use <service hostname>:<port>. Otherwise, use
-    //    /// <ip address>:<port>. Fortunately, for double-hbone, the authority/host is the same
-    //    /// for inner and outer CONNECT request, so we can reuse this for inner double hbone,
-    //    /// outer double hbone, and normal hbone.
-    //    pub fn hbone_target(&self) -> HboneAddress {
-    //        if self.workload.network_gateway.is_some() {
-    //            let svc = self
-    //                .destination_service
-    //                .as_ref()
-    //                .expect("Workloads with network gateways must be service addressed.");
-    //            HboneAddress::SvcHostname(
-    //                format!("{}.{}", svc.namespace, svc.hostname).into(),
-    //                self.port,
-    //            )
-    //        } else {
-    //            HboneAddress::SocketAddr(self.workload_socket_addr())
-    //        }
-    //    }
 
     pub fn workload_socket_addr(&self) -> Option<SocketAddr> {
         self.selected_workload_ip

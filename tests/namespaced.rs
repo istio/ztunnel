@@ -1003,14 +1003,7 @@ mod namespaced {
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
 
-                let dest = rustls::pki_types::ServerName::IpAddress(
-                    tcp_stream
-                        .peer_addr()
-                        .expect("peer_addr must be set")
-                        .ip()
-                        .into(),
-                );
-                let tls_stream = connector.connect(tcp_stream, dest).await.unwrap();
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
 
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
@@ -1075,14 +1068,7 @@ mod namespaced {
                     .await
                     .unwrap();
 
-                let dest = rustls::pki_types::ServerName::IpAddress(
-                    tcp_stream
-                        .peer_addr()
-                        .expect("peer_addr must be set")
-                        .ip()
-                        .into(),
-                );
-                let tls_stream = connector.connect(tcp_stream, dest).await.unwrap();
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
 
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
@@ -1165,14 +1151,8 @@ mod namespaced {
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
                     .unwrap();
-                let dest = rustls::pki_types::ServerName::IpAddress(
-                    tcp_stream
-                        .peer_addr()
-                        .expect("peer_addr must be set")
-                        .ip()
-                        .into(),
-                );
-                let tls_stream = connector.connect(tcp_stream, dest).await.unwrap();
+
+                let tls_stream = connector.connect(tcp_stream).await.unwrap();
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state

@@ -254,7 +254,6 @@ impl OutboundConnection {
         let tls_stream = connector
             .connect(
                 upgraded,
-                rustls::pki_types::ServerName::IpAddress(wl_key.dst.ip().into()),
             )
             .await?;
 
@@ -276,9 +275,6 @@ impl OutboundConnection {
 
         let _ = drain_tx.send(true);
         let _ = driver_task.await;
-        // Here, there is an implicit, drop(conn_client).
-        // Its really important that this happens AFTER driver_task finishes.
-        // Otherwise, TLS connections do not terminate gracefully.
 
         res
     }
