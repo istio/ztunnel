@@ -482,7 +482,7 @@ impl OutboundConnection {
                         .fetch_upstream_by_host(
                             &source_workload,
                             host,
-                            15008, //fixme
+                            ew_gtw.hbone_mtls_port,
                             target,
                             ServiceResolutionMode::Standard,
                         )
