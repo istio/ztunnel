@@ -179,6 +179,7 @@ impl OutboundConnection {
             source_addr,
             dest_addr,
             req.actual_destination,
+            req.protocol,
         );
 
         let metrics = self.pi.metrics.clone();
