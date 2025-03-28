@@ -16,6 +16,7 @@ use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
 use crate::state::service::{Endpoint, Service};
 use crate::state::workload::{HealthStatus, Workload, gatewayaddress};
+use crate::strng::Strng;
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
@@ -420,6 +421,12 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
+    /// 
+    pub fn network (mut self, network: Strng) -> Self {
+        self.w.workload.network = network;
+        self
+    }
+
     pub fn identity(mut self, identity: identity::Identity) -> Self {
         match identity {
             identity::Identity::Spiffe {
@@ -520,13 +527,6 @@ impl<'a> TestWorkloadBuilder<'a> {
             // This is a little inefficient, because we create the
             // namespace, but never actually use it.
             self.w.workload.workload_ips = vec![];
-            // self.w.workload.network_gateway = Some(GatewayAddress {
-            //     destination: gatewayaddress::Destination::Address(NetworkAddress {
-            //         network: "".into(),
-            //         address: network_namespace.ip(),
-            //     }),
-            //     hbone_mtls_port: 15008, // FIXME
-            // })
         } else {
             self.w.workload.workload_ips = vec![network_namespace.ip()];
         }

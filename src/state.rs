@@ -828,33 +828,11 @@ impl DemandProxyState {
                 .find_upstream(network, source_workload, addr, resolution_mode)
             // Drop the lock
         };
-        // deal with network gateway
-        // if let Some((wl, port, service)) = upstream.as_ref() {
-        //     if let Some(ref network_gateway) = wl.network_gateway {
-        //         self.handle_network_gateway(network_gateway).await;
-        //     }
-        // }
         tracing::trace!(%addr, ?upstream, "fetch_upstream");
         // package into a finalize upstream and pick/resolve addresses
         self.finalize_upstream(source_workload, addr, upstream)
             .await
     }
-
-    // Here, we want to handle the case where there is a network gateway.
-    // This is only if we find an upstream workload and there is a network gateway.
-    // We want this to look at the workloads network gateway and parse out the workload ip
-    // and if there is an hbone port override.
-    // Also, we might have to do another svc/vip lookup if the network gateway is a hostname.
-    // We also have to be careful to not infinite loop if the network gateway workload itself has a
-    // network gateway.
-    // async fn handle_network_gateway(&self, network_gateway: &GatewayAddress) {
-    //     let x = &network_gateway.destination;
-    //     match x {
-    //         Destination::Address(address) => todo!,
-    //         Destination::Hostname(h) => todo!,
-    //
-    //     }
-    // }
 
     pub async fn finalize_upstream(
         &self,
@@ -876,45 +854,6 @@ impl DemandProxyState {
                 ip_family_restriction,
             )
             .await?; // if we can't load balance just return the error
-        // if let Some(network_gateway) =
-        //     wl.network_gateway.as_ref()
-        // {
-        //     match &network_gateway.destination {
-        //         Destination::Address(network_address) => (
-        //             // Use network address if it exists
-        //             network_address.address,
-        //             Some(network_gateway.hbone_mtls_port),
-        //         ),
-        //         Destination::Hostname(hostname) => {
-        //             // Look in the service registry for this.
-        //             // HERE FIXME do an SVC lookup
-        //             let svc = self
-        //                     .read()
-        //                     .find_service_by_hostname(&hostname.hostname)?.first().ok_or(Error::NoHostname("Workloads referenced by Network Gateways destination hostnames must have IPs".into()))?;
-        //             (
-        //                 self.resolve_workload_address(
-        //                     &wl,
-        //                     source_workload,
-        //                     original_target_address,
-        //                 )
-        //                 .await?,
-        //                 Some(network_gateway.hbone_mtls_port),
-        //             )
-        //         }
-        //     }
-        // } else {
-        //     (
-        //         self.pick_workload_destination_or_resolve(
-        //             &wl,
-        //             source_workload,
-        //             original_target_address,
-        //             ip_family_restriction,
-        //         )
-        //         .await?,
-        //         None,
-        //     ) // if we can't load balance just return the error
-        // };
-
         let res = Upstream {
             workload: wl,
             selected_workload_ip,

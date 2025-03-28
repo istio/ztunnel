@@ -18,8 +18,8 @@ mod namespaced {
     use futures::future::poll_fn;
     use http_body_util::Empty;
     use std::collections::HashMap;
-    use ztunnel::state::workload::{GatewayAddress, NamespacedHostname};
     use ztunnel::state::workload::gatewayaddress::Destination;
+    use ztunnel::state::workload::{GatewayAddress, NamespacedHostname};
 
     use std::net::{IpAddr, SocketAddr};
 
@@ -203,6 +203,9 @@ mod namespaced {
         let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         // Service that resolves to workload with ew gateway
+        // The 8080 port mappings don't actually matter because the
+        // final ztunnel is actually an hbone echo server that doesn't
+        // forward anything.
         manager
             .service_builder("remote")
             .addresses(vec![NetworkAddress {
@@ -210,19 +213,7 @@ mod namespaced {
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
             .subject_alt_names(vec!["spiffe://cluster.local/ns/default/sa/echo".into()])
-            .ports(HashMap::from([(15008u16, 15008u16)]))
-            .register()
-            .await?;
-
-
-        // Service that resolves to the ew gateway.
-        manager
-            .service_builder("ew-gtw-svc")
-            .addresses(vec![NetworkAddress {
-                network: strng::EMPTY,
-                address: TEST_VIP3.parse::<IpAddr>()?,
-            }])
-            .ports(HashMap::from([(15009u16, 15008u16)]))
+            .ports(HashMap::from([(8080, 8080)]))
             .register()
             .await?;
 
@@ -230,37 +221,32 @@ mod namespaced {
         let actual_ew_gtw = manager
             .workload_builder("actual-ew-gtw", "remote-node")
             .hbone()
-            .service(
-                "default/ew-gtw-svc.default.svc.cluster.local",
-                15009u16,  // These can't be right (yet, or they might be...)
-                15008u16,
-            )
+            .network("remote".into())
             .register()
             .await?;
 
         // This is the workload in the local cluster that represents the workloads in the remote cluster.
         // Its local in the sense that the it shows up in the local cluster's xds, but it
         // represents workloads in the remote cluster.
+        // Its a little weird because we do give it a namespaced/ip,
+        // but that's because of how the tests infra works.
         let local_remote_workload = manager
             .workload_builder("local-remote-workload", "remote-node")
             .hbone()
+            .network("remote".into())
             .network_gateway(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: "".into(),
+                    network: "remote".into(),
                     address: actual_ew_gtw.ip(),
                 }),
-                hbone_mtls_port: 15008, // FIXME
+                hbone_mtls_port: 15008,
             })
             .identity(identity::Identity::Spiffe {
                 trust_domain: "cluster.local".into(),
                 namespace: "default".into(),
                 service_account: "actual-ew-gtw".into(),
             })
-            .service(
-                "default/remote.default.svc.cluster.local",
-                15008u16, // These can't be right (yet, or they might be...)
-                15008u16,
-            )
+            .service("default/remote.default.svc.cluster.local", 8080, 8080)
             .register()
             .await?;
         let echo = manager
@@ -272,17 +258,27 @@ mod namespaced {
             .workload_builder("client", DEFAULT_NODE)
             .register()
             .await?;
-        let echo_addr = SocketAddr::new(echo.ip(), 15008);
+        let echo_hbone_addr = SocketAddr::new(echo.ip(), 15008);
+
         // No need to run local_remote_workload, as it doesn't actually exist.
-        run_hbone_server(echo.clone(), "echo", tcp::Mode::ReadWrite, WAYPOINT_MESSAGE.into())?;
+        run_hbone_server(
+            echo.clone(),
+            "echo",
+            tcp::Mode::ReadWrite,
+            WAYPOINT_MESSAGE.into(),
+        )?;
         run_hbone_server(
             actual_ew_gtw.clone(),
             "actual-ew-gtw",
-            tcp::Mode::Forward(echo_addr.clone()),
+            tcp::Mode::Forward(echo_hbone_addr.clone()),
             b"".into(),
         )?;
 
-        run_tcp_to_hbone_client(client.clone(), manager.resolver(), &format!("{TEST_VIP}:15008"))?;
+        run_tcp_to_hbone_client(
+            client.clone(),
+            manager.resolver(),
+            &format!("{TEST_VIP}:8080"),
+        )?;
 
         Ok(())
     }
@@ -301,7 +297,7 @@ mod namespaced {
                 address: TEST_VIP2.parse::<IpAddr>()?,
             }])
             .subject_alt_names(vec!["spiffe://cluster.local/ns/default/sa/echo".into()])
-            .ports(HashMap::from([(15008u16, 15008u16)]))
+            .ports(HashMap::from([(8080, 8080)]))
             .register()
             .await?;
 
@@ -322,9 +318,10 @@ mod namespaced {
             .hbone()
             .service(
                 "default/ew-gtw-svc.default.svc.cluster.local",
-                15009u16,  // These can't be right (yet, or they might be...)
+                15009u16, 
                 15008u16,
             )
+            .network("remote".into())
             .register()
             .await?;
 
@@ -332,17 +329,18 @@ mod namespaced {
         let local_remote_workload_svc_gtw = manager
             .workload_builder("local-remote-workload-svc-gtw", "remote-node")
             .hbone()
+            .network("remote".into())
             .network_gateway(GatewayAddress {
                 destination: Destination::Hostname(NamespacedHostname {
                     namespace: "default".into(),
                     hostname: "ew-gtw-svc.default.svc.cluster.local".into(),
                 }),
-                hbone_mtls_port: 15009, // FIXME
+                hbone_mtls_port: 15009,
             })
             .service(
                 "default/remote-svc-gtw.default.svc.cluster.local",
-                15008u16, // These can't be right (yet, or they might be...)
-                15008u16,
+                8080,
+                8080,
             )
             .register()
             .await?;
@@ -367,8 +365,11 @@ mod namespaced {
             b"".into(),
         )?;
 
-
-        run_tcp_to_hbone_client(client.clone(), manager.resolver(), &format!("{TEST_VIP2}:15008"))?;
+        run_tcp_to_hbone_client(
+            client.clone(),
+            manager.resolver(),
+            &format!("{TEST_VIP2}:8080"),
+        )?;
 
         Ok(())
     }
@@ -1265,47 +1266,47 @@ mod namespaced {
 
     #[tokio::test]
     async fn trust_domain_mismatch_rejected() -> anyhow::Result<()> {
-        // let mut manager = setup_netns_test!(Shared);
-        // let id = identity::Identity::Spiffe {
-        //     trust_domain: "clusterset.local".into(), // change to mismatched trustdomain
-        //     service_account: "my-app".into(),
-        //     namespace: "default".into(),
-        // };
-        //
-        // let _ = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-        // run_tcp_server(
-        //     manager
-        //         .workload_builder("server", DEFAULT_NODE)
-        //         .register()
-        //         .await?,
-        // )?;
-        //
-        // let client = manager
-        //     .workload_builder("client", DEFAULT_NODE)
-        //     .identity(id)
-        //     .register()
-        //     .await?;
-        //
-        // let srv = resolve_target(manager.resolver(), "server");
-        //
-        // client
-        //     .run(move || async move {
-        //         let mut tcp_stream = TcpStream::connect(&srv.to_string()).await?;
-        //         tcp_stream.write_all(b"hello world!").await?;
-        //         let mut buf = [0; 10];
-        //         let mut buf = ReadBuf::new(&mut buf);
-        //
-        //         let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
-        //         assert!(result.is_err()); // expect a connection reset due to TLS SAN mismatch
-        //         assert_eq!(
-        //             result.err().unwrap().kind(),
-        //             std::io::ErrorKind::ConnectionReset
-        //         );
-        //
-        //         Ok(())
-        //     })?
-        //     .join()
-        //     .unwrap()?;
+        let mut manager = setup_netns_test!(Shared);
+        let id = identity::Identity::Spiffe {
+            trust_domain: "clusterset.local".into(), // change to mismatched trustdomain
+            service_account: "my-app".into(),
+            namespace: "default".into(),
+        };
+
+        let _ = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        run_tcp_server(
+            manager
+                .workload_builder("server", DEFAULT_NODE)
+                .register()
+                .await?,
+        )?;
+
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .identity(id)
+            .register()
+            .await?;
+
+        let srv = resolve_target(manager.resolver(), "server");
+
+        client
+            .run(move || async move {
+                let mut tcp_stream = TcpStream::connect(&srv.to_string()).await?;
+                tcp_stream.write_all(b"hello world!").await?;
+                let mut buf = [0; 10];
+                let mut buf = ReadBuf::new(&mut buf);
+
+                let result = poll_fn(|cx| tcp_stream.poll_peek(cx, &mut buf)).await;
+                assert!(result.is_err()); // expect a connection reset due to TLS SAN mismatch
+                assert_eq!(
+                    result.err().unwrap().kind(),
+                    std::io::ErrorKind::ConnectionReset
+                );
+
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
         Ok(())
     }
 

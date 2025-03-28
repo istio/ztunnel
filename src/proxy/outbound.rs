@@ -458,63 +458,58 @@ impl OutboundConnection {
             });
         };
 
-        // Check whether we are using an E/W gateway
-        // FIXME: this should check if there is a network gateway AND we are in different networks
-        // since wl entries are absolute
+        // Check whether we are using an E/W gateway and sending cross network traffic
         if let Some(ew_gtw) = &us.workload.network_gateway {
-            let svc = us
-                .destination_service
-                .as_ref()
-                .expect("Workloads with network gateways must be service addressed.");
+            if us.workload.network != source_workload.network {
+                let svc = us
+                    .destination_service
+                    .as_ref()
+                    .expect("Workloads with network gateways must be service addressed.");
 
-            let (actual_destination, upstream_sans, final_sans) = match &ew_gtw.destination {
-                // FIXME assume that this address is reachable and ignore the address.network
-                // field?
-                Destination::Address(address) => (
-                    SocketAddr::from((address.address, ew_gtw.hbone_mtls_port)),
-                    us.workload_and_services_san(),
-                    us.service_sans(),
-                ),
-                Destination::Hostname(host) => {
-                    let us_gtw = self
-                        .pi
-                        .state
-                        .fetch_upstream_by_host(
-                            &source_workload,
-                            host,
-                            ew_gtw.hbone_mtls_port,
-                            target,
-                            ServiceResolutionMode::Standard,
-                        )
-                        .await?
-                        .unwrap();
-                    (
-                        SocketAddr::from((us_gtw.selected_workload_ip.unwrap(), us_gtw.port)),
-                        us_gtw.workload_and_services_san(),
+                let (actual_destination, upstream_sans, final_sans) = match &ew_gtw.destination {
+                    Destination::Address(address) => (
+                        SocketAddr::from((address.address, ew_gtw.hbone_mtls_port)),
+                        us.workload_and_services_san(),
                         us.service_sans(),
-                    )
-                }
-            };
+                    ),
+                    Destination::Hostname(host) => {
+                        let us_gtw = self
+                            .pi
+                            .state
+                            .fetch_upstream_by_host(
+                                &source_workload,
+                                host,
+                                ew_gtw.hbone_mtls_port,
+                                target,
+                                ServiceResolutionMode::Standard,
+                            )
+                            .await?
+                            .unwrap();
+                        (
+                            SocketAddr::from((us_gtw.selected_workload_ip.unwrap(), us_gtw.port)),
+                            us_gtw.workload_and_services_san(),
+                            us.service_sans(),
+                        )
+                    }
+                };
 
-            let hbone_target_destination =
-                Some(HboneAddress::SvcHostname(svc.hostname.clone(), us.port));
+                let hbone_target_destination =
+                    Some(HboneAddress::SvcHostname(svc.hostname.clone(), us.port));
 
-
-            return Ok(Request {
-                protocol: ClientProtocol::DOUBLEHBONE,
-                source: source_workload,
-                hbone_target_destination,
-                actual_destination_workload: Some(us.workload.clone()),
-                intended_destination_service: us.destination_service.clone(),
-                actual_destination,
-                upstream_sans,
-                final_sans,
-            });
+                return Ok(Request {
+                    protocol: ClientProtocol::DOUBLEHBONE,
+                    source: source_workload,
+                    hbone_target_destination,
+                    actual_destination_workload: Some(us.workload.clone()),
+                    intended_destination_service: us.destination_service.clone(),
+                    actual_destination,
+                    upstream_sans,
+                    final_sans,
+                });
+            }
         }
 
         // We are not using a network gateway and there is no workload address.
-        //
-        //
         let from_waypoint = proxy::check_from_waypoint(
             state,
             &us.workload,
@@ -642,7 +637,6 @@ struct Request {
     // The identity of workload that will ultimately process this request.
     // This field only matters if we need to know both the identity of the next hop, as well as the
     // final hop (currently, this is only double HBONE).
-    // fixme is this even necessary?
     final_sans: Vec<Identity>,
 }
 
