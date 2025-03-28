@@ -606,7 +606,7 @@ fn baggage(r: &Request, cluster: String) -> String {
     )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Request {
     protocol: ClientProtocol,
     // Source workload sending the request
