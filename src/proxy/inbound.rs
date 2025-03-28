@@ -88,60 +88,57 @@ impl Inbound {
         // Although, that is *after* the TLS handshake; in theory we may get some benefits to setting it earlier.
         let mut stream = crate::hyper_util::tls_server(acceptor, self.listener.inner());
 
-        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            async move {
-                while let Some(tls) = stream.next().await {
-                    let pi = self.pi.clone();
-                    let (raw_socket, ssl) = tls.get_ref();
-                    let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
-                    let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
-                    let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
-                    let drain = drain.clone();
-                    let force_shutdown = force_shutdown.clone();
-                    let network = pi.cfg.network.clone();
-                    let serve_client = async move {
-                        let conn = Connection {
-                            src_identity,
-                            src,
-                            dst_network: strng::new(&network), // inbound request must be on our network
-                            dst,
-                        };
-                        debug!(%conn, "accepted connection");
-                        let cfg = pi.cfg.clone();
-                        let request_handler = move |req| {
-                            let id = Self::extract_traceparent(&req);
-                            let peer = conn.src;
-                            let req_handler = Self::serve_connect(
-                                pi.clone(),
-                                conn.clone(),
-                                self.enable_orig_src,
-                                req,
-                            )
-                            .instrument(info_span!("inbound", %id, %peer));
-                            // This is for each user connection, so most important to keep small
-                            assertions::size_between_ref(1500, 2500, &req_handler);
-                            req_handler
-                        };
-
-                        let serve_conn = h2::server::serve_connection(
-                            cfg,
-                            tls,
-                            drain,
-                            force_shutdown,
-                            request_handler,
-                        );
-                        // This is per HBONE connection, so while would be nice to be small, at least it
-                        // is pooled so typically fewer of these.
-                        let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
-                        serve.await
+        let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            while let Some(tls) = stream.next().await {
+                let pi = self.pi.clone();
+                let (raw_socket, ssl) = tls.get_ref();
+                let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
+                let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
+                let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
+                let drain = drain.clone();
+                let force_shutdown = force_shutdown.clone();
+                let network = pi.cfg.network.clone();
+                let serve_client = async move {
+                    let conn = Connection {
+                        src_identity,
+                        src,
+                        dst_network: strng::new(&network), // inbound request must be on our network
+                        dst,
                     };
-                    // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
-                    // and measured above.
-                    assertions::size_between_ref(1000, 1500, &serve_client);
-                    tokio::task::spawn(serve_client.in_current_span());
-                }
+                    debug!(%conn, "accepted connection");
+                    let cfg = pi.cfg.clone();
+                    let request_handler = move |req| {
+                        let id = Self::extract_traceparent(&req);
+                        let peer = conn.src;
+                        let req_handler = Self::serve_connect(
+                            pi.clone(),
+                            conn.clone(),
+                            self.enable_orig_src,
+                            req,
+                        )
+                        .instrument(info_span!("inbound", %id, %peer));
+                        // This is for each user connection, so most important to keep small
+                        assertions::size_between_ref(1500, 2500, &req_handler);
+                        req_handler
+                    };
+
+                    let serve_conn = h2::server::serve_connection(
+                        cfg,
+                        tls,
+                        drain,
+                        force_shutdown,
+                        request_handler,
+                    );
+                    // This is per HBONE connection, so while would be nice to be small, at least it
+                    // is pooled so typically fewer of these.
+                    let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
+                    serve.await
+                };
+                // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
+                // and measured above.
+                assertions::size_between_ref(1000, 1500, &serve_client);
+                tokio::task::spawn(serve_client.in_current_span());
             }
-            .in_current_span()
         };
 
         run_with_drain(

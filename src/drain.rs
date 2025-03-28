@@ -11,8 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use tracing::Instrument;
 
-use std::future::Future;
 use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -38,14 +38,13 @@ pub fn new() -> (DrainTrigger, DrainWatcher) {
 /// * force_shutdown: when this is triggered, the future must forcefully shutdown any ongoing work ASAP.
 ///   This means the graceful drain exceeded the hard deadline, and all work must terminate now.
 ///   This is only required for spawned() tasks; otherwise, the future is dropped entirely, canceling all work.
-pub async fn run_with_drain<F, Fut, O>(
+pub async fn run_with_drain<F, O>(
     component: String,
     drain: DrainWatcher,
     deadline: Duration,
     make_future: F,
 ) where
-    F: FnOnce(DrainWatcher, watch::Receiver<()>) -> Fut,
-    Fut: Future<Output = O>,
+    F: AsyncFnOnce(DrainWatcher, watch::Receiver<()>) -> O,
     O: Send + 'static,
 {
     let (sub_drain_signal, sub_drain) = new();
@@ -53,7 +52,7 @@ pub async fn run_with_drain<F, Fut, O>(
     // Stop accepting once we drain.
     // We will then allow connections up to `deadline` to terminate on their own.
     // After that, they will be forcefully terminated.
-    let fut = make_future(sub_drain, force_shutdown);
+    let fut = make_future(sub_drain, force_shutdown).in_current_span();
     tokio::select! {
         _res = fut => {}
         res = drain.wait_for_drain() => {

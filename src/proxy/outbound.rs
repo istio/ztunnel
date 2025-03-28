@@ -78,50 +78,47 @@ impl Outbound {
             self.pi.local_workload_information.clone(),
         );
         let pi = self.pi.clone();
-        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            async move {
-                loop {
-                    // Asynchronously wait for an inbound socket.
-                    let socket = self.listener.accept().await;
-                    let start = Instant::now();
-                    let drain = drain.clone();
-                    let mut force_shutdown = force_shutdown.clone();
-                    match socket {
-                        Ok((stream, _remote)) => {
-                            let mut oc = OutboundConnection {
-                                pi: self.pi.clone(),
-                                id: TraceParent::new(),
-                                pool: pool.clone(),
-                                hbone_port: self.pi.cfg.inbound_addr.port(),
-                            };
-                            let span = info_span!("outbound", id=%oc.id);
-                            let serve_outbound_connection = (async move {
-                                debug!(component="outbound", "connection started");
-                                // Since this task is spawned, make sure we are guaranteed to terminate
-                                tokio::select! {
-                                    _ = force_shutdown.changed() => {
-                                        debug!(component="outbound", "connection forcefully terminated");
-                                    }
-                                    _ = oc.proxy(stream) => {}
+        let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                let start = Instant::now();
+                let drain = drain.clone();
+                let mut force_shutdown = force_shutdown.clone();
+                match socket {
+                    Ok((stream, _remote)) => {
+                        let mut oc = OutboundConnection {
+                            pi: self.pi.clone(),
+                            id: TraceParent::new(),
+                            pool: pool.clone(),
+                            hbone_port: self.pi.cfg.inbound_addr.port(),
+                        };
+                        let span = info_span!("outbound", id=%oc.id);
+                        let serve_outbound_connection = async move {
+                            debug!(component="outbound", "connection started");
+                            // Since this task is spawned, make sure we are guaranteed to terminate
+                            tokio::select! {
+                                _ = force_shutdown.changed() => {
+                                    debug!(component="outbound", "connection forcefully terminated");
                                 }
-                                // Mark we are done with the connection, so drain can complete
-                                drop(drain);
-                                debug!(component="outbound", dur=?start.elapsed(), "connection completed");
-                            }).instrument(span);
-
-                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
-                            tokio::spawn(serve_outbound_connection);
-                        }
-                        Err(e) => {
-                            if util::is_runtime_shutdown(&e) {
-                                return;
+                                _ = oc.proxy(stream) => {}
                             }
-                            error!("Failed TCP handshake {}", e);
+                            // Mark we are done with the connection, so drain can complete
+                            drop(drain);
+                            debug!(component="outbound", dur=?start.elapsed(), "connection completed");
+                        }.instrument(span);
+
+                        assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                        tokio::spawn(serve_outbound_connection);
+                    }
+                    Err(e) => {
+                        if util::is_runtime_shutdown(&e) {
+                            return;
                         }
+                        error!("Failed TCP handshake {}", e);
                     }
                 }
             }
-            .in_current_span()
         };
 
         run_with_drain(
