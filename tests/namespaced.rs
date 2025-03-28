@@ -18,6 +18,8 @@ mod namespaced {
     use futures::future::poll_fn;
     use http_body_util::Empty;
     use std::collections::HashMap;
+    use ztunnel::state::workload::{GatewayAddress, NamespacedHostname};
+    use ztunnel::state::workload::gatewayaddress::Destination;
 
     use std::net::{IpAddr, SocketAddr};
 
@@ -200,6 +202,7 @@ mod namespaced {
 
         let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
+        // Service that resolves to workload with ew gateway
         manager
             .service_builder("remote")
             .addresses(vec![NetworkAddress {
@@ -211,13 +214,76 @@ mod namespaced {
             .register()
             .await?;
 
-        let ew_gtw = manager
-            .workload_builder("ew-gtw", "remote-node")
+        // Service that resolves to workload with ew gateway that uses service addressing
+        manager
+            .service_builder("remote-svc-gtw")
+            .addresses(vec![NetworkAddress {
+                network: strng::EMPTY,
+                address: TEST_VIP2.parse::<IpAddr>()?,
+            }])
+            .subject_alt_names(vec!["spiffe://cluster.local/ns/default/sa/echo".into()])
+            .ports(HashMap::from([(15008u16, 15008u16)]))
+            .register()
+            .await?;
+
+        // Service that resolves to the ew gateway.
+        manager
+            .service_builder("ew-gtw-svc")
+            .addresses(vec![NetworkAddress {
+                network: strng::EMPTY,
+                address: TEST_VIP3.parse::<IpAddr>()?,
+            }])
+            .ports(HashMap::from([(15008u16, 15008u16)]))
+            .register()
+            .await?;
+
+        // This is the e/w gateway that is supposed to be in the remote cluster/network.
+        let actual_ew_gtw = manager
+            .workload_builder("actual-ew-gtw", "remote-node")
             .hbone()
-            .network_gateway()
+            .service(
+                "default/ew-gtw-svc.default.svc.cluster.local",
+                15008u16,  // These can't be right (yet, or they might be...)
+                15008u16,
+            )
+            .register()
+            .await?;
+
+        // This is the workload in the local cluster that represents the workloads in the remote cluster.
+        // Its local in the sense that the it shows up in the local cluster's xds, but it
+        // represents workloads in the remote cluster.
+        let local_remote_workload = manager
+            .workload_builder("local-remote-workload", "remote-node")
+            .hbone()
+            .network_gateway(GatewayAddress {
+                destination: Destination::Address(NetworkAddress {
+                    network: "".into(),
+                    address: actual_ew_gtw.ip(),
+                }),
+                hbone_mtls_port: 15008, // FIXME
+            })
             .service(
                 "default/remote.default.svc.cluster.local",
-                15008u16,  // These can't be right
+                15008u16, // These can't be right (yet, or they might be...)
+                15008u16,
+            )
+            .register()
+            .await?;
+
+        // Like local_remote_workload, but the network gateway is service addressed
+        let local_remote_workload_svc_gtw = manager
+            .workload_builder("local-remote-workload-svc-gtw", "remote-node")
+            .hbone()
+            .network_gateway(GatewayAddress {
+                destination: Destination::Hostname(NamespacedHostname {
+                    namespace: "default".into(),
+                    hostname: "ew-gtw-svc.default.svc.cluster.local".into(),
+                }),
+                hbone_mtls_port: 15008, // FIXME
+            })
+            .service(
+                "default/remote-svc-gtw.default.svc.cluster.local",
+                15008u16, // These can't be right (yet, or they might be...)
                 15008u16,
             )
             .register()
@@ -234,9 +300,16 @@ mod namespaced {
             .await?;
         let echo_addr = SocketAddr::new(echo.ip(), 15008);
         run_hbone_server(echo, "echo", tcp::Mode::ReadWrite, WAYPOINT_MESSAGE.into())?;
-        run_hbone_server(ew_gtw, "ew-gtw", tcp::Mode::Forward(echo_addr), b"".into())?;
+        run_hbone_server(
+            actual_ew_gtw,
+            "actual-ew-gtw",
+            tcp::Mode::Forward(echo_addr),
+            b"".into(),
+        )?;
+        // No need to run local_remote_workload, as it doesn't actually exist.
 
-        run_tcp_to_hbone_client(client, manager.resolver(), &format!("{TEST_VIP}:15008"))?;
+        // run_tcp_to_hbone_client(client.clone(), manager.resolver(), &format!("{TEST_VIP}:15008"))?;
+        run_tcp_to_hbone_client(client.clone(), manager.resolver(), &format!("{TEST_VIP2}:15008"))?;
 
         Ok(())
     }
@@ -1250,6 +1323,8 @@ mod namespaced {
     }
 
     const TEST_VIP: &str = "10.10.0.1";
+    const TEST_VIP2: &str = "10.10.0.2";
+    const TEST_VIP3: &str = "10.10.0.3";
 
     const SERVER_PORT: u16 = 8080;
     const SERVER_HOSTNAME: &str = "server.default.svc.cluster.local";

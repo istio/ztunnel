@@ -467,30 +467,38 @@ impl OutboundConnection {
                 .as_ref()
                 .expect("Workloads with network gateways must be service addressed.");
 
-            let actual_destination = match &ew_gtw.destination {
+            let (actual_destination, upstream_sans, final_sans) = match &ew_gtw.destination {
                 // FIXME assume that this address is reachable and ignore the address.network
                 // field?
-                Destination::Address(address) => {
-                    SocketAddr::from((address.address, ew_gtw.hbone_mtls_port))
-                }
+                Destination::Address(address) => (
+                    SocketAddr::from((address.address, ew_gtw.hbone_mtls_port)),
+                    us.workload_and_services_san(),
+                    us.service_sans(),
+                ),
                 Destination::Hostname(host) => {
-                    let us = self.pi.state.fetch_upstream_by_host(
-                        &source_workload,
-                        host,
-                        15008, //fixme
-                        target,
-                        ServiceResolutionMode::Standard
-                    ).await?.unwrap();
-                    SocketAddr::from((us.selected_workload_ip.unwrap(), us.port))
+                    let us_gtw = self
+                        .pi
+                        .state
+                        .fetch_upstream_by_host(
+                            &source_workload,
+                            host,
+                            15008, //fixme
+                            target,
+                            ServiceResolutionMode::Standard,
+                        )
+                        .await?
+                        .unwrap();
+                    (
+                        SocketAddr::from((us_gtw.selected_workload_ip.unwrap(), us_gtw.port)),
+                        us_gtw.workload_and_services_san(),
+                        us.service_sans(),
+                    )
                 }
             };
 
             let hbone_target_destination =
                 Some(HboneAddress::SvcHostname(svc.hostname.clone(), us.port));
 
-            // TODO: if the gateway address is a hostname, we want to use the workload/service sans
-            // of the resolved workload.
-            let (upstream_sans, final_sans) = (us.workload_and_services_san(), us.service_sans());
 
             return Ok(Request {
                 protocol: ClientProtocol::DOUBLEHBONE,

@@ -393,7 +393,6 @@ impl<'a> TestServiceBuilder<'a> {
 pub struct TestWorkloadBuilder<'a> {
     w: LocalWorkload,
     captured: bool,
-    is_network_gateway: bool,
     manager: &'a mut WorkloadManager,
 }
 
@@ -401,7 +400,6 @@ impl<'a> TestWorkloadBuilder<'a> {
     pub fn new(name: &str, manager: &'a mut WorkloadManager) -> TestWorkloadBuilder<'a> {
         TestWorkloadBuilder {
             captured: false,
-            is_network_gateway: false,
             w: LocalWorkload {
                 workload: Workload {
                     name: name.into(),
@@ -467,8 +465,8 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    pub fn network_gateway(mut self) -> Self {
-        self.is_network_gateway = true;
+    pub fn network_gateway(mut self, network_gateway: GatewayAddress) -> Self {
+        self.w.workload.network_gateway = Some(network_gateway);
         self
     }
 
@@ -518,15 +516,17 @@ impl<'a> TestWorkloadBuilder<'a> {
                 .namespaces
                 .child(&self.w.workload.node, &self.w.workload.name)?
         };
-        if self.is_network_gateway {
+        if self.w.workload.network_gateway.is_some() {
+            // This is a little inefficient, because we create the
+            // namespace, but never actually use it.
             self.w.workload.workload_ips = vec![];
-            self.w.workload.network_gateway = Some(GatewayAddress {
-                destination: gatewayaddress::Destination::Address(NetworkAddress {
-                    network: "".into(),
-                    address: network_namespace.ip(),
-                }),
-                hbone_mtls_port: 15008, // FIXME
-            })
+            // self.w.workload.network_gateway = Some(GatewayAddress {
+            //     destination: gatewayaddress::Destination::Address(NetworkAddress {
+            //         network: "".into(),
+            //         address: network_namespace.ip(),
+            //     }),
+            //     hbone_mtls_port: 15008, // FIXME
+            // })
         } else {
             self.w.workload.workload_ips = vec![network_namespace.ip()];
         }

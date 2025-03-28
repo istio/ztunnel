@@ -316,8 +316,7 @@ impl ProxyState {
                 self.find_upstream_from_service(source_workload, port, resolution_mode, svc)
             }
             Address::Workload(wl) => Some((wl, port, None)),
-        };
-        todo!()
+        }
     }
 
     fn find_upstream(
