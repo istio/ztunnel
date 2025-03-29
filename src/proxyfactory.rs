@@ -37,6 +37,19 @@ pub struct ProxyFactory {
     drain: DrainWatcher,
 }
 
+impl Clone for ProxyFactory {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            state: self.state.clone(),
+            cert_manager: self.cert_manager.clone(),
+            proxy_metrics: self.proxy_metrics.clone(),
+            dns_metrics: self.dns_metrics.clone(),
+            drain: self.drain.clone(),
+        }
+    }
+}
+
 impl ProxyFactory {
     pub fn new(
         config: Arc<config::Config>,
