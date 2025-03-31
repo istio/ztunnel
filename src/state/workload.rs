@@ -43,19 +43,29 @@ use xds::istio::workload::Workload as XdsWorkload;
 
 // The protocol that the final workload expects
 #[derive(
-    Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
+    Default,
+    Debug,
+    Hash,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Clone,
+    Copy,
+    serde::Serialize,
+    serde::Deserialize,
 )]
-pub enum ServerProtocol {
+pub enum InboundProtocol {
     #[default]
     TCP,
     HBONE,
 }
 
-impl From<xds::istio::workload::TunnelProtocol> for ServerProtocol {
+impl From<xds::istio::workload::TunnelProtocol> for InboundProtocol {
     fn from(value: xds::istio::workload::TunnelProtocol) -> Self {
         match value {
-            xds::istio::workload::TunnelProtocol::Hbone => ServerProtocol::HBONE,
-            xds::istio::workload::TunnelProtocol::None => ServerProtocol::TCP,
+            xds::istio::workload::TunnelProtocol::Hbone => InboundProtocol::HBONE,
+            xds::istio::workload::TunnelProtocol::None => InboundProtocol::TCP,
         }
     }
 }
@@ -63,20 +73,30 @@ impl From<xds::istio::workload::TunnelProtocol> for ServerProtocol {
 // The protocol that the sender should use to send data. Can be different from ServerProtocol when there is a
 // proxy in the middle (e.g. e/w gateway with double hbone).
 #[derive(
-    Default, Debug, Eq, PartialEq, Clone, Copy
+    Default,
+    Debug,
+    Hash,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Clone,
+    Copy,
+    serde::Serialize,
+    serde::Deserialize,
 )]
-pub enum ClientProtocol {
+pub enum OutboundProtocol {
     #[default]
     TCP,
     HBONE,
     DOUBLEHBONE,
 }
 
-impl From<ServerProtocol> for ClientProtocol {
-    fn from(value: ServerProtocol) -> Self {
+impl From<InboundProtocol> for OutboundProtocol {
+    fn from(value: InboundProtocol) -> Self {
         match value {
-            ServerProtocol::HBONE => ClientProtocol::HBONE,
-            ServerProtocol::TCP => ClientProtocol::TCP,
+            InboundProtocol::HBONE => OutboundProtocol::HBONE,
+            InboundProtocol::TCP => OutboundProtocol::TCP,
         }
     }
 }
@@ -202,7 +222,7 @@ pub struct Workload {
     pub network_gateway: Option<GatewayAddress>,
 
     #[serde(default)]
-    pub protocol: ServerProtocol,
+    pub protocol: InboundProtocol,
     #[serde(default)]
     pub network_mode: NetworkMode,
 
@@ -422,7 +442,7 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
             waypoint: wp,
             network_gateway: network_gw,
 
-            protocol: ServerProtocol::from(xds::istio::workload::TunnelProtocol::try_from(
+            protocol: InboundProtocol::from(xds::istio::workload::TunnelProtocol::try_from(
                 resource.tunnel_protocol,
             )?),
             network_mode: NetworkMode::from(xds::istio::workload::NetworkMode::try_from(
@@ -727,7 +747,7 @@ impl WorkloadByAddr {
                     let is_pod = w.uid.contains("//Pod/");
                     // We fallback to looking for HBONE -- a resource marked as in the mesh is likely
                     // to have more useful context than one not in the mesh.
-                    let is_hbone = w.protocol == ServerProtocol::HBONE;
+                    let is_hbone = w.protocol == InboundProtocol::HBONE;
                     match (is_pod, is_hbone) {
                         (true, true) => 3,
                         (true, false) => 2,

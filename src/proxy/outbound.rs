@@ -37,9 +37,9 @@ use crate::drain::run_with_drain;
 use crate::proxy::h2::{H2Stream, client::WorkloadKey};
 use crate::state::ServiceResolutionMode;
 use crate::state::service::ServiceDescription;
-use crate::state::workload::ClientProtocol;
+use crate::state::workload::OutboundProtocol;
 use crate::state::workload::gatewayaddress::Destination;
-use crate::state::workload::{NetworkAddress, ServerProtocol, Workload, address::Address};
+use crate::state::workload::{NetworkAddress, InboundProtocol, Workload, address::Address};
 use crate::{assertions, copy, proxy, socket};
 
 use super::h2::TokioH2Stream;
@@ -82,50 +82,47 @@ impl Outbound {
             self.pi.local_workload_information.clone(),
         );
         let pi = self.pi.clone();
-        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            async move {
-                loop {
-                    // Asynchronously wait for an inbound socket.
-                    let socket = self.listener.accept().await;
-                    let start = Instant::now();
-                    let drain = drain.clone();
-                    let mut force_shutdown = force_shutdown.clone();
-                    match socket {
-                        Ok((stream, _remote)) => {
-                            let mut oc = OutboundConnection {
-                                pi: self.pi.clone(),
-                                id: TraceParent::new(),
-                                pool: pool.clone(),
-                                hbone_port: self.pi.cfg.inbound_addr.port(),
-                            };
-                            let span = info_span!("outbound", id=%oc.id);
-                            let serve_outbound_connection = (async move {
-                                debug!(component="outbound", "connection started");
-                                // Since this task is spawned, make sure we are guaranteed to terminate
-                                tokio::select! {
-                                    _ = force_shutdown.changed() => {
-                                        debug!(component="outbound", "connection forcefully terminated");
-                                    }
-                                    _ = oc.proxy(stream) => {}
+        let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                let start = Instant::now();
+                let drain = drain.clone();
+                let mut force_shutdown = force_shutdown.clone();
+                match socket {
+                    Ok((stream, _remote)) => {
+                        let mut oc = OutboundConnection {
+                            pi: self.pi.clone(),
+                            id: TraceParent::new(),
+                            pool: pool.clone(),
+                            hbone_port: self.pi.cfg.inbound_addr.port(),
+                        };
+                        let span = info_span!("outbound", id=%oc.id);
+                        let serve_outbound_connection = async move {
+                            debug!(component="outbound", "connection started");
+                            // Since this task is spawned, make sure we are guaranteed to terminate
+                            tokio::select! {
+                                _ = force_shutdown.changed() => {
+                                    debug!(component="outbound", "connection forcefully terminated");
                                 }
-                                // Mark we are done with the connection, so drain can complete
-                                drop(drain);
-                                debug!(component="outbound", dur=?start.elapsed(), "connection completed");
-                            }).instrument(span);
-
-                            assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
-                            tokio::spawn(serve_outbound_connection);
-                        }
-                        Err(e) => {
-                            if util::is_runtime_shutdown(&e) {
-                                return;
+                                _ = oc.proxy(stream) => {}
                             }
-                            error!("Failed TCP handshake {}", e);
+                            // Mark we are done with the connection, so drain can complete
+                            drop(drain);
+                            debug!(component="outbound", dur=?start.elapsed(), "connection completed");
+                        }.instrument(span);
+
+                        assertions::size_between_ref(1000, 1750, &serve_outbound_connection);
+                        tokio::spawn(serve_outbound_connection);
+                    }
+                    Err(e) => {
+                        if util::is_runtime_shutdown(&e) {
+                            return;
                         }
+                        error!("Failed TCP handshake {}", e);
                     }
                 }
             }
-            .in_current_span()
         };
 
         run_with_drain(
@@ -186,6 +183,7 @@ impl OutboundConnection {
             source_addr,
             dest_addr,
             req.actual_destination,
+            req.protocol,
         );
 
         let metrics = self.pi.metrics.clone();
@@ -200,7 +198,7 @@ impl OutboundConnection {
         ));
 
         let res = match req.protocol {
-            ClientProtocol::DOUBLEHBONE => {
+            OutboundProtocol::DOUBLEHBONE => {
                 // We box this since its not a common path and it would make the future really big.
                 Box::pin(self.proxy_to_double_hbone(
                     source_stream,
@@ -210,11 +208,11 @@ impl OutboundConnection {
                 ))
                 .await
             }
-            ClientProtocol::HBONE => {
+            OutboundProtocol::HBONE => {
                 self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
                     .await
             }
-            ClientProtocol::TCP => {
+            OutboundProtocol::TCP => {
                 self.proxy_to_tcp(source_stream, &req, &result_tracker)
                     .await
             }
@@ -356,7 +354,7 @@ impl OutboundConnection {
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
-        let derived_source = if req.protocol == ClientProtocol::HBONE {
+        let derived_source = if req.protocol == OutboundProtocol::HBONE {
             Some(DerivedWorkload {
                 // We are going to do mTLS, so report our identity
                 identity: Some(req.source.as_ref().identity()),
@@ -370,7 +368,7 @@ impl OutboundConnection {
             derived_source,
             source: Some(req.source.clone()),
             destination: req.actual_destination_workload.clone(),
-            connection_security_policy: if req.protocol == ClientProtocol::HBONE {
+            connection_security_policy: if req.protocol == OutboundProtocol::HBONE {
                 metrics::SecurityPolicy::mutual_tls
             } else {
                 metrics::SecurityPolicy::unknown
@@ -412,7 +410,7 @@ impl OutboundConnection {
                         )))?;
                 debug!("built request to service waypoint proxy");
                 return Ok(Request {
-                    protocol: ClientProtocol::HBONE,
+                    protocol: OutboundProtocol::HBONE,
                     source: source_workload,
                     hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
@@ -443,7 +441,7 @@ impl OutboundConnection {
             }
             debug!("built request as passthrough; no upstream found");
             return Ok(Request {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 source: source_workload,
                 hbone_target_destination: None,
                 actual_destination_workload: None,
@@ -493,7 +491,7 @@ impl OutboundConnection {
                     Some(HboneAddress::SvcHostname(svc.hostname.clone(), us.port));
 
                 return Ok(Request {
-                    protocol: ClientProtocol::DOUBLEHBONE,
+                    protocol: OutboundProtocol::DOUBLEHBONE,
                     source: source_workload,
                     hbone_target_destination,
                     actual_destination_workload: Some(us.workload.clone()),
@@ -533,7 +531,7 @@ impl OutboundConnection {
                 debug!("built request to workload waypoint proxy");
                 return Ok(Request {
                     // Always use HBONE here
-                    protocol: ClientProtocol::HBONE,
+                    protocol: OutboundProtocol::HBONE,
                     source: source_workload,
                     // Use the original VIP, not translated
                     hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
@@ -553,24 +551,24 @@ impl OutboundConnection {
 
         // only change the port if we're sending HBONE
         let actual_destination = match us.workload.protocol {
-            ServerProtocol::HBONE => SocketAddr::from((selected_workload_ip, self.hbone_port)),
-            ServerProtocol::TCP => us
+            InboundProtocol::HBONE => SocketAddr::from((selected_workload_ip, self.hbone_port)),
+            InboundProtocol::TCP => us
                 .workload_socket_addr()
                 .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
         };
         let hbone_target_destination = match us.workload.protocol {
-            ServerProtocol::HBONE => Some(HboneAddress::SocketAddr(
+            InboundProtocol::HBONE => Some(HboneAddress::SocketAddr(
                 us.workload_socket_addr()
                     .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
             )),
-            ServerProtocol::TCP => None,
+            InboundProtocol::TCP => None,
         };
 
         // For case no waypoint for both side and direct to remote node proxy
         let (upstream_sans, final_sans) = (us.workload_and_services_san(), vec![]);
         debug!("built request to workload");
         Ok(Request {
-            protocol: ClientProtocol::from(us.workload.protocol),
+            protocol: OutboundProtocol::from(us.workload.protocol),
             source: source_workload,
             hbone_target_destination,
             actual_destination_workload: Some(us.workload.clone()),
@@ -608,7 +606,7 @@ fn baggage(r: &Request, cluster: String) -> String {
 
 #[derive(Debug)]
 struct Request {
-    protocol: ClientProtocol,
+    protocol: OutboundProtocol,
     // Source workload sending the request
     source: Arc<Workload>,
     // The actual destination workload we are targeting. When proxying through a waypoint, this is the waypoint,
@@ -790,7 +788,7 @@ mod tests {
                 ..Default::default()
             }),
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
                 destination: "1.2.3.4:80",
             }),
@@ -813,7 +811,7 @@ mod tests {
                 ..Default::default()
             }),
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
                 destination: "127.0.0.2:80",
             }),
@@ -836,7 +834,7 @@ mod tests {
                 ..Default::default()
             }),
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.2:15008",
             }),
@@ -859,7 +857,7 @@ mod tests {
                 ..Default::default()
             }),
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
                 destination: "127.0.0.2:80",
             }),
@@ -882,7 +880,7 @@ mod tests {
                 ..Default::default()
             }),
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.2:15008",
             }),
@@ -911,7 +909,7 @@ mod tests {
             }),
             // Even though source has a waypoint, we don't use it
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
                 destination: "127.0.0.1:80",
             }),
@@ -940,7 +938,7 @@ mod tests {
             }),
             // Should use the waypoint
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.10:15008",
             }),
@@ -974,7 +972,7 @@ mod tests {
             }),
             // Should use the waypoint
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "[ff06::c3]:80",
                 destination: "127.0.0.11:15008",
             }),
@@ -1009,7 +1007,7 @@ mod tests {
             }),
             // Should use the waypoint
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "127.0.0.3:80",
                 destination: "127.0.0.10:15008",
             }),
@@ -1094,7 +1092,7 @@ mod tests {
                 }),
             ],
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
                 destination: "127.0.0.2:1234",
             }),
@@ -1149,7 +1147,7 @@ mod tests {
             xds.clone(),
             // Traffic to the service should go to the pod in the service
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 destination: "127.0.0.2:80",
                 hbone_destination: "",
             }),
@@ -1170,7 +1168,7 @@ mod tests {
             xds.clone(),
             // Traffic to the service should go to the pod in the service
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 destination: "127.0.0.2:80",
                 hbone_destination: "",
             }),
@@ -1201,7 +1199,7 @@ mod tests {
             "127.0.0.2:80",
             workload.clone(),
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
                 destination: "127.0.0.2:80",
             }),
@@ -1213,7 +1211,7 @@ mod tests {
             "[ff06::c3]:80",
             workload.clone(),
             Some(ExpectedRequest {
-                protocol: ClientProtocol::TCP,
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
                 destination: "[ff06::c3]:80",
             }),
@@ -1265,7 +1263,7 @@ mod tests {
             "127.0.0.3:80",
             vec![svc(IpFamilies::Ipv6Only), workload.clone()],
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "[ff06::c3]:80",
                 destination: "[ff06::c3]:15008",
             }),
@@ -1277,7 +1275,7 @@ mod tests {
             "127.0.0.3:80",
             vec![svc(IpFamilies::Ipv4Only), workload.clone()],
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.2:15008",
             }),
@@ -1289,7 +1287,7 @@ mod tests {
             "127.0.0.3:80",
             vec![svc(IpFamilies::Dual), workload.clone()],
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "127.0.0.2:80",
                 destination: "127.0.0.2:15008",
             }),
@@ -1301,7 +1299,7 @@ mod tests {
             "[::3]:80",
             vec![svc(IpFamilies::Dual), workload.clone()],
             Some(ExpectedRequest {
-                protocol: ClientProtocol::HBONE,
+                protocol: OutboundProtocol::HBONE,
                 hbone_destination: "[ff06::c3]:80",
                 destination: "[ff06::c3]:15008",
             }),
@@ -1334,7 +1332,7 @@ mod tests {
 
     #[derive(PartialEq, Debug)]
     struct ExpectedRequest<'a> {
-        protocol: ClientProtocol,
+        protocol: OutboundProtocol,
         hbone_destination: &'a str,
         destination: &'a str,
     }

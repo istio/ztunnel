@@ -225,7 +225,7 @@ async fn run_requests_test(
         None
     };
     tokio::spawn(echo.run());
-    testapp::with_app(cfg, |app| async move {
+    testapp::with_app(cfg, async move |app| {
         let dst = match SocketAddr::from_str(target) {
             Ok(s) => DestinationAddr::Ip(s),
             Err(_) if target.contains(':') => {
@@ -324,7 +324,7 @@ async fn test_hostname_request_local() {
 
 #[tokio::test]
 async fn test_stats_exist() {
-    testapp::with_app(test_config(), |app| async move {
+    testapp::with_app(test_config(), async move |app| {
         let metrics = app.metrics().await.unwrap();
         for metric in &[
             // Meta
@@ -375,7 +375,7 @@ async fn test_stats_exist() {
 async fn test_dns_metrics() {
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     tokio::spawn(echo.run());
-    testapp::with_app(test_config(), |app| async move {
+    testapp::with_app(test_config(), async move |app| {
         // Make a valid request that will be forwarded to the upstream resolver.
         _ = app.dns_request("www.google.com.", true, false).await;
 
@@ -415,7 +415,7 @@ async fn test_tcp_connections_metrics() {
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
-    testapp::with_app(test_config(), |app| async move {
+    testapp::with_app(test_config(), async move |app| {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
         let mut stream = app
             .socks5_connect(
@@ -476,7 +476,7 @@ async fn test_tcp_bytes_metrics() {
     let echo_addr = echo.address();
     tokio::spawn(echo.run());
     let cfg = test_config();
-    testapp::with_app(cfg, |app| async move {
+    testapp::with_app(cfg, async move |app| {
         let dst = helpers::with_ip(echo_addr, TEST_WORKLOAD_TCP.parse().unwrap());
         let mut stream = app
             .socks5_connect(

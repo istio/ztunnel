@@ -35,7 +35,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
-use ztunnel::state::workload::{ServerProtocol, Workload};
+use ztunnel::state::workload::{InboundProtocol, Workload};
 use ztunnel::state::{DemandProxyState, ProxyRbacContext, ProxyState};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::linux::{TestMode, WorkloadManager};
@@ -457,7 +457,7 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
         let lwl = LocalWorkload {
             workload: Workload {
                 workload_ips: vec![hbone_connection_ip(i)],
-                protocol: ServerProtocol::HBONE,
+                protocol: InboundProtocol::HBONE,
                 uid: strng::format!("cluster1//v1/Pod/default/remote{}", i),
                 name: strng::format!("workload-{}", i),
                 namespace: strng::format!("namespace-{}", i),
@@ -471,7 +471,7 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
     let lwl = LocalWorkload {
         workload: Workload {
             workload_ips: vec![],
-            protocol: ServerProtocol::HBONE,
+            protocol: InboundProtocol::HBONE,
             uid: "cluster1//v1/Pod/default/local-source".into(),
             name: "local-source".into(),
             namespace: "default".into(),
