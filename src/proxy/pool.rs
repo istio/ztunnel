@@ -610,8 +610,6 @@ mod test {
                 .unwrap()
         };
 
-        let start = Instant::now();
-
         let c = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
         let mut c = TokioH2Stream::new(c);
         c.write_all(b"abcde").await.unwrap();

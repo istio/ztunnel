@@ -230,7 +230,7 @@ mod namespaced {
         // represents workloads in the remote cluster.
         // Its a little weird because we do give it a namespaced/ip,
         // but that's because of how the tests infra works.
-        let local_remote_workload = manager
+        let _local_remote_workload = manager
             .workload_builder("local-remote-workload", "remote-node")
             .hbone()
             .network("remote".into())
@@ -326,7 +326,7 @@ mod namespaced {
             .await?;
 
         // Like local_remote_workload, but the network gateway is service addressed
-        let local_remote_workload_svc_gtw = manager
+        let _local_remote_workload_svc_gtw = manager
             .workload_builder("local-remote-workload-svc-gtw", "remote-node")
             .hbone()
             .network("remote".into())
