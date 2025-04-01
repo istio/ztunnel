@@ -33,7 +33,7 @@ use crate::metrics::DefaultedUnknown;
 use crate::proxy::{self, HboneAddress};
 
 use crate::state::service::ServiceDescription;
-use crate::state::workload::Workload;
+use crate::state::workload::{Protocol, Workload};
 use crate::strng::{RichStrng, Strng};
 
 #[derive(Debug)]
@@ -344,9 +344,9 @@ impl Metrics {
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
 pub struct ConnectionResult {
     // Src address and name
-    src: (SocketAddr, Option<RichStrng>),
+    src: (SocketAddr, Option<RichStrng>, Option<Protocol>),
     // Dst address and name
-    dst: (SocketAddr, Option<RichStrng>),
+    dst: (SocketAddr, Option<RichStrng>, Option<Protocol>),
     hbone_target: Option<HboneAddress>,
     start: Instant,
 
@@ -435,10 +435,15 @@ impl ConnectionResult {
         metrics: Arc<Metrics>,
     ) -> Self {
         // for src and dest, try to get pod name but fall back to "canonical service"
-        let mut src = (src, conn.source.as_ref().map(|wl| wl.name.clone().into()));
+        let mut src = (
+            src,
+            conn.source.as_ref().map(|wl| wl.name.clone().into()),
+            conn.source.as_ref().map(|wl| wl.protocol),
+        );
         let mut dst = (
             dst,
             conn.destination.as_ref().map(|wl| wl.name.clone().into()),
+            conn.destination.as_ref().map(|wl| wl.protocol),
         );
         let tl = CommonTrafficLabels::from(conn);
         metrics.connection_opens.get_or_create(&tl).inc();
@@ -454,6 +459,7 @@ impl ConnectionResult {
 
             src.addr = %src.0,
             src.workload = src.1.as_deref().map(to_value),
+            src.protocol = src.2.as_ref().map(display),
             src.namespace = tl.source_workload_namespace.to_value(),
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
@@ -461,6 +467,7 @@ impl ConnectionResult {
             dst.hbone_addr = hbone_target.as_ref().map(display),
             dst.service = tl.destination_service.to_value(),
             dst.workload = dst.1.as_deref().map(to_value),
+            dst.protocol = dst.2.as_ref().map(display),
             dst.namespace = tl.destination_workload_namespace.to_value(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
@@ -548,6 +555,7 @@ impl ConnectionResult {
 
             src.addr = %self.src.0,
             src.workload = self.src.1.as_deref().map(to_value),
+            src.protocol = self.src.2.as_ref().map(display),
             src.namespace = tl.source_workload_namespace.to_value(),
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
@@ -555,6 +563,7 @@ impl ConnectionResult {
             dst.hbone_addr = self.hbone_target.as_ref().map(display),
             dst.service = tl.destination_service.to_value(),
             dst.workload = self.dst.1.as_deref().map(to_value),
+            dst.protocol = self.dst.2.as_ref().map(display),
             dst.namespace = tl.destination_workload_namespace.to_value(),
             dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 

@@ -60,6 +60,15 @@ pub enum Protocol {
     HBONE,
 }
 
+impl std::fmt::Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TCP => write!(f, "TCP"),
+            Self::HBONE => write!(f, "HBONE"),
+        }
+    }
+}
+
 impl From<xds::istio::workload::TunnelProtocol> for Protocol {
     fn from(value: xds::istio::workload::TunnelProtocol) -> Self {
         match value {
