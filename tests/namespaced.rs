@@ -200,7 +200,7 @@ mod namespaced {
     async fn double_hbone1() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(Shared);
 
-        let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
 
         // Service that resolves to workload with ew gateway
         // The 8080 port mappings don't actually matter because the
@@ -258,6 +258,7 @@ mod namespaced {
             .workload_builder("client", DEFAULT_NODE)
             .register()
             .await?;
+
         let echo_hbone_addr = SocketAddr::new(echo.ip(), 15008);
 
         // No need to run local_remote_workload, as it doesn't actually exist.
@@ -280,6 +281,37 @@ mod namespaced {
             &format!("{TEST_VIP}:8080"),
         )?;
 
+        let metrics = [
+            (CONNECTIONS_OPENED, 1),
+            (CONNECTIONS_CLOSED, 1),
+            (BYTES_RECV, REQ_SIZE),
+            (BYTES_SENT, HBONE_REQ_SIZE),
+        ];
+        verify_metrics(&zt, &metrics, &source_labels()).await;
+
+        let sent = format!("{REQ_SIZE}");
+        let recv = format!("{HBONE_REQ_SIZE}");
+        let dst_addr = format!("{}:15008", actual_ew_gtw.ip());
+        let want = HashMap::from([
+            ("scope", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "local-remote-workload"),
+            ("dst.hbone_addr", "remote.default.svc.cluster.local:8080"),
+            ("dst.addr", &dst_addr),
+            ("bytes_sent", &sent),
+            ("bytes_recv", &recv),
+            ("direction", "outbound"),
+            ("message", "connection complete"),
+            (
+                "src.identity",
+                "spiffe://cluster.local/ns/default/sa/client",
+            ),
+            (
+                "dst.identity",
+                "spiffe://cluster.local/ns/default/sa/actual-ew-gtw",
+            ),
+        ]);
+        telemetry::testing::assert_contains(want);
         Ok(())
     }
 
@@ -318,7 +350,7 @@ mod namespaced {
             .hbone()
             .service(
                 "default/ew-gtw-svc.default.svc.cluster.local",
-                15009u16, 
+                15009u16,
                 15008u16,
             )
             .network("remote".into())
