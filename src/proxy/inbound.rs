@@ -665,7 +665,7 @@ mod tests {
             self, DemandProxyState,
             service::{Endpoint, EndpointSet, Service},
             workload::{
-                ApplicationTunnel, GatewayAddress, NetworkAddress, InboundProtocol, Workload,
+                ApplicationTunnel, GatewayAddress, InboundProtocol, NetworkAddress, Workload,
                 application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
             },
         },

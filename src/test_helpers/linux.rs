@@ -421,7 +421,7 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    pub fn network (mut self, network: Strng) -> Self {
+    pub fn network(mut self, network: Strng) -> Self {
         self.w.workload.network = network;
         self
     }

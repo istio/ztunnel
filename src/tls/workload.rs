@@ -171,10 +171,7 @@ pub struct OutboundConnector {
 }
 
 impl OutboundConnector {
-    pub async fn connect<IO>(
-        self,
-        stream: IO,
-    ) -> Result<client::TlsStream<IO>, io::Error>
+    pub async fn connect<IO>(self, stream: IO) -> Result<client::TlsStream<IO>, io::Error>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {

@@ -101,7 +101,6 @@ impl From<InboundProtocol> for OutboundProtocol {
     }
 }
 
-
 #[derive(
     Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize,
 )]

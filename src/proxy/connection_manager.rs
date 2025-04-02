@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 
 use crate::drain;
 use crate::drain::{DrainTrigger, DrainWatcher};
-use crate::state::workload::{OutboundProtocol, InboundProtocol};
+use crate::state::workload::{InboundProtocol, OutboundProtocol};
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, error, info, warn};

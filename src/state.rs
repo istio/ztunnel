@@ -74,7 +74,6 @@ pub struct Upstream {
 }
 
 impl Upstream {
-
     pub fn workload_socket_addr(&self) -> Option<SocketAddr> {
         self.selected_workload_ip
             .map(|ip| SocketAddr::new(ip, self.port))
@@ -778,12 +777,8 @@ impl DemandProxyState {
         resolution_mode: ServiceResolutionMode,
     ) -> Result<Option<Upstream>, Error> {
         let upstream = {
-            self.read().find_upstream_from_host(
-                source_workload,
-                host,
-                port,
-                resolution_mode,
-            )
+            self.read()
+                .find_upstream_from_host(source_workload, host, port, resolution_mode)
             // Drop the lock
         };
         // tracing::trace!(%addr, ?upstream, "fetch_upstream");
@@ -821,7 +816,7 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
-        let selected_workload_ip  = self
+        let selected_workload_ip = self
             .pick_workload_destination_or_resolve(
                 &wl,
                 source_workload,
