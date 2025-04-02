@@ -1034,9 +1034,7 @@ mod namespaced {
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
-
                 let tls_stream = connector.connect(tcp_stream).await.unwrap();
-
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
@@ -1099,9 +1097,7 @@ mod namespaced {
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
                     .unwrap();
-
                 let tls_stream = connector.connect(tcp_stream).await.unwrap();
-
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();
                 // spawn a task to poll the connection and drive the HTTP state
@@ -1183,7 +1179,6 @@ mod namespaced {
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
                     .unwrap();
-
                 let tls_stream = connector.connect(tcp_stream).await.unwrap();
                 let (mut request_sender, connection) =
                     builder.handshake(TokioIo::new(tls_stream)).await.unwrap();

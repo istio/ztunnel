@@ -253,7 +253,7 @@ impl OutboundConnection {
 
         // Spawn inner CONNECT tunnel
         let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-        let (mut sender, driver_task) =
+        let mut sender =
             super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, wl_key)
                 .await?;
         let http_request = self.create_hbone_request(remote_addr, req);
@@ -268,7 +268,6 @@ impl OutboundConnection {
         .await;
 
         let _ = drain_tx.send(true);
-        let _ = driver_task.await;
 
         res
     }

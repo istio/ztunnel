@@ -71,8 +71,6 @@ pub struct Upstream {
     pub service_sans: Vec<Strng>,
     /// If this was from a service, the service info.
     pub destination_service: Option<ServiceDescription>,
-    /// Use this port instead of the default one for the proxy protocol.
-    pub proxy_protocol_port_override: Option<u16>,
 }
 
 impl Upstream {
@@ -837,7 +835,6 @@ impl DemandProxyState {
             port,
             service_sans: svc.map(|s| s.subject_alt_names.clone()).unwrap_or_default(),
             destination_service: svc_desc,
-            proxy_protocol_port_override: None,
         };
         tracing::trace!(?res, "finalize_upstream");
         Ok(Some(res))
