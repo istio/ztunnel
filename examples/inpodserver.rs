@@ -25,8 +25,6 @@ const PROXY_WORKLOAD_INFO: &str = "PROXY_WORKLOAD_INFO";
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
-    use std::time::Duration;
-
     let uds = std::env::var("INPOD_UDS").unwrap();
     let pwi = match parse_proxy_workload_info() {
         Ok(pwi) => pwi,
@@ -52,7 +50,6 @@ async fn main() {
         .await
         .unwrap();
     sender.wait_forever().await.unwrap();
-    tokio::time::sleep(Duration::from_secs(99999999)).await;
 }
 
 fn parse_proxy_workload_info() -> Result<WorkloadInfo, Error> {

@@ -1015,35 +1015,35 @@ mod tests {
         .await;
     }
 
-    // #[tokio::test]
-    // async fn build_request_source_waypoint() {
-    //     run_build_request(
-    //         "127.0.0.2",
-    //         "127.0.0.1:80",
-    //         XdsAddressType::Workload(XdsWorkload {
-    //             uid: "cluster1//v1/Pod/default/my-pod".to_string(),
-    //             addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
-    //             waypoint: Some(xds::istio::workload::GatewayAddress {
-    //                 destination: Some(xds::istio::workload::gateway_address::Destination::(
-    //                     XdsNamespacedHostname {
-    //                         namespace: "".into(),
-    //                         hostname: "ew-gtw.default.svc.cluster.local".to_vec(),
-    //                     },
-    //                 )),
-    //                 hbone_mtls_port: 15008,
-    //             }),
-    //             ..Default::default()
-    //         }),
-    //         // Even though source has a waypoint, we don't use it
-    //         Some(ExpectedRequest {
-    //             protocol: OutboundProtocol::TCP,
-    //             hbone_destination: "",
-    //             destination: "127.0.0.1:80",
-    //         }),
-    //     )
-    //     .await;
-    // }
-    //
+    #[tokio::test]
+    async fn build_request_source_waypoint() {
+        run_build_request(
+            "127.0.0.2",
+            "127.0.0.1:80",
+            XdsAddressType::Workload(XdsWorkload {
+                uid: "cluster1//v1/Pod/default/my-pod".to_string(),
+                addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 2])],
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: [127, 0, 0, 10].to_vec(),
+                        },
+                    )),
+                    hbone_mtls_port: 15008,
+                }),
+                ..Default::default()
+            }),
+            // Even though source has a waypoint, we don't use it
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::TCP,
+                hbone_destination: "",
+                destination: "127.0.0.1:80",
+            }),
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn build_request_destination_waypoint() {
         run_build_request(
@@ -1274,8 +1274,8 @@ mod tests {
             xds.clone(),
             // Traffic to the service should go to the pod in the service
             Some(ExpectedRequest {
-                protocol: OutboundProtocol::TCP,
                 destination: "127.0.0.2:80",
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
             }),
         )
@@ -1295,8 +1295,8 @@ mod tests {
             xds.clone(),
             // Traffic to the service should go to the pod in the service
             Some(ExpectedRequest {
-                protocol: OutboundProtocol::TCP,
                 destination: "127.0.0.2:80",
+                protocol: OutboundProtocol::TCP,
                 hbone_destination: "",
             }),
         )

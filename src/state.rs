@@ -328,7 +328,7 @@ impl ProxyState {
         None
     }
 
-    pub fn find_upstream_from_service(
+    fn find_upstream_from_service(
         &self,
         source_workload: &Workload,
         svc_port: u16,
@@ -601,13 +601,13 @@ impl DemandProxyState {
         src_workload: &Workload,
         original_target_address: SocketAddr,
         ip_family_restriction: Option<IpFamily>,
-    ) -> Result<(Option<IpAddr>, Option<u16>), Error> {
+    ) -> Result<Option<IpAddr>, Error> {
         // If the user requested the pod by a specific IP, use that directly.
         if dst_workload
             .workload_ips
             .contains(&original_target_address.ip())
         {
-            return Ok((Some(original_target_address.ip()), None));
+            return Ok(Some(original_target_address.ip()));
         }
         // They may have 1 or 2 IPs (single/dual stack)
         // Ensure we are meeting the Service family restriction (if any is defined).
@@ -622,7 +622,7 @@ impl DemandProxyState {
             })
             .find_or_first(|ip| ip.is_ipv6() == original_target_address.is_ipv6())
         {
-            return Ok((Some(*ip), None));
+            return Ok(Some(*ip));
         }
         if dst_workload.hostname.is_empty() {
             if dst_workload.network_gateway.is_none() {
@@ -633,7 +633,7 @@ impl DemandProxyState {
                 return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
             } else {
                 // We can route through network gateway
-                return Ok((None, None));
+                return Ok(None);
             }
         }
         let ip = Box::pin(self.resolve_workload_address(
@@ -642,7 +642,7 @@ impl DemandProxyState {
             original_target_address,
         ))
         .await?;
-        Ok((Some(ip), None))
+        Ok(Some(ip))
     }
 
     async fn resolve_workload_address(
@@ -793,7 +793,6 @@ impl DemandProxyState {
             .await
     }
 
-    // Find/resolve all information about the target workload (or have it passthrough).
     pub async fn fetch_upstream(
         &self,
         network: Strng,
@@ -801,22 +800,19 @@ impl DemandProxyState {
         addr: SocketAddr,
         resolution_mode: ServiceResolutionMode,
     ) -> Result<Option<Upstream>, Error> {
-        // update cache?
         self.fetch_address(&network_addr(network.clone(), addr.ip()))
             .await;
-        // find upstream and select destination workload
         let upstream = {
             self.read()
                 .find_upstream(network, source_workload, addr, resolution_mode)
             // Drop the lock
         };
         tracing::trace!(%addr, ?upstream, "fetch_upstream");
-        // package into a finalize upstream and pick/resolve addresses
         self.finalize_upstream(source_workload, addr, upstream)
             .await
     }
 
-    pub async fn finalize_upstream(
+    async fn finalize_upstream(
         &self,
         source_workload: &Workload,
         original_target_address: SocketAddr,
@@ -827,8 +823,7 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
-
-        let (selected_workload_ip, _) = self
+        let selected_workload_ip  = self
             .pick_workload_destination_or_resolve(
                 &wl,
                 source_workload,
