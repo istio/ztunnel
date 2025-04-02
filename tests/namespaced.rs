@@ -271,7 +271,7 @@ mod namespaced {
         run_hbone_server(
             actual_ew_gtw.clone(),
             "actual-ew-gtw",
-            tcp::Mode::Forward(echo_hbone_addr.clone()),
+            tcp::Mode::Forward(echo_hbone_addr),
             b"".into(),
         )?;
 
