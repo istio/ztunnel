@@ -495,7 +495,7 @@ impl DemandProxyState {
     ) -> Result<(), proxy::AuthorizationRejectionError> {
         let wl = &ctx.dest_workload;
         let conn = &ctx.conn;
-        let state = self.state.read().unwrap();
+        let state = self.read();
 
         // We can get policies from namespace, global, and workload...
         let ns = state.policies.get_by_namespace(&wl.namespace);
@@ -667,7 +667,7 @@ impl DemandProxyState {
         debug!(%wl, "wait for workload");
 
         // Take a watch listener *before* checking state (so we don't miss anything)
-        let mut wl_sub = self.state.read().unwrap().workloads.new_subscriber();
+        let mut wl_sub = self.read().workloads.new_subscriber();
 
         debug!(%wl, "got sub, waiting for workload");
 
@@ -698,7 +698,7 @@ impl DemandProxyState {
     /// Finds the workload by workload information, as an arc.
     /// Note: this does not currently support on-demand.
     fn find_by_info(&self, wl: &WorkloadInfo) -> Option<Arc<Workload>> {
-        self.state.read().unwrap().workloads.find_by_info(wl)
+        self.read().workloads.find_by_info(wl)
     }
 
     // fetch_workload_by_address looks up a Workload by address.
@@ -708,21 +708,21 @@ impl DemandProxyState {
     pub async fn fetch_workload_by_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload");
-        if let Some(wl) = self.state.read().unwrap().workloads.find_address(addr) {
+        if let Some(wl) = self.read().workloads.find_address(addr) {
             return Some(wl);
         }
         if !self.supports_on_demand() {
             return None;
         }
         self.fetch_on_demand(addr.to_string().into()).await;
-        self.state.read().unwrap().workloads.find_address(addr)
+        self.read().workloads.find_address(addr)
     }
 
     // only support workload
     pub async fn fetch_workload_by_uid(&self, uid: &Strng) -> Option<Arc<Workload>> {
         // Wait for it on-demand, *if* needed
         debug!(%uid, "fetch workload");
-        if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
+        if let Some(wl) = self.read().workloads.find_uid(uid) {
             return Some(wl);
         }
         if !self.supports_on_demand() {
@@ -792,7 +792,7 @@ impl DemandProxyState {
         let (res, target_address) = match &gw_address.destination {
             Destination::Address(ip) => {
                 let addr = SocketAddr::new(ip.address, gw_address.hbone_mtls_port);
-                let us = self.state.read().unwrap().find_upstream(
+                let us = self.read().find_upstream(
                     ip.network.clone(),
                     source_workload,
                     addr,
@@ -880,7 +880,7 @@ impl DemandProxyState {
     pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
-        if let Some(address) = self.state.read().unwrap().find_address(network_addr) {
+        if let Some(address) = self.read().find_address(network_addr) {
             return Some(address);
         }
         if !self.supports_on_demand() {
@@ -888,7 +888,7 @@ impl DemandProxyState {
         }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(network_addr.to_string().into()).await;
-        self.state.read().unwrap().find_address(network_addr)
+        self.read().find_address(network_addr)
     }
 
     /// Looks for the given hostname to find either a workload or service by IP. If not found
@@ -896,7 +896,7 @@ impl DemandProxyState {
     async fn fetch_hostname(&self, hostname: &NamespacedHostname) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%hostname, "fetch hostname");
-        if let Some(address) = self.state.read().unwrap().find_hostname(hostname) {
+        if let Some(address) = self.read().find_hostname(hostname) {
             return Some(address);
         }
         if !self.supports_on_demand() {
@@ -904,7 +904,7 @@ impl DemandProxyState {
         }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(hostname.to_string().into()).await;
-        self.state.read().unwrap().find_hostname(hostname)
+        self.read().find_hostname(hostname)
     }
 
     pub fn supports_on_demand(&self) -> bool {
