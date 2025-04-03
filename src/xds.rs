@@ -333,18 +333,7 @@ fn insert_service_endpoints(
 ) -> anyhow::Result<()> {
     for (namespaced_host, ports) in services {
         // Parse the namespaced hostname for the service.
-        let namespaced_host = match namespaced_host.split_once('/') {
-            Some((namespace, hostname)) => NamespacedHostname {
-                namespace: namespace.into(),
-                hostname: hostname.into(),
-            },
-            None => {
-                return Err(anyhow::anyhow!(
-                    "failed parsing service name: {namespaced_host}"
-                ));
-            }
-        };
-
+        let namespaced_host = NamespacedHostname::from_str(namespaced_host)?;
         services_state.insert_endpoint(
             namespaced_host,
             Endpoint {
