@@ -67,15 +67,15 @@ To use these vendored libraries and build ztunnel for either of these OS/arch co
 ##### For linux/x86_64
 
 ``` toml
-BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
-BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
+BORING_BSSL_FIPS_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
+BORING_BSSL_FIPS_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
 ```
 
 ##### For linux/arm64
 
 ``` toml
-BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_arm64", force = true, relative = true }
-BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
+BORING_BSSL_FIPS_PATH = { value = "vendor/boringssl-fips/linux_arm64", force = true, relative = true }
+BORING_BSSL_FIPS_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
 ```
 
 Once that's done, you should be able to build:
