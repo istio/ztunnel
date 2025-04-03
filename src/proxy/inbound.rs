@@ -201,10 +201,15 @@ impl Inbound {
                     ResponseFlags::AuthorizationPolicyDenied,
                 ))?;
 
-            // TODO if we support additional app tunnel protocols we should handle them here
-            let tunnel_protocol = ri.tunnel_request.as_ref().map(|tr| &tr.protocol);
-            let proxy_to_localhost = pi.cfg.localhost_app_tunnel;
-            let (src, dst) = if proxy_to_localhost && tunnel_protocol == Some(&Protocol::PROXY) {
+            // app tunnels should only bind to localhost to prevent
+            // being accessed without going through ztunnel
+            let localhost_tunnel = pi.cfg.localhost_app_tunnel
+                && ri
+                    .tunnel_request
+                    .as_ref()
+                    .map(|tr| tr.protocol.supports_localhost_send())
+                    .unwrap_or(false);
+            let (src, dst) = if localhost_tunnel {
                 // guess the family based on the destination address
                 let loopback = match ri.upstream_addr {
                     SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
