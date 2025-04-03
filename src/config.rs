@@ -752,7 +752,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         xds_headers: parse_headers(ISTIO_XDS_HEADER_PREFIX)?,
         ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
 
-        localhost_app_tunnel: parse_default(LOCALHOST_APP_TUNNEL, false)?,
+        localhost_app_tunnel: parse_default(LOCALHOST_APP_TUNNEL, true)?,
     })
 }
 
