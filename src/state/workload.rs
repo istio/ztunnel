@@ -155,6 +155,15 @@ pub mod application_tunnel {
         PROXY,
     }
 
+    impl Protocol {
+        pub fn supports_localhost_send(&self) -> bool {
+            match self {
+                Protocol::NONE => false,
+                Protocol::PROXY => true,
+            }
+        }
+    }
+
     impl From<XdsProtocol> for Protocol {
         fn from(value: XdsProtocol) -> Self {
             match value {

@@ -163,6 +163,7 @@ impl WorkloadManager {
             } else {
                 Some(true)
             },
+            localhost_app_tunnel: true,
             ..config::parse_config().unwrap()
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
