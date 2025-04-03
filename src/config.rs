@@ -106,6 +106,8 @@ const CERT_SYSTEM: &str = "SYSTEM";
 const PROXY_MODE_DEDICATED: &str = "dedicated";
 const PROXY_MODE_SHARED: &str = "shared";
 
+const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -288,6 +290,9 @@ pub struct Config {
 
     // Headers to be added to certificate requests
     pub ca_headers: MetadataVector,
+
+    // If true, when AppTunnel is set for
+    pub localhost_app_tunnel: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -746,6 +751,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         fake_self_inbound: false,
         xds_headers: parse_headers(ISTIO_XDS_HEADER_PREFIX)?,
         ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
+
+        localhost_app_tunnel: parse_default(LOCALHOST_APP_TUNNEL, false)?,
     })
 }
 

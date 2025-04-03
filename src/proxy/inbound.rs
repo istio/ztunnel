@@ -15,7 +15,7 @@
 use futures::stream::StreamExt;
 use futures_util::TryFutureExt;
 use http::{Method, Response, StatusCode};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
@@ -201,17 +201,39 @@ impl Inbound {
                     ResponseFlags::AuthorizationPolicyDenied,
                 ))?;
 
-            let orig_src = enable_original_source.then_some(ri.rbac_ctx.conn.src.ip());
+            // TODO if we support additional app tunnel protocols we should handle them here
+            let tunnel_protocol = ri.tunnel_request.as_ref().map(|tr| &tr.protocol);
+            let proxy_to_localhost = pi.cfg.localhost_app_tunnel;
+            let (src, dst) = if proxy_to_localhost && tunnel_protocol == Some(&Protocol::PROXY) {
+                // guess the family based on the destination address
+                let loopback = match ri.upstream_addr {
+                    SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                };
+
+                // we must bind the src to be localhost when sending to localhost,
+                // or various components could break traffic (RPF, iptables, ip route)
+                // the original source is preserved within PROXY protocol
+                (
+                    Some(loopback),
+                    SocketAddr::new(loopback, ri.upstream_addr.port()),
+                )
+            } else {
+                (
+                    enable_original_source.then_some(ri.rbac_ctx.conn.src.ip()),
+                    ri.upstream_addr,
+                )
+            };
+
             // Establish upstream connection between original source and destination
             // We are allowing a bind to the original source address locally even if the ip address isn't on this node.
-            let stream =
-                super::freebind_connect(orig_src, ri.upstream_addr, pi.socket_factory.as_ref())
-                    .await
-                    .map_err(Error::ConnectionFailed)
-                    .map_err(InboundFlagError::build(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        ResponseFlags::ConnectionFailure,
-                    ))?;
+            let stream = super::freebind_connect(src, dst, pi.socket_factory.as_ref())
+                .await
+                .map_err(Error::ConnectionFailed)
+                .map_err(InboundFlagError::build(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ResponseFlags::ConnectionFailure,
+                ))?;
             debug!("connected to: {}", ri.upstream_addr);
             Ok((conn_guard, stream))
         };
