@@ -15,11 +15,11 @@
 use crate::config::ConfigSource;
 use crate::config::{self, RootCert};
 use crate::state::service::{Endpoint, EndpointSet, Service};
-use crate::state::workload::Protocol::{HBONE, TCP};
+use crate::state::workload::InboundProtocol::{HBONE, TCP};
 use crate::state::workload::{
     GatewayAddress, NamespacedHostname, NetworkAddress, Workload, gatewayaddress,
 };
-use crate::state::workload::{HealthStatus, Protocol};
+use crate::state::workload::{HealthStatus, InboundProtocol};
 use crate::state::{DemandProxyState, ProxyState};
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
@@ -233,7 +233,7 @@ pub fn test_default_workload() -> Workload {
 fn test_custom_workload(
     ip_str: &str,
     name: &str,
-    protocol: Protocol,
+    protocol: InboundProtocol,
     echo_port: u16,
     services_vec: Vec<&Service>,
     hostname_only: bool,

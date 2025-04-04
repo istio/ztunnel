@@ -21,7 +21,7 @@ use crate::tls::{ServerCertProvider, TlsError};
 use futures_util::TryFutureExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, DnsName, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{
@@ -31,12 +31,20 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::strng::Strng;
 use crate::tls;
+use once_cell::sync::Lazy;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
 use tracing::{debug, trace};
+
+// Dummy domain used for TLS SNI because the actual domain isn't relevant
+// since we use SANs for identity verification.
+// dummy.istio.io is a valid domain, so the unwrap should never fail.
+static DUMMY_DOMAIN: Lazy<ServerName<'static>> =
+    Lazy::new(|| ServerName::DnsName(DnsName::try_from_str("dummy.istio.io").unwrap()));
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -163,19 +171,12 @@ pub struct OutboundConnector {
 }
 
 impl OutboundConnector {
-    pub async fn connect(
-        self,
-        stream: TcpStream,
-    ) -> Result<client::TlsStream<TcpStream>, io::Error> {
-        let dest = ServerName::IpAddress(
-            stream
-                .peer_addr()
-                .expect("peer_addr must be set")
-                .ip()
-                .into(),
-        );
+    pub async fn connect<IO>(self, stream: IO) -> Result<client::TlsStream<IO>, io::Error>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         let c = tokio_rustls::TlsConnector::from(self.client_config);
-        c.connect(dest, stream).await
+        c.connect(DUMMY_DOMAIN.clone(), stream).await
     }
 }
 
