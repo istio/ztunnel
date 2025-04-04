@@ -816,7 +816,7 @@ mod tests {
     #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
     #[tokio::test]
-    async fn test_find_inbound_upstream(
+    async fn test_resolve_inbound_target(
         target_waypoint: Waypoint<'_>,
         connection_dst: &str,
         hbone_dst: &str,
@@ -846,7 +846,7 @@ mod tests {
 
         let validate_destination =
             Inbound::validate_destination(&state, &conn, &local_wl, &hbone_addr).await;
-        let res = Inbound::find_inbound_upstream(&cfg, &state, &conn, &local_wl, &hbone_addr);
+        let res = Inbound::resolve_inbound_target(&cfg, &state, &conn, &local_wl, &hbone_addr);
 
         match want {
             Some((ip, port)) => {
