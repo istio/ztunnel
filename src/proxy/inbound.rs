@@ -26,7 +26,7 @@ use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, Res
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
-use crate::config::Config;
+use crate::config::{Config, Address as ConfigAddress};
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
@@ -45,7 +45,7 @@ use crate::state::{DemandProxyState, ProxyRbacContext};
 use crate::strng::Strng;
 use crate::tls::TlsError;
 
-pub(super) struct Inbound {
+pub struct Inbound {
     listener: socket::Listener,
     drain: DrainWatcher,
     pi: Arc<ProxyInputs>,
@@ -53,7 +53,7 @@ pub(super) struct Inbound {
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
+    pub async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -74,11 +74,12 @@ impl Inbound {
         })
     }
 
-    pub(super) fn address(&self) -> SocketAddr {
+    /// Returns the socket address this proxy is listening on.
+    pub fn address(&self) -> SocketAddr {
         self.listener.local_addr()
     }
 
-    pub(super) async fn run(self) {
+    pub async fn run(self) {
         let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
             local_workload: self.pi.local_workload_information.clone(),
@@ -232,13 +233,14 @@ impl Inbound {
 
             // Establish upstream connection between original source and destination
             // We are allowing a bind to the original source address locally even if the ip address isn't on this node.
-            let stream = super::freebind_connect(src, dst, pi.socket_factory.as_ref())
-                .await
-                .map_err(Error::ConnectionFailed)
-                .map_err(InboundFlagError::build(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    ResponseFlags::ConnectionFailure,
-                ))?;
+            let stream =
+                super::freebind_connect(src, dst, pi.socket_factory.as_ref())
+                    .await
+                    .map_err(Error::ConnectionFailed)
+                    .map_err(InboundFlagError::build(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        ResponseFlags::ConnectionFailure,
+                    ))?;
             debug!("connected to: {}", ri.upstream_addr);
             Ok((conn_guard, stream))
         };
@@ -323,7 +325,7 @@ impl Inbound {
             .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
         // Determine the next hop.
-        let (upstream_addr, tunnel_request, upstream_service) = Self::find_inbound_upstream(
+        let (upstream_addr, tunnel_request, upstream_service) = Self::resolve_inbound_target(
             &pi.cfg,
             &pi.state,
             &conn,
@@ -514,9 +516,12 @@ impl Inbound {
         Ok(())
     }
 
-    /// find_inbound_upstream determines the next hop for an inbound request.
-    #[expect(clippy::type_complexity)]
-    fn find_inbound_upstream(
+    /// Resolves the target address for an inbound request.
+    /// This handles both regular workload traffic and ztunnel's own services.
+    /// 
+    /// When ztunnel is the target workload (identified by workload name starting with "ztunnel"),
+    /// this function will handle routing to local services like metrics or metadata endpoints.
+    pub fn resolve_inbound_target(
         cfg: &Config,
         state: &DemandProxyState,
         conn: &Connection,
@@ -525,6 +530,43 @@ impl Inbound {
     ) -> Result<(SocketAddr, Option<TunnelRequest>, Vec<Arc<Service>>), Error> {
         // We always target the local workload IP as the destination. But we need to determine the port to send to.
         let target_ip = conn.dst.ip();
+        
+        // When ztunnel is serving its own services over mTLS - the target is the ztunnel itself
+        if local_workload.name.starts_with("ztunnel") {
+            // Special case for local services: forward to the appropriate local endpoint
+            let local_addr = match hbone_addr {
+                // For metrics endpoint - compare with stats_port from config
+                HboneAddress::SocketAddr(addr) if matches!(cfg.stats_addr, ConfigAddress::SocketAddr(s) if addr.port() == s.port())
+                    || matches!(cfg.stats_addr, ConfigAddress::Localhost(_, p) if addr.port() == p) => {
+                    match cfg.stats_addr {
+                        ConfigAddress::Localhost(ipv6_enabled, port) => {
+                            let localhost = if ipv6_enabled {
+                                "[::1]".parse().unwrap() // IPv6 localhost
+                            } else {
+                                "127.0.0.1".parse().unwrap() // IPv4 localhost
+                            };
+                            SocketAddr::new(localhost, port)
+                        },
+                        ConfigAddress::SocketAddr(addr) => {
+                            // For explicit socket address, we still want to ensure it's localhost
+                            if !addr.ip().is_loopback() {
+                                tracing::warn!("local service address {} is not localhost, forcing to localhost", addr);
+                                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
+                            } else {
+                                addr
+                            }
+                        }
+                    }
+                },
+                _ => return Err(Error::NoPortForServices(
+                    "ztunnel".to_string(),
+                    hbone_addr.port(),
+                )),
+            };
+            tracing::debug!("ztunnel local service request forwarded to {}", local_addr);
+            return Ok((local_addr, None, Vec::new()));
+        }
+        
         // First, fetch the actual target SocketAddr as well as all possible services this could be for.
         // Given they may request the pod directly, there may be multiple possible services; we will
         // select a final one (if any) later.

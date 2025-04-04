@@ -34,6 +34,23 @@ pub mod mock {
     };
 }
 
+/// Gets the Identity for ztunnel itself using the Downward API
+pub fn get_ztunnel_identity() -> Result<Identity, Error> {
+    Identity::from_downward_api()
+}
+
+/// Gets the WorkloadInfo for ztunnel itself using the Downward API
+pub fn get_ztunnel_workload_info() -> Result<crate::state::WorkloadInfo, Error> {
+    Identity::ztunnel_workload_info()
+}
+
+/// Gets ztunnel's own certificate using the provided SecretManager
+pub async fn get_ztunnel_cert(secret_mgr: &SecretManager) -> Result<std::sync::Arc<crate::tls::WorkloadCertificate>, Error> {
+    let id = get_ztunnel_identity()?;
+    tracing::info!("Fetching certificate for ztunnel's own identity: {}", id);
+    secret_mgr.fetch_certificate(&id).await
+}
+
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum Error {
     #[error("failed to create CSR: {0}")]
@@ -54,6 +71,8 @@ pub enum Error {
     Forgotten,
     #[error("BUG: identity requested {0}, but only allowed {1:?}")]
     BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
+    #[error("Kubernetes Downward API configuration error: {0}")]
+    Configuration(String),
 }
 
 impl From<tls::Error> for Error {
