@@ -36,7 +36,7 @@ Rustls has support for plugging in various crypto providers to meet various need
 
 | Name                                               | How To Enable                                  |
 |----------------------------------------------------|------------------------------------------------|
-| [aws-lc]https://github.com/aws/aws-lc-rs)          | Default (or `--features tls-aws-lc`)           |
+| [aws-lc](https://github.com/aws/aws-lc-rs)         | Default (or `--features tls-aws-lc`)           |
 | [ring](https://github.com/briansmith/ring/)        | `--features tls-ring --no-default-features`    |
 | [boring](https://github.com/cloudflare/boring)     | `--features tls-boring --no-default-features`  |
 | [openssl](https://github.com/tofay/rustls-openssl) | `--features tls-openssl --no-default-features` |
