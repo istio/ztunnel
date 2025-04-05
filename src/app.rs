@@ -128,7 +128,7 @@ pub async fn build_with_cert(
         config.clone(),
         state.clone(),
         cert_manager.clone(),
-        proxy_metrics,
+        proxy_metrics.clone(),
         dns_metrics,
         drain_rx.clone(),
     )

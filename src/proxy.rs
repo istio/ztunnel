@@ -48,8 +48,9 @@ use crate::state::{DemandProxyState, WorkloadInfo};
 use crate::{config, identity, socket, tls};
 
 pub mod connection_manager;
+pub mod inbound;
+
 mod h2;
-mod inbound;
 mod inbound_passthrough;
 #[allow(non_camel_case_types)]
 pub mod metrics;
