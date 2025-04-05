@@ -710,19 +710,24 @@ fn build_response(status: StatusCode) -> Response<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Inbound, ProxyInputs};
-    use crate::{config, proxy::ConnectionManager, proxy::inbound::HboneAddress, strng};
-
+    use super::*;
+    use crate::config::{self, Address as ConfigAddress};
+    use crate::proxy::{
+        ConnectionManager,
+        DefaultSocketFactory,
+        LocalWorkloadInformation,
+    };
+    use crate::state::{
+        self, DemandProxyState,
+        service::{Endpoint, EndpointSet, Service},
+        workload::{
+            ApplicationTunnel, GatewayAddress, NetworkAddress, Protocol, Workload,
+            application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
+            NetworkMode,
+        },
+    };
     use crate::{
         rbac::Connection,
-        state::{
-            self, DemandProxyState,
-            service::{Endpoint, EndpointSet, Service},
-            workload::{
-                ApplicationTunnel, GatewayAddress, NetworkAddress, Protocol, Workload,
-                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
-            },
-        },
         test_helpers,
     };
     use std::{
@@ -732,8 +737,6 @@ mod tests {
     };
 
     use crate::identity::manager::mock::new_secret_manager;
-    use crate::proxy::DefaultSocketFactory;
-    use crate::proxy::LocalWorkloadInformation;
     use crate::proxy::h2::server::RequestParts;
     use crate::state::WorkloadInfo;
     use crate::state::workload::HealthStatus;
@@ -760,6 +763,9 @@ mod tests {
         port: Some(PROXY_PORT),
         protocol: AppProtocol::PROXY,
     });
+
+    const ZTUNNEL_POD_IP: &str = "10.0.0.4";
+    const METRICS_PORT: u16 = 15888;
 
     struct MockParts {
         method: Method,
@@ -966,7 +972,6 @@ mod tests {
                 "waypoint",
                 WAYPOINT_POD_IP,
                 Waypoint::None,
-                // the waypoint's _workload_ gets the app tunnel field
                 server_waypoint.app_tunnel(),
             ),
             ("client", CLIENT_POD_IP, Waypoint::None, None),
@@ -982,6 +987,7 @@ mod tests {
             namespace: "default".into(),
             service_account: strng::format!("service-account-{name}"),
             application_tunnel: app_tunnel,
+            network_mode: NetworkMode::Standard,
             ..test_helpers::test_default_workload()
         });
 
@@ -1044,5 +1050,91 @@ mod tests {
                 hbone_mtls_port: 15008,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn test_ztunnel_metrics_routing() {
+        let state = test_state(Waypoint::None).expect("state setup");
+        let mut cfg = config::parse_config().unwrap();
+        
+        // Configure metrics endpoint
+        cfg.stats_addr = ConfigAddress::SocketAddr(SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            METRICS_PORT,
+        ));
+
+        let conn = Connection {
+            src_identity: None,
+            src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
+            dst_network: "".into(),
+            dst: format!("{ZTUNNEL_POD_IP}:15008").parse().unwrap(),
+        };
+
+        let local_wl = Arc::new(Workload {
+            name: "ztunnel-abc123".into(),
+            namespace: "istio-system".into(),
+            service_account: "ztunnel".into(),
+            waypoint: None,
+            protocol: Protocol::HBONE,
+            network: "".into(),
+            workload_ips: vec![conn.dst.ip()],
+            status: HealthStatus::Healthy,
+            workload_type: "pod".into(),
+            canonical_name: "ztunnel".into(),
+            canonical_revision: "latest".into(),
+            node: "test-node".into(),
+            native_tunnel: false,
+            authorization_policies: vec![],
+            uid: "ztunnel-abc123".into(),
+            network_gateway: None,
+            network_mode: NetworkMode::Standard,
+            trust_domain: "cluster.local".into(),
+            workload_name: "ztunnel".into(),
+            hostname: "".into(),
+            application_tunnel: None,
+            cluster_id: "Kubernetes".into(),
+            locality: Default::default(),
+            services: vec![],
+            capacity: 1,
+        });
+
+        // Invalid port case
+        let invalid_hbone_addr = HboneAddress::SocketAddr(
+            format!("{ZTUNNEL_POD_IP}:9999").parse().unwrap()
+        );
+
+        let err = Inbound::resolve_inbound_target(
+            &cfg,
+            &state,
+            &conn,
+            &local_wl,
+            &invalid_hbone_addr,
+        ).unwrap_err();
+
+        if let Error::NoPortForServices(name, port) = err {
+            assert_eq!(name, "ztunnel", "Error should reference ztunnel service");
+            assert_eq!(port, 9999, "Error should contain the invalid port");
+        } else {
+            panic!("Expected Error::NoPortForServices variant for invalid port");
+        }
+
+        // Valid metrics endpoint routing
+        let valid_hbone_addr = HboneAddress::SocketAddr(
+            format!("{ZTUNNEL_POD_IP}:{METRICS_PORT}").parse().unwrap()
+        );
+
+        let (addr, tunnel_req, services) = Inbound::resolve_inbound_target(
+            &cfg,
+            &state,
+            &conn,
+            &local_wl,
+            &valid_hbone_addr,
+        ).expect("resolution should succeed for valid port");
+
+        // Should route to the original ztunnel IP with metrics port
+        assert_eq!(addr.ip(), conn.dst.ip(), "Target IP should match ztunnel IP");
+        assert_eq!(addr.port(), METRICS_PORT, "Target port should be metrics port");
+        assert!(tunnel_req.is_none(), "No tunnel request should be present");
+        assert!(services.is_empty(), "No services should be returned");
     }
 }

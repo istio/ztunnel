@@ -1222,4 +1222,81 @@ mod tests {
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/sa/sa/"), Err(_));
         assert_matches!(Identity::from_str("spiffe://td/ns/ns/foobar/sa/"), Err(_));
     }
+
+    #[test]
+    fn test_ztunnel_identity_from_downward_api() {
+        // Clear required env vars to ensure clean state
+        unsafe {
+            std::env::remove_var("POD_NAMESPACE");
+            std::env::remove_var("POD_SERVICE_ACCOUNT");
+        }
+
+        let err = Identity::from_downward_api().unwrap_err();
+        if let Error::Configuration(msg) = err {
+            assert!(msg.contains("POD_NAMESPACE"), "Error should mention missing POD_NAMESPACE");
+        } else {
+            panic!("Expected Error::Configuration variant for missing env vars");
+        }
+
+        unsafe {
+            std::env::set_var("POD_NAMESPACE", "istio-system");
+            std::env::set_var("POD_SERVICE_ACCOUNT", "ztunnel");
+        }
+
+        let id = Identity::from_downward_api().unwrap();
+        if let Identity::Spiffe { 
+            trust_domain,
+            namespace,
+            service_account,
+        } = id {
+            assert_eq!(trust_domain, "cluster.local", "trust_domain should be cluster.local");
+            assert_eq!(namespace, "istio-system", "namespace should match POD_NAMESPACE");
+            assert_eq!(service_account, "ztunnel", "service_account should match POD_SERVICE_ACCOUNT");
+        } else {
+            panic!("Expected Identity::Spiffe variant for valid env vars");
+        }
+
+        // Clean up env vars
+        unsafe {
+            std::env::remove_var("POD_NAMESPACE");
+            std::env::remove_var("POD_SERVICE_ACCOUNT");
+        }
+    }
+
+    #[test]
+    fn test_ztunnel_workload_info() {
+        // Clear required env vars to ensure clean state
+        unsafe {
+            std::env::remove_var("POD_NAME");
+            std::env::remove_var("POD_NAMESPACE");
+            std::env::remove_var("POD_SERVICE_ACCOUNT");
+        }
+
+        // Test error case first
+        let err = Identity::ztunnel_workload_info().unwrap_err();
+        if let Error::Configuration(msg) = err {
+            assert!(msg.contains("POD_NAME"), "Error should mention missing POD_NAME");
+        } else {
+            panic!("Expected Error::Configuration variant for missing env vars");
+        }
+
+        // Second test: Success case - set env vars and verify workload info
+        unsafe {
+            std::env::set_var("POD_NAME", "ztunnel-abc123");
+            std::env::set_var("POD_NAMESPACE", "istio-system");
+            std::env::set_var("POD_SERVICE_ACCOUNT", "ztunnel");
+        }
+
+        let info = Identity::ztunnel_workload_info().unwrap();
+        assert_eq!(info.name, "ztunnel-abc123", "name should match POD_NAME");
+        assert_eq!(info.namespace, "istio-system", "namespace should match POD_NAMESPACE");
+        assert_eq!(info.service_account, "ztunnel", "service_account should match POD_SERVICE_ACCOUNT");
+
+        // Clean up env vars
+        unsafe {
+            std::env::remove_var("POD_NAME");
+            std::env::remove_var("POD_NAMESPACE");
+            std::env::remove_var("POD_SERVICE_ACCOUNT");
+        }
+    }
 }
