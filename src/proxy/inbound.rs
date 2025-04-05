@@ -531,31 +531,14 @@ impl Inbound {
         // We always target the local workload IP as the destination. But we need to determine the port to send to.
         let target_ip = conn.dst.ip();
         
-        // When ztunnel is serving its own services over mTLS - the target is the ztunnel itself
+        // When ztunnel is serving its own metrics over mTLS - the target is the ztunnel itself
         if local_workload.name.starts_with("ztunnel") {
-            // Special case for local services: forward to the appropriate local endpoint
-            let local_addr = match hbone_addr {
-                // For metrics endpoint - compare with stats_port from config
+            let metrics_port = match hbone_addr {
                 HboneAddress::SocketAddr(addr) if matches!(cfg.stats_addr, ConfigAddress::SocketAddr(s) if addr.port() == s.port())
                     || matches!(cfg.stats_addr, ConfigAddress::Localhost(_, p) if addr.port() == p) => {
                     match cfg.stats_addr {
-                        ConfigAddress::Localhost(ipv6_enabled, port) => {
-                            let localhost = if ipv6_enabled {
-                                "[::1]".parse().unwrap() // IPv6 localhost
-                            } else {
-                                "127.0.0.1".parse().unwrap() // IPv4 localhost
-                            };
-                            SocketAddr::new(localhost, port)
-                        },
-                        ConfigAddress::SocketAddr(addr) => {
-                            // For explicit socket address, we still want to ensure it's localhost
-                            if !addr.ip().is_loopback() {
-                                tracing::warn!("local service address {} is not localhost, forcing to localhost", addr);
-                                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
-                            } else {
-                                addr
-                            }
-                        }
+                        ConfigAddress::Localhost(_, port) => port,
+                        ConfigAddress::SocketAddr(addr) => addr.port(),
                     }
                 },
                 _ => return Err(Error::NoPortForServices(
@@ -563,8 +546,10 @@ impl Inbound {
                     hbone_addr.port(),
                 )),
             };
-            tracing::debug!("ztunnel local service request forwarded to {}", local_addr);
-            return Ok((local_addr, None, Vec::new()));
+            
+            let target = SocketAddr::new(target_ip, metrics_port);
+            tracing::debug!("ztunnel metrics request forwarded to {}", target);
+            return Ok((target, None, Vec::new()));
         }
         
         // First, fetch the actual target SocketAddr as well as all possible services this could be for.
