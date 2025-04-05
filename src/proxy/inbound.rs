@@ -53,7 +53,7 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    pub async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
+    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -521,7 +521,7 @@ impl Inbound {
     /// 
     /// When ztunnel is the target workload (identified by workload name starting with "ztunnel"),
     /// this function will handle routing to local services like metrics or metadata endpoints.
-    pub fn resolve_inbound_target(
+    pub(super) fn resolve_inbound_target(
         cfg: &Config,
         state: &DemandProxyState,
         conn: &Connection,
@@ -647,7 +647,7 @@ impl Inbound {
 }
 
 #[derive(Debug)]
-struct TunnelRequest {
+pub(super) struct TunnelRequest {
     tunnel_target: SocketAddr,
     protocol: Protocol,
 }
