@@ -1,12 +1,14 @@
 #!/bin/bash
 
+set -e
+
 # Specifically using RSA as this makes the signing deterministic, which is
 # useful for tests.
 
 if [ ! -f ca-key.pem ]; then
     # Only gen if doesn't exist. As some tests depend on the existing content of root cert.
     openssl genrsa -f4 -out ca-key.pem
-    openssl req -x509 -new -nodes -key "ca-key.pem" -days 100000 -out "root-cert.pem" -subj "/O=cluster.local"
+    openssl req -x509 -new -nodes -addext "keyUsage = keyCertSign"  -key "ca-key.pem" -days 100000 -out "root-cert.pem" -subj "/O=cluster.local"
 fi
 
 openssl req -x509 -new -nodes -CA "root-cert.pem" -CAkey "ca-key.pem" -newkey rsa:2048 -keyout "intermediary-key.pem" -days 100000 -out "intermediary-cert.pem" -subj "/O=intermediary.cluster.local"
