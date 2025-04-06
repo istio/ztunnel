@@ -129,7 +129,9 @@ impl Identity {
 
     /// Creates a new proxy Identity using the Kubernetes Downward API environment variables.
     pub fn from_downward_api() -> Result<Self, Error> {
-        const TRUST_DOMAIN: &str = "cluster.local";
+        let trust_domain = std::env::var("TRUST_DOMAIN")
+            .or_else(|_| std::env::var("CLUSTER_DOMAIN"))
+            .unwrap_or_else(|_| "cluster.local".to_string());
         
         let namespace = std::env::var("POD_NAMESPACE")
             .map_err(|_| Error::Configuration("POD_NAMESPACE environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath=metadata.namespace".to_string()))?;
@@ -138,21 +140,22 @@ impl Identity {
             return Err(Error::Configuration("Empty namespace from Downward API".to_string()));
         }
 
-        let service_account = std::env::var("POD_SERVICE_ACCOUNT")
-            .map_err(|_| Error::Configuration("POD_SERVICE_ACCOUNT environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath=spec.serviceAccountName".to_string()))?;
+        let service_account = std::env::var("SERVICE_ACCOUNT")
+            .map_err(|_| Error::Configuration("SERVICE_ACCOUNT environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath=spec.serviceAccountName".to_string()))?;
 
         if service_account.is_empty() {
             return Err(Error::Configuration("Empty service account from Downward API".to_string()));
         }
         
         tracing::info!(
+            trust_domain = %trust_domain,
             namespace = %namespace,
             service_account = %service_account,
             "Created ztunnel identity from Downward API"
         );
         
         Ok(Identity::Spiffe {
-            trust_domain: TRUST_DOMAIN.into(),
+            trust_domain: trust_domain.into(),
             namespace: namespace.into(),
             service_account: service_account.into(),
         })
@@ -162,7 +165,7 @@ impl Identity {
     /// The following environment variables must be set in the Pod spec using the Downward API:
     /// - POD_NAME: metadata.name
     /// - POD_NAMESPACE: metadata.namespace 
-    /// - POD_SERVICE_ACCOUNT: spec.serviceAccountName
+    /// - SERVICE_ACCOUNT: spec.serviceAccountName
     pub fn ztunnel_workload_info() -> Result<WorkloadInfo, Error> {
         let name = std::env::var("POD_NAME")
             .map_err(|_| Error::Configuration("POD_NAME environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath=metadata.name".to_string()))?;
@@ -178,8 +181,8 @@ impl Identity {
             return Err(Error::Configuration("Empty namespace from Downward API".to_string()));
         }
         
-        let service_account = std::env::var("POD_SERVICE_ACCOUNT")
-            .map_err(|_| Error::Configuration("POD_SERVICE_ACCOUNT environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath=spec.serviceAccountName".to_string()))?;
+        let service_account = std::env::var("SERVICE_ACCOUNT")
+            .map_err(|_| Error::Configuration("SERVICE_ACCOUNT environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath=spec.serviceAccountName".to_string()))?;
 
         if service_account.is_empty() {
             return Err(Error::Configuration("Empty service account from Downward API".to_string()));
@@ -1225,6 +1228,7 @@ mod tests {
 
     #[test]
     fn test_ztunnel_identity_from_downward_api() {
+        // First test: No environment variables set - should fail due to missing POD_NAMESPACE
         let err = Identity::from_downward_api().unwrap_err();
         if let Error::Configuration(msg) = err {
             assert!(msg.contains("POD_NAMESPACE"), "Error should mention missing POD_NAMESPACE");
@@ -1232,9 +1236,10 @@ mod tests {
             panic!("Expected Error::Configuration variant for missing env vars");
         }
 
+        // Second test: Set required vars but no trust domain - should use default "cluster.local"
         unsafe {
             std::env::set_var("POD_NAMESPACE", "istio-system");
-            std::env::set_var("POD_SERVICE_ACCOUNT", "ztunnel");
+            std::env::set_var("SERVICE_ACCOUNT", "ztunnel");
         }
 
         let id = Identity::from_downward_api().unwrap();
@@ -1243,14 +1248,29 @@ mod tests {
             namespace,
             service_account,
         } = id;
-        assert_eq!(trust_domain, "cluster.local", "trust_domain should be cluster.local");
+        assert_eq!(trust_domain, "cluster.local", "When no trust domain is set, should default to cluster.local");
         assert_eq!(namespace, "istio-system", "namespace should match POD_NAMESPACE");
-        assert_eq!(service_account, "ztunnel", "service_account should match POD_SERVICE_ACCOUNT");
+        assert_eq!(service_account, "ztunnel", "service_account should match SERVICE_ACCOUNT");
 
-        // Clean up env vars
+        // Third test: Set custom trust domain
+        unsafe {
+            std::env::set_var("TRUST_DOMAIN", "custom.local");
+        }
+
+        let id = Identity::from_downward_api().unwrap();
+        let Identity::Spiffe { 
+            trust_domain,
+            namespace,
+            service_account,
+        } = id;
+        assert_eq!(trust_domain, "custom.local", "When TRUST_DOMAIN is set, should use that value");
+        assert_eq!(namespace, "istio-system", "namespace should match POD_NAMESPACE");
+        assert_eq!(service_account, "ztunnel", "service_account should match SERVICE_ACCOUNT");
+
         unsafe {
             std::env::remove_var("POD_NAMESPACE");
-            std::env::remove_var("POD_SERVICE_ACCOUNT");
+            std::env::remove_var("SERVICE_ACCOUNT");
+            std::env::remove_var("TRUST_DOMAIN");
         }
     }
 
@@ -1266,19 +1286,18 @@ mod tests {
         unsafe {
             std::env::set_var("POD_NAME", "ztunnel-abc123");
             std::env::set_var("POD_NAMESPACE", "istio-system");
-            std::env::set_var("POD_SERVICE_ACCOUNT", "ztunnel");
+            std::env::set_var("SERVICE_ACCOUNT", "ztunnel");
         }
 
         let info = Identity::ztunnel_workload_info().unwrap();
         assert_eq!(info.name, "ztunnel-abc123", "name should match POD_NAME");
         assert_eq!(info.namespace, "istio-system", "namespace should match POD_NAMESPACE");
-        assert_eq!(info.service_account, "ztunnel", "service_account should match POD_SERVICE_ACCOUNT");
+        assert_eq!(info.service_account, "ztunnel", "service_account should match SERVICE_ACCOUNT");
 
-        // Clean up env vars
         unsafe {
             std::env::remove_var("POD_NAME");
             std::env::remove_var("POD_NAMESPACE");
-            std::env::remove_var("POD_SERVICE_ACCOUNT");
+            std::env::remove_var("SERVICE_ACCOUNT");
         }
     }
 }
