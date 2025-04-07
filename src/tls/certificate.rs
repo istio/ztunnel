@@ -17,6 +17,7 @@ use crate::tls::{Error, IdentityVerifier, OutboundConnector};
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use itertools::Itertools;
+use std::{cmp, iter};
 
 use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -49,12 +50,14 @@ pub struct Expiration {
 pub struct WorkloadCertificate {
     /// cert is the leaf certificate
     pub cert: Certificate,
-    /// chain is the entire trust chain, excluding the leaf
+    /// chain is the entire trust chain, excluding the leaf and root
     pub chain: Vec<Certificate>,
-    pub private_key: PrivateKeyDer<'static>,
+    pub(in crate::tls) private_key: PrivateKeyDer<'static>,
 
-    /// precomputed roots
-    pub roots: Arc<RootCertStore>,
+    /// precomputed roots. This is used for verification
+    root_store: Arc<RootCertStore>,
+    /// original roots, used or debugging
+    pub roots: Vec<Certificate>,
 }
 
 pub fn identity_from_connection(conn: &server::ServerConnection) -> Option<Identity> {
@@ -204,6 +207,25 @@ fn parse_cert(mut cert: Vec<u8>) -> Result<Certificate, Error> {
     })
 }
 
+fn parse_cert_multi(mut cert: &[u8]) -> Result<Vec<Certificate>, Error> {
+    let mut reader = std::io::BufReader::new(Cursor::new(&mut cert));
+    let parsed: Result<Vec<_>, _> = rustls_pemfile::read_all(&mut reader).collect();
+    parsed
+        .map_err(|e| Error::CertificateParseError(e.to_string()))?
+        .into_iter()
+        .map(|p| {
+            let Item::X509Certificate(der) = p else {
+                return Err(Error::CertificateParseError("no certificate".to_string()));
+            };
+            let (_, cert) = x509_parser::parse_x509_certificate(&der)?;
+            Ok(Certificate {
+                der: der.clone(),
+                expiry: expiration(cert),
+            })
+        })
+        .collect()
+}
+
 fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
     let mut reader = std::io::BufReader::new(Cursor::new(&mut key));
     let parsed = rustls_pemfile::read_one(&mut reader)
@@ -218,32 +240,57 @@ fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
 impl WorkloadCertificate {
     pub fn new(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Result<WorkloadCertificate, Error> {
         let cert = parse_cert(cert.to_vec())?;
-        let chain = chain
-            .into_iter()
+
+        // The Istio API does something pretty unhelpful, by providing a single chain of certs.
+        // The last one is the root. However, there may be multiple roots concatenated in that last cert,
+        // so we will need to split them.
+        let Some(raw_root) = chain.last() else {
+            return Err(Error::InvalidRootCert(
+                "no root certificate present".to_string(),
+            ));
+        };
+        let roots = parse_cert_multi(raw_root)?;
+        let chain = chain[..cmp::max(0, chain.len() - 1)]
+            .iter()
             .map(|x| x.to_vec())
             .map(parse_cert)
             .collect::<Result<Vec<_>, _>>()?;
         let key: PrivateKeyDer = parse_key(key)?;
 
-        let mut roots = RootCertStore::empty();
-        roots.add_parsable_certificates(chain.iter().last().map(|c| c.der.clone()));
+        let mut roots_store = RootCertStore::empty();
+        roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
         Ok(WorkloadCertificate {
             cert,
             chain,
             private_key: key,
-            roots: Arc::new(roots),
+            roots,
+            root_store: Arc::new(roots_store),
         })
+    }
+
+    pub fn identity(&self) -> Option<Identity> {
+        self.cert.identity()
     }
 
     // TODO: can we precompute some or all of this?
 
-    pub(in crate::tls) fn cert_and_intermediates(&self) -> Vec<CertificateDer<'static>> {
+    pub(in crate::tls) fn cert_and_intermediates_der(&self) -> Vec<CertificateDer<'static>> {
         std::iter::once(self.cert.der.clone())
-            .chain(
-                self.chain[..self.chain.len() - 1]
-                    .iter()
-                    .map(|x| x.der.clone()),
-            )
+            .chain(self.chain.iter().map(|x| x.der.clone()))
+            .collect()
+    }
+
+    pub fn cert_and_intermediates(&self) -> Vec<Certificate> {
+        std::iter::once(self.cert.clone())
+            .chain(self.chain.clone())
+            .collect()
+    }
+
+    pub fn full_chain_and_roots(&self) -> Vec<String> {
+        self.cert_and_intermediates()
+            .into_iter()
+            .map(|c| c.as_pem())
+            .chain(iter::once(self.roots.iter().map(|c| c.as_pem()).join("\n")))
             .collect()
     }
 
@@ -252,7 +299,7 @@ impl WorkloadCertificate {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
         let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
-            self.roots.clone(),
+            self.root_store.clone(),
             crate::tls::lib::provider(),
         )
         .build()?;
@@ -263,20 +310,26 @@ impl WorkloadCertificate {
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("server config must be valid")
             .with_client_cert_verifier(client_cert_verifier)
-            .with_single_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
+            .with_single_cert(
+                self.cert_and_intermediates_der(),
+                self.private_key.clone_key(),
+            )?;
         sc.alpn_protocols = vec![b"h2".into()];
         Ok(sc)
     }
 
     pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
-        let roots = self.roots.clone();
+        let roots = self.root_store.clone();
         let verifier = IdentityVerifier { roots, identity };
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("client config must be valid")
             .dangerous() // Customer verifier is requires "dangerous" opt-in
             .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_client_auth_cert(self.cert_and_intermediates(), self.private_key.clone_key())?;
+            .with_client_auth_cert(
+                self.cert_and_intermediates_der(),
+                self.private_key.clone_key(),
+            )?;
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;
