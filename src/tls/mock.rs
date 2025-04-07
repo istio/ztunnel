@@ -181,7 +181,7 @@ impl ServerCertProvider for MockServerCertProvider {
             .expect("server config must be valid")
             .with_no_client_auth()
             .with_single_cert(
-                self.0.cert_and_intermediates(),
+                self.0.cert_and_intermediates_der(),
                 self.0.private_key.clone_key(),
             )
             .unwrap();
