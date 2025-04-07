@@ -88,6 +88,7 @@ impl CaClient {
             .await
             .map_err(Box::new)?
             .into_inner();
+
         let leaf = resp
             .cert_chain
             .first()
@@ -101,12 +102,8 @@ impl CaClient {
         };
         let certs = tls::WorkloadCertificate::new(&private_key, leaf, chain)?;
         // Make the certificate actually matches the identity we requested.
-        if self.enable_impersonated_identity && certs.cert.identity().as_ref() != Some(id) {
-            error!(
-                "expected identity {:?}, got {:?}",
-                id,
-                certs.cert.identity()
-            );
+        if self.enable_impersonated_identity && certs.identity().as_ref() != Some(id) {
+            error!("expected identity {:?}, got {:?}", id, certs.identity());
             return Err(Error::SanError(id.to_owned()));
         }
         Ok(certs)
@@ -246,7 +243,7 @@ pub mod mock {
 
 #[cfg(test)]
 mod tests {
-    use std::iter;
+
     use std::time::Duration;
 
     use matches::assert_matches;
@@ -286,10 +283,7 @@ mod tests {
         );
 
         let res = test_ca_client_with_response(IstioCertificateResponse {
-            cert_chain: iter::once(certs.cert)
-                .chain(certs.chain)
-                .map(|c| c.as_pem())
-                .collect(),
+            cert_chain: certs.full_chain_and_roots(),
         })
         .await;
         assert_matches!(res, Err(Error::SanError(_)));
@@ -304,10 +298,7 @@ mod tests {
         );
 
         let res = test_ca_client_with_response(IstioCertificateResponse {
-            cert_chain: iter::once(certs.cert)
-                .chain(certs.chain)
-                .map(|c| c.as_pem())
-                .collect(),
+            cert_chain: certs.full_chain_and_roots(),
         })
         .await;
         assert_matches!(res, Ok(_));
