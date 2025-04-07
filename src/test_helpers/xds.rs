@@ -73,7 +73,7 @@ impl AdsServer {
             Duration::from_secs(0),
             Duration::from_secs(100),
         );
-        let root_cert = RootCert::Static(certs.chain.iter().map(|c| c.as_pem()).join("\n").into());
+        let root_cert = RootCert::Static(certs.roots.iter().map(|c| c.as_pem()).join("\n").into());
         let acceptor = tls::mock::MockServerCertProvider::new(certs);
         let listener_addr_string = "https://".to_string() + &server_addr.to_string();
         let mut tls_stream = crate::hyper_util::tls_server(acceptor, listener);
