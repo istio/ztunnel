@@ -295,7 +295,7 @@ mod namespaced {
         let want = HashMap::from([
             ("scope", "access"),
             ("src.workload", "client"),
-            ("dst.workload", "local-remote-workload"),
+            ("dst.workload", "actual-ew-gtw"),
             ("dst.hbone_addr", "remote.default.svc.cluster.local:8080"),
             ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),

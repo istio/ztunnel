@@ -447,10 +447,10 @@ impl OutboundConnection {
         // Check whether we are using an E/W gateway and sending cross network traffic
         if us.workload.network != source_workload.network {
             if let Some(ew_gtw) = &us.workload.network_gateway {
-                let (actual_destination, upstream_sans, final_sans) = {
+                let gtw_us = {
                     self.pi
                         .state
-                        .fetch_network_gateway(ew_gtw, &source_workload, target, &us)
+                        .fetch_network_gateway(ew_gtw, &source_workload, target)
                         .await?
                 };
 
@@ -465,11 +465,13 @@ impl OutboundConnection {
                     protocol: OutboundProtocol::DOUBLEHBONE,
                     source: source_workload,
                     hbone_target_destination,
-                    actual_destination_workload: Some(us.workload.clone()),
+                    actual_destination_workload: Some(gtw_us.workload.clone()),
                     intended_destination_service: us.destination_service.clone(),
-                    actual_destination,
-                    upstream_sans,
-                    final_sans,
+                    actual_destination: gtw_us.workload_socket_addr().ok_or(
+                        Error::NoValidDestination(Box::new((*gtw_us.workload).clone())),
+                    )?,
+                    upstream_sans: gtw_us.workload_and_services_san(),
+                    final_sans: us.service_sans(),
                 });
             } else {
                 // Do not try to send cross-network traffic without network gateway.
@@ -837,8 +839,8 @@ mod tests {
                         destination: Some(
                             xds::istio::workload::gateway_address::Destination::Address(
                                 XdsNetworkAddress {
-                                    network: "".to_string(),
-                                    address: vec![1, 2, 3, 4],
+                                    network: "remote".to_string(),
+                                    address: vec![10, 22, 1, 1],
                                 },
                             ),
                         ),
@@ -855,11 +857,17 @@ mod tests {
                     )]),
                     ..Default::default()
                 }),
+                XdsAddressType::Workload(XdsWorkload {
+                    uid: "cluster1//v1/Pod/default/ew-gtw".to_string(),
+                    addresses: vec![Bytes::copy_from_slice(&[10, 22, 1, 1])],
+                    network: "remote".to_string(),
+                    ..Default::default()
+                }),
             ],
             Some(ExpectedRequest {
                 protocol: OutboundProtocol::DOUBLEHBONE,
                 hbone_destination: "example.com:8080",
-                destination: "1.2.3.4:15009",
+                destination: "10.22.1.1:15009",
             }),
         )
         .await;

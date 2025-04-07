@@ -807,48 +807,57 @@ impl DemandProxyState {
     /// have workloads. That is, they could just be IPs without a corresponding workload.
     pub async fn fetch_network_gateway(
         &self,
-        gtw: &GatewayAddress,
+        gw_address: &GatewayAddress,
         source_workload: &Workload,
         original_destination_address: SocketAddr,
-        original_us: &Upstream,
-    ) -> Result<(SocketAddr, Vec<Identity>, Vec<Identity>), Error> {
-        match &gtw.destination {
-            Destination::Address(address) => Ok((
-                SocketAddr::from((address.address, gtw.hbone_mtls_port)),
-                original_us.workload_and_services_san(),
-                original_us.service_sans(),
-            )),
-            Destination::Hostname(host) => {
-                let us_gtw = match self.read().find_hostname(host) {
-                    Some(Address::Service(svc)) => self.read().find_upstream_from_service(
-                        source_workload,
-                        gtw.hbone_mtls_port,
-                        ServiceResolutionMode::Standard,
-                        svc,
-                    ),
-                    Some(Address::Workload(wl)) => Some((wl, gtw.hbone_mtls_port, None)),
-                    None => return Err(Error::NoHostname(host.to_string())),
-                };
-                let us_gtw = self
-                    .finalize_upstream(source_workload, original_destination_address, us_gtw)
-                    .await?
-                    .ok_or(Error::NoValidDestination(Box::new(
-                        (*original_us.workload).clone(),
-                    )))?;
-                Ok((
-                    SocketAddr::from((
-                        us_gtw
-                            .selected_workload_ip
-                            .ok_or(Error::NoValidDestination(Box::new(
-                                (*us_gtw.workload).clone(),
-                            )))?,
-                        us_gtw.port,
-                    )),
-                    us_gtw.workload_and_services_san(),
-                    original_us.service_sans(),
-                ))
+    ) -> Result<Upstream, Error> {
+        let (res, target_address) = match &gw_address.destination {
+            Destination::Address(ip) => {
+                let addr = SocketAddr::new(ip.address, gw_address.hbone_mtls_port);
+                let us = self.state.read().unwrap().find_upstream(
+                    ip.network.clone(),
+                    source_workload,
+                    addr,
+                    ServiceResolutionMode::Standard,
+                );
+                // If the workload references a network gateway by IP, use that IP as the destination.
+                // Note this means that an IPv6 call may be translated to IPv4 if the network
+                // gateway is specified as an IPv4 address.
+                // For this reason, the Hostname method is preferred which can adapt to the callers IP family.
+                (us, addr)
             }
-        }
+            Destination::Hostname(host) => {
+                let state = self.read();
+                match state.find_hostname(host) {
+                    Some(Address::Service(s)) => {
+                        let us = state.find_upstream_from_service(
+                            source_workload,
+                            gw_address.hbone_mtls_port,
+                            ServiceResolutionMode::Standard,
+                            s,
+                        );
+                        // For hostname, use the original_destination_address as the target so we can
+                        // adapt to the callers IP family.
+                        (us, original_destination_address)
+                    }
+                    Some(Address::Workload(w)) => {
+                        let us = Some((w, gw_address.hbone_mtls_port, None));
+                        (us, original_destination_address)
+                    }
+                    None => {
+                        return Err(Error::UnknownNetworkGateway(format!(
+                            "network gateway {} not found",
+                            host.hostname
+                        )));
+                    }
+                }
+            }
+        };
+        self.finalize_upstream(source_workload, target_address, res)
+            .await?
+            .ok_or_else(|| {
+                Error::UnknownNetworkGateway(format!("network gateway {:?} not found", gw_address))
+            })
     }
 
     async fn fetch_waypoint(
