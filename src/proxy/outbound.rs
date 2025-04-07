@@ -38,7 +38,6 @@ use crate::proxy::h2::{H2Stream, client::WorkloadKey};
 use crate::state::ServiceResolutionMode;
 use crate::state::service::ServiceDescription;
 use crate::state::workload::OutboundProtocol;
-use crate::state::workload::gatewayaddress::Destination;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
 use crate::{assertions, copy, proxy, socket};
 
@@ -446,40 +445,19 @@ impl OutboundConnection {
         };
 
         // Check whether we are using an E/W gateway and sending cross network traffic
-        if let Some(ew_gtw) = &us.workload.network_gateway {
-            if us.workload.network != source_workload.network {
+        if us.workload.network != source_workload.network {
+            if let Some(ew_gtw) = &us.workload.network_gateway {
+                let (actual_destination, upstream_sans, final_sans) = {
+                    self.pi
+                        .state
+                        .fetch_network_gateway(ew_gtw, &source_workload, target, &us)
+                        .await?
+                };
+
                 let svc = us
                     .destination_service
                     .as_ref()
                     .expect("Workloads with network gateways must be service addressed.");
-
-                let (actual_destination, upstream_sans, final_sans) = match &ew_gtw.destination {
-                    Destination::Address(address) => (
-                        SocketAddr::from((address.address, ew_gtw.hbone_mtls_port)),
-                        us.workload_and_services_san(),
-                        us.service_sans(),
-                    ),
-                    Destination::Hostname(host) => {
-                        let us_gtw = self
-                            .pi
-                            .state
-                            .fetch_upstream_by_host(
-                                &source_workload,
-                                host,
-                                ew_gtw.hbone_mtls_port,
-                                target,
-                                ServiceResolutionMode::Standard,
-                            )
-                            .await?
-                            .unwrap();
-                        (
-                            SocketAddr::from((us_gtw.selected_workload_ip.unwrap(), us_gtw.port)),
-                            us_gtw.workload_and_services_san(),
-                            us.service_sans(),
-                        )
-                    }
-                };
-
                 let hbone_target_destination =
                     Some(HboneAddress::SvcHostname(svc.hostname.clone(), us.port));
 
@@ -493,6 +471,9 @@ impl OutboundConnection {
                     upstream_sans,
                     final_sans,
                 });
+            } else {
+                // Do not try to send cross-network traffic without network gateway.
+                return Err(Error::NoValidDestination(Box::new((*us.workload).clone())));
             }
         }
 
@@ -787,6 +768,45 @@ mod tests {
                 hbone_destination: "",
                 destination: "1.2.3.4:80",
             }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_wrong_network() {
+        run_build_request_multi(
+            "127.0.0.1",
+            "127.0.0.3:80",
+            vec![
+                XdsAddressType::Service(XdsService {
+                    hostname: "example.com".to_string(),
+                    addresses: vec![XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vec![127, 0, 0, 3],
+                    }],
+                    ports: vec![Port {
+                        service_port: 80,
+                        target_port: 8080,
+                    }],
+                    ..Default::default()
+                }),
+                XdsAddressType::Workload(XdsWorkload {
+                    uid: "cluster1//v1/Pod/default/remote-pod".to_string(),
+                    addresses: vec![Bytes::copy_from_slice(&[10, 0, 0, 2])],
+                    network: "remote".to_string(),
+                    services: std::collections::HashMap::from([(
+                        "/example.com".to_string(),
+                        PortList {
+                            ports: vec![Port {
+                                service_port: 80,
+                                target_port: 8080,
+                            }],
+                        },
+                    )]),
+                    ..Default::default()
+                }),
+            ],
+            None,
         )
         .await;
     }

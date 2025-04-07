@@ -282,22 +282,6 @@ impl ProxyState {
             .ok_or_else(|| Error::NoHostname(hostname.to_string()))
     }
 
-    fn find_upstream_from_host(
-        &self,
-        source_workload: &Workload,
-        host: &NamespacedHostname,
-        port: u16,
-        resolution_mode: ServiceResolutionMode,
-    ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
-        let address = self.find_hostname(host)?;
-        match address {
-            Address::Service(svc) => {
-                self.find_upstream_from_service(source_workload, port, resolution_mode, svc)
-            }
-            Address::Workload(wl) => Some((wl, port, None)),
-        }
-    }
-
     fn find_upstream(
         &self,
         network: Strng,
@@ -768,24 +752,6 @@ impl DemandProxyState {
         self.read().workloads.find_uid(uid)
     }
 
-    pub async fn fetch_upstream_by_host(
-        &self,
-        source_workload: &Workload,
-        host: &NamespacedHostname,
-        port: u16,
-        original_target_address: SocketAddr,
-        resolution_mode: ServiceResolutionMode,
-    ) -> Result<Option<Upstream>, Error> {
-        let upstream = {
-            self.read()
-                .find_upstream_from_host(source_workload, host, port, resolution_mode)
-            // Drop the lock
-        };
-        // tracing::trace!(%addr, ?upstream, "fetch_upstream");
-        self.finalize_upstream(source_workload, original_target_address, upstream)
-            .await
-    }
-
     pub async fn fetch_upstream(
         &self,
         network: Strng,
@@ -833,6 +799,56 @@ impl DemandProxyState {
         };
         tracing::trace!(?res, "finalize_upstream");
         Ok(Some(res))
+    }
+
+    /// Returns destination address, upstream sans, and final sans, for
+    /// connecting to a remote workload through a gateway.
+    /// Would be nice to return this as an Upstream, but gateways don't necessarily
+    /// have workloads. That is, they could just be IPs without a corresponding workload.
+    pub async fn fetch_network_gateway(
+        &self,
+        gtw: &GatewayAddress,
+        source_workload: &Workload,
+        original_destination_address: SocketAddr,
+        original_us: &Upstream,
+    ) -> Result<(SocketAddr, Vec<Identity>, Vec<Identity>), Error> {
+        match &gtw.destination {
+            Destination::Address(address) => Ok((
+                SocketAddr::from((address.address, gtw.hbone_mtls_port)),
+                original_us.workload_and_services_san(),
+                original_us.service_sans(),
+            )),
+            Destination::Hostname(host) => {
+                let us_gtw = match self.read().find_hostname(host) {
+                    Some(Address::Service(svc)) => self.read().find_upstream_from_service(
+                        source_workload,
+                        gtw.hbone_mtls_port,
+                        ServiceResolutionMode::Standard,
+                        svc,
+                    ),
+                    Some(Address::Workload(wl)) => Some((wl, gtw.hbone_mtls_port, None)),
+                    None => return Err(Error::NoHostname(host.to_string())),
+                };
+                let us_gtw = self
+                    .finalize_upstream(source_workload, original_destination_address, us_gtw)
+                    .await?
+                    .ok_or(Error::NoValidDestination(Box::new(
+                        (*original_us.workload).clone(),
+                    )))?;
+                Ok((
+                    SocketAddr::from((
+                        us_gtw
+                            .selected_workload_ip
+                            .ok_or(Error::NoValidDestination(Box::new(
+                                (*us_gtw.workload).clone(),
+                            )))?,
+                        us_gtw.port,
+                    )),
+                    us_gtw.workload_and_services_san(),
+                    original_us.service_sans(),
+                ))
+            }
+        }
     }
 
     async fn fetch_waypoint(
