@@ -711,7 +711,7 @@ mod tests {
                 ApplicationTunnel,
                 GatewayAddress,
                 NetworkAddress,
-                Protocol,
+                InboundProtocol,
                 Workload,
                 NetworkMode,
                 HealthStatus,
