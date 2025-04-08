@@ -26,7 +26,7 @@ use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, Res
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
-use crate::config::{Config, Address as ConfigAddress};
+use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
@@ -531,27 +531,6 @@ impl Inbound {
         // We always target the local workload IP as the destination. But we need to determine the port to send to.
         let target_ip = conn.dst.ip();
         
-        // When ztunnel is serving its own metrics over mTLS - the target is the ztunnel itself
-        if local_workload.name.starts_with("ztunnel") {
-            let metrics_port = match hbone_addr {
-                HboneAddress::SocketAddr(addr) if matches!(cfg.stats_addr, ConfigAddress::SocketAddr(s) if addr.port() == s.port())
-                    || matches!(cfg.stats_addr, ConfigAddress::Localhost(_, p) if addr.port() == p) => {
-                    match cfg.stats_addr {
-                        ConfigAddress::Localhost(_, port) => port,
-                        ConfigAddress::SocketAddr(addr) => addr.port(),
-                    }
-                },
-                _ => return Err(Error::NoPortForServices(
-                    "ztunnel".to_string(),
-                    hbone_addr.port(),
-                )),
-            };
-            
-            let target = SocketAddr::new(target_ip, metrics_port);
-            tracing::debug!("ztunnel metrics request forwarded to {}", target);
-            return Ok((target, None, Vec::new()));
-        }
-        
         // First, fetch the actual target SocketAddr as well as all possible services this could be for.
         // Given they may request the pod directly, there may be multiple possible services; we will
         // select a final one (if any) later.
@@ -709,45 +688,46 @@ fn build_response(status: StatusCode) -> Response<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 mod tests {
-    use super::*;
-    use crate::config::{self, Address as ConfigAddress};
-    use crate::proxy::{
-        ConnectionManager,
-        DefaultSocketFactory,
-        LocalWorkloadInformation,
-    };
-    use crate::state::{
-        self, DemandProxyState,
-        service::{Endpoint, EndpointSet, Service},
-        workload::{
-            ApplicationTunnel, GatewayAddress, NetworkAddress, Protocol, Workload,
-            application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
-            NetworkMode,
-        },
-    };
+    use super::{Inbound, ProxyInputs};
     use crate::{
+        config,
+        identity::manager::mock::new_secret_manager,
+        proxy::{
+            ConnectionManager, 
+            DefaultSocketFactory,
+            LocalWorkloadInformation,
+            h2::server::RequestParts,
+            inbound::HboneAddress,
+        },
         rbac::Connection,
         state::{
-            self, DemandProxyState,
+            self,
+            DemandProxyState,
+            WorkloadInfo,
             service::{Endpoint, EndpointSet, Service},
             workload::{
-                ApplicationTunnel, GatewayAddress, InboundProtocol, NetworkAddress, Workload,
-                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
+                ApplicationTunnel,
+                GatewayAddress,
+                NetworkAddress,
+                Protocol,
+                Workload,
+                NetworkMode,
+                HealthStatus,
+                application_tunnel::Protocol as AppProtocol,
+                gatewayaddress::Destination,
             },
         },
+        strng,
         test_helpers,
     };
     use std::{
+        env,
         net::SocketAddr,
         sync::{Arc, RwLock},
         time::Duration,
     };
-
-    use crate::identity::manager::mock::new_secret_manager;
-    use crate::proxy::h2::server::RequestParts;
-    use crate::state::WorkloadInfo;
-    use crate::state::workload::HealthStatus;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use http::{Method, Uri};
     use prometheus_client::registry::Registry;
@@ -771,9 +751,6 @@ mod tests {
         port: Some(PROXY_PORT),
         protocol: AppProtocol::PROXY,
     });
-
-    const ZTUNNEL_POD_IP: &str = "10.0.0.4";
-    const METRICS_PORT: u16 = 15888;
 
     struct MockParts {
         method: Method,
@@ -958,18 +935,18 @@ mod tests {
         .map(|(name, vip, waypoint)| Service {
             name: name.into(),
             namespace: "default".into(),
-            hostname: strng::format!("{name}.default.svc.cluster.local"),
+            hostname: strng::new(&format!("{name}.default.svc.cluster.local")),
             vips: vec![NetworkAddress {
                 address: vip.parse().unwrap(),
                 network: "".into(),
             }],
             ports: std::collections::HashMap::from([(80u16, 8080u16)]),
             endpoints: EndpointSet::from_list([Endpoint {
-                workload_uid: strng::format!("cluster1//v1/Pod/default/{name}"),
+                workload_uid: strng::new(&format!("cluster1//v1/Pod/default/{name}")),
                 port: std::collections::HashMap::new(),
                 status: HealthStatus::Healthy,
             }]),
-            subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
+            subject_alt_names: vec![strng::new(&format!("{name}.default.svc.cluster.local"))],
             waypoint: waypoint.service_attached(),
             load_balancer: None,
             ip_families: None,
@@ -1008,13 +985,14 @@ mod tests {
 
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        Ok(DemandProxyState::new(
+        let res = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
             metrics,
-        ))
+        );
+        Ok(res)
     }
 
     // tells the test if we're using workload-attached or svc-attached waypoints
@@ -1039,7 +1017,7 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: strng::EMPTY,
+                    network: strng::new(""),
                     address: s.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
@@ -1052,97 +1030,11 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: strng::EMPTY,
+                    network: strng::new(""),
                     address: w.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
             })
         }
-    }
-
-    #[tokio::test]
-    async fn test_ztunnel_metrics_routing() {
-        let state = test_state(Waypoint::None).expect("state setup");
-        let mut cfg = config::parse_config().unwrap();
-        
-        // Configure metrics endpoint
-        cfg.stats_addr = ConfigAddress::SocketAddr(SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            METRICS_PORT,
-        ));
-
-        let conn = Connection {
-            src_identity: None,
-            src: format!("{CLIENT_POD_IP}:1234").parse().unwrap(),
-            dst_network: "".into(),
-            dst: format!("{ZTUNNEL_POD_IP}:15008").parse().unwrap(),
-        };
-
-        let local_wl = Arc::new(Workload {
-            name: "ztunnel-abc123".into(),
-            namespace: "istio-system".into(),
-            service_account: "ztunnel".into(),
-            waypoint: None,
-            protocol: Protocol::HBONE,
-            network: "".into(),
-            workload_ips: vec![conn.dst.ip()],
-            status: HealthStatus::Healthy,
-            workload_type: "pod".into(),
-            canonical_name: "ztunnel".into(),
-            canonical_revision: "latest".into(),
-            node: "test-node".into(),
-            native_tunnel: false,
-            authorization_policies: vec![],
-            uid: "ztunnel-abc123".into(),
-            network_gateway: None,
-            network_mode: NetworkMode::Standard,
-            trust_domain: "cluster.local".into(),
-            workload_name: "ztunnel".into(),
-            hostname: "".into(),
-            application_tunnel: None,
-            cluster_id: "Kubernetes".into(),
-            locality: Default::default(),
-            services: vec![],
-            capacity: 1,
-        });
-
-        // Invalid port case
-        let invalid_hbone_addr = HboneAddress::SocketAddr(
-            format!("{ZTUNNEL_POD_IP}:9999").parse().unwrap()
-        );
-
-        let err = Inbound::resolve_inbound_target(
-            &cfg,
-            &state,
-            &conn,
-            &local_wl,
-            &invalid_hbone_addr,
-        ).unwrap_err();
-
-        if let Error::NoPortForServices(name, port) = err {
-            assert_eq!(name, "ztunnel", "Error should reference ztunnel service");
-            assert_eq!(port, 9999, "Error should contain the invalid port");
-        } else {
-            panic!("Expected Error::NoPortForServices variant for invalid port");
-        }
-
-        // Valid metrics endpoint routing
-        let valid_hbone_addr = HboneAddress::SocketAddr(
-            format!("{ZTUNNEL_POD_IP}:{METRICS_PORT}").parse().unwrap()
-        );
-
-        let (addr, tunnel_req, services) = Inbound::resolve_inbound_target(
-            &cfg,
-            &state,
-            &conn,
-            &local_wl,
-            &valid_hbone_addr,
-        ).expect("resolution should succeed for valid port");
-
-        // Should route to the original ztunnel IP with metrics port
-        assert_eq!(addr.ip(), conn.dst.ip(), "Target IP should match ztunnel IP");
-        assert_eq!(addr.port(), METRICS_PORT, "Target port should be metrics port");
-        assert!(tunnel_req.is_none(), "No tunnel request should be present");
-        assert!(services.is_empty(), "No services should be returned");
     }
 }

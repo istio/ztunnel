@@ -293,6 +293,10 @@ pub struct Config {
 
     // If true, when AppTunnel is set for
     pub localhost_app_tunnel: bool,
+
+    pub ztunnel_identity: identity::Identity,
+
+    pub ztunnel_workload: state::WorkloadInfo,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -402,6 +406,15 @@ fn parse_headers(prefix: &str) -> Result<MetadataVector, Error> {
 pub fn parse_config() -> Result<Config, Error> {
     let pc = parse_proxy_config()?;
     construct_config(pc)
+}
+
+/// Helper function to read required Downward API variables
+fn get_downward_api_var(name: &str, field_path: &str) -> Result<String, Error> {
+    std::env::var(name).map_err(|_| Error::EnvVar(
+        name.to_string(),
+        "".to_string(),
+        format!("{name} environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath={field_path}").to_string(),
+    ))
 }
 
 fn parse_proxy_config() -> Result<ProxyConfig, Error> {
@@ -600,6 +613,27 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     let socket_config_defaults = SocketConfig::default();
 
+    let trust_domain = std::env::var("TRUST_DOMAIN")
+    // TODO: most probably we shouldnt hardcode to cluster.local
+        .unwrap_or_else(|_| "cluster.local".to_string());
+
+    // Read ztunnel identity and workload info from Downward API
+    let namespace = get_downward_api_var("POD_NAMESPACE", "metadata.namespace")?;
+    let service_account = get_downward_api_var("SERVICE_ACCOUNT", "spec.serviceAccountName")?;
+    let pod_name = get_downward_api_var("POD_NAME", "metadata.name")?;
+
+    let ztunnel_identity = identity::Identity::from_parts(
+        trust_domain.into(),
+        namespace.clone().into(),
+        service_account.clone().into(),
+    );
+
+    let ztunnel_workload = state::WorkloadInfo::new(
+        pod_name,
+        namespace,
+        service_account,
+    );
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
@@ -753,6 +787,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
 
         localhost_app_tunnel: parse_default(LOCALHOST_APP_TUNNEL, true)?,
+        ztunnel_identity,
+        ztunnel_workload,
     })
 }
 
@@ -960,6 +996,7 @@ pub mod tests {
 
     #[test]
     fn config_from_proxyconfig() {
+
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
 
