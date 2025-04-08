@@ -525,6 +525,7 @@ mod test {
     use std::sync::RwLock;
     use std::sync::atomic::AtomicU32;
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
@@ -536,6 +537,8 @@ mod test {
     use crate::test_helpers::helpers::initialize_telemetry;
 
     use crate::identity::Identity;
+
+    use self::h2::TokioH2Stream;
 
     use super::*;
     use crate::drain::DrainWatcher;
@@ -588,6 +591,34 @@ mod test {
         // Once we drop the pool, we should drop the connections as well
         drop(pool);
         assert_opens_drops!(srv, 1, 1);
+    }
+
+    /// This is really a test for TokioH2Stream, but its nicer here because we have access to
+    /// streams
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn small_reads() {
+        let (mut pool, srv) = setup_test(3).await;
+
+        let key = key(&srv, 2);
+        let req = || {
+            http::Request::builder()
+                .uri(srv.addr.to_string())
+                .method(http::Method::CONNECT)
+                .version(http::Version::HTTP_2)
+                .body(())
+                .unwrap()
+        };
+
+        let c = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let mut c = TokioH2Stream::new(c);
+        c.write_all(b"abcde").await.unwrap();
+        let mut b = [0u8; 0];
+        // Crucially, this should error rather than panic.
+        if let Err(e) = c.read(&mut b).await {
+            assert_eq!(e.kind(), io::ErrorKind::Other);
+        } else {
+            panic!("Should have errored");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

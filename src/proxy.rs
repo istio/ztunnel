@@ -447,6 +447,9 @@ pub enum Error {
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
 
+    #[error("unknown network gateway: {0}")]
+    UnknownNetworkGateway(String),
+
     #[error("no service or workload for hostname: {0}")]
     NoHostname(String),
 

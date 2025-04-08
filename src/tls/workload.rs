@@ -31,6 +31,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::strng::Strng;
 use crate::tls;
@@ -163,19 +164,17 @@ pub struct OutboundConnector {
 }
 
 impl OutboundConnector {
-    pub async fn connect(
-        self,
-        stream: TcpStream,
-    ) -> Result<client::TlsStream<TcpStream>, io::Error> {
-        let dest = ServerName::IpAddress(
-            stream
-                .peer_addr()
-                .expect("peer_addr must be set")
-                .ip()
-                .into(),
-        );
+    pub async fn connect<IO>(self, stream: IO) -> Result<client::TlsStream<IO>, io::Error>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         let c = tokio_rustls::TlsConnector::from(self.client_config);
-        c.connect(dest, stream).await
+        // Use dummy value for domain because it doesn't matter.
+        c.connect(
+            ServerName::IpAddress(std::net::Ipv4Addr::new(0, 0, 0, 0).into()),
+            stream,
+        )
+        .await
     }
 }
 

@@ -728,6 +728,14 @@ mod tests {
     };
     use crate::{
         rbac::Connection,
+        state::{
+            self, DemandProxyState,
+            service::{Endpoint, EndpointSet, Service},
+            workload::{
+                ApplicationTunnel, GatewayAddress, InboundProtocol, NetworkAddress, Workload,
+                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
+            },
+        },
         test_helpers,
     };
     use std::{
@@ -981,7 +989,7 @@ mod tests {
         .map(|(name, ip, waypoint, app_tunnel)| Workload {
             workload_ips: vec![ip.parse().unwrap()],
             waypoint: waypoint.workload_attached(),
-            protocol: Protocol::HBONE,
+            protocol: InboundProtocol::HBONE,
             uid: strng::format!("cluster1//v1/Pod/default/{name}"),
             name: strng::format!("workload-{name}"),
             namespace: "default".into(),

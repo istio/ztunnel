@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 
 use crate::drain;
 use crate::drain::{DrainTrigger, DrainWatcher};
-use crate::state::workload::Protocol;
+use crate::state::workload::{InboundProtocol, OutboundProtocol};
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -134,7 +134,7 @@ pub struct OutboundConnection {
     pub src: SocketAddr,
     pub original_dst: SocketAddr,
     pub actual_dst: SocketAddr,
-    pub protocol: Protocol,
+    pub protocol: OutboundProtocol,
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
@@ -143,7 +143,7 @@ pub struct InboundConnectionDump {
     pub src: SocketAddr,
     pub original_dst: Option<String>,
     pub actual_dst: SocketAddr,
-    pub protocol: Protocol,
+    pub protocol: InboundProtocol,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize)]
@@ -160,7 +160,7 @@ impl ConnectionManager {
         src: SocketAddr,
         original_dst: SocketAddr,
         actual_dst: SocketAddr,
-        protocol: Protocol,
+        protocol: OutboundProtocol,
     ) -> OutboundConnectionGuard {
         let c = OutboundConnection {
             src,
@@ -284,9 +284,9 @@ impl Serialize for ConnectionManager {
                 original_dst: c.dest_service,
                 actual_dst: c.ctx.conn.dst,
                 protocol: if c.ctx.conn.src_identity.is_some() {
-                    Protocol::HBONE
+                    InboundProtocol::HBONE
                 } else {
-                    Protocol::TCP
+                    InboundProtocol::TCP
                 },
             })
             .collect();

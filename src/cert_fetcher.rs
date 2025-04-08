@@ -16,7 +16,7 @@ use crate::config;
 use crate::config::ProxyMode;
 use crate::identity::Priority::Warmup;
 use crate::identity::{Identity, Request, SecretManager};
-use crate::state::workload::{Protocol, Workload};
+use crate::state::workload::{InboundProtocol, Workload};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -96,7 +96,7 @@ impl CertFetcherImpl {
             // We only get certs for our own node
             Some(w.node.as_ref()) == self.local_node.as_deref() &&
             // If it doesn't support HBONE it *probably* doesn't need a cert.
-            (w.native_tunnel || w.protocol == Protocol::HBONE)
+            (w.native_tunnel || w.protocol == InboundProtocol::HBONE)
     }
 }
 
