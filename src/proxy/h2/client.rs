@@ -27,10 +27,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
-use tokio_rustls::client::TlsStream;
 use tracing::{Instrument, debug, error, trace, warn};
 
 #[derive(Debug, Clone)]
@@ -147,7 +145,7 @@ impl H2ConnectClient {
 
 pub async fn spawn_connection(
     cfg: Arc<config::Config>,
-    s: TlsStream<TcpStream>,
+    s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     driver_drain: Receiver<bool>,
     wl_key: WorkloadKey,
 ) -> Result<H2ConnectClient, Error> {
