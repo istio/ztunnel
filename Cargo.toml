@@ -90,7 +90,7 @@ socket2 = { version = "0.5", features = ["all"] }
 textnonce = { version = "1.0" }
 thiserror = "2.0"
 tls-listener = { version = "0.11" }
-tokio = { version = "1.42", features = ["full", "test-util"] }
+tokio = { version = "1.43", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.12", default-features = false, features = ["prost", "codegen"] }
