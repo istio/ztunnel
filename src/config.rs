@@ -412,16 +412,16 @@ pub fn parse_config() -> Result<Config, Error> {
 fn get_downward_api_var(name: &str, field_path: Option<&str>) -> Result<Option<String>, Error> {
     match std::env::var(name) {
         Ok(val) => Ok(Some(val)),
-        Err(_) => match field_path {
-            Some(field_path) => Err(Error::EnvVar(
-                name.to_string(),
-                "".to_string(),
-                format!(
-                    "{name} environment variable not set. Ensure your Pod spec includes: fieldRef.fieldPath={field_path}"
-                ),
-            )),
-            None => Ok(None),
-        },
+        Err(_) => {
+            if let Some(field_path) = field_path {
+                tracing::warn!(
+                    "{} environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath={}",
+                    name,
+                    field_path
+                );
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -1008,6 +1008,7 @@ impl Address {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::identity::Identity;
 
     #[test]
     fn config_from_proxyconfig() {
@@ -1098,6 +1099,50 @@ pub mod tests {
         validate_metadata_vector(&cfg.xds_headers, expected_xds_headers.clone());
 
         validate_metadata_vector(&cfg.ca_headers, expected_ca_headers.clone());
+    }
+
+    #[test]
+    fn test_ztunnel_identity_workload() {
+        unsafe {
+            env::set_var("POD_NAMESPACE", "istio-system");
+            env::set_var("SERVICE_ACCOUNT", "ztunnel");
+            env::set_var("POD_NAME", "ztunnel-test");
+            env::set_var("TRUST_DOMAIN", "cluster.local");
+        }
+
+        let pc = construct_proxy_config("", None).unwrap();
+        let cfg = construct_config(pc).unwrap();
+
+        // Verify ztunnel identity
+        assert!(cfg.ztunnel_identity.is_some());
+        let identity = cfg.ztunnel_identity.unwrap();
+        match identity {
+            Identity::Spiffe { trust_domain, namespace, service_account } => {
+                assert_eq!(trust_domain, "cluster.local");
+                assert_eq!(namespace, "istio-system");
+                assert_eq!(service_account, "ztunnel");
+            }
+        }
+
+        // Verify workload info
+        assert!(cfg.ztunnel_workload.is_some());
+        let workload = cfg.ztunnel_workload.unwrap();
+        assert_eq!(workload.namespace, "istio-system");
+        assert_eq!(workload.name, "ztunnel-test");
+        assert_eq!(workload.service_account, "ztunnel");
+
+        unsafe {
+            env::remove_var("POD_NAMESPACE");
+            env::remove_var("SERVICE_ACCOUNT");
+            env::remove_var("POD_NAME");
+            env::remove_var("TRUST_DOMAIN");
+        }
+
+        let pc = construct_proxy_config("", None).unwrap();
+        let cfg = construct_config(pc).unwrap();
+
+        assert!(cfg.ztunnel_identity.is_none());
+        assert!(cfg.ztunnel_workload.is_none());
     }
 
     fn validate_metadata_vector(metadata: &MetadataVector, header_map: HashMap<String, String>) {
