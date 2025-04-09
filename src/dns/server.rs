@@ -32,6 +32,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::event;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::proxy::{LocalWorkloadFetcher, SocketFactory};
@@ -506,6 +507,24 @@ impl Store {
     }
 }
 
+fn access_log(request: &Request, source: Option<&Workload>, result: &str, ep_count: usize) {
+    let src = source.as_ref();
+    event!(
+        target: "dns",
+        parent: None,
+        tracing::Level::DEBUG,
+
+        src.workload = src.map(|w| w.name.as_str()).unwrap_or("unknown"),
+        src.namespace = src.map(|w| w.namespace.as_str()).unwrap_or("unknown"),
+
+        query = request.query().query_type().to_string(),
+        domain = request.query().name().to_string(),
+
+        result = result,
+        endpoints = ep_count,
+    );
+}
+
 #[async_trait::async_trait]
 impl Resolver for Store {
     #[instrument(
@@ -531,7 +550,23 @@ impl Resolver for Store {
         let record_type = request.query().query_type();
         if !is_record_type_supported(record_type) {
             debug!("unknown record type");
-            return self.forward(Some(&client), request).await;
+            let result = self.forward(Some(&client), request).await;
+            match result {
+                Ok(ref answer) => {
+                    access_log(
+                        request,
+                        Some(&client),
+                        "forwarded",
+                        answer.record_iter().count(),
+                    );
+                }
+                Err(e) => {
+                    // Forwarding failed. Just return the error.
+                    access_log(request, Some(&client), "forwarding failed", 0);
+                    return Err(e);
+                }
+            }
+            return result;
         }
 
         // Find the service for the requested host.
@@ -540,7 +575,23 @@ impl Resolver for Store {
         let Some(service_match) = self.find_server(&client, &requested_name) else {
             trace!("unknown host, forwarding");
             // Unknown host. Forward to the upstream resolver.
-            return self.forward(Some(&client), request).await;
+            let result = self.forward(Some(&client), request).await;
+            match result {
+                Ok(ref answer) => {
+                    access_log(
+                        request,
+                        Some(&client),
+                        "forwarded",
+                        answer.record_iter().count(),
+                    );
+                }
+                Err(e) => {
+                    // Forwarding failed. Just return the error.
+                    access_log(request, Some(&client), "forwarding failed", 0);
+                    return Err(e);
+                }
+            }
+            return result;
         };
 
         // Increment counter for all requests.
@@ -553,7 +604,12 @@ impl Resolver for Store {
         let is_authoritative = true;
 
         if !service_family_allowed(&service_match.server, record_type) {
-            debug!(alias=%service_match.alias, %record_type, ans=?Answer::new(Vec::default(), is_authoritative), "service does not support this record type");
+            access_log(
+                request,
+                Some(&client),
+                "service does not support this record type",
+                0,
+            );
             // This is not NXDOMAIN, since we found the host. Just return an empty set of records.
             return Ok(Answer::new(Vec::default(), is_authoritative));
         }
@@ -562,7 +618,7 @@ impl Resolver for Store {
         let addresses = self.get_addresses(&client, &service_match.server, record_type);
 
         if addresses.is_empty() {
-            debug!(alias=%service_match.alias, name=%service_match.name, "no records");
+            access_log(request, Some(&client), "no records", 0);
             // Lookup succeeded, but no records were returned. This is not NXDOMAIN, since we
             // found the host. Just return an empty set of records.
             return Ok(Answer::new(Vec::default(), is_authoritative));
@@ -574,7 +630,6 @@ impl Resolver for Store {
         // Assume that we'll just use the requested name as the record name.
         let mut ip_record_name = requested_name.clone();
 
-        debug!(alias=%service_match.alias, name=%service_match.name, "success");
         // If the service was found by stripping off one of the search domains, create a
         // CNAME record to map to the appropriate canonical name.
         if let Some(stripped) = service_match.alias.stripped {
@@ -604,6 +659,7 @@ impl Resolver for Store {
             }
         }
 
+        access_log(request, Some(&client), "success", records.len());
         // Add the IP records.
         ip_records(ip_record_name, addresses, &mut records);
 
