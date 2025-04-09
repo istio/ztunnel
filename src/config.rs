@@ -294,9 +294,9 @@ pub struct Config {
     // If true, when AppTunnel is set for
     pub localhost_app_tunnel: bool,
 
-    pub ztunnel_identity: identity::Identity,
+    pub ztunnel_identity: Option<identity::Identity>,
 
-    pub ztunnel_workload: state::WorkloadInfo,
+    pub ztunnel_workload: Option<state::WorkloadInfo>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -408,13 +408,21 @@ pub fn parse_config() -> Result<Config, Error> {
     construct_config(pc)
 }
 
-/// Helper function to read required Downward API variables
-fn get_downward_api_var(name: &str, field_path: &str) -> Result<String, Error> {
-    std::env::var(name).map_err(|_| Error::EnvVar(
-        name.to_string(),
-        "".to_string(),
-        format!("{name} environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath={field_path}").to_string(),
-    ))
+/// Helper function to read Downward API variables
+fn get_downward_api_var(name: &str, field_path: Option<&str>) -> Result<Option<String>, Error> {
+    match std::env::var(name) {
+        Ok(val) => Ok(Some(val)),
+        Err(_) => match field_path {
+            Some(field_path) => Err(Error::EnvVar(
+                name.to_string(),
+                "".to_string(),
+                format!(
+                    "{name} environment variable not set. Ensure your Pod spec includes: fieldRef.fieldPath={field_path}"
+                ),
+            )),
+            None => Ok(None),
+        },
+    }
 }
 
 fn parse_proxy_config() -> Result<ProxyConfig, Error> {
@@ -613,26 +621,33 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     let socket_config_defaults = SocketConfig::default();
 
-    let trust_domain = std::env::var("TRUST_DOMAIN")
-    // TODO: most probably we shouldnt hardcode to cluster.local
-        .unwrap_or_else(|_| "cluster.local".to_string());
+    // Read ztunnel identity and workload info from Downward API if available
+    let (ztunnel_identity, ztunnel_workload) = match (
+        get_downward_api_var("POD_NAMESPACE", Some("metadata.namespace"))?,
+        get_downward_api_var("SERVICE_ACCOUNT", Some("spec.serviceAccountName"))?,
+        get_downward_api_var("POD_NAME", Some("metadata.name"))?,
+    ) {
+        (Some(namespace), Some(service_account), Some(pod_name)) => {
+            let trust_domain = std::env::var("TRUST_DOMAIN")
+            // TODO: most probably we shouldnt hardcode to cluster.local
+                .unwrap_or_else(|_| "cluster.local".to_string());
 
-    // Read ztunnel identity and workload info from Downward API
-    let namespace = get_downward_api_var("POD_NAMESPACE", "metadata.namespace")?;
-    let service_account = get_downward_api_var("SERVICE_ACCOUNT", "spec.serviceAccountName")?;
-    let pod_name = get_downward_api_var("POD_NAME", "metadata.name")?;
+            let identity = identity::Identity::from_parts(
+                trust_domain.into(),
+                namespace.clone().into(),
+                service_account.clone().into(),
+            );
 
-    let ztunnel_identity = identity::Identity::from_parts(
-        trust_domain.into(),
-        namespace.clone().into(),
-        service_account.clone().into(),
-    );
+            let workload = state::WorkloadInfo::new(
+                pod_name,
+                namespace,
+                service_account,
+            );
 
-    let ztunnel_workload = state::WorkloadInfo::new(
-        pod_name,
-        namespace,
-        service_account,
-    );
+            (Some(identity), Some(workload))
+        }
+        _ => (None, None),
+    };
 
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,

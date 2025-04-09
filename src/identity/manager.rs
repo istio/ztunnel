@@ -619,12 +619,6 @@ impl SecretManager {
         self.fetch_certificate_pri(id, Priority::RealTime).await
     }
 
-    /// Get ztunnel's own identity
-    pub async fn get_ztunnel_cert(&self, cfg: &crate::config::Config) -> Result<Arc<tls::WorkloadCertificate>, Error> {
-        tracing::info!("Fetching certificate for ztunnel's own identity: {}", cfg.ztunnel_identity);
-        self.fetch_certificate(&cfg.ztunnel_identity).await
-    }
-
     pub async fn forget_certificate(&self, id: &Identity) {
         // TODO: consider keeping the cert around for a minute or so to avoid churn
         // We would ideally drop any pending or new requests to rotate.

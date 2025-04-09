@@ -54,8 +54,8 @@ pub enum Error {
     Forgotten,
     #[error("BUG: identity requested {0}, but only allowed {1:?}")]
     BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
-    #[error("Kubernetes Downward API configuration error: {0}")]
-    Configuration(String),
+    #[error("No ztunnel identity configured")]
+    NoIdentity,
 }
 
 impl From<tls::Error> for Error {

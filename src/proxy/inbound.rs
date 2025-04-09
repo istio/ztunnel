@@ -325,7 +325,7 @@ impl Inbound {
             .map_err(InboundError::build(StatusCode::BAD_REQUEST))?;
 
         // Determine the next hop.
-        let (upstream_addr, tunnel_request, upstream_service) = Self::resolve_inbound_target(
+        let (upstream_addr, tunnel_request, upstream_service) = Self::find_inbound_upstream(
             &pi.cfg,
             &pi.state,
             &conn,
@@ -516,12 +516,9 @@ impl Inbound {
         Ok(())
     }
 
-    /// Resolves the target address for an inbound request.
-    /// This handles both regular workload traffic and ztunnel's own services.
-    /// 
-    /// When ztunnel is the target workload (identified by workload name starting with "ztunnel"),
-    /// this function will handle routing to local services like metrics or metadata endpoints.
-    pub(super) fn resolve_inbound_target(
+    /// find_inbound_upstream determines the next hop for an inbound request.
+    #[expect(clippy::type_complexity)]
+    pub (super) fn find_inbound_upstream(
         cfg: &Config,
         state: &DemandProxyState,
         conn: &Connection,
@@ -792,7 +789,7 @@ mod tests {
     #[test_case(Waypoint::Service(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_POD_IP , None; "to workload via waypoint with wrong attachment")]
     #[test_case(Waypoint::Workload(WAYPOINT_POD_IP, None), WAYPOINT_POD_IP, SERVER_SVC_IP , None; "to service via waypoint with wrong attachment")]
     #[tokio::test]
-    async fn test_resolve_inbound_target(
+    async fn test_find_inbound_upstream(
         target_waypoint: Waypoint<'_>,
         connection_dst: &str,
         hbone_dst: &str,
@@ -822,7 +819,7 @@ mod tests {
 
         let validate_destination =
             Inbound::validate_destination(&state, &conn, &local_wl, &hbone_addr).await;
-        let res = Inbound::resolve_inbound_target(&cfg, &state, &conn, &local_wl, &hbone_addr);
+        let res = Inbound::find_inbound_upstream(&cfg, &state, &conn, &local_wl, &hbone_addr);
 
         match want {
             Some((ip, port)) => {
