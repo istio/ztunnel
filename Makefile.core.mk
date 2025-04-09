@@ -10,7 +10,7 @@ else ifeq ($(TLS_MODE), openssl)
 endif
 
 test:
-	RUST_BACKTRACE=1 TRUST_DOMAIN=cluster.local POD_NAMESPACE=istio-system SERVICE_ACCOUNT=ztunnel POD_NAME=ztunnel-test cargo test --benches --tests --bins $(FEATURES)
+	RUST_BACKTRACE=1 cargo test --benches --tests --bins $(FEATURES)
 
 coverage:
 	FEATURES=$(FEATURES) ./scripts/test-with-coverage.sh 
