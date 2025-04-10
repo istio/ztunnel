@@ -33,7 +33,7 @@ use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
 use educe::Educe;
 use futures_util::FutureExt;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use itertools::Itertools;
@@ -466,7 +466,7 @@ pub struct DemandProxyState {
     metrics: Arc<proxy::Metrics>,
 
     #[serde(skip_serializing)]
-    dns_resolver: TokioAsyncResolver,
+    dns_resolver: TokioResolver,
 }
 
 impl DemandProxyState {
@@ -487,11 +487,12 @@ impl DemandProxyState {
         dns_resolver_opts: ResolverOpts,
         metrics: Arc<proxy::Metrics>,
     ) -> Self {
-        let dns_resolver = TokioAsyncResolver::new(
-            dns_resolver_cfg.to_owned(),
-            dns_resolver_opts.clone(),
+        let mut rb = hickory_resolver::Resolver::builder_with_config(
+            dns_resolver_cfg,
             TokioConnectionProvider::default(),
         );
+        *rb.options_mut() = dns_resolver_opts;
+        let dns_resolver = rb.build();
         Self {
             state,
             demand,
@@ -665,7 +666,7 @@ impl DemandProxyState {
         let (matching, unmatching): (Vec<_>, Vec<_>) = resp
             .as_lookup()
             .record_iter()
-            .filter_map(|record| record.data().and_then(|d| d.ip_addr()))
+            .filter_map(|record| record.data().ip_addr())
             .partition(|record| record.is_ipv6() == original_target_address.is_ipv6());
         // Randomly pick an IP, prefer to match the IP family of the downstream request.
         // Without this, we run into trouble in pure v4 or pure v6 environments.

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
 
-use hickory_proto::error::ProtoError;
+use hickory_proto::ProtoError;
 
 use crate::strng::Strng;
 use rand::Rng;

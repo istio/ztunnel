@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use crate::dns::resolver::{Answer, Resolver};
+use hickory_proto::ProtoErrorKind;
 use hickory_proto::op::{Edns, Header, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::Record;
-use hickory_resolver::error::ResolveErrorKind;
+use hickory_resolver::ResolveErrorKind;
 use hickory_server::authority::{LookupError, MessageResponse, MessageResponseBuilder};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use std::sync::Arc;
@@ -117,16 +118,14 @@ async fn send_lookup_error<R: ResponseHandler>(
         }
         LookupError::ResponseCode(code) => send_error(request, response_handle, code).await,
         LookupError::ResolveError(e) => {
-            match e.kind() {
-                ResolveErrorKind::NoRecordsFound { response_code, .. } => {
+            if let ResolveErrorKind::Proto(proto) = e.kind() {
+                if let ProtoErrorKind::NoRecordsFound { response_code, .. } = proto.kind() {
                     // Respond with the error code.
-                    send_error(request, response_handle, *response_code).await
-                }
-                _ => {
-                    // TODO(nmittler): log?
-                    send_error(request, response_handle, ResponseCode::ServFail).await
+                    return send_error(request, response_handle, *response_code).await;
                 }
             }
+            // TODO(nmittler): log?
+            send_error(request, response_handle, ResponseCode::ServFail).await
         }
         LookupError::Io(_) => {
             // TODO(nmittler): log?
@@ -189,7 +188,7 @@ fn response_edns(request: &Request) -> Option<Edns> {
         let mut resp_edns: Edns = Edns::new();
         resp_edns.set_max_payload(req_edns.max_payload().max(512));
         resp_edns.set_version(req_edns.version());
-        resp_edns.set_dnssec_ok(req_edns.dnssec_ok());
+        resp_edns.set_dnssec_ok(req_edns.flags().dnssec_ok);
 
         Some(resp_edns)
     } else {
@@ -207,11 +206,10 @@ mod tests {
     use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
     use hickory_proto::rr::{Name, Record, RecordType};
     use hickory_proto::serialize::binary::BinEncoder;
+    use hickory_proto::xfer::Protocol;
     use hickory_server::authority::LookupError;
     use hickory_server::authority::MessageResponse;
-    use hickory_server::server::{
-        Protocol, Request, RequestHandler, ResponseHandler, ResponseInfo,
-    };
+    use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -262,7 +260,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Resolver for FakeResolver {
         async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
-            let name = Name::from(request.query().name().clone());
+            let name = Name::from(request.request_info()?.query.name().clone());
             let records = vec![a(name, Ipv4Addr::new(127, 0, 0, 1))];
             Ok(Answer::new(records, false))
         }

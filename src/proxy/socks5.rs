@@ -19,8 +19,9 @@ use crate::dns::resolver::Resolver;
 use hickory_proto::op::{Message, MessageType, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
+use hickory_proto::xfer::Protocol;
 use hickory_server::authority::MessageRequest;
-use hickory_server::server::{Protocol, Request};
+use hickory_server::server::Request;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -315,7 +316,7 @@ async fn dns_lookup(
     let answer = resolver.lookup(&req).await?;
     let response = answer
         .record_iter()
-        .filter_map(|rec| rec.data().and_then(|d| d.ip_addr()))
+        .filter_map(|rec| rec.data().ip_addr())
         .next() // TODO: do not always use the first result
         .ok_or_else(|| Error::DnsEmpty)?;
 
