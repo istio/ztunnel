@@ -39,7 +39,9 @@ pub fn trim_domain(name: &Name, domain: &Name) -> Option<Name> {
         // Create a Name from the labels leading up to the domain.
         let iter = name.iter();
         let num_labels = iter.len() - domain.num_labels() as usize;
-        Some(Name::from_labels(iter.take(num_labels)).unwrap())
+        let mut name = Name::from_labels(iter.take(num_labels)).unwrap();
+        name.set_fqdn(false);
+        Some(name)
     } else {
         None
     }
