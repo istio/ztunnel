@@ -518,7 +518,7 @@ impl Inbound {
 
     /// find_inbound_upstream determines the next hop for an inbound request.
     #[expect(clippy::type_complexity)]
-    pub (super) fn find_inbound_upstream(
+    pub(super) fn find_inbound_upstream(
         cfg: &Config,
         state: &DemandProxyState,
         conn: &Connection,
@@ -527,6 +527,21 @@ impl Inbound {
     ) -> Result<(SocketAddr, Option<TunnelRequest>, Vec<Arc<Service>>), Error> {
         // We always target the local workload IP as the destination. But we need to determine the port to send to.
         let target_ip = conn.dst.ip();
+
+        // Check if this is traffic to ztunnel itself
+        if let HboneAddress::SocketAddr(hbone_addr) = hbone_addr {
+            if hbone_addr.ip() == target_ip {
+                if hbone_addr.port() == 15020 {
+                    debug!("handling request to metrics endpoint");
+                    // For ztunnel's own metrics, simply forward to the metrics port
+                    return Ok((
+                        SocketAddr::new(target_ip, 15020),
+                        None,
+                        state.get_services_by_workload(local_workload),
+                    ));
+                }
+            }
+        }
         
         // First, fetch the actual target SocketAddr as well as all possible services this could be for.
         // Given they may request the pod directly, there may be multiple possible services; we will
@@ -720,7 +735,6 @@ mod tests {
         test_helpers,
     };
     use std::{
-        env,
         net::SocketAddr,
         sync::{Arc, RwLock},
         time::Duration,
