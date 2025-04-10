@@ -79,7 +79,7 @@ fn main() -> Result<(), anyhow::Error> {
             for line in String::from_utf8(output.stdout).unwrap().lines() {
                 // Each line looks like `istio.io/pkg/version.buildGitRevision=abc`
                 if let Some((key, value)) = line.split_once('=') {
-                    let key = key.split('.').last().unwrap();
+                    let key = key.split('.').next_back().unwrap();
                     println!("cargo:rustc-env=ZTUNNEL_BUILD_{key}={value}");
                 } else {
                     println!("cargo:warning=invalid build output {line}");
