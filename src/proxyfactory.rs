@@ -16,7 +16,7 @@ use crate::config;
 use crate::identity::SecretManager;
 use crate::state::{DemandProxyState, WorkloadInfo};
 use std::sync::Arc;
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::dns;
 use crate::drain::DrainWatcher;

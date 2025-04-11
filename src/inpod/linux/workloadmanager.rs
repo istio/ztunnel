@@ -20,8 +20,8 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tracing::{debug, error, info, warn};
 
-use super::Error;
 use super::statemanager::WorkloadProxyManagerState;
+use crate::inpod::Error;
 
 use super::protocol::WorkloadStreamProcessor;
 
@@ -258,7 +258,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
     async fn read_message_and_retry_proxies(
         &mut self,
         processor: &mut WorkloadStreamProcessor,
-    ) -> anyhow::Result<Option<crate::inpod::WorkloadMessage>> {
+    ) -> anyhow::Result<Option<crate::inpod::linux::WorkloadMessage>> {
         let readmsg = processor.read_message();
         // Note: readmsg future is NOT cancel safe, so we want to make sure this function doesn't exit
         // return without completing it.
@@ -324,7 +324,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                 }
             }?;
 
-            debug!("received message: {:?}", msg);
+            info!("received message: {:?}", msg);
 
             // send ack:
             match self.state.process_msg(msg).await {
@@ -386,7 +386,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    use crate::inpod::test_helpers::{
+    use crate::inpod::linux::test_helpers::{
         self, create_proxy_conflict, new_netns, read_hello, read_msg, send_snap_sent,
         send_workload_added, send_workload_del, uid,
     };
@@ -417,12 +417,13 @@ pub(crate) mod tests {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            windows_namespace: None,
         })
     }
 
     struct Fixture {
         state: WorkloadProxyManagerState,
-        inpod_metrics: Arc<crate::inpod::Metrics>,
+        inpod_metrics: Arc<crate::inpod::metrics::Metrics>,
         drain_rx: DrainWatcher,
         _drain_tx: DrainTrigger,
     }
