@@ -518,6 +518,7 @@ impl Resolver for Store {
         ),
     )]
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
+        info!("looking up {request:?}");
         let client = self.local_workload.get_workload().await.map_err(|_| {
             debug!("unknown source");
             self.metrics.increment(&DnsRequest {
@@ -574,7 +575,7 @@ impl Resolver for Store {
         // Assume that we'll just use the requested name as the record name.
         let mut ip_record_name = requested_name.clone();
 
-        debug!(alias=%service_match.alias, name=%service_match.name, "success");
+        debug!(alias=%service_match.alias, name=%service_match.name, addresses=?addresses, "success");
         // If the service was found by stripping off one of the search domains, create a
         // CNAME record to map to the appropriate canonical name.
         if let Some(stripped) = service_match.alias.stripped {

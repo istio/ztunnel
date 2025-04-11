@@ -96,16 +96,13 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = self.configure(
-            || std::net::TcpListener::bind(addr),
-        )?;
+        let std_sock = self.configure( || std::net::TcpListener::bind(addr))?;
         std_sock.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
 
     fn udp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
-        let std_sock =
-            self.configure(|| std::net::UdpSocket::bind(addr))?;
+        let std_sock = self.configure(|| std::net::UdpSocket::bind(addr))?;
         std_sock.set_nonblocking(true)?;
         tokio::net::UdpSocket::from_std(std_sock)
     }

@@ -30,8 +30,6 @@ use hyper::{Request, Response, header::CONTENT_TYPE, header::HeaderValue};
 use pprof::protos::Message;
 use std::borrow::Borrow;
 use std::collections::HashMap;
-#[cfg(target_os = "linux")]
-use pprof::protos::Message;
 
 use std::str::FromStr;
 use std::sync::Arc;
