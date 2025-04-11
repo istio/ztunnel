@@ -50,7 +50,7 @@ spec:
           operator: Exists
       containers:
       - name: istio-proxy
-        image: "istiolocaltesting.azurecr.io/ztunnel-windows:20250321-6"
+        image: "istiolocaltesting.azurecr.io/ztunnel-windows:20250322-9"
         resources:
           requests:
             cpu: 200m
@@ -76,7 +76,7 @@ spec:
         - name: REVISION
           value: "1-25-0"
         - name: RUST_LOG
-          value: "debug"
+          value: "trace"
         - name: RUST_BACKTRACE
           value: "1"
         - name: ISTIO_META_CLUSTER_ID

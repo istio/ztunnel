@@ -14,11 +14,9 @@
 
 use crate::drain;
 use crate::drain::DrainTrigger;
-use crate::inpod::{metrics::Metrics, Error};
+use crate::inpod::{metrics::Metrics, Error, WorkloadMessage};
 use std::sync::Arc;
 use tracing::{Instrument, debug, info};
-
-use super::{Error, WorkloadMessage, metrics::Metrics};
 
 use crate::proxyfactory::ProxyFactory;
 use crate::state::WorkloadInfo;

@@ -538,6 +538,7 @@ impl Resolver for Store {
         ),
     )]
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
+        info!("looking up {request:?}");
         let client = self.local_workload.get_workload().await.map_err(|_| {
             debug!("unknown source");
             self.metrics.increment(&DnsRequest {

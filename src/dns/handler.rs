@@ -20,7 +20,7 @@ use hickory_resolver::ResolveErrorKind;
 use hickory_server::authority::{LookupError, MessageResponse, MessageResponseBuilder};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use std::sync::Arc;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// A Trust-DNS [RequestHandler] that proxies all DNS requests.
 ///
@@ -58,6 +58,7 @@ impl RequestHandler for Handler {
         request: &Request,
         response_handle: R,
     ) -> ResponseInfo {
+        info!("handling request: {:?}", request);
         match request.message_type() {
             MessageType::Query => match request.op_code() {
                 OpCode::Query => self.lookup(request, response_handle).await,
@@ -170,7 +171,6 @@ async fn send_response<'a, R: ResponseHandler>(
     mut response_handle: R,
 ) -> ResponseInfo {
     let result = response_handle.send_response(response).await;
-
     match result {
         Err(e) => {
             error!("request error: {}", e);
@@ -178,7 +178,10 @@ async fn send_response<'a, R: ResponseHandler>(
             header.set_response_code(ResponseCode::ServFail);
             header.into()
         }
-        Ok(info) => info,
+        Ok(info) => {
+            info!("response sent: {:?}", info.response_code());
+            info
+        },
     }
 }
 

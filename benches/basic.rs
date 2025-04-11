@@ -20,6 +20,7 @@ use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+#[cfg(target_os = "linux")]
 use pprof::criterion::{Output, PProfProfiler};
 use prometheus_client::registry::Registry;
 use tokio::runtime::Runtime;
@@ -34,6 +35,7 @@ use ztunnel::xds::istio::workload::Workload as XdsWorkload;
 use ztunnel::xds::istio::workload::load_balancing;
 use ztunnel::xds::istio::workload::{NetworkAddress as XdsNetworkAddress, PortList};
 
+#[cfg(target_os = "linux")]
 pub fn xds(c: &mut Criterion) {
     use ztunnel::xds::istio::workload::Port;
     use ztunnel::xds::istio::workload::Service as XdsService;
@@ -193,6 +195,7 @@ fn build_load_balancer(
     (rt, demand, src_wl, svc_addr)
 }
 
+#[cfg(target_os = "linux")]
 criterion_group! {
     name = benches;
     config = Criterion::default()
