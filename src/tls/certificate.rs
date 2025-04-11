@@ -258,7 +258,8 @@ impl WorkloadCertificate {
         let key: PrivateKeyDer = parse_key(key)?;
 
         let mut roots_store = RootCertStore::empty();
-        let (_valid, invalid) = roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+        let (_valid, invalid) =
+            roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
         if invalid > 0 {
             tracing::warn!("warning: found {invalid} invalid root certs");
         }
