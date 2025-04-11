@@ -56,7 +56,7 @@ pub struct WorkloadCertificate {
 
     /// precomputed roots. This is used for verification
     root_store: Arc<RootCertStore>,
-    /// original roots, used or debugging
+    /// original roots, used for debugging
     pub roots: Vec<Certificate>,
 }
 
@@ -258,7 +258,10 @@ impl WorkloadCertificate {
         let key: PrivateKeyDer = parse_key(key)?;
 
         let mut roots_store = RootCertStore::empty();
-        roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+        let (_valid, invalid) = roots_store.add_parsable_certificates(roots.iter().map(|c| c.der.clone()));
+        if invalid > 0 {
+            tracing::warn!("warning: found {invalid} invalid root certs");
+        }
         Ok(WorkloadCertificate {
             cert,
             chain,
@@ -389,4 +392,76 @@ fn der_to_pem(der: &[u8], label: &str) -> String {
     ans.push_str(label);
     ans.push_str("-----\n");
     ans
+}
+
+#[cfg(test)]
+mod test {
+    use crate::identity::Identity;
+    use crate::test_helpers::helpers;
+    use crate::tls::WorkloadCertificate;
+    use crate::tls::mock::{TEST_ROOT, TEST_ROOT_KEY, TEST_ROOT2, TEST_ROOT2_KEY, TestIdentity};
+
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::SystemTime;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsAcceptor;
+
+    #[tokio::test]
+    async fn multi_root() {
+        helpers::initialize_telemetry();
+        let id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+        // Joined root
+        let mut joined = TEST_ROOT.to_vec();
+        joined.push(b'\n');
+        joined.extend(TEST_ROOT2);
+
+        // Generate key+cert signed by root1
+        let (key, cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT_KEY,
+            TEST_ROOT,
+        );
+        let cert1 =
+            WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
+
+        // Generate key+cert signed by root2
+        let (key, cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id.clone()),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+            TEST_ROOT2_KEY,
+            TEST_ROOT2,
+        );
+        let cert2 =
+            WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
+
+        // Do a simple handshake between them; we should be able to accept the trusted root
+        let server = cert1.server_config().unwrap();
+        let tls = TlsAcceptor::from(Arc::new(server));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::task::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut tls = tls.accept(stream).await.unwrap();
+            let _ = tls.write(b"serv").await.unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let client = cert2.outbound_connector(vec![id]).unwrap();
+        let mut tls = client.connect(stream).await.unwrap();
+
+        let _ = tls.write(b"hi").await.unwrap();
+        let mut buf = [0u8; 4];
+        tls.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"serv");
+    }
 }
