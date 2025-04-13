@@ -172,6 +172,7 @@ pub struct Proxy {
     outbound: Outbound,
     socks5: Option<Socks5>,
     policy_watcher: PolicyWatcher,
+    ztunnel_inbound: Option<Inbound>,
 }
 
 pub struct LocalWorkloadInformation {
@@ -294,6 +295,13 @@ impl Proxy {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
 
+        // Create a inbound instance for ztunnel traffic
+        let ztunnel_inbound = if pi.local_workload_information.workload_info().service_account == "ztunnel" {
+            Some(Inbound::new(pi.clone(), drain.clone()).await?)
+        } else {
+            None
+        };
+
         // This exists for `direct` integ tests, no other reason
         #[cfg(any(test, feature = "testing"))]
         if pi.cfg.fake_self_inbound {
@@ -323,6 +331,7 @@ impl Proxy {
             outbound,
             socks5,
             policy_watcher,
+            ztunnel_inbound,
         })
     }
 
@@ -337,6 +346,11 @@ impl Proxy {
         if let Some(socks5) = self.socks5 {
             tasks.push(tokio::spawn(socks5.run().in_current_span()));
         };
+
+        // Run the ztunnel inbound if it exists
+        if let Some(ztunnel_inbound) = self.ztunnel_inbound {
+            tasks.push(tokio::spawn(ztunnel_inbound.run().in_current_span()));
+        }
 
         futures::future::join_all(tasks).await;
     }

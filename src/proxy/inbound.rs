@@ -233,14 +233,13 @@ impl Inbound {
 
             // Establish upstream connection between original source and destination
             // We are allowing a bind to the original source address locally even if the ip address isn't on this node.
-            let stream =
-                super::freebind_connect(src, dst, pi.socket_factory.as_ref())
-                    .await
-                    .map_err(Error::ConnectionFailed)
-                    .map_err(InboundFlagError::build(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        ResponseFlags::ConnectionFailure,
-                    ))?;
+            let stream = super::freebind_connect(src, dst, pi.socket_factory.as_ref())
+                .await
+                .map_err(Error::ConnectionFailed)
+                .map_err(InboundFlagError::build(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ResponseFlags::ConnectionFailure,
+                ))?;
             debug!("connected to: {}", ri.upstream_addr);
             Ok((conn_guard, stream))
         };
@@ -448,7 +447,14 @@ impl Inbound {
             return Ok(());
         };
         if conn.dst.ip() == hbone_addr.ip() {
-            // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
+            // Normal case: both are aligned. This is allowed
+            return Ok(());
+        }
+        // Allow ztunnel to accept HBONE connections to its metrics endpoint
+        if local_workload.service_account == "ztunnel"
+            && (hbone_addr.port() == 15020 || conn.dst.port() == 15008)
+            && local_workload.workload_ips.contains(&hbone_addr.ip())
+        {
             return Ok(());
         }
         if local_workload.application_tunnel.is_some() {
@@ -525,24 +531,20 @@ impl Inbound {
         local_workload: &Workload,
         hbone_addr: &HboneAddress,
     ) -> Result<(SocketAddr, Option<TunnelRequest>, Vec<Arc<Service>>), Error> {
-        // We always target the local workload IP as the destination. But we need to determine the port to send to.
-        let target_ip = conn.dst.ip();
-
-        // Check if this is traffic to ztunnel itself
-        if let HboneAddress::SocketAddr(hbone_addr) = hbone_addr {
-            if hbone_addr.ip() == target_ip {
-                if hbone_addr.port() == 15020 {
-                    debug!("handling request to metrics endpoint");
-                    // For ztunnel's own metrics, simply forward to the metrics port
-                    return Ok((
-                        SocketAddr::new(target_ip, 15020),
-                        None,
-                        state.get_services_by_workload(local_workload),
-                    ));
+        // Special case for ztunnel metrics endpoint
+        if local_workload.service_account == "ztunnel" {
+            if let HboneAddress::SocketAddr(addr) = hbone_addr {
+                if addr.port() == 15020 {
+                    // For metrics endpoint, we want to redirect to the actual metrics port
+                    let target = SocketAddr::new(conn.dst.ip(), 15020);
+                    return Ok((target, None, vec![]));
                 }
             }
         }
-        
+
+        // We always target the local workload IP as the destination. But we need to determine the port to send to.
+        let target_ip = conn.dst.ip();
+
         // First, fetch the actual target SocketAddr as well as all possible services this could be for.
         // Given they may request the pod directly, there may be multiple possible services; we will
         // select a final one (if any) later.
@@ -707,41 +709,29 @@ mod tests {
         config,
         identity::manager::mock::new_secret_manager,
         proxy::{
-            ConnectionManager, 
-            DefaultSocketFactory,
-            LocalWorkloadInformation,
-            h2::server::RequestParts,
-            inbound::HboneAddress,
+            ConnectionManager, DefaultSocketFactory, LocalWorkloadInformation,
+            h2::server::RequestParts, inbound::HboneAddress,
         },
         rbac::Connection,
         state::{
-            self,
-            DemandProxyState,
-            WorkloadInfo,
+            self, DemandProxyState, WorkloadInfo,
             service::{Endpoint, EndpointSet, Service},
             workload::{
-                ApplicationTunnel,
-                GatewayAddress,
-                NetworkAddress,
-                InboundProtocol,
-                Workload,
-                NetworkMode,
-                HealthStatus,
-                application_tunnel::Protocol as AppProtocol,
+                ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress,
+                NetworkMode, Workload, application_tunnel::Protocol as AppProtocol,
                 gatewayaddress::Destination,
             },
         },
-        strng,
-        test_helpers,
+        strng, test_helpers,
     };
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use http::{Method, Uri};
+    use prometheus_client::registry::Registry;
     use std::{
         net::SocketAddr,
         sync::{Arc, RwLock},
         time::Duration,
     };
-    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-    use http::{Method, Uri};
-    use prometheus_client::registry::Registry;
     use test_case::test_case;
 
     const CLIENT_POD_IP: &str = "10.0.0.1";
