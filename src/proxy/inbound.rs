@@ -86,7 +86,6 @@ impl Inbound {
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
         // Although, that is *after* the TLS handshake; in theory we may get some benefits to setting it earlier.
-        // let mut stream = crate::hyper_util::tls_server(acceptor, self.listener.inner());
 
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             loop {
