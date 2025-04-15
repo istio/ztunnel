@@ -86,6 +86,7 @@ pub struct CertsDump {
     identity: String,
     state: String,
     cert_chain: Vec<CertDump>,
+    root_certs: Vec<CertDump>,
 }
 
 impl Service {
@@ -220,10 +221,12 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
                 Unavailable(err) => dump.state = format!("Unavailable: {err}"),
                 Available(certs) => {
                     dump.state = "Available".to_string();
-                    dump.cert_chain = std::iter::once(&certs.cert)
-                        .chain(certs.chain.iter())
+                    dump.cert_chain = certs
+                        .cert_and_intermediates()
+                        .iter()
                         .map(dump_cert)
                         .collect();
+                    dump.root_certs = certs.roots.iter().map(dump_cert).collect();
                 }
             };
             dump
@@ -541,11 +544,13 @@ mod tests {
         let want = serde_json::json!([
           {
             "certChain": [],
+            "rootCerts": [],
             "identity": "spiffe://error/ns/forgotten/sa/sa-failed",
             "state": "Unavailable: the identity is no longer needed"
           },
           {
             "certChain": [],
+            "rootCerts": [],
             "identity": "spiffe://test/ns/test/sa/sa-pending",
             "state": "Initializing"
           },
@@ -557,6 +562,8 @@ mod tests {
                 "serialNumber": "588850990443535479077311695632745359443207891470",
                 "validFrom": "2023-03-11T05:57:26Z"
               },
+            ],
+            "rootCerts": [
               {
                 "expirationTime": "2296-12-24T18:31:28Z",
                 "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQytjLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXgKTWpoYUdBOHlNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU1lQ1R4UEp0dWQwVXh3KwpDYWFkZFdEN2ErUUV1UVkrQlBUS0pkbk1lajBzQk1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3AKMnNkMzJTWTRiZGJva1Fjb3ArQmp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiCkZZZWFpKzZxN2lNamxiQ0dBdTcvVW5LSnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3FpRQpYTVJtdzQvQkVoRkd6bUlEMm9VREtCMzZkdVZiZHpTRW01MVF2Z1U1SUxYSWd5VnJlak41Q0ZzQytXK3gKamVPWExFenRmSEZVb3FiM3dXaGtCdUV4bXI4MUoyaEdXOXBVTEoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94CkllYU5tTHpQSUdyWDAxelFZSWRaVHVEd01ZMENBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYQpya3V3UitVUmhLQWUySVRaS1o3Vk1COEdBMVVkSXdRWU1CYUFGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFoKS1o3Vk1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFLcm5BZVNzClNTSzMvOHp4K2h6ajZTRlhkSkE5Q1EwMkdFSjdoSHJLaWpHV1ZZZGRhbDlkQWJTNXRMZC8vcUtPOXVJcwpHZXR5L09rMmJSUTZjcXFNbGdkTnozam1tcmJTbFlXbUlYSTB5SEdtQ2lTYXpIc1hWYkVGNkl3eTN0Y1IKNHZvWFdLSUNXUGgrQzJjVGdMbWVaMEV1ekZ4cTR3Wm5DZjQwd0tvQUo5aTFhd1NyQm5FOWpXdG5wNEY0CmhXbkpUcEdreTVkUkFMRTBsLzJBYnJsMzh3Z2ZNOHI0SW90bVBUaEZLbkZlSUhVN2JRMXJZQW9xcGJBaApDdjBCTjVQakFRUldNazZib28zZjBha1MwN25sWUlWcVhoeHFjWW5PZ3drZGxUdFg5TXFHSXEyNm44bjEKTldXd25tS09qTnNrNnFSbXVsRWdlR080dnhUdlNKWWIraFU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
@@ -575,6 +582,8 @@ mod tests {
                 "serialNumber": "528170730419860468572163268563070820131458817969",
                 "validFrom": "2023-03-11T06:57:26Z"
               },
+            ],
+            "rootCerts": [
               {
                 "expirationTime": "2296-12-24T18:31:28Z",
                 "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQytjLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXgKTWpoYUdBOHlNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU1lQ1R4UEp0dWQwVXh3KwpDYWFkZFdEN2ErUUV1UVkrQlBUS0pkbk1lajBzQk1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3AKMnNkMzJTWTRiZGJva1Fjb3ArQmp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiCkZZZWFpKzZxN2lNamxiQ0dBdTcvVW5LSnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3FpRQpYTVJtdzQvQkVoRkd6bUlEMm9VREtCMzZkdVZiZHpTRW01MVF2Z1U1SUxYSWd5VnJlak41Q0ZzQytXK3gKamVPWExFenRmSEZVb3FiM3dXaGtCdUV4bXI4MUoyaEdXOXBVTEoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94CkllYU5tTHpQSUdyWDAxelFZSWRaVHVEd01ZMENBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYQpya3V3UitVUmhLQWUySVRaS1o3Vk1COEdBMVVkSXdRWU1CYUFGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFoKS1o3Vk1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFLcm5BZVNzClNTSzMvOHp4K2h6ajZTRlhkSkE5Q1EwMkdFSjdoSHJLaWpHV1ZZZGRhbDlkQWJTNXRMZC8vcUtPOXVJcwpHZXR5L09rMmJSUTZjcXFNbGdkTnozam1tcmJTbFlXbUlYSTB5SEdtQ2lTYXpIc1hWYkVGNkl3eTN0Y1IKNHZvWFdLSUNXUGgrQzJjVGdMbWVaMEV1ekZ4cTR3Wm5DZjQwd0tvQUo5aTFhd1NyQm5FOWpXdG5wNEY0CmhXbkpUcEdreTVkUkFMRTBsLzJBYnJsMzh3Z2ZNOHI0SW90bVBUaEZLbkZlSUhVN2JRMXJZQW9xcGJBaApDdjBCTjVQakFRUldNazZib28zZjBha1MwN25sWUlWcVhoeHFjWW5PZ3drZGxUdFg5TXFHSXEyNm44bjEKTldXd25tS09qTnNrNnFSbXVsRWdlR080dnhUdlNKWWIraFU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
