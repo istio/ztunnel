@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::stream::StreamExt;
 use futures_util::TryFutureExt;
 use http::{Method, Response, StatusCode};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
+use tls_listener::AsyncTls;
 use tokio::sync::watch;
 
-use tracing::{Instrument, debug, info, info_span, trace_span};
+use tracing::{Instrument, debug, error, info, info_span, trace_span};
 
-use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, ResponseFlags};
+use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, ResponseFlags, util};
 use crate::baggage::parse_baggage_header;
 use crate::identity::Identity;
 
@@ -87,19 +87,39 @@ impl Inbound {
 
         // Safety: we set nodelay directly in tls_server, so it is safe to convert to a normal listener.
         // Although, that is *after* the TLS handshake; in theory we may get some benefits to setting it earlier.
-        let mut stream = crate::hyper_util::tls_server(acceptor, self.listener.inner());
 
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            while let Some(tls) = stream.next().await {
-                let pi = self.pi.clone();
-                let (raw_socket, ssl) = tls.get_ref();
-                let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
-                let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
-                let src = to_canonical(raw_socket.peer_addr().expect("peer_addr available"));
+            loop {
+                let (raw_socket, src) = match self.listener.accept().await {
+                    Ok(raw_socket) => raw_socket,
+                    Err(e) => {
+                        if util::is_runtime_shutdown(&e) {
+                            return;
+                        }
+                        error!("Failed TCP handshake {}", e);
+                        continue;
+                    }
+                };
+                let src = to_canonical(src);
+                let start = Instant::now();
                 let drain = drain.clone();
                 let force_shutdown = force_shutdown.clone();
+                let pi = self.pi.clone();
+                let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
                 let network = pi.cfg.network.clone();
+                let acceptor = crate::tls::InboundAcceptor::new(acceptor.clone());
                 let serve_client = async move {
+                    let tls = match acceptor.accept(raw_socket).await {
+                        Ok(tls) => tls,
+                        Err(e) => {
+                            metrics::log_early_deny(src, dst, Reporter::destination, e);
+
+                            return Err::<(), _>(proxy::Error::SelfCall);
+                        }
+                    };
+                    debug!(latency=?start.elapsed(), "accepted TLS connection");
+                    let (_, ssl) = tls.get_ref();
+                    let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
                     let conn = Connection {
                         src_identity,
                         src,
