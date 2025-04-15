@@ -450,13 +450,6 @@ impl Inbound {
             // Normal case: both are aligned. This is allowed
             return Ok(());
         }
-        // Allow ztunnel to accept HBONE connections to its metrics endpoint
-        if local_workload.service_account == "ztunnel"
-            && (hbone_addr.port() == 15020 || conn.dst.port() == 15008)
-            && local_workload.workload_ips.contains(&hbone_addr.ip())
-        {
-            return Ok(());
-        }
         if local_workload.application_tunnel.is_some() {
             // In the case they have their own tunnel, they will get the HBONE target address in the PROXY
             // header, and their application can decide what to do with it; we don't validate this.
@@ -535,8 +528,14 @@ impl Inbound {
         if local_workload.service_account == "ztunnel" {
             if let HboneAddress::SocketAddr(addr) = hbone_addr {
                 if addr.port() == 15020 {
-                    // For metrics endpoint, we want to redirect to the actual metrics port
-                    let target = SocketAddr::new(conn.dst.ip(), 15020);
+                    // For metrics endpoint, redirect to LOOPBACK address on the metrics port
+                    let loopback_ip = if conn.dst.is_ipv4() {
+                        IpAddr::V4(Ipv4Addr::LOCALHOST)
+                    } else {
+                        IpAddr::V6(Ipv6Addr::LOCALHOST)
+                    };
+                    let target = SocketAddr::new(loopback_ip, 15020);
+                    debug!(%target, "Redirecting ztunnel metrics request to loopback");
                     return Ok((target, None, vec![]));
                 }
             }
