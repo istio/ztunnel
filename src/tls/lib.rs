@@ -148,7 +148,8 @@ pub mod tests {
         let certs = WorkloadCertificate::new(TEST_PKEY, TEST_WORKLOAD_CERT, roots).unwrap();
 
         // 3 certs that should be here are the istiod cert, intermediary cert and the root cert.
-        assert_eq!(certs.chain.len(), 3);
+        assert_eq!(certs.chain.len(), 2);
+        assert_eq!(certs.roots.len(), 1);
         assert_eq!(
             certs.cert.names(),
             vec![
