@@ -53,7 +53,7 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
+    pub async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)

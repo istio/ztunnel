@@ -29,6 +29,7 @@ use tracing::{Instrument, warn};
 
 use crate::identity::SecretManager;
 use crate::state::ProxyStateManager;
+use crate::proxy::{inbound::Inbound, connection_manager::ConnectionManager, DefaultSocketFactory, LocalWorkloadInformation};
 use crate::{admin, config, metrics, proxy, readiness, signal};
 use crate::{dns, xds};
 
@@ -128,7 +129,7 @@ pub async fn build_with_cert(
         config.clone(),
         state.clone(),
         cert_manager.clone(),
-        proxy_metrics,
+        proxy_metrics.clone(),
         dns_metrics,
         drain_rx.clone(),
     )
@@ -136,6 +137,48 @@ pub async fn build_with_cert(
 
     if config.proxy_mode == config::ProxyMode::Shared {
         tracing::info!("shared proxy mode - in-pod mode enabled");
+        
+        // Create ztunnel inbound listener only if both identity and workload info are set up
+        if let (Some(ztunnel_identity), Some(ztunnel_workload)) = (&config.ztunnel_identity, &config.ztunnel_workload) {
+            if ztunnel_workload.service_account == "ztunnel" {
+                tracing::info!("creating ztunnel inbound listener with identity: {:?}", ztunnel_identity);
+                let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+                    Arc::new(ztunnel_workload.clone()),
+                    state.clone(),
+                    cert_manager.clone(),
+                ));
+
+                let cm = ConnectionManager::default();
+                let pi = crate::proxy::ProxyInputs::new(
+                    config.clone(),
+                    cm.clone(),
+                    state.clone(),
+                    proxy_metrics.clone(),
+                    Arc::new(DefaultSocketFactory(config.socket_config)),
+                    None,
+                    local_workload_information,
+                );
+
+                let inbound = Inbound::new(pi, drain_rx.clone()).await
+                    .map_err(|e| anyhow::anyhow!("failed to create ztunnel inbound listener: {:?}", e))?;
+                
+                // Run the inbound listener in the data plane worker pool
+                let mut xds_rx_for_inbound = xds_rx.clone();
+                data_plane_pool.send(DataPlaneTask {
+                    block_shutdown: true,
+                    fut: Box::pin(async move {
+                        let _ = xds_rx_for_inbound.changed().await;
+                        tokio::task::spawn(async move {
+                            inbound.run().in_current_span().await;
+                        }).await?;
+                        Ok(())
+                    }),
+                })?;
+            }
+        } else {
+            tracing::warn!("skipping ztunnel inbound listener creation - missing identity or workload info");
+        }
+
         let run_future = init_inpod_proxy_mgr(
             &mut registry,
             &mut admin_server,
