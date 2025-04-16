@@ -53,7 +53,7 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    pub async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
+    pub(crate) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -544,23 +544,6 @@ impl Inbound {
         local_workload: &Workload,
         hbone_addr: &HboneAddress,
     ) -> Result<(SocketAddr, Option<TunnelRequest>, Vec<Arc<Service>>), Error> {
-        // Special case for ztunnel metrics endpoint
-        if local_workload.service_account == "ztunnel" {
-            if let HboneAddress::SocketAddr(addr) = hbone_addr {
-                if addr.port() == 15020 {
-                    // For metrics endpoint, redirect to LOOPBACK address on the metrics port
-                    let loopback_ip = if conn.dst.is_ipv4() {
-                        IpAddr::V4(Ipv4Addr::LOCALHOST)
-                    } else {
-                        IpAddr::V6(Ipv6Addr::LOCALHOST)
-                    };
-                    let target = SocketAddr::new(loopback_ip, 15020);
-                    debug!(%target, "Redirecting ztunnel metrics request to loopback");
-                    return Ok((target, None, vec![]));
-                }
-            }
-        }
-
         // We always target the local workload IP as the destination. But we need to determine the port to send to.
         let target_ip = conn.dst.ip();
 

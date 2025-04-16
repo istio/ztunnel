@@ -408,23 +408,6 @@ pub fn parse_config() -> Result<Config, Error> {
     construct_config(pc)
 }
 
-/// Helper function to read Downward API variables
-fn get_downward_api_var(name: &str, field_path: Option<&str>) -> Result<Option<String>, Error> {
-    match std::env::var(name) {
-        Ok(val) => Ok(Some(val)),
-        Err(_) => {
-            if let Some(field_path) = field_path {
-                tracing::warn!(
-                    "{} environment variable not set. Configure Pod spec with Downward API: fieldRef.fieldPath={}",
-                    name,
-                    field_path
-                );
-            }
-            Ok(None)
-        }
-    }
-}
-
 fn parse_proxy_config() -> Result<ProxyConfig, Error> {
     let mesh_config_path = "./etc/istio/config/mesh";
     let pc_env = parse::<String>(PROXY_CONFIG)?;
@@ -623,9 +606,9 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     // Read ztunnel identity and workload info from Downward API if available
     let (ztunnel_identity, ztunnel_workload) = match (
-        get_downward_api_var("POD_NAMESPACE", Some("metadata.namespace"))?,
-        get_downward_api_var("SERVICE_ACCOUNT", Some("spec.serviceAccountName"))?,
-        get_downward_api_var("POD_NAME", Some("metadata.name"))?,
+        parse::<String>("POD_NAMESPACE")?,
+        parse::<String>("SERVICE_ACCOUNT")?,
+        parse::<String>("POD_NAME")?,
     ) {
         (Some(namespace), Some(service_account), Some(pod_name)) => {
             let trust_domain = std::env::var("TRUST_DOMAIN")

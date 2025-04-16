@@ -23,8 +23,8 @@ use crate::drain::DrainWatcher;
 
 use crate::proxy::connection_manager::ConnectionManager;
 use crate::proxy::{Error, LocalWorkloadInformation, Metrics};
+use crate::proxy::{DefaultSocketFactory, Proxy, inbound::Inbound};
 
-use crate::proxy::Proxy;
 
 // Proxy factory creates ztunnel proxies using a socket factory.
 // this allows us to create our proxies the same way in regular mode and in inpod mode.
@@ -136,6 +136,50 @@ impl ProxyFactory {
         }
 
         Ok(result)
+    }
+
+    pub async fn create_ztunnel_inbound_listener(
+        &self,
+    ) -> Result<Option<crate::proxy::inbound::Inbound>, Error> {
+        if self.config.proxy_mode != config::ProxyMode::Shared {
+            return Ok(None);
+        }
+
+        if let (Some(ztunnel_identity), Some(ztunnel_workload)) =
+            (&self.config.ztunnel_identity, &self.config.ztunnel_workload)
+        {
+            tracing::info!(
+                "creating ztunnel inbound listener with identity: {:?}",
+                ztunnel_identity
+            );
+
+            let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+                Arc::new(ztunnel_workload.clone()),
+                self.state.clone(),
+                self.cert_manager.clone(),
+            ));
+
+            let socket_factory = Arc::new(DefaultSocketFactory(
+                self.config.socket_config,
+            ));
+
+            let cm = ConnectionManager::default();
+
+            let pi = crate::proxy::ProxyInputs::new(
+                self.config.clone(),
+                cm.clone(),
+                self.state.clone(),
+                self.proxy_metrics.clone(),
+                socket_factory,
+                None,
+                local_workload_information,
+            );
+
+            let inbound = Inbound::new(pi, self.drain.clone()).await?;
+            Ok(Some(inbound))
+        } else {
+            Ok(None)
+        }
     }
 }
 
