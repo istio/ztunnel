@@ -245,10 +245,12 @@ impl Inbound {
                     SocketAddr::new(loopback, ri.upstream_addr.port()),
                 )
             } else {
-                (
-                    enable_original_source.then_some(ri.rbac_ctx.conn.src.ip()),
-                    ri.upstream_addr,
-                )
+                let upstream_src_ip = if pi.disable_inbound_freebind {
+                    None
+                } else {
+                    enable_original_source.then_some(ri.rbac_ctx.conn.src.ip())
+                };
+                (upstream_src_ip, ri.upstream_addr)
             };
 
             // Establish upstream connection between original source and destination
@@ -905,6 +907,7 @@ mod tests {
             sf,
             None,
             local_workload,
+            false,
         ));
         let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;
         match want {

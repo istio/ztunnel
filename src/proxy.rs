@@ -260,6 +260,8 @@ pub(super) struct ProxyInputs {
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     local_workload_information: Arc<LocalWorkloadInformation>,
     resolver: Option<Arc<dyn Resolver + Send + Sync>>,
+    // If true, inbound connections created with these inputs will not attempt to preserve the original source IP.
+    pub disable_inbound_freebind: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -272,6 +274,7 @@ impl ProxyInputs {
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
         local_workload_information: Arc<LocalWorkloadInformation>,
+        disable_inbound_freebind: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
@@ -281,6 +284,7 @@ impl ProxyInputs {
             socket_factory,
             local_workload_information,
             resolver,
+            disable_inbound_freebind,
         })
     }
 }

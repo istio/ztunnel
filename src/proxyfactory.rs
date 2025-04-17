@@ -130,6 +130,7 @@ impl ProxyFactory {
                 socket_factory.clone(),
                 resolver,
                 local_workload_information,
+                false,
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
@@ -173,6 +174,7 @@ impl ProxyFactory {
                 socket_factory,
                 None,
                 local_workload_information,
+                true,
             );
 
             let inbound = Inbound::new(pi, self.drain.clone()).await?;
