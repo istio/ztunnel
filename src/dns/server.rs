@@ -564,7 +564,12 @@ impl Resolver for Store {
                 }
                 Err(e) => {
                     // Forwarding failed. Just return the error.
-                    access_log(request, Some(&client), "forwarding failed", 0);
+                    access_log(
+                        request,
+                        Some(&client),
+                        &format!("forwarding failed ({e})"),
+                        0,
+                    );
                     return Err(e);
                 }
             }
@@ -589,7 +594,12 @@ impl Resolver for Store {
                 }
                 Err(e) => {
                     // Forwarding failed. Just return the error.
-                    access_log(request, Some(&client), "forwarding failed", 0);
+                    access_log(
+                        request,
+                        Some(&client),
+                        &format!("forwarding failed ({e})"),
+                        0,
+                    );
                     return Err(e);
                 }
             }
