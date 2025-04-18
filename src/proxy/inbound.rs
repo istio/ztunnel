@@ -45,7 +45,7 @@ use crate::state::{DemandProxyState, ProxyRbacContext};
 use crate::strng::Strng;
 use crate::tls::TlsError;
 
-pub(super) struct Inbound {
+pub struct Inbound {
     listener: socket::Listener,
     drain: DrainWatcher,
     pi: Arc<ProxyInputs>,
@@ -53,7 +53,7 @@ pub(super) struct Inbound {
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
+    pub(crate) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -74,11 +74,12 @@ impl Inbound {
         })
     }
 
-    pub(super) fn address(&self) -> SocketAddr {
+    /// Returns the socket address this proxy is listening on.
+    pub fn address(&self) -> SocketAddr {
         self.listener.local_addr()
     }
 
-    pub(super) async fn run(self) {
+    pub async fn run(self) {
         let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
             local_workload: self.pi.local_workload_information.clone(),
@@ -244,10 +245,12 @@ impl Inbound {
                     SocketAddr::new(loopback, ri.upstream_addr.port()),
                 )
             } else {
-                (
-                    enable_original_source.then_some(ri.rbac_ctx.conn.src.ip()),
-                    ri.upstream_addr,
-                )
+                let upstream_src_ip = if pi.disable_inbound_freebind {
+                    None
+                } else {
+                    enable_original_source.then_some(ri.rbac_ctx.conn.src.ip())
+                };
+                (upstream_src_ip, ri.upstream_addr)
             };
 
             // Establish upstream connection between original source and destination
@@ -466,7 +469,7 @@ impl Inbound {
             return Ok(());
         };
         if conn.dst.ip() == hbone_addr.ip() {
-            // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
+            // Normal case: both are aligned. This is allowed
             return Ok(());
         }
         if local_workload.application_tunnel.is_some() {
@@ -536,7 +539,7 @@ impl Inbound {
 
     /// find_inbound_upstream determines the next hop for an inbound request.
     #[expect(clippy::type_complexity)]
-    fn find_inbound_upstream(
+    pub(super) fn find_inbound_upstream(
         cfg: &Config,
         state: &DemandProxyState,
         conn: &Connection,
@@ -545,6 +548,7 @@ impl Inbound {
     ) -> Result<(SocketAddr, Option<TunnelRequest>, Vec<Arc<Service>>), Error> {
         // We always target the local workload IP as the destination. But we need to determine the port to send to.
         let target_ip = conn.dst.ip();
+
         // First, fetch the actual target SocketAddr as well as all possible services this could be for.
         // Given they may request the pod directly, there may be multiple possible services; we will
         // select a final one (if any) later.
@@ -640,7 +644,7 @@ impl Inbound {
 }
 
 #[derive(Debug)]
-struct TunnelRequest {
+pub(super) struct TunnelRequest {
     tunnel_target: SocketAddr,
     protocol: Protocol,
 }
@@ -702,37 +706,36 @@ fn build_response(status: StatusCode) -> Response<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 mod tests {
     use super::{Inbound, ProxyInputs};
-    use crate::{config, proxy::ConnectionManager, proxy::inbound::HboneAddress, strng};
-
     use crate::{
+        config,
+        identity::manager::mock::new_secret_manager,
+        proxy::{
+            ConnectionManager, DefaultSocketFactory, LocalWorkloadInformation,
+            h2::server::RequestParts, inbound::HboneAddress,
+        },
         rbac::Connection,
         state::{
-            self, DemandProxyState,
+            self, DemandProxyState, WorkloadInfo,
             service::{Endpoint, EndpointSet, Service},
             workload::{
-                ApplicationTunnel, GatewayAddress, InboundProtocol, NetworkAddress, Workload,
-                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
+                ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress,
+                NetworkMode, Workload, application_tunnel::Protocol as AppProtocol,
+                gatewayaddress::Destination,
             },
         },
-        test_helpers,
+        strng, test_helpers,
     };
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use http::{Method, Uri};
+    use prometheus_client::registry::Registry;
     use std::{
         net::SocketAddr,
         sync::{Arc, RwLock},
         time::Duration,
     };
-
-    use crate::identity::manager::mock::new_secret_manager;
-    use crate::proxy::DefaultSocketFactory;
-    use crate::proxy::LocalWorkloadInformation;
-    use crate::proxy::h2::server::RequestParts;
-    use crate::state::WorkloadInfo;
-    use crate::state::workload::HealthStatus;
-    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-    use http::{Method, Uri};
-    use prometheus_client::registry::Registry;
     use test_case::test_case;
 
     const CLIENT_POD_IP: &str = "10.0.0.1";
@@ -904,6 +907,7 @@ mod tests {
             sf,
             None,
             local_workload,
+            false,
         ));
         let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;
         match want {
@@ -937,18 +941,18 @@ mod tests {
         .map(|(name, vip, waypoint)| Service {
             name: name.into(),
             namespace: "default".into(),
-            hostname: strng::format!("{name}.default.svc.cluster.local"),
+            hostname: strng::new(&format!("{name}.default.svc.cluster.local")),
             vips: vec![NetworkAddress {
                 address: vip.parse().unwrap(),
                 network: "".into(),
             }],
             ports: std::collections::HashMap::from([(80u16, 8080u16)]),
             endpoints: EndpointSet::from_list([Endpoint {
-                workload_uid: strng::format!("cluster1//v1/Pod/default/{name}"),
+                workload_uid: strng::new(&format!("cluster1//v1/Pod/default/{name}")),
                 port: std::collections::HashMap::new(),
                 status: HealthStatus::Healthy,
             }]),
-            subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
+            subject_alt_names: vec![strng::new(&format!("{name}.default.svc.cluster.local"))],
             waypoint: waypoint.service_attached(),
             load_balancer: None,
             ip_families: None,
@@ -959,7 +963,6 @@ mod tests {
                 "waypoint",
                 WAYPOINT_POD_IP,
                 Waypoint::None,
-                // the waypoint's _workload_ gets the app tunnel field
                 server_waypoint.app_tunnel(),
             ),
             ("client", CLIENT_POD_IP, Waypoint::None, None),
@@ -975,6 +978,7 @@ mod tests {
             namespace: "default".into(),
             service_account: strng::format!("service-account-{name}"),
             application_tunnel: app_tunnel,
+            network_mode: NetworkMode::Standard,
             ..test_helpers::test_default_workload()
         });
 
@@ -987,13 +991,14 @@ mod tests {
 
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        Ok(DemandProxyState::new(
+        let res = DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
             metrics,
-        ))
+        );
+        Ok(res)
     }
 
     // tells the test if we're using workload-attached or svc-attached waypoints
@@ -1018,7 +1023,7 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: strng::EMPTY,
+                    network: strng::new(""),
                     address: s.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
@@ -1031,7 +1036,7 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: strng::EMPTY,
+                    network: strng::new(""),
                     address: w.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
