@@ -716,6 +716,7 @@ mod tests {
                 local_workload_information: local_workload_information.clone(),
                 connection_manager: ConnectionManager::default(),
                 resolver: None,
+                disable_inbound_freebind: false,
             }),
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
