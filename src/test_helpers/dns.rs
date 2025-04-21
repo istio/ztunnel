@@ -24,21 +24,23 @@ use crate::xds::istio::workload::Workload as XdsWorkload;
 use crate::{dns, drain, metrics};
 use futures_util::ready;
 use futures_util::stream::{Stream, StreamExt};
-use hickory_client::client::{AsyncClient, ClientHandle};
-use hickory_client::error::ClientError;
+use hickory_client::ClientError;
+use hickory_client::client::{Client, ClientHandle};
 use hickory_proto::DnsHandle;
-use hickory_proto::error::{ProtoError, ProtoErrorKind};
-use hickory_proto::iocompat::AsyncIoTokioAsStd;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
+use hickory_proto::runtime::TokioRuntimeProvider;
+use hickory_proto::runtime::iocompat::AsyncIoTokioAsStd;
 use hickory_proto::serialize::binary::BinDecodable;
 use hickory_proto::tcp::TcpClientStream;
 use hickory_proto::udp::UdpClientStream;
+use hickory_proto::xfer::Protocol;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
+use hickory_proto::{ProtoError, ProtoErrorKind};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_server::authority::{LookupError, MessageRequest};
-use hickory_server::server::{Protocol, Request};
+use hickory_server::server::Request;
 use prometheus_client::registry::Registry;
 use std::collections::HashMap;
 use std::future::Future;
@@ -46,7 +48,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 
 const TTL: u32 = 5;
 
@@ -72,11 +74,14 @@ pub fn cname(name: Name, canonical_name: Name) -> Record {
 
 /// Creates a new DNS client that establishes a TCP connection to the nameserver at the given
 /// address.
-pub async fn new_tcp_client(addr: SocketAddr) -> AsyncClient {
-    let (stream, sender) = TcpClientStream::<AsyncIoTokioAsStd<TcpStream>>::new(addr);
-    let (client, bg) = AsyncClient::new(Box::new(stream), sender, None)
-        .await
-        .unwrap();
+pub async fn new_tcp_client(addr: SocketAddr) -> Client {
+    let (stream, sender) = TcpClientStream::<AsyncIoTokioAsStd<TcpStream>>::new(
+        addr,
+        None,
+        None,
+        TokioRuntimeProvider::new(),
+    );
+    let (client, bg) = Client::new(Box::new(stream), sender, None).await.unwrap();
 
     // Run the client exchange in the background.
     tokio::spawn(bg);
@@ -85,9 +90,10 @@ pub async fn new_tcp_client(addr: SocketAddr) -> AsyncClient {
 }
 
 /// Creates a new DNS client that establishes a UDP connection to the nameserver at the given address.
-pub async fn new_udp_client(addr: SocketAddr) -> AsyncClient {
-    let stream = UdpClientStream::<UdpSocket>::new(addr);
-    let (client, bg) = AsyncClient::connect(stream).await.unwrap();
+pub async fn new_udp_client(addr: SocketAddr) -> Client {
+    let stream =
+        UdpClientStream::<TokioRuntimeProvider>::builder(addr, TokioRuntimeProvider::new()).build();
+    let (client, bg) = Client::connect(stream).await.unwrap();
 
     // Run the client exchange in the background.
     tokio::spawn(bg);
@@ -106,7 +112,7 @@ pub async fn send_request<C: ClientHandle>(
 
 /// Sends a request with the given maximum response payload size.
 pub async fn send_with_max_size(
-    client: &mut AsyncClient,
+    client: &mut Client,
     name: Name,
     rr_type: RecordType,
     max_payload: u16,
@@ -230,15 +236,17 @@ fn internal_resolver_config(tcp: SocketAddr, udp: SocketAddr) -> ResolverConfig 
     let mut rc = ResolverConfig::new();
     rc.add_name_server(NameServerConfig {
         socket_addr: udp,
-        protocol: hickory_resolver::config::Protocol::Udp,
+        protocol: Protocol::Udp,
         tls_dns_name: None,
+        http_endpoint: None,
         trust_negative_responses: false,
         bind_addr: None,
     });
     rc.add_name_server(NameServerConfig {
         socket_addr: tcp,
-        protocol: hickory_resolver::config::Protocol::Tcp,
+        protocol: Protocol::Tcp,
         tls_dns_name: None,
+        http_endpoint: None,
         trust_negative_responses: false,
         bind_addr: None,
     });
@@ -353,12 +361,13 @@ impl crate::dns::Forwarder for FakeForwarder {
         _: Option<&Workload>,
         request: &Request,
     ) -> Result<Answer, LookupError> {
-        let name: Name = request.query().name().into();
+        let query = request.request_info()?.query;
+        let name: Name = query.name().into();
         let utf = name.to_string();
         if let Some(ip) = utf.strip_suffix(".reflect.internal.") {
             // Magic to allow `ip.reflect.internal` to always return ip (like nip.io)
             return Ok(Answer::new(
-                vec![a(request.query().name().into(), ip.parse().unwrap())],
+                vec![a(query.name().into(), ip.parse().unwrap())],
                 false,
             ));
         }
@@ -368,17 +377,18 @@ impl crate::dns::Forwarder for FakeForwarder {
         };
 
         let mut out = Vec::new();
-        let rtype = request.query().query_type();
+
+        let rtype = query.query_type();
         for ip in ips {
             match ip {
                 IpAddr::V4(ip) => {
                     if rtype == RecordType::A {
-                        out.push(a(request.query().name().into(), *ip));
+                        out.push(a(query.name().into(), *ip));
                     }
                 }
                 IpAddr::V6(ip) => {
                     if rtype == RecordType::AAAA {
-                        out.push(aaaa(request.query().name().into(), *ip));
+                        out.push(aaaa(query.name().into(), *ip));
                     }
                 }
             }

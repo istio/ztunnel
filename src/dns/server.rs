@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hickory_proto::error::ProtoErrorKind;
+use hickory_proto::ProtoErrorKind;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
@@ -509,6 +509,7 @@ impl Store {
 
 fn access_log(request: &Request, source: Option<&Workload>, result: &str, ep_count: usize) {
     let src = source.as_ref();
+    let query = request.request_info().ok().map(|info| info.query);
     event!(
         target: "dns",
         parent: None,
@@ -517,8 +518,8 @@ fn access_log(request: &Request, source: Option<&Workload>, result: &str, ep_cou
         src.workload = src.map(|w| w.name.as_str()).unwrap_or("unknown"),
         src.namespace = src.map(|w| w.namespace.as_str()).unwrap_or("unknown"),
 
-        query = request.query().query_type().to_string(),
-        domain = request.query().name().to_string(),
+        query = query.map(|q| q.query_type().to_string()),
+        domain = query.map(|q| q.name().to_string()),
 
         result = result,
         endpoints = ep_count,
@@ -532,8 +533,8 @@ impl Resolver for Store {
         skip_all,
         fields(
             src=%request.src(),
-            query=%request.query().query_type(),
-            name=%request.query().name(),
+            query=%request.request_info()?.query.query_type(),
+            name=%request.request_info()?.query.name(),
         ),
     )]
     async fn lookup(&self, request: &Request) -> Result<Answer, LookupError> {
@@ -546,8 +547,9 @@ impl Resolver for Store {
             LookupError::ResponseCode(ResponseCode::ServFail)
         })?;
 
+        let query = request.request_info()?.query;
         // Make sure the request is for IP records. Anything else, we forward.
-        let record_type = request.query().query_type();
+        let record_type = query.query_type();
         if !is_record_type_supported(record_type) {
             debug!("unknown record type");
             let result = self.forward(Some(&client), request).await;
@@ -562,7 +564,12 @@ impl Resolver for Store {
                 }
                 Err(e) => {
                     // Forwarding failed. Just return the error.
-                    access_log(request, Some(&client), "forwarding failed", 0);
+                    access_log(
+                        request,
+                        Some(&client),
+                        &format!("forwarding failed ({e})"),
+                        0,
+                    );
                     return Err(e);
                 }
             }
@@ -570,7 +577,7 @@ impl Resolver for Store {
         }
 
         // Find the service for the requested host.
-        let requested_name = Name::from(request.query().name().clone());
+        let requested_name = Name::from(query.name().clone());
         trace!("incoming request {requested_name:?}");
         let Some(service_match) = self.find_server(&client, &requested_name) else {
             trace!("unknown host, forwarding");
@@ -587,7 +594,12 @@ impl Resolver for Store {
                 }
                 Err(e) => {
                     // Forwarding failed. Just return the error.
-                    access_log(request, Some(&client), "forwarding failed", 0);
+                    access_log(
+                        request,
+                        Some(&client),
+                        &format!("forwarding failed ({e})"),
+                        0,
+                    );
                     return Err(e);
                 }
             }
@@ -919,7 +931,7 @@ mod tests {
     use std::net::{SocketAddrV4, SocketAddrV6};
 
     use bytes::Bytes;
-    use hickory_server::server::Protocol;
+    use hickory_proto::xfer::Protocol;
     use prometheus_client::registry::Registry;
 
     use super::*;
@@ -1568,7 +1580,7 @@ mod tests {
         let resp = send_request(&mut udp_client, n("large.com."), RecordType::A).await;
         // UDP is truncated
         assert!(resp.truncated());
-        assert_eq!(75, resp.answers().len(), "expected UDP to be truncated");
+        assert_eq!(74, resp.answers().len(), "expected UDP to be truncated");
     }
 
     #[test]
@@ -1881,24 +1893,25 @@ mod tests {
             _: Option<&Workload>,
             request: &Request,
         ) -> Result<Answer, LookupError> {
-            let name = request.query().name().into();
+            let query = request.request_info()?.query;
+            let name = query.name().into();
             let Some(ips) = self.ips.get(&name) else {
                 // Not found.
                 return Err(LookupError::ResponseCode(ResponseCode::NXDomain));
             };
 
             let mut out = Vec::new();
-            let rtype = request.query().query_type();
+            let rtype = query.query_type();
             for ip in ips {
                 match ip {
                     IpAddr::V4(ip) => {
                         if rtype == RecordType::A {
-                            out.push(a(request.query().name().into(), *ip));
+                            out.push(a(query.name().into(), *ip));
                         }
                     }
                     IpAddr::V6(ip) => {
                         if rtype == RecordType::AAAA {
-                            out.push(aaaa(request.query().name().into(), *ip));
+                            out.push(aaaa(query.name().into(), *ip));
                         }
                     }
                 }
