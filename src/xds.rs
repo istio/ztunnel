@@ -399,7 +399,7 @@ pub struct LocalWorkload {
     pub services: HashMap<String, HashMap<u16, u16>>,
 }
 
-#[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalConfig {
     #[serde(default)]

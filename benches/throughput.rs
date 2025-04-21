@@ -94,6 +94,7 @@ fn create_test_policies() -> Vec<Authorization> {
             scope: ztunnel::rbac::RbacScope::Global,
             namespace: "default".into(),
             rules: rules.clone(),
+            stats: Default::default(),
         });
     }
 

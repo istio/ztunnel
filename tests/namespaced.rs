@@ -1001,6 +1001,7 @@ mod namespaced {
                     )],
                     ..Default::default()
                 }]]],
+                stats: Default::default(),
             })
             .await?;
         let _ = manager

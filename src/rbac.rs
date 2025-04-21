@@ -17,6 +17,9 @@ use ipnet::IpNet;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 use tracing::{instrument, trace};
 use xds::istio::security::Address as XdsAddress;
 use xds::istio::security::Authorization as XdsRbac;
@@ -31,7 +34,7 @@ use crate::state::workload::{WorkloadError, byte_to_ip};
 use crate::strng::Strng;
 use crate::{strng, xds};
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Authorization {
     pub name: Strng,
@@ -39,6 +42,24 @@ pub struct Authorization {
     pub scope: RbacScope,
     pub action: RbacAction,
     pub rules: Vec<Vec<Vec<RbacMatch>>>,
+    #[serde(default)]
+    pub stats: Arc<AuthzCounter>,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthzCounter {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl AuthzCounter {
+    pub fn hit(&self) {
+        self.hits.fetch_add(1, Relaxed);
+    }
+    pub fn miss(&self) {
+        self.misses.fetch_add(1, Relaxed);
+    }
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
@@ -360,6 +381,7 @@ impl TryFrom<XdsRbac> for Authorization {
             scope: RbacScope::from(xds::istio::security::Scope::try_from(resource.scope)?),
             action: RbacAction::from(xds::istio::security::Action::try_from(resource.action)?),
             rules,
+            stats: Default::default(),
         })
     }
 }
@@ -483,6 +505,7 @@ mod tests {
             scope: RbacScope::Global,
             action: RbacAction::Allow,
             rules,
+            stats: Default::default(),
         }
     }
 

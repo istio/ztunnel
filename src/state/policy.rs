@@ -56,8 +56,14 @@ impl PolicyStore {
             .collect()
     }
 
-    pub fn insert(&mut self, xds_name: Strng, rbac: Authorization) {
-        self.remove(xds_name.clone());
+    pub fn insert(&mut self, xds_name: Strng, mut rbac: Authorization) {
+        if let Some(old) = self.remove(xds_name.clone()) {
+            // Copy over old stats. There could be some motivation to reset the stats if the policy
+            // changes, but right now this is getting triggered even for NO-OP changes possibly, so
+            // resets would be confusing.
+            rbac.stats = old.stats;
+        }
+
         match rbac.scope {
             RbacScope::Global => {
                 self.by_namespace
@@ -76,13 +82,11 @@ impl PolicyStore {
         self.by_key.insert(xds_name.clone(), rbac);
     }
 
-    pub fn remove(&mut self, xds_name: Strng) {
-        let Some(rbac) = self.by_key.remove(&xds_name) else {
-            return;
-        };
-        if let Some(key) = match rbac.scope {
+    pub fn remove(&mut self, xds_name: Strng) -> Option<Authorization> {
+        let rbac = self.by_key.remove(&xds_name)?;
+        if let Some(key) = match &rbac.scope {
             RbacScope::Global => Some(strng::EMPTY),
-            RbacScope::Namespace => Some(rbac.namespace),
+            RbacScope::Namespace => Some(rbac.namespace.clone()),
             RbacScope::WorkloadSelector => None,
         } {
             if let Some(pl) = self.by_namespace.get_mut(&key) {
@@ -92,6 +96,7 @@ impl PolicyStore {
                 }
             }
         }
+        Some(rbac)
     }
     pub fn subscribe(&self) -> watch::Receiver<()> {
         self.notifier.sender.subscribe()
@@ -128,6 +133,7 @@ mod tests {
                 namespaces: vec![StringMatch::Exact("whatever".into())],
                 ..Default::default()
             }]]],
+            stats: Default::default(),
         };
         let policy_key = policy.to_key();
         // insert this namespace-scoped policy into policystore then assert it is
