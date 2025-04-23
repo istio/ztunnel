@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::{ConfigSource, ProxyMode};
+use crate::config::{ConfigSource, ProxyMode, Address};
 use crate::rbac::Authorization;
 use crate::state::service::{Endpoint, Service};
 use crate::state::workload::{HealthStatus, Workload, gatewayaddress};
@@ -30,7 +30,7 @@ use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
 use arcstr::ArcStr;
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -114,7 +114,16 @@ impl WorkloadManager {
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
     pub async fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
-        self.deploy_dedicated_ztunnel(node, None).await
+        let wli = if self.mode == Dedicated {
+            Some(state::WorkloadInfo {
+                name: format!("ztunnel-{node}"),
+                namespace: "default".to_string(),
+                service_account: format!("ztunnel-{node}"),
+            })
+        } else {
+            None
+        };
+        self.deploy_dedicated_ztunnel(node, wli).await
     }
 
     /// deploy_ztunnel runs a ztunnel instance for dedicated mode.
@@ -124,20 +133,49 @@ impl WorkloadManager {
         wli: Option<state::WorkloadInfo>,
     ) -> anyhow::Result<TestApp> {
         let mut inpod_uds: PathBuf = "/dev/null".into();
-        let ztunnel_server = if self.mode == Shared {
+        let current_mode = self.mode;
+        let ztunnel_server = if current_mode == Shared {
             inpod_uds = self.tmp_dir.join(node);
             Some(start_ztunnel_server(inpod_uds.clone()).await)
         } else {
             None
         };
-        let ns = TestWorkloadBuilder::new(&format!("ztunnel-{node}"), self)
+        
+        let ztunnel_name = format!("ztunnel-{node}");
+        let ztunnel_workload_identity = if current_mode == Shared {
+            identity::Identity::Spiffe {
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: ztunnel_name.clone().into(),
+            }
+        } else {
+            // In dedicated mode, identity comes from wli
+            let dedicated_wli = wli.as_ref().expect("wli must be provided for dedicated mode");
+            identity::Identity::Spiffe {
+                trust_domain: "cluster.local".into(), // Assuming same trust domain, adjust if needed
+                namespace: dedicated_wli.namespace.clone().into(),
+                service_account: dedicated_wli.service_account.clone().into(),
+            }
+        };
+
+        let mut builder = TestWorkloadBuilder::new(&ztunnel_name, self)
             .on_node(node)
-            .uncaptured()
-            .register()
-            .await?;
+            .identity(ztunnel_workload_identity); 
+            
+        // Set HBONE protocol in Shared mode, otherwise default to uncaptured (TCP) in Dedicated mode
+        if current_mode == Shared { 
+            builder = builder.hbone();
+        } else {
+            builder = builder.uncaptured();
+        }
+        
+
+        let ns = builder.register().await?;
+        let ztunnel_local_workload = self.workloads.last().cloned().expect("ztunnel workload should be registered");
+        
         let ip = ns.ip();
         let initial_config = LocalConfig {
-            workloads: self.workloads.clone(),
+            workloads: self.workloads.clone(), 
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
@@ -149,13 +187,37 @@ impl WorkloadManager {
         let (mut tx_cfg, rx_cfg) = mpsc_ack(1);
         tx_cfg.send(initial_config).await?;
         let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
-        let cfg = config::Config {
+
+        // Create ztunnel identity and workload info for shared proxy mode
+        let (ztunnel_identity, ztunnel_workload) = if proxy_mode == ProxyMode::Shared {
+            let identity = identity::Identity::Spiffe {
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: format!("ztunnel-{node}").into(),
+            };
+            let workload = state::WorkloadInfo::new(
+                format!("ztunnel-{node}"),
+                "default".to_string(),
+                format!("ztunnel-{node}"),
+            );
+            (Some(identity), Some(workload))
+        } else {
+            (None, None)
+        };
+
+        let mut proxy_wli = if proxy_mode == ProxyMode::Shared {
+            ztunnel_workload.clone()
+        } else {
+            wli
+        };
+
+        let mut cfg = config::Config {
             xds_address: None,
             dns_proxy: true,
             fake_ca: true,
             local_xds_config,
             local_node: Some(node.to_string()),
-            proxy_workload_information: wli,
+            proxy_workload_information: proxy_wli,
             inpod_uds,
             proxy_mode,
             // We use packet mark even in dedicated to distinguish proxy from application
@@ -166,12 +228,16 @@ impl WorkloadManager {
                 Some(true)
             },
             localhost_app_tunnel: true,
+            ztunnel_identity: ztunnel_identity.clone(),
+            ztunnel_workload,
             ..config::parse_config().unwrap()
         };
+
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
         let cloned_ns2 = ns.clone();
+        let ztunnel_identity = ztunnel_identity.clone();
         // run_ready will spawn a thread and block on it. Run with spawn_blocking so it doesn't block the runtime.
         tokio::task::spawn_blocking(move || {
             ns.run_ready(move |ready| async move {
@@ -210,9 +276,9 @@ impl WorkloadManager {
                         ip,
                     )),
                     cert_manager,
-
                     namespace: Some(cloned_ns),
                     shutdown,
+                    ztunnel_identity: ztunnel_identity.clone(),
                 };
                 ta.ready().await;
                 info!("ready");
@@ -569,7 +635,7 @@ impl<'a> TestWorkloadBuilder<'a> {
                 let fd = network_namespace.netns().file().as_raw_fd();
                 let msg = inpod::Message::Start(inpod::StartZtunnelMessage {
                     uid: uid.to_string(),
-                    workload_info: Some(wli),
+                    workload_info: Some(wli.clone()),
                     fd,
                 });
                 zt_info
