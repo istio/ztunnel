@@ -18,8 +18,8 @@ mod namespaced {
     use futures::future::poll_fn;
     use http_body_util::Empty;
     use std::collections::HashMap;
-    use ztunnel::state::workload::application_tunnel::Protocol;
     use ztunnel::state::workload::ApplicationTunnel;
+    use ztunnel::state::workload::application_tunnel::Protocol;
     use ztunnel::state::workload::gatewayaddress::Destination;
     use ztunnel::state::workload::{GatewayAddress, NamespacedHostname};
     use ztunnel::test_helpers::linux::TestMode;
@@ -944,7 +944,10 @@ mod namespaced {
 
         // The long running connection should also fail on next attempt
         let tx_send_result = tx.send_and_wait(()).await;
-        assert!(tx_send_result.is_err(), "long running connection should fail after workload deletion");
+        assert!(
+            tx_send_result.is_err(),
+            "long running connection should fail after workload deletion"
+        );
 
         drop(tx);
         assert!(cjh.join().unwrap().is_err());
@@ -1245,7 +1248,7 @@ mod namespaced {
                 // Ztunnel doesn't listen on these ports...
                 (zt, 15001, Connection), // Outbound: should be blocked due to recursive call
                 (zt, 15006, Connection), // Inbound: should be blocked due to recursive call
-                (zt, 15008, Request),    // HBONE: Connection succeeds (ztunnel listens) but request fails due to TLS
+                (zt, 15008, Request), // HBONE: Connection succeeds (ztunnel listens) but request fails due to TLS
                 // Localhost is not accessible
                 (zt, 15080, Connection), // socks5: localhost
                 (zt, 15000, Connection), // admin: localhost
@@ -1323,7 +1326,9 @@ mod namespaced {
 
         let ta = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let ztunnel_identity_obj = ta.ztunnel_identity.as_ref().unwrap().clone();
-        ta.cert_manager.fetch_certificate(&ztunnel_identity_obj).await?;
+        ta.cert_manager
+            .fetch_certificate(&ztunnel_identity_obj)
+            .await?;
         let ztunnel_identity_str = ztunnel_identity_obj.to_string();
 
         let check = |want: Vec<String>, help: &str| {
@@ -1345,21 +1350,33 @@ mod namespaced {
                 assert!(res.is_ok(), "{}: got {:?}", help, res.err().unwrap());
             }
         };
-        check(vec![ztunnel_identity_str.clone()], "initially only ztunnel cert").await;
+        check(
+            vec![ztunnel_identity_str.clone()],
+            "initially only ztunnel cert",
+        )
+        .await;
 
         manager
             .workload_builder("id1-a-remote-node", REMOTE_NODE)
             .identity(id1.clone())
             .register()
             .await?;
-        check(vec![ztunnel_identity_str.clone()], "we should not prefetch remote nodes").await;
+        check(
+            vec![ztunnel_identity_str.clone()],
+            "we should not prefetch remote nodes",
+        )
+        .await;
 
         manager
             .workload_builder("id1-a-same-node", DEFAULT_NODE)
             .identity(id1.clone())
             .register()
             .await?;
-        check(vec![ztunnel_identity_str.clone(), id1s.clone()], "we should prefetch our nodes").await;
+        check(
+            vec![ztunnel_identity_str.clone(), id1s.clone()],
+            "we should prefetch our nodes",
+        )
+        .await;
 
         manager
             .workload_builder("id1-b-same-node", DEFAULT_NODE)
@@ -1408,10 +1425,10 @@ mod namespaced {
     #[tokio::test]
     async fn test_inbound_hbone_connection() -> Result<(), anyhow::Error> {
         let mut manager = setup_netns_test!(Shared);
-    
+
         // Deploy ztunnel for the node
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
-        
+
         // Deploy a server workload
         let server = manager
             .workload_builder("server", DEFAULT_NODE)
@@ -1419,7 +1436,7 @@ mod namespaced {
             .await?;
         run_tcp_server(server.clone())?; // Run standard TCP echo server
         let server_ip = server.ip();
-        
+
         // Deploy a client workload
         let client = manager
             .workload_builder("client", DEFAULT_NODE)
@@ -1437,14 +1454,14 @@ mod namespaced {
         let metrics = [
             (CONNECTIONS_OPENED, 1),
             (CONNECTIONS_CLOSED, 1),
-            (BYTES_RECV, REQ_SIZE), // ztunnel received from client
+            (BYTES_RECV, REQ_SIZE),     // ztunnel received from client
             (BYTES_SENT, REQ_SIZE * 2), // ztunnel sent to server (echo)
         ];
         verify_metrics(&zt, &metrics, &destination_labels()).await;
-    
+
         // Verify INBOUND telemetry log
         let sent = format!("{}", REQ_SIZE * 2); // Server sent back double
-        let recv = format!("{}", REQ_SIZE);     // Server received
+        let recv = format!("{}", REQ_SIZE); // Server received
         // For inbound HBONE, logs show dst.addr has server IP but HBONE port.
         let dst_addr_log = format!("{}:15008", server_ip); // Use server IP, HBONE port 15008
         let src_ip = manager.resolve("client")?;
@@ -1826,9 +1843,15 @@ mod namespaced {
 
     async fn hbone_read_write_stream(stream: &mut TcpStream) -> anyhow::Result<()> {
         const BODY: &[u8] = b"hello world";
-        stream.write_all(BODY).await.expect("HBONE stream write failed");
+        stream
+            .write_all(BODY)
+            .await
+            .expect("HBONE stream write failed");
         let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
-        stream.read_exact(&mut buf).await.expect("HBONE stream read failed");
+        stream
+            .read_exact(&mut buf)
+            .await
+            .expect("HBONE stream read failed");
         assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
         Ok(())
     }

@@ -612,7 +612,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     ) {
         (Some(namespace), Some(service_account), Some(pod_name)) => {
             let trust_domain = std::env::var("TRUST_DOMAIN")
-            // TODO: most probably we shouldnt hardcode to cluster.local
+                // TODO: most probably we shouldnt hardcode to cluster.local
                 .unwrap_or_else(|_| "cluster.local".to_string());
 
             let identity = identity::Identity::from_parts(
@@ -621,11 +621,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
                 service_account.clone().into(),
             );
 
-            let workload = state::WorkloadInfo::new(
-                pod_name,
-                namespace,
-                service_account,
-            );
+            let workload = state::WorkloadInfo::new(pod_name, namespace, service_account);
 
             (Some(identity), Some(workload))
         }
@@ -995,7 +991,6 @@ pub mod tests {
 
     #[test]
     fn config_from_proxyconfig() {
-
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
 
@@ -1100,7 +1095,11 @@ pub mod tests {
         assert!(cfg.ztunnel_identity.is_some());
         let identity = cfg.ztunnel_identity.unwrap();
         match identity {
-            Identity::Spiffe { trust_domain, namespace, service_account } => {
+            Identity::Spiffe {
+                trust_domain,
+                namespace,
+                service_account,
+            } => {
                 assert_eq!(trust_domain, "cluster.local");
                 assert_eq!(namespace, "istio-system");
                 assert_eq!(service_account, "ztunnel");

@@ -140,7 +140,7 @@ impl WorkloadManager {
         } else {
             None
         };
-        
+
         let ztunnel_name = format!("ztunnel-{node}");
         let ztunnel_workload_identity = if current_mode == Shared {
             identity::Identity::Spiffe {
@@ -150,7 +150,9 @@ impl WorkloadManager {
             }
         } else {
             // In dedicated mode, identity comes from wli
-            let dedicated_wli = wli.as_ref().expect("wli must be provided for dedicated mode");
+            let dedicated_wli = wli
+                .as_ref()
+                .expect("wli must be provided for dedicated mode");
             identity::Identity::Spiffe {
                 trust_domain: "cluster.local".into(), // Assuming same trust domain, adjust if needed
                 namespace: dedicated_wli.namespace.clone().into(),
@@ -160,22 +162,25 @@ impl WorkloadManager {
 
         let mut builder = TestWorkloadBuilder::new(&ztunnel_name, self)
             .on_node(node)
-            .identity(ztunnel_workload_identity); 
-            
+            .identity(ztunnel_workload_identity);
+
         // Set HBONE protocol in Shared mode, otherwise default to uncaptured (TCP) in Dedicated mode
-        if current_mode == Shared { 
+        if current_mode == Shared {
             builder = builder.hbone();
         } else {
             builder = builder.uncaptured();
         }
-        
 
         let ns = builder.register().await?;
-        let _ztunnel_local_workload = self.workloads.last().cloned().expect("ztunnel workload should be registered");
-        
+        let _ztunnel_local_workload = self
+            .workloads
+            .last()
+            .cloned()
+            .expect("ztunnel workload should be registered");
+
         let ip = ns.ip();
         let initial_config = LocalConfig {
-            workloads: self.workloads.clone(), 
+            workloads: self.workloads.clone(),
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };

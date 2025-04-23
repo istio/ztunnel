@@ -22,9 +22,8 @@ use crate::dns;
 use crate::drain::DrainWatcher;
 
 use crate::proxy::connection_manager::ConnectionManager;
-use crate::proxy::{Error, LocalWorkloadInformation, Metrics};
 use crate::proxy::{DefaultSocketFactory, Proxy, inbound::Inbound};
-
+use crate::proxy::{Error, LocalWorkloadInformation, Metrics};
 
 // Proxy factory creates ztunnel proxies using a socket factory.
 // this allows us to create our proxies the same way in regular mode and in inpod mode.
@@ -160,9 +159,7 @@ impl ProxyFactory {
                 self.cert_manager.clone(),
             ));
 
-            let socket_factory = Arc::new(DefaultSocketFactory(
-                self.config.socket_config,
-            ));
+            let socket_factory = Arc::new(DefaultSocketFactory(self.config.socket_config));
 
             let cm = ConnectionManager::default();
 
