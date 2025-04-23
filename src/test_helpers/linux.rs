@@ -33,7 +33,6 @@ use nix::unistd::mkdtemp;
 use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use tokio::sync::Mutex;
