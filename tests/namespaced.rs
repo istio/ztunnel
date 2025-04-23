@@ -16,9 +16,8 @@
 mod namespaced {
     use bytes::Bytes;
     use futures::future::poll_fn;
-    use http_body_util::{BodyExt, Empty};
+    use http_body_util::Empty;
     use std::collections::HashMap;
-    use tokio::io::{AsyncBufReadExt, BufReader};
     use ztunnel::state::workload::application_tunnel::Protocol;
     use ztunnel::state::workload::ApplicationTunnel;
     use ztunnel::state::workload::gatewayaddress::Destination;
@@ -29,15 +28,12 @@ mod namespaced {
 
     use anyhow::Context;
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
     use std::time::Duration;
     use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
 
     use hyper::{Method, StatusCode};
     use hyper_util::rt::TokioIo;
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
 
     use WorkloadMode::Uncaptured;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
@@ -1336,7 +1332,6 @@ mod namespaced {
             let mut sorted_want = want.clone();
             sorted_want.sort();
             async move {
-                let duration = Duration::from_secs(5);
                 let res = check_eventually(
                     Duration::from_secs(2),
                     || async {

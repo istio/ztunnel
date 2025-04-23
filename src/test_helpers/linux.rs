@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::{ConfigSource, ProxyMode, Address};
+use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
 use crate::state::service::{Endpoint, Service};
 use crate::state::workload::{HealthStatus, Workload, gatewayaddress};
@@ -30,7 +30,7 @@ use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
 use arcstr::ArcStr;
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -171,7 +171,7 @@ impl WorkloadManager {
         
 
         let ns = builder.register().await?;
-        let ztunnel_local_workload = self.workloads.last().cloned().expect("ztunnel workload should be registered");
+        let _ztunnel_local_workload = self.workloads.last().cloned().expect("ztunnel workload should be registered");
         
         let ip = ns.ip();
         let initial_config = LocalConfig {
@@ -205,13 +205,13 @@ impl WorkloadManager {
             (None, None)
         };
 
-        let mut proxy_wli = if proxy_mode == ProxyMode::Shared {
+        let proxy_wli = if proxy_mode == ProxyMode::Shared {
             ztunnel_workload.clone()
         } else {
             wli
         };
 
-        let mut cfg = config::Config {
+        let cfg = config::Config {
             xds_address: None,
             dns_proxy: true,
             fake_ca: true,
