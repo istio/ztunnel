@@ -70,6 +70,10 @@ const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 const IPV6_ENABLED: &str = "IPV6_ENABLED";
 
+const HTTP2_STREAM_WINDOW_SIZE: &str = "HTTP2_STREAM_WINDOW_SIZE";
+const HTTP2_CONNECTION_WINDOW_SIZE: &str = "HTTP2_CONNECTION_WINDOW_SIZE";
+const HTTP2_FRAME_SIZE: &str = "HTTP2_FRAME_SIZE";
+
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
@@ -614,9 +618,15 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
         )?,
 
-        window_size: 4 * 1024 * 1024,
-        connection_window_size: 4 * 1024 * 1024,
-        frame_size: 1024 * 1024,
+        // window size: per-stream limit
+        window_size: parse_default(HTTP2_STREAM_WINDOW_SIZE, 4 * 1024 * 1024)?,
+        // connection window size: per connection.
+        // Setting this to the same value as window_size can introduce deadlocks in some applications
+        // where clients do not read data on streamA until they receive data on streamB.
+        // If streamA consumes the entire connection window, we enter a deadlock.
+        // A 4x limit should be appropriate without introducing too much potential buffering.
+        connection_window_size: parse_default(HTTP2_CONNECTION_WINDOW_SIZE, 16 * 1024 * 1024)?,
+        frame_size: parse_default(HTTP2_FRAME_SIZE, 1024 * 1024)?,
 
         self_termination_deadline: match parse_duration(CONNECTION_TERMINATION_DEADLINE)? {
             Some(period) => period,
