@@ -114,16 +114,7 @@ impl WorkloadManager {
     /// Warning: currently, workloads are not dynamically update; they are snapshotted at the time
     /// deploy_ztunnel is called. As such, you must ensure this is called after all other workloads are created.
     pub async fn deploy_ztunnel(&mut self, node: &str) -> anyhow::Result<TestApp> {
-        let wli = if self.mode == Dedicated {
-            Some(state::WorkloadInfo {
-                name: format!("ztunnel-{node}"),
-                namespace: "default".to_string(),
-                service_account: format!("ztunnel-{node}"),
-            })
-        } else {
-            None
-        };
-        self.deploy_dedicated_ztunnel(node, wli).await
+        self.deploy_dedicated_ztunnel(node, None).await
     }
 
     /// deploy_ztunnel runs a ztunnel instance for dedicated mode.
@@ -142,36 +133,27 @@ impl WorkloadManager {
         };
 
         let ztunnel_name = format!("ztunnel-{node}");
-        let ztunnel_workload_identity = if current_mode == Shared {
-            identity::Identity::Spiffe {
-                trust_domain: "cluster.local".into(),
-                namespace: "default".into(),
-                service_account: ztunnel_name.clone().into(),
-            }
+
+        let ns = if current_mode == Shared {
+            // Shared mode: Ztunnel has its own identity, registered as HBONE
+            let ztunnel_workload_identity = identity::Identity::Spiffe {
+                    trust_domain: "cluster.local".into(),
+                    namespace: "default".into(),
+                    service_account: ztunnel_name.clone().into(),
+            };
+            TestWorkloadBuilder::new(&ztunnel_name, self)
+                .on_node(node)
+                .identity(ztunnel_workload_identity.clone()) 
+                .hbone() // Shared ztunnel uses HBONE protocol
+                .register()
+                .await?
         } else {
-            // In dedicated mode, identity comes from wli
-            let dedicated_wli = wli
-                .as_ref()
-                .expect("wli must be provided for dedicated mode");
-            identity::Identity::Spiffe {
-                trust_domain: "cluster.local".into(), // Assuming same trust domain, adjust if needed
-                namespace: dedicated_wli.namespace.clone().into(),
-                service_account: dedicated_wli.service_account.clone().into(),
-            }
+            TestWorkloadBuilder::new(&ztunnel_name, self)
+                .on_node(node)
+                .uncaptured() // Dedicated ztunnel is treated as uncaptured TCP
+                .register()
+                .await?
         };
-
-        let mut builder = TestWorkloadBuilder::new(&ztunnel_name, self)
-            .on_node(node)
-            .identity(ztunnel_workload_identity);
-
-        // Set HBONE protocol in Shared mode, otherwise default to uncaptured (TCP) in Dedicated mode
-        if current_mode == Shared {
-            builder = builder.hbone();
-        } else {
-            builder = builder.uncaptured();
-        }
-
-        let ns = builder.register().await?;
         let _ztunnel_local_workload = self
             .workloads
             .last()
@@ -184,7 +166,7 @@ impl WorkloadManager {
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
-        let proxy_mode = if ztunnel_server.is_some() {
+        let proxy_mode = if current_mode == Shared {
             ProxyMode::Shared
         } else {
             ProxyMode::Dedicated
@@ -193,8 +175,8 @@ impl WorkloadManager {
         tx_cfg.send(initial_config).await?;
         let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
 
-        // Create ztunnel identity and workload info for shared proxy mode
-        let (ztunnel_identity, ztunnel_workload) = if proxy_mode == ProxyMode::Shared {
+        // These are ONLY populated for Shared mode runtime config
+        let (ztunnel_identity_config, ztunnel_workload_config) = if proxy_mode == ProxyMode::Shared {
             let identity = identity::Identity::Spiffe {
                 trust_domain: "cluster.local".into(),
                 namespace: "default".into(),
@@ -210,8 +192,8 @@ impl WorkloadManager {
             (None, None)
         };
 
-        let proxy_wli = if proxy_mode == ProxyMode::Shared {
-            ztunnel_workload.clone()
+        let proxy_wli_config = if proxy_mode == ProxyMode::Shared {
+            ztunnel_workload_config.clone()
         } else {
             wli
         };
@@ -222,7 +204,7 @@ impl WorkloadManager {
             fake_ca: true,
             local_xds_config,
             local_node: Some(node.to_string()),
-            proxy_workload_information: proxy_wli,
+            proxy_workload_information: proxy_wli_config,
             inpod_uds,
             proxy_mode,
             // We use packet mark even in dedicated to distinguish proxy from application
@@ -233,8 +215,8 @@ impl WorkloadManager {
                 Some(true)
             },
             localhost_app_tunnel: true,
-            ztunnel_identity: ztunnel_identity.clone(),
-            ztunnel_workload,
+            ztunnel_identity: ztunnel_identity_config.clone(),
+            ztunnel_workload: ztunnel_workload_config,
             ..config::parse_config().unwrap()
         };
 
@@ -242,7 +224,7 @@ impl WorkloadManager {
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
         let cloned_ns2 = ns.clone();
-        let ztunnel_identity = ztunnel_identity.clone();
+        let ztunnel_identity = ztunnel_identity_config.clone();
         // run_ready will spawn a thread and block on it. Run with spawn_blocking so it doesn't block the runtime.
         tokio::task::spawn_blocking(move || {
             ns.run_ready(move |ready| async move {
