@@ -39,10 +39,14 @@ pub struct BuildInfo {
 
 impl BuildInfo {
     pub fn new() -> Self {
+        #[cfg(feature = "tls-aws-lc")]
+        let crypto_provider = "tls-aws-lc".to_string();
         #[cfg(feature = "tls-ring")]
         let crypto_provider = "tls-ring".to_string();
         #[cfg(feature = "tls-boring")]
         let crypto_provider = "tls-boring".to_string();
+        #[cfg(feature = "tls-openssl")]
+        let crypto_provider = "tls-openssl".to_string();
 
         BuildInfo {
             version: BUILD_VERSION.to_string(),
