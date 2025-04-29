@@ -34,10 +34,16 @@ pub struct BuildInfo {
     build_status: String,
     git_tag: String,
     pub istio_version: String,
+    crypto_provider: String,
 }
 
 impl BuildInfo {
     pub fn new() -> Self {
+        #[cfg(feature = "tls-ring")]
+        let crypto_provider = "tls-ring".to_string();
+        #[cfg(feature = "tls-boring")]
+        let crypto_provider = "tls-boring".to_string();
+
         BuildInfo {
             version: BUILD_VERSION.to_string(),
             git_revision: BUILD_GIT_REVISION.to_string(),
@@ -47,6 +53,7 @@ impl BuildInfo {
             git_tag: BUILD_TAG.to_string(),
             istio_version: env::var("ISTIO_META_ISTIO_VERSION")
                 .unwrap_or_else(|_| "unknown".to_string()),
+            crypto_provider,
         }
     }
 }
@@ -55,14 +62,15 @@ impl Display for BuildInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildProfile:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
+            "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildProfile:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\", CryptoProvider:\"{}\"}}",
             self.version,
             self.git_revision,
             self.rust_version,
             self.build_profile,
             self.build_status,
             self.git_tag,
-            self.istio_version
+            self.istio_version,
+            self.crypto_provider,
         )
     }
 }
