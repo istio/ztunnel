@@ -1429,8 +1429,10 @@ mod namespaced {
         // Deploy ztunnel for the node
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let ztunnel_node_ip = manager.resolve("ztunnel-node")?;
-        let metrics_addr = zt.metrics_address; // Get the actual metrics address (IP + dynamic port)
-        let hbone_listener_addr = SocketAddr::new(ztunnel_node_ip, 15008);
+        // Use the actual metrics address ztunnel is listening on (e.g., [::]:15020)
+        // but combine it with the node IP for the client to target.
+        let target_metrics_addr = SocketAddr::new(ztunnel_node_ip, zt.metrics_address.port());
+        let target_metrics_url = format!("http://{}/metrics", target_metrics_addr);
 
         // Deploy a client workload (simulating Prometheus)
         let client = manager
@@ -1439,130 +1441,74 @@ mod namespaced {
             .await?;
 
         let zt_identity_str = zt.ztunnel_identity.as_ref().unwrap().to_string();
-        let cert_manager_clone = zt.cert_manager.clone();
-        let zt_identity_clone = zt.ztunnel_identity.as_ref().expect("Ztunnel identity missing").clone();
 
-        // Client connects to ztunnel's HBONE port (15008), sends CONNECT to metrics port, then GET /metrics
-        client.run(move || async move {
-            info!(target=%hbone_listener_addr, metrics_target=%metrics_addr, "Client attempting HBONE CONNECT to metrics");
+        // Client makes a standard HTTP GET request to ztunnel's metrics endpoint
+        // Ztunnel's outbound capture should intercept this, initiate HBONE to its own inbound,
+        // which then proxies to the internal metrics server.
+        client
+            .run(move || async move {
+                info!(target=%target_metrics_url, "Client attempting standard HTTP GET to metrics endpoint");
 
-            // Setup mTLS Connector for client
-            // Use client's default identity. Need ztunnel's identity for validation.
-             let client_identity = identity::Identity::Spiffe {
-                    trust_domain: "cluster.local".into(),
-                    namespace: "default".into(),
-                    service_account: "client".into(),
-             };
-            let client_cert = cert_manager_clone.fetch_certificate(&client_identity).await?; 
-            let connector = client_cert.outbound_connector(vec![zt_identity_clone]).expect("Failed to create connector"); // Use cloned identity
+                let client = hyper_util::client::legacy::Client::builder(
+                    ztunnel::hyper_util::TokioExecutor,
+                )
+                .build_http();
 
-            // TCP Connect to HBONE port (15008)
-            let tcp_stream = TcpStream::connect(hbone_listener_addr).await?;
+                let req = hyper::Request::builder()
+                    .method(Method::GET)
+                    .uri(&target_metrics_url)
+                    .body(Empty::<Bytes>::new())?;
 
-            // TLS Connect using client certs, expecting ztunnel identity
-            let tls_stream = connector.connect(tcp_stream).await?;
-            info!("mTLS connection established to {}", hbone_listener_addr);
+                let response = client.request(req).await?;
 
-            let (mut request_sender, connection) = hyper::client::conn::http2::Builder::new(ztunnel::hyper_util::TokioExecutor)
-                .handshake(TokioIo::new(tls_stream)).await?;
+                info!("Received response status: {:?}", response.status());
+                assert_eq!(response.status(), StatusCode::OK, "GET request failed");
 
-             tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    error!("Error in HBONE connection handshake: {:?}", e);
-                } else {
-                    info!("HBONE connection task completed");
-                }
-            });
+                let body_bytes = http_body_util::BodyExt::collect(response.into_body())
+                    .await?
+                    .to_bytes();
+                let response_str = String::from_utf8_lossy(&body_bytes);
 
+                assert!(
+                    response_str.contains("# TYPE"),
+                    "Expected Prometheus metrics (# TYPE) in response, got:\n{}",
+                    response_str
+                );
+                info!("Successfully verified metrics response body");
 
-            // Send CONNECT request targeting the internal metrics address
-            let connect_request = hyper::Request::builder()
-                .method(Method::CONNECT)
-                .uri(metrics_addr.to_string()) 
-                .version(hyper::Version::HTTP_2)
-                .body(Empty::<Bytes>::new())?;
-
-            info!("Sending CONNECT request to {}", metrics_addr);
-            let response = request_sender.send_request(connect_request).await?;
-            info!("Received response to CONNECT: {:?}", response.status());
-
-            // Verify CONNECT response is OK
-            assert_eq!(response.status(), StatusCode::OK, "CONNECT request failed");
-
-            // Upgrade the connection to get the I/O stream from the tunnel
-            info!("Attempting to upgrade connection");
-            let upgraded_io = hyper::upgrade::on(response).await?;
-            let mut stream = TokioIo::new(upgraded_io); 
-            info!("Connection upgraded, obtained stream for metrics request");
-
-            // Send GET /metrics over the established tunnel
-            let get_request_bytes = format!("GET /metrics HTTP/1.1\\r\\nHost: {}\\r\\nConnection: close\\r\\n\\r\\n", metrics_addr.ip()).into_bytes();
-
-            info!("Sending GET /metrics request over tunnel");
-            stream.write_all(&get_request_bytes).await?;
-            stream.flush().await?;
-
-            info!("Reading metrics response");
-            let mut response_buffer = Vec::new();
-            let read_result = timeout(Duration::from_secs(5), stream.read_to_end(&mut response_buffer)).await;
-
-            match read_result {
-                 Ok(Ok(bytes_read)) => {
-                     info!("Successfully read {} bytes from metrics response", bytes_read);
-                     let response_str = String::from_utf8_lossy(&response_buffer);
-
-                     assert!(response_str.contains("HTTP/1.1 200 OK"), "Expected HTTP 200 OK in response, got:\n{}", response_str);
-                     assert!(response_str.contains("# TYPE"), "Expected Prometheus metrics (# TYPE) in response, got:\n{}", response_str);
-                     info!("Successfully verified metrics response");
-                 }
-                 Ok(Err(e)) => {
-                     error!("Error reading metrics response: {}", e);
-                     return Err(anyhow::Error::new(e).context("Failed to read metrics response"));
-                 }
-                 Err(_) => {
-                    error!("Timeout reading metrics response");
-                    return Err(anyhow::anyhow!("Timeout reading metrics response"));
-                 }
-             }
-
-            Ok(())
-        })?.join().unwrap()?; 
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
 
         // Verify metrics from the DESTINATION perspective (ztunnel handling its own inbound)
-        // Note: Byte counts might be harder to predict precisely for metrics. Focus on connection counts.
         let metrics = [
-            (CONNECTIONS_OPENED, 1),
-            (CONNECTIONS_CLOSED, 1),
-            // (BYTES_RECV, ???), // Bytes received by ztunnel from client (CONNECT + GET)
-            // (BYTES_SENT, ???), // Bytes sent by ztunnel to client (metrics response)
+            (CONNECTIONS_OPENED, 1), // One connection opened (client -> zt inbound via HBONE)
+            (CONNECTIONS_CLOSED, 1), // One connection closed
         ];
         verify_metrics(&zt, &metrics, &destination_labels()).await;
-    
+
         // Verify INBOUND telemetry log for the metrics connection
-        // The dst.addr should be the HBONE listener port. dst.hbone_addr is the internal target.
         let dst_addr_log = format!("{}:15008", ztunnel_node_ip);
-        let dst_hbone_addr_log = format!("{}", metrics_addr); // Internal target
-        // let zt_identity_str = zt.ztunnel_identity.as_ref().unwrap().to_string(); // Moved this calculation before the closure
+        let dst_hbone_addr_log = format!("{}", target_metrics_addr);
 
         // We don't know exact byte counts, so omit them from the check for now
         let want = HashMap::from([
             ("scope", "access"),
             ("src.workload", "client"),
             ("dst.workload", "ztunnel-node"), // ztunnel's workload name
-            ("dst.addr", dst_addr_log.as_str()),
-            ("dst.hbone_addr", dst_hbone_addr_log.as_str()),
-            // ("bytes_sent", ???),
-            // ("bytes_recv", ???),
+            ("dst.addr", dst_addr_log.as_str()), // Connected to HBONE port
+            ("dst.hbone_addr", dst_hbone_addr_log.as_str()), // Original target
             ("direction", "inbound"),
-            ("message", "connection complete"), // Assuming success
+            ("message", "connection complete"),   // Assuming success
             (
                 "src.identity",
                 "spiffe://cluster.local/ns/default/sa/client",
-            ),
+            ), // Client identity
             (
                 "dst.identity",
                 zt_identity_str.as_str(),
-            ),
+            ), // Ztunnel identity
         ]);
         telemetry::testing::assert_contains(want);
 
