@@ -137,13 +137,13 @@ impl WorkloadManager {
         let ns = if current_mode == Shared {
             // Shared mode: Ztunnel has its own identity, registered as HBONE
             let ztunnel_workload_identity = identity::Identity::Spiffe {
-                    trust_domain: "cluster.local".into(),
-                    namespace: "default".into(),
-                    service_account: ztunnel_name.clone().into(),
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: ztunnel_name.clone().into(),
             };
             TestWorkloadBuilder::new(&ztunnel_name, self)
                 .on_node(node)
-                .identity(ztunnel_workload_identity.clone()) 
+                .identity(ztunnel_workload_identity.clone())
                 .hbone() // Shared ztunnel uses HBONE protocol
                 .register()
                 .await?
@@ -176,7 +176,8 @@ impl WorkloadManager {
         let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
 
         // These are ONLY populated for Shared mode runtime config
-        let (ztunnel_identity_config, ztunnel_workload_config) = if proxy_mode == ProxyMode::Shared {
+        let (ztunnel_identity_config, ztunnel_workload_config) = if proxy_mode == ProxyMode::Shared
+        {
             let identity = identity::Identity::Spiffe {
                 trust_domain: "cluster.local".into(),
                 namespace: "default".into(),

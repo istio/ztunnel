@@ -575,15 +575,15 @@ mod namespaced {
             WAYPOINT_MESSAGE.into(),
         )?;
 
-            manager
-                .workload_builder("server", DEFAULT_NODE)
-                .waypoint_hostname("waypoint.example.com")
-                .register()
-                .await?;
-            let client = manager
-                .workload_builder("client", DEFAULT_NODE)
-                .register()
-                .await?;
+        manager
+            .workload_builder("server", DEFAULT_NODE)
+            .waypoint_hostname("waypoint.example.com")
+            .register()
+            .await?;
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
 
         let server_ip = manager.resolver().resolve("server")?;
         let waypoint_pod_ip = manager.resolver().resolve("waypoint")?;
@@ -1425,7 +1425,7 @@ mod namespaced {
     #[tokio::test]
     async fn test_hbone_metrics_access() -> Result<(), anyhow::Error> {
         let mut manager = setup_netns_test!(Shared);
-    
+
         // Deploy ztunnel for the node
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let ztunnel_node_ip = manager.resolve("ztunnel-node")?;
@@ -1500,15 +1500,12 @@ mod namespaced {
             ("dst.addr", dst_addr_log.as_str()), // Connected to HBONE port
             ("dst.hbone_addr", dst_hbone_addr_log.as_str()), // Original target
             ("direction", "inbound"),
-            ("message", "connection complete"),   // Assuming success
+            ("message", "connection complete"), // Assuming success
             (
                 "src.identity",
                 "spiffe://cluster.local/ns/default/sa/client",
             ), // Client identity
-            (
-                "dst.identity",
-                zt_identity_str.as_str(),
-            ), // Ztunnel identity
+            ("dst.identity", zt_identity_str.as_str()), // Ztunnel identity
         ]);
         telemetry::testing::assert_contains(want);
 
