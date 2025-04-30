@@ -125,34 +125,38 @@ impl WorkloadManager {
     ) -> anyhow::Result<TestApp> {
         let mut inpod_uds: PathBuf = "/dev/null".into();
         let current_mode = self.mode;
-        let ztunnel_server = if current_mode == Shared {
-            inpod_uds = self.tmp_dir.join(node);
-            Some(start_ztunnel_server(inpod_uds.clone()).await)
-        } else {
-            None
+        let ztunnel_server = match current_mode {
+            Shared => {
+                inpod_uds = self.tmp_dir.join(node);
+                Some(start_ztunnel_server(inpod_uds.clone()).await)
+            }
+            Dedicated => None,
         };
 
         let ztunnel_name = format!("ztunnel-{node}");
 
-        let ns = if current_mode == Shared {
-            // Shared mode: Ztunnel has its own identity, registered as HBONE
-            let ztunnel_workload_identity = identity::Identity::Spiffe {
-                trust_domain: "cluster.local".into(),
-                namespace: "default".into(),
-                service_account: ztunnel_name.clone().into(),
-            };
-            TestWorkloadBuilder::new(&ztunnel_name, self)
-                .on_node(node)
-                .identity(ztunnel_workload_identity.clone())
-                .hbone() // Shared ztunnel uses HBONE protocol
-                .register()
-                .await?
-        } else {
-            TestWorkloadBuilder::new(&ztunnel_name, self)
-                .on_node(node)
-                .uncaptured() // Dedicated ztunnel is treated as uncaptured TCP
-                .register()
-                .await?
+        let ns = match current_mode {
+            Shared => {
+                // Shared mode: Ztunnel has its own identity, registered as HBONE
+                let ztunnel_workload_identity = identity::Identity::Spiffe {
+                    trust_domain: "cluster.local".into(),
+                    namespace: "default".into(),
+                    service_account: ztunnel_name.clone().into(),
+                };
+                TestWorkloadBuilder::new(&ztunnel_name, self)
+                    .on_node(node)
+                    .identity(ztunnel_workload_identity.clone())
+                    .hbone() // Shared ztunnel uses HBONE protocol
+                    .register()
+                    .await?
+            }
+            Dedicated => {
+                TestWorkloadBuilder::new(&ztunnel_name, self)
+                    .on_node(node)
+                    .uncaptured() // Dedicated ztunnel is treated as uncaptured TCP
+                    .register()
+                    .await?
+            }
         };
         let _ztunnel_local_workload = self
             .workloads
@@ -166,37 +170,35 @@ impl WorkloadManager {
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
-        let proxy_mode = if current_mode == Shared {
-            ProxyMode::Shared
-        } else {
-            ProxyMode::Dedicated
+        let proxy_mode = match current_mode {
+            Shared => ProxyMode::Shared,
+            Dedicated => ProxyMode::Dedicated,
         };
         let (mut tx_cfg, rx_cfg) = mpsc_ack(1);
         tx_cfg.send(initial_config).await?;
         let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
 
         // These are ONLY populated for Shared mode runtime config
-        let (ztunnel_identity_config, ztunnel_workload_config) = if proxy_mode == ProxyMode::Shared
-        {
-            let identity = identity::Identity::Spiffe {
-                trust_domain: "cluster.local".into(),
-                namespace: "default".into(),
-                service_account: format!("ztunnel-{node}").into(),
-            };
-            let workload = state::WorkloadInfo::new(
-                format!("ztunnel-{node}"),
-                "default".to_string(),
-                format!("ztunnel-{node}"),
-            );
-            (Some(identity), Some(workload))
-        } else {
-            (None, None)
+        let (ztunnel_identity_config, ztunnel_workload_config) = match proxy_mode {
+            ProxyMode::Shared => {
+                let identity = identity::Identity::Spiffe {
+                    trust_domain: "cluster.local".into(),
+                    namespace: "default".into(),
+                    service_account: format!("ztunnel-{node}").into(),
+                };
+                let workload = state::WorkloadInfo::new(
+                    format!("ztunnel-{node}"),
+                    "default".to_string(),
+                    format!("ztunnel-{node}"),
+                );
+                (Some(identity), Some(workload))
+            }
+            ProxyMode::Dedicated => (None, None),
         };
 
-        let proxy_wli_config = if proxy_mode == ProxyMode::Shared {
-            ztunnel_workload_config.clone()
-        } else {
-            wli
+        let proxy_wli_config = match proxy_mode {
+            ProxyMode::Shared => ztunnel_workload_config.clone(),
+            ProxyMode::Dedicated => wli,
         };
 
         let cfg = config::Config {
@@ -566,16 +568,18 @@ impl<'a> TestWorkloadBuilder<'a> {
     pub async fn register(mut self) -> anyhow::Result<Namespace> {
         let zt = self.manager.ztunnels.get(self.w.workload.node.as_str());
         let node = self.w.workload.node.clone();
-        let network_namespace = if self.manager.mode == Dedicated && zt.is_some() {
-            // This is a bit of hack. For dedicated mode, we run the app and ztunnel in the same namespace
-            // We probably should express this more natively in the framework, but for now we just detect it
-            // and re-use the namespace.
-            tracing::info!("node already has ztunnel and dedicate mode, sharing");
-            zt.as_ref().unwrap().namespace.clone()
-        } else {
-            self.manager
+        let network_namespace = match (self.manager.mode, zt.is_some()) {
+            (Dedicated, true) => {
+                // This is a bit of hack. For dedicated mode, we run the app and ztunnel in the same namespace
+                // We probably should express this more natively in the framework, but for now we just detect it
+                // and re-use the namespace.
+                tracing::info!("node already has ztunnel and dedicate mode, sharing");
+                zt.as_ref().unwrap().namespace.clone()
+            }
+            _ => self
+                .manager
                 .namespaces
-                .child(&self.w.workload.node, &self.w.workload.name)?
+                .child(&self.w.workload.node, &self.w.workload.name)?,
         };
         if self.w.workload.network_gateway.is_some() {
             // This is a little inefficient, because we create the

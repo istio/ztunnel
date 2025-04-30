@@ -1408,11 +1408,9 @@ mod namespaced {
 
         // In shared mode, certificates may be kept alive by the inbound listener
         // for handling inbound connections, even after workload deletion
-        let expected_certs = if manager.mode() == TestMode::Shared {
-            vec![ztunnel_identity_str.clone(), id1s.clone()]
-        } else {
-            // In dedicated mode, only ztunnel cert should remain
-            vec![ztunnel_identity_str.clone()]
+        let expected_certs = match manager.mode() {
+            TestMode::Shared => vec![ztunnel_identity_str.clone(), id1s.clone()],
+            TestMode::Dedicated => vec![ztunnel_identity_str.clone()],
         };
         check(
             expected_certs,
