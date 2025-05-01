@@ -399,8 +399,8 @@ fn der_to_pem(der: &[u8], label: &str) -> String {
 mod test {
     use crate::identity::Identity;
     use crate::test_helpers::helpers;
+    use crate::tls::mock::{TestIdentity, TEST_ROOT, TEST_ROOT2, TEST_ROOT2_KEY, TEST_ROOT_KEY};
     use crate::tls::WorkloadCertificate;
-    use crate::tls::mock::{TEST_ROOT, TEST_ROOT_KEY, TEST_ROOT2, TEST_ROOT2_KEY, TestIdentity};
 
     use std::str::FromStr;
     use std::sync::Arc;
