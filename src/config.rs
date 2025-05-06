@@ -616,8 +616,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     ) {
         (Some(namespace), Some(service_account), Some(pod_name)) => {
             let trust_domain = std::env::var("TRUST_DOMAIN")
-                // TODO: most probably we shouldnt hardcode to cluster.local
-                .unwrap_or_else(|_| "cluster.local".to_string());
+                .unwrap_or_else(|_| crate::identity::manager::DEFAULT_TRUST_DOMAIN.to_string());
 
             let identity = identity::Identity::from_parts(
                 trust_domain.into(),

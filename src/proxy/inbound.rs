@@ -123,7 +123,7 @@ impl Inbound {
                     let conn = Connection {
                         src_identity,
                         src,
-                        dst_network: strng::new(format!("{}", network)), // inbound request must be on our network
+                        dst_network: network.clone(), // inbound request must be on our network
                         dst,
                     };
                     debug!(%conn, "accepted connection");
@@ -947,18 +947,18 @@ mod tests {
         .map(|(name, vip, waypoint)| Service {
             name: name.into(),
             namespace: "default".into(),
-            hostname: strng::new(format!("{name}.default.svc.cluster.local")),
+            hostname: strng::format!("{name}.default.svc.cluster.local"),
             vips: vec![NetworkAddress {
                 address: vip.parse().unwrap(),
                 network: "".into(),
             }],
             ports: std::collections::HashMap::from([(80u16, 8080u16)]),
             endpoints: EndpointSet::from_list([Endpoint {
-                workload_uid: strng::new(format!("cluster1//v1/Pod/default/{name}")),
+                workload_uid: strng::format!("cluster1//v1/Pod/default/{name}"),
                 port: std::collections::HashMap::new(),
                 status: HealthStatus::Healthy,
             }]),
-            subject_alt_names: vec![strng::new(format!("{name}.default.svc.cluster.local"))],
+            subject_alt_names: vec![strng::format!("{name}.default.svc.cluster.local")],
             waypoint: waypoint.service_attached(),
             load_balancer: None,
             ip_families: None,
@@ -1029,7 +1029,7 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: strng::new(""),
+                    network: strng::EMPTY,
                     address: s.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
@@ -1042,7 +1042,7 @@ mod tests {
             };
             Some(GatewayAddress {
                 destination: Destination::Address(NetworkAddress {
-                    network: strng::new(""),
+                    network: strng::EMPTY,
                     address: w.parse().expect("a valid waypoint IP"),
                 }),
                 hbone_mtls_port: 15008,
