@@ -125,6 +125,36 @@ impl WorkloadManager {
     ) -> anyhow::Result<TestApp> {
         let mut inpod_uds: PathBuf = "/dev/null".into();
         let current_mode = self.mode;
+        let proxy_mode = match current_mode {
+            Shared => ProxyMode::Shared,
+            Dedicated => ProxyMode::Dedicated,
+        };
+        let ztunnel_name = format!("ztunnel-{node}");
+
+        // Define ztunnel's own identity and workload info if it's a Shared proxy.
+        // These are used for registering ztunnel as a workload and for cfg.ztunnel_identity/workload.
+        let ztunnel_shared_identity: Option<identity::Identity> = if proxy_mode == ProxyMode::Shared
+        {
+            Some(identity::Identity::Spiffe {
+                trust_domain: "cluster.local".into(),
+                namespace: "default".into(),
+                service_account: ztunnel_name.clone().into(),
+            })
+        } else {
+            None
+        };
+
+        let ztunnel_shared_workload_info: Option<state::WorkloadInfo> =
+            if proxy_mode == ProxyMode::Shared {
+                Some(state::WorkloadInfo::new(
+                    ztunnel_name.clone(),
+                    "default".to_string(),
+                    ztunnel_name.clone(),
+                ))
+            } else {
+                None
+            };
+
         let ztunnel_server = match current_mode {
             Shared => {
                 inpod_uds = self.tmp_dir.join(node);
@@ -133,19 +163,16 @@ impl WorkloadManager {
             Dedicated => None,
         };
 
-        let ztunnel_name = format!("ztunnel-{node}");
-
         let ns = match current_mode {
             Shared => {
                 // Shared mode: Ztunnel has its own identity, registered as HBONE
-                let ztunnel_workload_identity = identity::Identity::Spiffe {
-                    trust_domain: "cluster.local".into(),
-                    namespace: "default".into(),
-                    service_account: ztunnel_name.clone().into(),
-                };
                 TestWorkloadBuilder::new(&ztunnel_name, self)
                     .on_node(node)
-                    .identity(ztunnel_workload_identity.clone())
+                    .identity(
+                        ztunnel_shared_identity
+                            .clone()
+                            .expect("Shared mode must have an identity for ztunnel registration"),
+                    )
                     .hbone() // Shared ztunnel uses HBONE protocol
                     .register()
                     .await?
@@ -170,34 +197,21 @@ impl WorkloadManager {
             policies: self.policies.clone(),
             services: self.services.values().cloned().collect_vec(),
         };
-        let proxy_mode = match current_mode {
-            Shared => ProxyMode::Shared,
-            Dedicated => ProxyMode::Dedicated,
-        };
         let (mut tx_cfg, rx_cfg) = mpsc_ack(1);
         tx_cfg.send(initial_config).await?;
         let local_xds_config = Some(ConfigSource::Dynamic(Arc::new(Mutex::new(rx_cfg))));
 
-        // These are ONLY populated for Shared mode runtime config
-        let (ztunnel_identity_config, ztunnel_workload_config) = match proxy_mode {
-            ProxyMode::Shared => {
-                let identity = identity::Identity::Spiffe {
-                    trust_domain: "cluster.local".into(),
-                    namespace: "default".into(),
-                    service_account: format!("ztunnel-{node}").into(),
-                };
-                let workload = state::WorkloadInfo::new(
-                    format!("ztunnel-{node}"),
-                    "default".to_string(),
-                    format!("ztunnel-{node}"),
-                );
-                (Some(identity), Some(workload))
-            }
-            ProxyMode::Dedicated => (None, None),
-        };
+        // Config for ztunnel's own identity and workload, primarily for when it acts as a server (metrics endpoint).
+        let cfg_ztunnel_identity = ztunnel_shared_identity.clone();
+        let cfg_ztunnel_workload_info = ztunnel_shared_workload_info.clone();
 
-        let proxy_wli_config = match proxy_mode {
-            ProxyMode::Shared => ztunnel_workload_config.clone(),
+        // Config for the workload this ztunnel instance is proxying for :
+        // If Shared, ztunnel is effectively proxying for itself
+        // If Dedicated, it's for the application workload `wli`
+        let cfg_proxy_workload_information = match proxy_mode {
+            // Ztunnel's own info for shared mode proxy
+            ProxyMode::Shared => ztunnel_shared_workload_info.clone(),
+            // Application's workload info for dedicated mode
             ProxyMode::Dedicated => wli,
         };
 
@@ -207,7 +221,7 @@ impl WorkloadManager {
             fake_ca: true,
             local_xds_config,
             local_node: Some(node.to_string()),
-            proxy_workload_information: proxy_wli_config,
+            proxy_workload_information: cfg_proxy_workload_information,
             inpod_uds,
             proxy_mode,
             // We use packet mark even in dedicated to distinguish proxy from application
@@ -218,8 +232,8 @@ impl WorkloadManager {
                 Some(true)
             },
             localhost_app_tunnel: true,
-            ztunnel_identity: ztunnel_identity_config.clone(),
-            ztunnel_workload: ztunnel_workload_config,
+            ztunnel_identity: cfg_ztunnel_identity,
+            ztunnel_workload: cfg_ztunnel_workload_info,
             ..config::parse_config().unwrap()
         };
 
@@ -227,7 +241,7 @@ impl WorkloadManager {
         // Setup the ztunnel...
         let cloned_ns = ns.clone();
         let cloned_ns2 = ns.clone();
-        let ztunnel_identity = ztunnel_identity_config.clone();
+        let ztunnel_identity = ztunnel_shared_identity.clone();
         // run_ready will spawn a thread and block on it. Run with spawn_blocking so it doesn't block the runtime.
         tokio::task::spawn_blocking(move || {
             ns.run_ready(move |ready| async move {

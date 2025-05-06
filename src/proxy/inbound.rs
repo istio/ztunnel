@@ -245,6 +245,12 @@ impl Inbound {
                     SocketAddr::new(loopback, ri.upstream_addr.port()),
                 )
             } else {
+                // When ztunnel is proxying to its own internal endpoints (e.g., metrics server after HBONE termination),
+                // we must not attempt to use the original external client's IP as the source for this internal connection.
+                // Setting `disable_inbound_freebind` to true for such self-proxy scenarios ensures `upstream_src_ip` is `None`,
+                // causing `freebind_connect` to use a local IP for the connection to ztunnel's own service.
+                // For regular inbound traffic to other workloads, `disable_inbound_freebind` is false, and original source
+                // preservation depends on `enable_original_source`.
                 let upstream_src_ip = if pi.disable_inbound_freebind {
                     None
                 } else {

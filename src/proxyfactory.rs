@@ -138,7 +138,10 @@ impl ProxyFactory {
         Ok(result)
     }
 
-    pub async fn create_ztunnel_inbound_listener(
+    /// Creates an inbound listener specifically for ztunnel's own internal endpoints (metrics).
+    /// This allows ztunnel to act as its own workload, enforcing policies on traffic directed to itself.
+    /// This is distinct from the main inbound listener which handles traffic for other workloads proxied by ztunnel.
+    pub async fn create_ztunnel_self_proxy_listener(
         &self,
     ) -> Result<Option<crate::proxy::inbound::Inbound>, Error> {
         if self.config.proxy_mode != config::ProxyMode::Shared {
@@ -149,7 +152,7 @@ impl ProxyFactory {
             (&self.config.ztunnel_identity, &self.config.ztunnel_workload)
         {
             tracing::info!(
-                "creating ztunnel inbound listener with identity: {:?}",
+                "creating ztunnel self-proxy listener with identity: {:?}",
                 ztunnel_identity
             );
 
