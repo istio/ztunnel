@@ -17,6 +17,8 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::string::String;
 
+use crate::tls::CRYPTO_PROVIDER;
+
 const BUILD_VERSION: &str = env!("ZTUNNEL_BUILD_buildVersion");
 const BUILD_GIT_REVISION: &str = env!("ZTUNNEL_BUILD_buildGitRevision");
 const BUILD_STATUS: &str = env!("ZTUNNEL_BUILD_buildStatus");
@@ -39,15 +41,6 @@ pub struct BuildInfo {
 
 impl BuildInfo {
     pub fn new() -> Self {
-        #[cfg(feature = "tls-aws-lc")]
-        let crypto_provider = "tls-aws-lc".to_string();
-        #[cfg(feature = "tls-ring")]
-        let crypto_provider = "tls-ring".to_string();
-        #[cfg(feature = "tls-boring")]
-        let crypto_provider = "tls-boring".to_string();
-        #[cfg(feature = "tls-openssl")]
-        let crypto_provider = "tls-openssl".to_string();
-
         BuildInfo {
             version: BUILD_VERSION.to_string(),
             git_revision: BUILD_GIT_REVISION.to_string(),
@@ -57,7 +50,7 @@ impl BuildInfo {
             git_tag: BUILD_TAG.to_string(),
             istio_version: env::var("ISTIO_META_ISTIO_VERSION")
                 .unwrap_or_else(|_| "unknown".to_string()),
-            crypto_provider,
+            crypto_provider: CRYPTO_PROVIDER.to_string(),
         }
     }
 }
