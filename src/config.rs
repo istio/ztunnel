@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::ser::SerializeSeq;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -20,12 +21,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, env, fs};
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 
 use anyhow::anyhow;
 use bytes::Bytes;
 use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
-use hyper::http::uri::InvalidUri;
 use hyper::Uri;
+use hyper::http::uri::InvalidUri;
 
 use crate::strng::Strng;
 use crate::{identity, state};
@@ -68,6 +70,10 @@ const ENABLE_ORIG_SRC: &str = "ENABLE_ORIG_SRC";
 const PROXY_CONFIG: &str = "PROXY_CONFIG";
 const IPV6_ENABLED: &str = "IPV6_ENABLED";
 
+const HTTP2_STREAM_WINDOW_SIZE: &str = "HTTP2_STREAM_WINDOW_SIZE";
+const HTTP2_CONNECTION_WINDOW_SIZE: &str = "HTTP2_CONNECTION_WINDOW_SIZE";
+const HTTP2_FRAME_SIZE: &str = "HTTP2_FRAME_SIZE";
+
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
@@ -88,6 +94,9 @@ const ISTIO_META_PREFIX: &str = "ISTIO_META_";
 const DNS_CAPTURE_METADATA: &str = "DNS_CAPTURE";
 const DNS_PROXY_ADDR_METADATA: &str = "DNS_PROXY_ADDR";
 
+const ISTIO_XDS_HEADER_PREFIX: &str = "XDS_HEADER_";
+const ISTIO_CA_HEADER_PREFIX: &str = "CA_HEADER_";
+
 /// Fetch the XDS/CA root cert file path based on below constants
 const XDS_ROOT_CA_ENV: &str = "XDS_ROOT_CA";
 const CA_ROOT_CA_ENV: &str = "CA_ROOT_CA";
@@ -100,6 +109,8 @@ const CERT_SYSTEM: &str = "SYSTEM";
 
 const PROXY_MODE_DEDICATED: &str = "dedicated";
 const PROXY_MODE_SHARED: &str = "shared";
+
+const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -132,6 +143,37 @@ pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
+}
+
+#[derive(Clone, Debug)]
+pub struct MetadataVector {
+    pub vec: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
+}
+
+impl serde::Serialize for MetadataVector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq: <S as serde::Serializer>::SerializeSeq =
+            serializer.serialize_seq(Some(self.vec.len()))?;
+
+        for (k, v) in &self.vec {
+            let serialized_key = k.to_string();
+
+            match v.to_str() {
+                Ok(serialized_val) => {
+                    seq.serialize_element(&(serialized_key, serialized_val))?;
+                }
+                Err(_) => {
+                    return Err(serde::ser::Error::custom(
+                        "failed to serialize metadata value",
+                    ));
+                }
+            }
+        }
+        seq.end()
+    }
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -246,6 +288,15 @@ pub struct Config {
     pub packet_mark: Option<u32>,
 
     pub socket_config: SocketConfig,
+
+    // Headers to be added to XDS discovery requests
+    pub xds_headers: MetadataVector,
+
+    // Headers to be added to certificate requests
+    pub ca_headers: MetadataVector,
+
+    // If true, when AppTunnel is set for
+    pub localhost_app_tunnel: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -281,6 +332,10 @@ pub enum Error {
     InvalidUri(#[from] Arc<InvalidUri>),
     #[error("invalid configuration: {0}")]
     InvalidState(String),
+    #[error("failed to parse header key: {0}")]
+    InvalidHeaderKey(String),
+    #[error("failed to parse header value: {0}")]
+    InvalidHeaderValue(String),
 }
 
 impl From<InvalidUri> for Error {
@@ -324,6 +379,28 @@ fn parse_duration_default(env: &str, default: Duration) -> Result<Duration, Erro
 fn parse_args() -> String {
     let cli_args: Vec<String> = env::args().collect();
     cli_args[1..].join(" ")
+}
+
+fn parse_headers(prefix: &str) -> Result<MetadataVector, Error> {
+    let mut metadata: MetadataVector = MetadataVector { vec: Vec::new() };
+
+    for (key, value) in env::vars() {
+        let stripped_key: Option<&str> = key.strip_prefix(prefix);
+        match stripped_key {
+            Some(stripped_key) => {
+                // attempt to parse the stripped key
+                let metadata_key = AsciiMetadataKey::from_str(stripped_key)
+                    .map_err(|_| Error::InvalidHeaderKey(key))?;
+                // attempt to parse the value
+                let metadata_value = AsciiMetadataValue::from_str(&value)
+                    .map_err(|_| Error::InvalidHeaderValue(value))?;
+                metadata.vec.push((metadata_key, metadata_value));
+            }
+            None => continue,
+        }
+    }
+
+    Ok(metadata)
 }
 
 pub fn parse_config() -> Result<Config, Error> {
@@ -484,7 +561,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
                     format!(
                         "PROXY_MODE must be one of {PROXY_MODE_DEDICATED}, {PROXY_MODE_SHARED}"
                     ),
-                ))
+                ));
             }
         },
         None => ProxyMode::Shared,
@@ -518,7 +595,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         (Some(_), Some(_)) => {
             return Err(Error::InvalidState(format!(
                 "only one of {LOCAL_XDS_PATH} or {LOCAL_XDS} may be set"
-            )))
+            )));
         }
         (Some(f), _) => Some(ConfigSource::File(f)),
         (_, Some(d)) => Some(ConfigSource::Static(Bytes::from(d))),
@@ -534,7 +611,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         dns_proxy: pc
             .proxy_metadata
             .get(DNS_CAPTURE_METADATA)
-            .map_or(true, |value| value.to_lowercase() == "true"),
+            .is_none_or(|value| value.to_lowercase() == "true"),
 
         pool_max_streams_per_conn: parse_default(
             POOL_MAX_STREAMS_PER_CONNECTION,
@@ -546,9 +623,15 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             DEFAULT_POOL_UNUSED_RELEASE_TIMEOUT,
         )?,
 
-        window_size: 4 * 1024 * 1024,
-        connection_window_size: 4 * 1024 * 1024,
-        frame_size: 1024 * 1024,
+        // window size: per-stream limit
+        window_size: parse_default(HTTP2_STREAM_WINDOW_SIZE, 4 * 1024 * 1024)?,
+        // connection window size: per connection.
+        // Setting this to the same value as window_size can introduce deadlocks in some applications
+        // where clients do not read data on streamA until they receive data on streamB.
+        // If streamA consumes the entire connection window, we enter a deadlock.
+        // A 4x limit should be appropriate without introducing too much potential buffering.
+        connection_window_size: parse_default(HTTP2_CONNECTION_WINDOW_SIZE, 16 * 1024 * 1024)?,
+        frame_size: parse_default(HTTP2_FRAME_SIZE, 1024 * 1024)?,
 
         self_termination_deadline: match parse_duration(CONNECTION_TERMINATION_DEADLINE)? {
             Some(period) => period,
@@ -676,6 +759,10 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             }
         }),
         fake_self_inbound: false,
+        xds_headers: parse_headers(ISTIO_XDS_HEADER_PREFIX)?,
+        ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
+
+        localhost_app_tunnel: parse_default(LOCALHOST_APP_TUNNEL, true)?,
     })
 }
 
@@ -909,9 +996,14 @@ pub mod tests {
         }"#,
         );
 
-        env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
-        env::set_var("NOT_INCLUDE", "not-include");
-        env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
+        unsafe {
+            env::set_var("ISTIO_META_INCLUDE_THIS", "foobar-env");
+            env::set_var("NOT_INCLUDE", "not-include");
+            env::set_var("ISTIO_META_CLUSTER_ID", "test-cluster");
+            env::set_var("XDS_HEADER_HEADER_FOO", "foo");
+            env::set_var("XDS_HEADER_HEADER_BAR", "bar");
+            env::set_var("CA_HEADER_HEADER_BAZ", "baz");
+        }
 
         let pc = construct_proxy_config("", pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
@@ -925,14 +1017,32 @@ pub mod tests {
         );
         assert_eq!(cfg.proxy_metadata["BAR"], "bar");
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
+        assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
+        assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata.get("NOT_INCLUDE"), None);
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
         assert_eq!(cfg.cluster_id, "test-cluster");
+
+        let mut expected_xds_headers = HashMap::new();
+        expected_xds_headers.insert("HEADER_FOO".to_string(), "foo".to_string());
+        expected_xds_headers.insert("HEADER_BAR".to_string(), "bar".to_string());
+
+        let mut expected_ca_headers = HashMap::new();
+        expected_ca_headers.insert("HEADER_BAZ".to_string(), "baz".to_string());
+
+        validate_metadata_vector(&cfg.xds_headers, expected_xds_headers.clone());
+
+        validate_metadata_vector(&cfg.ca_headers, expected_ca_headers.clone());
 
         // both (with a field override and metadata override)
         let pc = construct_proxy_config(mesh_config_path, pc_env).unwrap();
         let cfg = construct_config(pc).unwrap();
 
-        env::remove_var("ISTIO_META_INCLUDE_THIS");
-        env::remove_var("NOT_INCLUDE");
+        unsafe {
+            env::remove_var("ISTIO_META_INCLUDE_THIS");
+            env::remove_var("NOT_INCLUDE");
+        }
+
         assert_eq!(cfg.stats_addr.port(), 15888);
         assert_eq!(cfg.admin_addr.port(), 15999);
         assert_eq!(cfg.proxy_metadata["FOO"], "foo");
@@ -940,5 +1050,19 @@ pub mod tests {
         assert_eq!(cfg.proxy_metadata["FOOBAR"], "foobar-overwritten");
         assert_eq!(cfg.proxy_metadata["NO_PREFIX"], "no-prefix");
         assert_eq!(cfg.proxy_metadata["INCLUDE_THIS"], "foobar-env");
+        assert_eq!(cfg.proxy_metadata["CLUSTER_ID"], "test-cluster");
+        assert_eq!(cfg.cluster_id, "test-cluster");
+
+        validate_metadata_vector(&cfg.xds_headers, expected_xds_headers.clone());
+
+        validate_metadata_vector(&cfg.ca_headers, expected_ca_headers.clone());
+    }
+
+    fn validate_metadata_vector(metadata: &MetadataVector, header_map: HashMap<String, String>) {
+        for (k, v) in header_map {
+            let key: AsciiMetadataKey = AsciiMetadataKey::from_str(&k).unwrap();
+            let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
+            assert!(metadata.vec.contains(&(key, value)));
+        }
     }
 }

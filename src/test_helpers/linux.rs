@@ -15,7 +15,8 @@
 use crate::config::{ConfigSource, ProxyMode};
 use crate::rbac::Authorization;
 use crate::state::service::{Endpoint, Service};
-use crate::state::workload::{gatewayaddress, HealthStatus, Workload};
+use crate::state::workload::{HealthStatus, Workload, gatewayaddress};
+use crate::strng::Strng;
 use crate::test_helpers::app::TestApp;
 use crate::test_helpers::netns::{Namespace, Resolver};
 use crate::test_helpers::*;
@@ -26,6 +27,7 @@ use crate::inpod::istio::zds::WorkloadInfo;
 use crate::signal::ShutdownTrigger;
 use crate::test_helpers::inpod::start_ztunnel_server;
 use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
+use arcstr::ArcStr;
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
 use std::net::IpAddr;
@@ -163,6 +165,7 @@ impl WorkloadManager {
             } else {
                 Some(true)
             },
+            localhost_app_tunnel: true,
             ..config::parse_config().unwrap()
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
@@ -350,6 +353,11 @@ impl<'a> TestServiceBuilder<'a> {
         self
     }
 
+    pub fn subject_alt_names(mut self, mut sans: Vec<ArcStr>) -> Self {
+        self.s.subject_alt_names.append(&mut sans);
+        self
+    }
+
     /// Set the service waypoint
     pub fn waypoint(mut self, waypoint: IpAddr) -> Self {
         self.s.waypoint = Some(GatewayAddress {
@@ -414,6 +422,11 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
+    pub fn network(mut self, network: Strng) -> Self {
+        self.w.workload.network = network;
+        self
+    }
+
     pub fn identity(mut self, identity: identity::Identity) -> Self {
         match identity {
             identity::Identity::Spiffe {
@@ -453,9 +466,14 @@ impl<'a> TestWorkloadBuilder<'a> {
         self
     }
 
-    /// Set a waypoint to the workload
+    /// Mutate the workload
     pub fn mutate_workload(mut self, f: impl FnOnce(&mut Workload)) -> Self {
         f(&mut self.w.workload);
+        self
+    }
+
+    pub fn network_gateway(mut self, network_gateway: GatewayAddress) -> Self {
+        self.w.workload.network_gateway = Some(network_gateway);
         self
     }
 
@@ -505,7 +523,13 @@ impl<'a> TestWorkloadBuilder<'a> {
                 .namespaces
                 .child(&self.w.workload.node, &self.w.workload.name)?
         };
-        self.w.workload.workload_ips = vec![network_namespace.ip()];
+        if self.w.workload.network_gateway.is_some() {
+            // This is a little inefficient, because we create the
+            // namespace, but never actually use it.
+            self.w.workload.workload_ips = vec![];
+        } else {
+            self.w.workload.workload_ips = vec![network_namespace.ip()];
+        }
         self.w.workload.uid = format!(
             "cluster1//v1/Pod/{}/{}",
             self.w.workload.namespace, self.w.workload.name,

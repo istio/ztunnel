@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::metrics::{DefaultedUnknown, DeferRecorder, Recorder};
 
 use crate::state::workload::Workload;
+use crate::strng;
 use crate::strng::RichStrng;
 
 pub struct Metrics {
@@ -56,7 +57,7 @@ impl Metrics {
         );
 
         let forwarded_duration = Family::<DnsLabels, Histogram>::new_with_constructor(|| {
-            Histogram::new(vec![0.005f64, 0.001, 0.01, 0.1, 1.0, 5.0].into_iter())
+            Histogram::new(vec![0.005f64, 0.001, 0.01, 0.1, 1.0, 5.0])
         });
         registry.register_with_unit(
             "dns_upstream_request_duration",
@@ -78,7 +79,7 @@ impl DeferRecorder for Metrics {}
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct DnsLabels {
-    request_query_type: RichStrng,
+    request_query_type: DefaultedUnknown<RichStrng>,
     request_protocol: RichStrng,
 
     // Source workload.
@@ -89,7 +90,12 @@ pub struct DnsLabels {
 impl DnsLabels {
     pub fn new(r: &Request) -> Self {
         Self {
-            request_query_type: r.query().query_type().to_string().to_lowercase().into(),
+            request_query_type: r
+                .request_info()
+                .map(|q| q.query.query_type().to_string().to_lowercase())
+                .ok()
+                .map(|s| RichStrng::from(strng::new(s)))
+                .into(),
             request_protocol: r.protocol().to_string().to_lowercase().into(),
             source_canonical_service: Default::default(),
             source_canonical_revision: Default::default(),

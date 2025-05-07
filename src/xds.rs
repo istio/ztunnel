@@ -27,18 +27,18 @@ pub use client::*;
 pub use metrics::*;
 pub use types::*;
 use xds::istio::security::Authorization as XdsAuthorization;
-use xds::istio::workload::address::Type as XdsType;
 use xds::istio::workload::Address as XdsAddress;
 use xds::istio::workload::PortList;
 use xds::istio::workload::Service as XdsService;
 use xds::istio::workload::Workload as XdsWorkload;
+use xds::istio::workload::address::Type as XdsType;
 
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
 use crate::rbac::Authorization;
+use crate::state::ProxyState;
 use crate::state::service::{Endpoint, Service, ServiceStore};
 use crate::state::workload::{NamespacedHostname, Workload, WorkloadStore};
-use crate::state::ProxyState;
 use crate::strng::Strng;
 use crate::{rbac, strng};
 use crate::{tls, xds};
@@ -201,7 +201,9 @@ impl ProxyStateUpdateMutator {
 
         let Ok(name) = NamespacedHostname::from_str(xds_name) else {
             // we don't have namespace/hostname xds primary key for service
-            warn!("tried to remove service but it did not have the expected namespace/hostname format");
+            warn!(
+                "tried to remove service but it did not have the expected namespace/hostname format"
+            );
             return;
         };
 
@@ -331,18 +333,7 @@ fn insert_service_endpoints(
 ) -> anyhow::Result<()> {
     for (namespaced_host, ports) in services {
         // Parse the namespaced hostname for the service.
-        let namespaced_host = match namespaced_host.split_once('/') {
-            Some((namespace, hostname)) => NamespacedHostname {
-                namespace: namespace.into(),
-                hostname: hostname.into(),
-            },
-            None => {
-                return Err(anyhow::anyhow!(
-                    "failed parsing service name: {namespaced_host}"
-                ));
-            }
-        };
-
+        let namespaced_host = NamespacedHostname::from_str(namespaced_host)?;
         services_state.insert_endpoint(
             namespaced_host,
             Endpoint {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config::Config;
-use crate::hyper_util::{empty_response, plaintext_response, Server};
+use crate::hyper_util::{Server, empty_response, plaintext_response};
 use crate::identity::SecretManager;
 use crate::state::DemandProxyState;
 use crate::tls::Certificate;
@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
-use hyper::{header::HeaderValue, header::CONTENT_TYPE, Request, Response};
+use hyper::{Request, Response, header::CONTENT_TYPE, header::HeaderValue};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
@@ -86,6 +86,7 @@ pub struct CertsDump {
     identity: String,
     state: String,
     cert_chain: Vec<CertDump>,
+    root_certs: Vec<CertDump>,
 }
 
 impl Service {
@@ -220,10 +221,12 @@ async fn dump_certs(cert_manager: &SecretManager) -> Vec<CertsDump> {
                 Unavailable(err) => dump.state = format!("Unavailable: {err}"),
                 Available(certs) => {
                     dump.state = "Available".to_string();
-                    dump.cert_chain = std::iter::once(&certs.cert)
-                        .chain(certs.chain.iter())
+                    dump.cert_chain = certs
+                        .cert_and_intermediates()
+                        .iter()
                         .map(dump_cert)
                         .collect();
+                    dump.root_certs = certs.roots.iter().map(dump_cert).collect();
                 }
             };
             dump
@@ -441,17 +444,16 @@ fn base64_encode(data: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::ConfigDump;
     use super::change_log_level;
     use super::dump_certs;
     use super::handle_config_dump;
-    use super::ConfigDump;
     use crate::admin::HELP_STRING;
-    use crate::config::construct_config;
     use crate::config::ProxyConfig;
+    use crate::config::construct_config;
     use crate::identity;
     use crate::strng;
     use crate::test_helpers::{get_response_str, helpers, new_proxy_state};
-    use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::security::Address as XdsAddress;
     use crate::xds::istio::security::Authorization as XdsAuthorization;
     use crate::xds::istio::security::Clause as XdsClause;
@@ -459,7 +461,7 @@ mod tests {
     use crate::xds::istio::security::Rule as XdsRule;
     use crate::xds::istio::security::ServiceAccountMatch as XdsServiceAccountMatch;
     use crate::xds::istio::security::StringMatch as XdsStringMatch;
-    use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
+    use crate::xds::istio::security::string_match::MatchType as XdsMatchType;
     use crate::xds::istio::workload::GatewayAddress as XdsGatewayAddress;
     use crate::xds::istio::workload::LoadBalancing as XdsLoadBalancing;
     use crate::xds::istio::workload::Locality as XdsLocality;
@@ -469,6 +471,7 @@ mod tests {
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::WorkloadType as XdsWorkloadType;
+    use crate::xds::istio::workload::gateway_address::Destination as XdsDestination;
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
@@ -542,11 +545,13 @@ mod tests {
         let want = serde_json::json!([
           {
             "certChain": [],
+            "rootCerts": [],
             "identity": "spiffe://error/ns/forgotten/sa/sa-failed",
             "state": "Unavailable: the identity is no longer needed"
           },
           {
             "certChain": [],
+            "rootCerts": [],
             "identity": "spiffe://test/ns/test/sa/sa-pending",
             "state": "Initializing"
           },
@@ -554,15 +559,17 @@ mod tests {
             "certChain": [
               {
                 "expirationTime": "2023-03-11T12:57:26Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVWnlUOTI5c3d0QjhPSG1qUmFURWFENnlqcWc0d0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVTMKTWpaYUZ3MHlNekF6TVRFeE1qVTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEF3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFjTzNlMjAvK0ZrRkwKUmttMTNtQlFNYjVPUmpTOGhwWjBRMkZKd2wrSXV4TGY2MUJDZS9RVlhOVklpSUdlMXRVRTh5UTRoMXZrCjhVb01sSmpTQkdiM3VDdHVLRFVKN0xOM1VBUmV4YU1uQkZobC9mWmQxU3ZZcmhlWjU3WDlrTElVa2hkSQpDUVdxOFVFcXBWZEloNGxTZjhoYnFRQksvUWhCN0I2bUJOSW5uMThZTEhiOEpmU0N2aXBWYTRuNXByTlYKbVNWc1JPMUtpY1FQYVhpUzJta0xBWVFRanROYkVJdnJwQldCYytmVWZPaEQ0YmhwUFVmSVFIN1dFcUZLCm5TMnQwSmh1d08zM2FoUDhLZVBWWDRDRkJ4VXc2SDhrd1dJUkh5dW9YbGFwMmVST1EycFRyYmtmVjJZbgpmWjZxV0huREJ5ZjN6bkFQQVM1ZnZ4b1RoKzBYTHc9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
-                "serialNumber": "588850990443535479077311695632745359443207891470",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNYRENDQVVTZ0F3SUJBZ0lVTDVaZ0toTEI1YUt3YXRuZE1sR25CZWZ3Qkxnd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05UVTMKTWpaYUZ3MHlNekF6TVRFeE1qVTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJrd1p6QTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEF3RHdZRFZSMFBBUUgvQkFVREF3ZWdBREFkQmdOVkhTVUVGakFVQmdncgpCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBQ2xKZVJpdmpLYVkKdm5TUHhjUXZPNTNxVFpiUUdHWFc5OHI5Qm1FWGUwYm5YeXZlMWJUVlNYcWVNMXZHdE1DalJGai91dE9VCkRwcHphQVJGRlRzenN2QWdJNStwNFhpbVU4U0FwTlhUYVZjWHkwcG04c2dIWUF6U2drMExBcW1wTWJxbwpvNDB6dmFxVk9nQ1F0c2Vobkg5SCtMQXd1WDl1T08vY2J5NnRidjhrSkhrMWZOTmZ6RTlxZVUwUGFhWWQKZjZXQzhkaWliRGJoN0tjR29rSG80NDMvT05Mb0tJZU9aTFJIbXBFdDdyYnprTDl4elNlNnVZaGQ1SlNGCk55dlY2T3Zoc1FXVVpqd1BmanUvUVJUTzFPdWgrUUZYaTAxNFpvUjRVRnRZaDRjcXphcUlpYVQ0MERyMgpNTHk4eEhJUzRmM1ltUXJEei9VN1pUSG9xaWFLaVBZPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serialNumber": "271676055104741785552467469040731750696653685944",
                 "validFrom": "2023-03-11T05:57:26Z"
               },
+            ],
+            "rootCerts": [
               {
-                "expirationTime": "2296-12-24T18:31:28Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQytjLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXgKTWpoYUdBOHlNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU1lQ1R4UEp0dWQwVXh3KwpDYWFkZFdEN2ErUUV1UVkrQlBUS0pkbk1lajBzQk1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3AKMnNkMzJTWTRiZGJva1Fjb3ArQmp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiCkZZZWFpKzZxN2lNamxiQ0dBdTcvVW5LSnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3FpRQpYTVJtdzQvQkVoRkd6bUlEMm9VREtCMzZkdVZiZHpTRW01MVF2Z1U1SUxYSWd5VnJlak41Q0ZzQytXK3gKamVPWExFenRmSEZVb3FiM3dXaGtCdUV4bXI4MUoyaEdXOXBVTEoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94CkllYU5tTHpQSUdyWDAxelFZSWRaVHVEd01ZMENBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYQpya3V3UitVUmhLQWUySVRaS1o3Vk1COEdBMVVkSXdRWU1CYUFGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFoKS1o3Vk1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFLcm5BZVNzClNTSzMvOHp4K2h6ajZTRlhkSkE5Q1EwMkdFSjdoSHJLaWpHV1ZZZGRhbDlkQWJTNXRMZC8vcUtPOXVJcwpHZXR5L09rMmJSUTZjcXFNbGdkTnozam1tcmJTbFlXbUlYSTB5SEdtQ2lTYXpIc1hWYkVGNkl3eTN0Y1IKNHZvWFdLSUNXUGgrQzJjVGdMbWVaMEV1ekZ4cTR3Wm5DZjQwd0tvQUo5aTFhd1NyQm5FOWpXdG5wNEY0CmhXbkpUcEdreTVkUkFMRTBsLzJBYnJsMzh3Z2ZNOHI0SW90bVBUaEZLbkZlSUhVN2JRMXJZQW9xcGJBaApDdjBCTjVQakFRUldNazZib28zZjBha1MwN25sWUlWcVhoeHFjWW5PZ3drZGxUdFg5TXFHSXEyNm44bjEKTldXd25tS09qTnNrNnFSbXVsRWdlR080dnhUdlNKWWIraFU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
-                "serialNumber": "67955938755654933561614970125599055831405010529",
-                "validFrom": "2023-03-11T18:31:28Z"
+                "expirationTime": "2299-01-17T23:35:46Z",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURJRENDQWdpZ0F3SUJBZ0lVUmxsdFV1bTJRbTE1dFQ5end1MmtwaDR2ZWRjd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlOVEEwTURNeU16TTEKTkRaYUdBOHlNams1TURFeE56SXpNelUwTmxvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQUxxVHVwVXlMK2pvd3FOZQpMQUxFbnlXYS9VNmgyaktCYzFYWUFtekR1MDN4S0VhM3JhU1ZzU05BYjFnN1hybmgxaTViNEg0enBtY3gKdStsZURlMDh4OEdOOFJRVjBoUlE0bkkvb0lseHhmc2NOWDZoNGwyVlRRSGNLcnFaYUFRQ2NDTVJuc2EzCk9tUFNPQmRPdTR2ZkFxeVVxMS9ici82TEczRWFQMDYxQ09lMzVWUTFhbkZJYXQrVWJ6bEcrZmpGbXZXbwpxZFdFMVFaekV4UWdXV3VKNjh6RjJBN25MTXVxc0k5cG8wR2FKcHhwajZnc0tIZ3NRZ1JoYWR4UlR3ejAKc0hrVE0rS216SkY0aTJ1NDJ3VHc5YWpzME5NZmQ5WjdBbWlvRXpnS0J3bURBdGQra04zUFdyby8vaHAxClRtOUVqTVFac2s3QmV6NVVyUDA4Y09yTXNOTUNBd0VBQWFOZ01GNHdIUVlEVlIwT0JCWUVGRzlmWGRqQgo0THN2RUpxWUxZNllQc2xWMWxXVU1COEdBMVVkSXdRWU1CYUFGRzlmWGRqQjRMc3ZFSnFZTFk2WVBzbFYKMWxXVU1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0N3WURWUjBQQkFRREFnSUVNQTBHQ1NxR1NJYjNEUUVCCkN3VUFBNElCQVFDaXVMUzljZkNjRDNDblNGbUpOays5MkNhRXEyUmxTMXF1dmdTa3Z5ckhZNTV4cUxrYQpCbUVDU3VCT2FCT3lHNlZMaFlPMy9OeDBwRERJbUJYak1GZTRJRVJER3QvQTA0am41S2RFTGRiK1laOWUKdUZvY09xdWpucnFVYkxXT2Zra21rd3E5TDFWNjNsKzAxdGRFUlhYa0ZuWHM4QTFhUnh6U2RCSVUrZEtKCmpyRHNtUzdnK1B5dWNEZzJ2WWtTcExoMTdhTm1RdndrOWRPMlpvVHdMcW1JSEZYcHhlNW1PdmlyRVE1RQpYL1JzRW9IY0hURTNGUk0xaDBVdUI1SjN4ekVoOXpHUFRwNWljS2d1TC9vUElmUXVJdWhaRCtWNWg3ZzcKS3k1RHlNVWNLT0l1T0c2SStLdDJYaWpHMld5UHRwWEJBTXJoU2ZaM2ViQWd0WjZJdjZxdgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serialNumber": "401623643733315109898464329860171355725264550359",
+                "validFrom": "2025-04-03T23:35:46Z"
               }
             ],
             "identity": "spiffe://trust_domain/ns/namespace/sa/sa-0",
@@ -572,15 +579,17 @@ mod tests {
             "certChain": [
               {
                 "expirationTime": "2023-03-11T13:57:26Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNXekNDQVVPZ0F3SUJBZ0lVWElQK29ySVF3dDZFUGRLSFdRU0VMOTM0bjdFd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTMKTWpaYUZ3MHlNekF6TVRFeE16VTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJnd1pqQTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEV3RGdZRFZSMFBBUUgvQkFRREFnV2dNQjBHQTFVZEpRUVdNQlFHQ0NzRwpBUVVGQndNQkJnZ3JCZ0VGQlFjREFqQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFHV2tCY1plUEhrZisKSEpoazY5NHhDaHZLVENkVlRoNE9QNTBvWC9TdE0vK3NsazU0Y2RkcnRpOG0rdEFnai8wK0FLaFhpSTJaCjBNRFZPaEpOWTVRT1VXdkVBUWNYVTlPR2NCWmsyRWNGVW9BOC9RRzFpcVB3ejJJRGluakYrb3lTWExEdApFRGxPdW1Sa3VETWtyME51TGNZTlJuYUI0LzMreDAvdVlRM2M3TXpvUEtUQmZQdW1DY0wzbG5mR1dGR3kKc1d3b1p5V01CK1ZFdjYzK2psdTZDZmwzUGN1NEtFNHVhQUJiWHVvRkhjeU8yMW5sZVVvT3Z2VXhLZDdGCkxvQWNsVDNaSUI3dzNUcXE2MFR3UlV6ZGZkQlA5UURabEVSL1JLTDZWbnBBUVZhbXZBWmNjZFVuTWZjOAppT0N6TWVqV2tweGxXL3MrMW1nMUxzQWxyYlJMdHc9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
-                "serialNumber": "528170730419860468572163268563070820131458817969",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNYRENDQVVTZ0F3SUJBZ0lVSlVGNVVGbU52OVhYQlFWaDFDbFk0VFNLRng4d0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZUZ3MHlNekF6TVRFd05qVTMKTWpaYUZ3MHlNekF6TVRFeE16VTNNalphTUJneEZqQVVCZ05WQkFvTURXTnNkWE4wWlhJdWJHOWpZV3d3CldUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFSYXIyQm1JWUFndkptT3JTcENlRlE3OUpQeQo4Y3c0K3pFRThmcXI1N2svdW1NcDVqWFpFR0JwZWRCSVkrcWZtSlBYRWlyYTlFOTJkU21rZks1QUtNV3gKbzJrd1p6QTFCZ05WSFJFRUxqQXNoaXB6Y0dsbVptVTZMeTkwY25WemRGOWtiMjFoYVc0dmJuTXZibUZ0ClpYTndZV05sTDNOaEwzTmhMVEV3RHdZRFZSMFBBUUgvQkFVREF3ZWdBREFkQmdOVkhTVUVGakFVQmdncgpCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBSWdscTIvNnJyWlIKa25UUmZqM201SnU0MmFycGlxVVNHR3A2Mks3L09zeDc5RmovZDBwdU1hMzFkMFhwS0w3N0F2QmtvcVk3CjFWejJKOHRzUkZhZEM1ZmFtQlRXdUN4OUE5R0V3WHEzQmllK2l1a2RGWjZqUTRsb2EybHVWWWFZanhUbgpqR3NLQm0xR0hwMHpacFFVNkdENzA2c2RaTjltaGlqWVA4RnpxWGg1TTlzTzQ4UldveElOUmhXd0pKejQKYUlaZWlRTlJWdkRNZm93MGtxdFFtN001TnQzanA2RkJjTzhGQkJvV0p3MXNCSitLME5XN0VuUG82Yyt0CjE5MkZ0Nmx0eXpvV1BSMnVIYUZENi9FRjZVTkowcTN1ejZicjNYRFg1Q3lrRjQxSEMrNHRSMjQ3RWhmZgpGQkpyUVc0dXAxdHAzdnZGYTdHYnl6bkZWUEc4M3dvPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serialNumber": "212692774886610945930036647276614034927450199839",
                 "validFrom": "2023-03-11T06:57:26Z"
               },
+            ],
+            "rootCerts": [
               {
-                "expirationTime": "2296-12-24T18:31:28Z",
-                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURFekNDQWZ1Z0F3SUJBZ0lVQytjLzYwZStGMWVFKzdWcXhuYVdjT09abm1Fd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlNekF6TVRFeE9ETXgKTWpoYUdBOHlNamsyTVRJeU5ERTRNekV5T0Zvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU1lQ1R4UEp0dWQwVXh3KwpDYWFkZFdEN2ErUUV1UVkrQlBUS0pkbk1lajBzQk1mVU1iVDE2SkxrWU5GZ3JqMVVWSEhjcFNvSUhvY3AKMnNkMzJTWTRiZGJva1Fjb3ArQmp0azU1alE0NktMWXNKZ2IyTnd2WW8xdDhFMWFldEpxRkdWN3JtZVpiCkZZZWFpKzZxN2lNamxiQ0dBdTcvVW5LSnNkR25hSlFnTjhkdTBUMUtEZ2pxS1B5SHFkc3U5a2JwQ3FpRQpYTVJtdzQvQkVoRkd6bUlEMm9VREtCMzZkdVZiZHpTRW01MVF2Z1U1SUxYSWd5VnJlak41Q0ZzQytXK3gKamVPWExFenRmSEZVb3FiM3dXaGtCdUV4bXI4MUoyaEdXOXBVTEoyd2tRZ2RmWFA3Z3RNa0I2RXlLdy94CkllYU5tTHpQSUdyWDAxelFZSWRaVHVEd01ZMENBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUVGRDhrNGYxYQpya3V3UitVUmhLQWUySVRaS1o3Vk1COEdBMVVkSXdRWU1CYUFGRDhrNGYxYXJrdXdSK1VSaEtBZTJJVFoKS1o3Vk1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFLcm5BZVNzClNTSzMvOHp4K2h6ajZTRlhkSkE5Q1EwMkdFSjdoSHJLaWpHV1ZZZGRhbDlkQWJTNXRMZC8vcUtPOXVJcwpHZXR5L09rMmJSUTZjcXFNbGdkTnozam1tcmJTbFlXbUlYSTB5SEdtQ2lTYXpIc1hWYkVGNkl3eTN0Y1IKNHZvWFdLSUNXUGgrQzJjVGdMbWVaMEV1ekZ4cTR3Wm5DZjQwd0tvQUo5aTFhd1NyQm5FOWpXdG5wNEY0CmhXbkpUcEdreTVkUkFMRTBsLzJBYnJsMzh3Z2ZNOHI0SW90bVBUaEZLbkZlSUhVN2JRMXJZQW9xcGJBaApDdjBCTjVQakFRUldNazZib28zZjBha1MwN25sWUlWcVhoeHFjWW5PZ3drZGxUdFg5TXFHSXEyNm44bjEKTldXd25tS09qTnNrNnFSbXVsRWdlR080dnhUdlNKWWIraFU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
-                "serialNumber": "67955938755654933561614970125599055831405010529",
-                "validFrom": "2023-03-11T18:31:28Z"
+                "expirationTime": "2299-01-17T23:35:46Z",
+                "pem": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURJRENDQWdpZ0F3SUJBZ0lVUmxsdFV1bTJRbTE1dFQ5end1MmtwaDR2ZWRjd0RRWUpLb1pJaHZjTgpBUUVMQlFBd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oYkRBZ0Z3MHlOVEEwTURNeU16TTEKTkRaYUdBOHlNams1TURFeE56SXpNelUwTmxvd0dERVdNQlFHQTFVRUNnd05ZMngxYzNSbGNpNXNiMk5oCmJEQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQUxxVHVwVXlMK2pvd3FOZQpMQUxFbnlXYS9VNmgyaktCYzFYWUFtekR1MDN4S0VhM3JhU1ZzU05BYjFnN1hybmgxaTViNEg0enBtY3gKdStsZURlMDh4OEdOOFJRVjBoUlE0bkkvb0lseHhmc2NOWDZoNGwyVlRRSGNLcnFaYUFRQ2NDTVJuc2EzCk9tUFNPQmRPdTR2ZkFxeVVxMS9ici82TEczRWFQMDYxQ09lMzVWUTFhbkZJYXQrVWJ6bEcrZmpGbXZXbwpxZFdFMVFaekV4UWdXV3VKNjh6RjJBN25MTXVxc0k5cG8wR2FKcHhwajZnc0tIZ3NRZ1JoYWR4UlR3ejAKc0hrVE0rS216SkY0aTJ1NDJ3VHc5YWpzME5NZmQ5WjdBbWlvRXpnS0J3bURBdGQra04zUFdyby8vaHAxClRtOUVqTVFac2s3QmV6NVVyUDA4Y09yTXNOTUNBd0VBQWFOZ01GNHdIUVlEVlIwT0JCWUVGRzlmWGRqQgo0THN2RUpxWUxZNllQc2xWMWxXVU1COEdBMVVkSXdRWU1CYUFGRzlmWGRqQjRMc3ZFSnFZTFk2WVBzbFYKMWxXVU1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0N3WURWUjBQQkFRREFnSUVNQTBHQ1NxR1NJYjNEUUVCCkN3VUFBNElCQVFDaXVMUzljZkNjRDNDblNGbUpOays5MkNhRXEyUmxTMXF1dmdTa3Z5ckhZNTV4cUxrYQpCbUVDU3VCT2FCT3lHNlZMaFlPMy9OeDBwRERJbUJYak1GZTRJRVJER3QvQTA0am41S2RFTGRiK1laOWUKdUZvY09xdWpucnFVYkxXT2Zra21rd3E5TDFWNjNsKzAxdGRFUlhYa0ZuWHM4QTFhUnh6U2RCSVUrZEtKCmpyRHNtUzdnK1B5dWNEZzJ2WWtTcExoMTdhTm1RdndrOWRPMlpvVHdMcW1JSEZYcHhlNW1PdmlyRVE1RQpYL1JzRW9IY0hURTNGUk0xaDBVdUI1SjN4ekVoOXpHUFRwNWljS2d1TC9vUElmUXVJdWhaRCtWNWg3ZzcKS3k1RHlNVWNLT0l1T0c2SStLdDJYaWpHMld5UHRwWEJBTXJoU2ZaM2ViQWd0WjZJdjZxdgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==",
+                "serialNumber": "401623643733315109898464329860171355725264550359",
+                "validFrom": "2025-04-03T23:35:46Z"
               }
             ],
             "identity": "spiffe://trust_domain/ns/namespace/sa/sa-1",
@@ -658,6 +667,8 @@ mod tests {
                 zone: "zone".to_string(),
                 subzone: "subezone".to_string(),
             }),
+            extensions: Default::default(),
+            capacity: Default::default(),
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
@@ -681,6 +692,7 @@ mod tests {
                 health_policy: 1,
             }), // ..Default::default() // intentionally don't default. we want all fields populated
             ip_families: 0,
+            extensions: Default::default(),
         };
 
         let auth = XdsAuthorization {
@@ -845,17 +857,23 @@ mod tests {
 
         let resp = change_log_level(true, "trace");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,trace\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,trace\n")
+        );
 
         let resp = change_log_level(true, "info");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,info\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,info\n")
+        );
 
         let resp = change_log_level(true, "off");
         let resp_str = get_response_str(resp).await;
-        assert!(resp_str
-            .contains("current log level is hickory_server::server::server_future=off,off\n"));
+        assert!(
+            resp_str
+                .contains("current log level is hickory_server::server::server_future=off,off\n")
+        );
     }
 }

@@ -53,8 +53,12 @@ pub enum Error {
     #[cfg(feature = "tls-boring")]
     SslError(#[from] boring::error::ErrorStack),
 
+    #[error("invalid operation: {0:?}")]
+    #[cfg(feature = "tls-openssl")]
+    SslError(#[from] openssl::error::ErrorStack),
+
     #[error("invalid certificate generation: {0:?}")]
-    #[cfg(feature = "tls-ring")]
+    #[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
     RcgenError(Arc<rcgen::Error>),
 
     #[error("failed to build server verifier: {0}")]
@@ -70,7 +74,7 @@ impl From<InvalidUri> for Error {
     }
 }
 
-#[cfg(feature = "tls-ring")]
+#[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
 impl From<rcgen::Error> for Error {
     fn from(err: rcgen::Error) -> Self {
         Error::RcgenError(Arc::new(err))

@@ -13,34 +13,28 @@
 // limitations under the License.
 
 #![warn(clippy::cast_lossless)]
-use super::{h2, LocalWorkloadInformation};
 use super::{Error, SocketFactory};
+use super::{LocalWorkloadInformation, h2};
 use std::time::Duration;
 
 use std::collections::hash_map::DefaultHasher;
-use std::fmt;
-use std::fmt::{Display, Formatter};
 
 use std::hash::{Hash, Hasher};
 
-use std::net::IpAddr;
-use std::net::SocketAddr;
-
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use tokio::sync::watch;
 
 use tokio::sync::Mutex;
-use tracing::{debug, trace, Instrument};
+use tracing::{Instrument, debug, trace};
 
 use crate::config;
-use crate::identity::Identity;
 
 use flurry;
 
-use crate::proxy::h2::client::H2ConnectClient;
 use crate::proxy::h2::H2Stream;
+use crate::proxy::h2::client::{H2ConnectClient, WorkloadKey};
 use pingora_pool;
 use tokio::io;
 
@@ -64,7 +58,7 @@ struct PoolState {
     timeout_tx: watch::Sender<bool>, // This is already impl clone? rustc complains that it isn't, tho
     // this is effectively just a convenience data type - a rwlocked hashmap with keying and LRU drops
     // and has no actual hyper/http/connection logic.
-    connected_pool: Arc<pingora_pool::ConnectionPool<ConnClient>>,
+    connected_pool: Arc<pingora_pool::ConnectionPool<H2ConnectClient>>,
     // this must be an atomic/concurrent-safe list-of-locks, so we can lock per-key, not globally, and avoid holding up all conn attempts
     established_conn_writelock: flurry::HashMap<u64, Option<Arc<Mutex<()>>>>,
     pool_unused_release_timeout: Duration,
@@ -83,7 +77,7 @@ struct ConnSpawner {
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
-    async fn new_pool_conn(&self, key: WorkloadKey) -> Result<ConnClient, Error> {
+    async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
@@ -97,14 +91,14 @@ impl ConnSpawner {
 
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
-        let sender =
-            h2::client::spawn_connection(self.cfg.clone(), tls_stream, self.timeout_rx.clone())
-                .await?;
-        let client = ConnClient {
-            sender,
-            wl_key: key,
-        };
-        Ok(client)
+        let sender = h2::client::spawn_connection(
+            self.cfg.clone(),
+            tls_stream,
+            self.timeout_rx.clone(),
+            key,
+        )
+        .await?;
+        Ok(sender)
     }
 }
 
@@ -129,8 +123,8 @@ impl PoolState {
     //
     // Note that this simply removes the client ref from this pool - if other things hold client/streamrefs refs,
     // they must also drop those before the underlying connection is fully closed.
-    fn maybe_checkin_conn(&self, conn: ConnClient, pool_key: pingora_pool::ConnectionMeta) {
-        if conn.sender.will_be_at_max_streamcount() {
+    fn maybe_checkin_conn(&self, conn: H2ConnectClient, pool_key: pingora_pool::ConnectionMeta) {
+        if conn.will_be_at_max_streamcount() {
             debug!(
                 "checked out connection for {:?} is now at max streamcount; removing from pool",
                 pool_key
@@ -164,7 +158,7 @@ impl PoolState {
         &self,
         hash_key: &u64,
         workload_key: &WorkloadKey,
-    ) -> Result<Option<ConnClient>, Error> {
+    ) -> Result<Option<H2ConnectClient>, Error> {
         match self.connected_pool.get(hash_key) {
             None => Ok(None),
             Some(conn) => match Self::enforce_key_integrity(conn, workload_key) {
@@ -180,9 +174,9 @@ impl PoolState {
     //
     // this is a final safety check for collisions, we will throw up our hands and refuse to return the conn
     fn enforce_key_integrity(
-        conn: ConnClient,
+        conn: H2ConnectClient,
         expected_key: &WorkloadKey,
-    ) -> Result<ConnClient, Error> {
+    ) -> Result<H2ConnectClient, Error> {
         match conn.is_for_workload(expected_key) {
             Ok(()) => Ok(conn),
             Err(e) => Err(e),
@@ -211,7 +205,7 @@ impl PoolState {
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Result<Option<ConnClient>, Error> {
+    ) -> Result<Option<H2ConnectClient>, Error> {
         let inner_conn_lock = {
             trace!("getting keyed lock out of lockmap");
             let guard = self.established_conn_writelock.guard();
@@ -273,7 +267,7 @@ impl PoolState {
         &self,
         workload_key: &WorkloadKey,
         pool_key: &pingora_pool::ConnectionMeta,
-    ) -> Result<Option<ConnClient>, Error> {
+    ) -> Result<Option<H2ConnectClient>, Error> {
         let found_conn = {
             trace!("pool connect outer map - take guard");
             let guard = self.established_conn_writelock.guard();
@@ -293,13 +287,12 @@ impl PoolState {
 
         trace!(
             "checkout - got writelock for conn with key {} and hash {:?}",
-            workload_key,
-            pool_key.key
+            workload_key, pool_key.key
         );
         let returned_connection = loop {
             match self.guarded_get(&pool_key.key, workload_key)? {
                 Some(mut existing) => {
-                    if !existing.sender.ready_to_use() {
+                    if !existing.ready_to_use() {
                         // We checked this out, and will not check it back in
                         // Loop again to find another/make a new one
                         debug!(
@@ -329,7 +322,9 @@ impl PoolState {
 // which will terminate all connection driver spawns, as well as cancel all outstanding eviction timeout spawns
 impl Drop for PoolState {
     fn drop(&mut self) {
-        debug!("poolstate dropping, stopping all connection drivers and cancelling all outstanding eviction timeout spawns");
+        debug!(
+            "poolstate dropping, stopping all connection drivers and cancelling all outstanding eviction timeout spawns"
+        );
         let _ = self.timeout_tx.send(true);
     }
 }
@@ -378,7 +373,7 @@ impl WorkloadHBONEPool {
     ) -> Result<H2Stream, Error> {
         let mut connection = self.connect(workload_key).await?;
 
-        connection.sender.send_request(request).await
+        connection.send_request(request).await
     }
 
     // Obtain a pooled connection. Will prefer to retrieve an existing conn from the pool, but
@@ -387,7 +382,7 @@ impl WorkloadHBONEPool {
     //
     // If many `connects` request a connection to the same dest at once, all will wait until exactly
     // one connection is created, before deciding if they should create more or just use that one.
-    async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<ConnClient, Error> {
+    async fn connect(&mut self, workload_key: &WorkloadKey) -> Result<H2ConnectClient, Error> {
         trace!("pool connect START");
         // TODO BML this may not be collision resistant, or a fast hash. It should be resistant enough for workloads tho.
         // We are doing a deep-equals check at the end to mitigate any collisions, will see about bumping Pingora
@@ -488,7 +483,10 @@ impl WorkloadHBONEPool {
                                 .await?;
                             match existing_conn {
                                 None => {
-                                    trace!("woke up on pool notification, but didn't find a conn for {:?} yet", hash_key);
+                                    trace!(
+                                        "woke up on pool notification, but didn't find a conn for {:?} yet",
+                                        hash_key
+                                    );
                                     continue;
                                 }
                                 Some(e_conn) => {
@@ -508,83 +506,39 @@ impl WorkloadHBONEPool {
     }
 }
 
-#[derive(Debug, Clone)]
-// A sort of faux-client, that represents a single checked-out 'request sender' which might
-// send requests over some underlying stream using some underlying http/2 client
-struct ConnClient {
-    sender: H2ConnectClient,
-    // A WL key may have many clients, but every client has no more than one WL key
-    wl_key: WorkloadKey, // the WL key associated with this client.
-}
-
-impl ConnClient {
-    pub fn is_for_workload(&self, wl_key: &WorkloadKey) -> Result<(), crate::proxy::Error> {
-        if !(self.wl_key == *wl_key) {
-            Err(crate::proxy::Error::Generic(
-                "fetched connection does not match workload key!".into(),
-            ))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-// This is currently only for debugging
-impl Drop for ConnClient {
-    fn drop(&mut self) {
-        trace!("dropping ConnClient for key {}", self.wl_key,)
-    }
-}
-
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub struct WorkloadKey {
-    pub src_id: Identity,
-    pub dst_id: Vec<Identity>,
-    // In theory we can just use src,dst,node. However, the dst has a check that
-    // the L3 destination IP matches the HBONE IP. This could be loosened to just assert they are the same identity maybe.
-    pub dst: SocketAddr,
-    // Because we spoof the source IP, we need to key on this as well. Note: for in-pod its already per-pod
-    // pools anyways.
-    pub src: IpAddr,
-}
-
-impl Display for WorkloadKey {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})->{}[", self.src, &self.src_id, self.dst,)?;
-        for i in &self.dst_id {
-            write!(f, "{i}")?;
-        }
-        write!(f, "]")
-    }
-}
-
 #[cfg(test)]
 mod test {
     use std::convert::Infallible;
+    use std::net::IpAddr;
     use std::net::SocketAddr;
     use std::time::Instant;
 
     use crate::{drain, identity, proxy};
 
-    use futures_util::{future, StreamExt};
+    use futures_util::{StreamExt, future};
     use hyper::body::Incoming;
 
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use prometheus_client::registry::Registry;
-    use std::sync::atomic::AtomicU32;
     use std::sync::RwLock;
+    use std::sync::atomic::AtomicU32;
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
     use tokio::sync::oneshot;
 
-    use tracing::{error, Instrument};
+    use tracing::{Instrument, error};
 
     use crate::test_helpers::helpers::initialize_telemetry;
+
+    use crate::identity::Identity;
+
+    use self::h2::TokioH2Stream;
 
     use super::*;
     use crate::drain::DrainWatcher;
@@ -594,7 +548,7 @@ mod test {
     use ztunnel::test_helpers::*;
 
     macro_rules! assert_opens_drops {
-        ($srv:expr, $open:expr, $drops:expr) => {
+        ($srv:expr_2021, $open:expr_2021, $drops:expr_2021) => {
             assert_eq!(
                 $srv.conn_counter.load(Ordering::Relaxed),
                 $open,
@@ -637,6 +591,34 @@ mod test {
         // Once we drop the pool, we should drop the connections as well
         drop(pool);
         assert_opens_drops!(srv, 1, 1);
+    }
+
+    /// This is really a test for TokioH2Stream, but its nicer here because we have access to
+    /// streams
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn small_reads() {
+        let (mut pool, srv) = setup_test(3).await;
+
+        let key = key(&srv, 2);
+        let req = || {
+            http::Request::builder()
+                .uri(srv.addr.to_string())
+                .method(http::Method::CONNECT)
+                .version(http::Version::HTTP_2)
+                .body(())
+                .unwrap()
+        };
+
+        let c = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let mut c = TokioH2Stream::new(c);
+        c.write_all(b"abcde").await.unwrap();
+        let mut b = [0u8; 0];
+        // Crucially, this should error rather than panic.
+        if let Err(e) = c.read(&mut b).await {
+            assert_eq!(e.kind(), io::ErrorKind::Other);
+        } else {
+            panic!("Should have errored");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

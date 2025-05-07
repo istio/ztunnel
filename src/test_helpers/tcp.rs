@@ -22,9 +22,9 @@ use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use std::{cmp, io};
 
+use hyper::Response;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
-use hyper::Response;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -222,16 +222,19 @@ pub struct HboneTestServer {
     listener: TcpListener,
     mode: Mode,
     name: String,
+    /// Write this message when acting as waypoint to show that waypoint was hit.
+    waypoint_message: Vec<u8>,
 }
 
 impl HboneTestServer {
-    pub async fn new(mode: Mode, name: &str) -> Self {
+    pub async fn new(mode: Mode, name: &str, waypoint_message: Vec<u8>) -> Self {
         let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 15008);
         let listener = TcpListener::bind(addr).await.unwrap();
         Self {
             listener,
             mode,
             name: name.to_string(),
+            waypoint_message,
         }
     }
 
@@ -254,24 +257,28 @@ impl HboneTestServer {
         let mut tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mode = self.mode;
         while let Some(socket) = tls_stream.next().await {
+            let waypoint_message = self.waypoint_message.clone();
             if let Err(err) = http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(socket),
-                    service_fn(move |req| async move {
-                        info!("waypoint: received request");
-                        tokio::task::spawn(async move {
-                            match hyper::upgrade::on(req).await {
-                                Ok(upgraded) => {
-                                    let mut io = TokioIo::new(upgraded);
-                                    // let (mut ri, mut wi) = tokio::io::split(TokioIo::new(upgraded));
-                                    // Signal we are the waypoint so tests can validate this
-                                    io.write_all(b"waypoint\n").await.unwrap();
-                                    handle_stream(mode, &mut io).await;
+                    service_fn(move |req| {
+                        let waypoint_message = waypoint_message.clone();
+                        async move {
+                            info!("waypoint: received request");
+                            tokio::task::spawn(async move {
+                                match hyper::upgrade::on(req).await {
+                                    Ok(upgraded) => {
+                                        let mut io = TokioIo::new(upgraded);
+                                        // let (mut ri, mut wi) = tokio::io::split(TokioIo::new(upgraded));
+                                        // Signal we are the waypoint so tests can validate this
+                                        io.write_all(&waypoint_message[..]).await.unwrap();
+                                        handle_stream(mode, &mut io).await;
+                                    }
+                                    Err(e) => error!("No upgrade {e}"),
                                 }
-                                Err(e) => error!("No upgrade {e}"),
-                            }
-                        });
-                        Ok::<_, Infallible>(Response::new(Full::<Bytes>::from("streaming...")))
+                            });
+                            Ok::<_, Infallible>(Response::new(Full::<Bytes>::from("streaming...")))
+                        }
                     }),
                 )
                 .await

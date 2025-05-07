@@ -25,6 +25,8 @@ pub struct Baggage {
     pub workload_name: Option<Strng>,
     pub service_name: Option<Strng>,
     pub revision: Option<Strng>,
+    pub region: Option<Strng>,
+    pub zone: Option<Strng>,
 }
 
 pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToStrError> {
@@ -49,6 +51,9 @@ pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToS
                     | "k8s.job.name" => baggage.workload_name = val,
                     "service.name" => baggage.service_name = val,
                     "service.version" => baggage.revision = val,
+                    // https://opentelemetry.io/docs/specs/semconv/attributes-registry/cloud/
+                    "cloud.region" => baggage.region = val,
+                    "cloud.availability_zone" => baggage.zone = val,
                     _ => {}
                 }
             }
@@ -59,7 +64,7 @@ pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToS
 
 #[cfg(test)]
 pub mod tests {
-    use hyper::{http::HeaderValue, HeaderMap};
+    use hyper::{HeaderMap, http::HeaderValue};
 
     use crate::proxy::BAGGAGE_HEADER;
 

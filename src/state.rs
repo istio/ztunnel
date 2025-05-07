@@ -21,8 +21,8 @@ use crate::state::service::{
 };
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
-    address::Address, gatewayaddress::Destination, network_addr, GatewayAddress,
-    NamespacedHostname, NetworkAddress, Workload, WorkloadStore,
+    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, WorkloadStore, address::Address,
+    gatewayaddress::Destination, network_addr,
 };
 use crate::strng::Strng;
 use crate::tls;
@@ -33,11 +33,12 @@ use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
 use educe::Educe;
 use futures_util::FutureExt;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::*;
 use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::TokioAsyncResolver;
 use itertools::Itertools;
 use rand::prelude::IteratorRandom;
+use rand::seq::IndexedRandom;
 use serde::Serializer;
 use std::collections::HashMap;
 use std::convert::Into;
@@ -61,7 +62,8 @@ pub struct Upstream {
     pub workload: Arc<Workload>,
     /// selected_workload_ip defines the IP address we should actually use to connect to this workload
     /// This handles multiple IPs (dual stack) or Hostname destinations (DNS resolution)
-    pub selected_workload_ip: IpAddr,
+    /// The workload IP might be empty if we have to go through a network gateway.
+    pub selected_workload_ip: Option<IpAddr>,
     /// Port is the port we should connect to
     pub port: u16,
     /// Service SANs defines SANs defined at the service level *only*. A complete view of things requires
@@ -72,8 +74,9 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    pub fn workload_socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.selected_workload_ip, self.port)
+    pub fn workload_socket_addr(&self) -> Option<SocketAddr> {
+        self.selected_workload_ip
+            .map(|ip| SocketAddr::new(ip, self.port))
     }
     pub fn workload_and_services_san(&self) -> Vec<Identity> {
         self.service_sans
@@ -86,6 +89,19 @@ impl Upstream {
                 }
             })
             .chain(std::iter::once(self.workload.identity()))
+            .collect()
+    }
+
+    pub fn service_sans(&self) -> Vec<Identity> {
+        self.service_sans
+            .iter()
+            .flat_map(|san| match Identity::from_str(san) {
+                Ok(id) => Some(id),
+                Err(err) => {
+                    warn!("ignoring invalid SAN {}: {}", san, err);
+                    None
+                }
+            })
             .collect()
     }
 }
@@ -258,6 +274,14 @@ impl ProxyState {
             })
     }
 
+    /// Find services by hostname.
+    pub fn find_service_by_hostname(&self, hostname: &Strng) -> Result<Vec<Arc<Service>>, Error> {
+        // Hostnames for services are more common, so lookup service first and fallback to workload.
+        self.services
+            .get_by_host(hostname)
+            .ok_or_else(|| Error::NoHostname(hostname.to_string()))
+    }
+
     fn find_upstream(
         &self,
         network: Strng,
@@ -348,8 +372,7 @@ impl ProxyState {
                         // Filter workload out, it doesn't have a matching port
                         trace!(
                             "filter endpoint {}, it does not have service port {}",
-                            ep.workload_uid,
-                            svc_port
+                            ep.workload_uid, svc_port
                         );
                         return None;
                     }
@@ -371,7 +394,7 @@ impl ProxyState {
             Some((ep, wl))
         });
 
-        match svc.load_balancer {
+        let options = match svc.load_balancer {
             Some(ref lb) if lb.mode != LoadBalancerMode::Standard => {
                 let ranks = endpoints
                     .filter_map(|(ep, wl)| {
@@ -410,14 +433,21 @@ impl ProxyState {
                     })
                     .collect::<Vec<_>>();
                 let max = *ranks.iter().map(|(rank, _ep, _wl)| rank).max()?;
-                ranks
+                let options: Vec<_> = ranks
                     .into_iter()
                     .filter(|(rank, _ep, _wl)| *rank == max)
                     .map(|(_, ep, wl)| (ep, wl))
-                    .choose(&mut rand::thread_rng())
+                    .collect();
+                options
             }
-            _ => endpoints.choose(&mut rand::thread_rng()),
-        }
+            _ => endpoints.collect(),
+        };
+        options
+            .choose_weighted(&mut rand::rng(), |(_, wl)| wl.capacity as u64)
+            // This can fail if there are no weights, the sum is zero (not possible in our API), or if it overflows
+            // The API has u32 but we sum into an u64, so it would take ~4 billion entries of max weight to overflow
+            .ok()
+            .cloned()
     }
 }
 
@@ -436,7 +466,7 @@ pub struct DemandProxyState {
     metrics: Arc<proxy::Metrics>,
 
     #[serde(skip_serializing)]
-    dns_resolver: TokioAsyncResolver,
+    dns_resolver: TokioResolver,
 }
 
 impl DemandProxyState {
@@ -457,11 +487,12 @@ impl DemandProxyState {
         dns_resolver_opts: ResolverOpts,
         metrics: Arc<proxy::Metrics>,
     ) -> Self {
-        let dns_resolver = TokioAsyncResolver::new(
-            dns_resolver_cfg.to_owned(),
-            dns_resolver_opts.clone(),
+        let mut rb = hickory_resolver::Resolver::builder_with_config(
+            dns_resolver_cfg,
             TokioConnectionProvider::default(),
         );
+        *rb.options_mut() = dns_resolver_opts;
+        let dns_resolver = rb.build();
         Self {
             state,
             demand,
@@ -480,7 +511,7 @@ impl DemandProxyState {
     ) -> Result<(), proxy::AuthorizationRejectionError> {
         let wl = &ctx.dest_workload;
         let conn = &ctx.conn;
-        let state = self.state.read().unwrap();
+        let state = self.read();
 
         // We can get policies from namespace, global, and workload...
         let ns = state.policies.get_by_namespace(&wl.namespace);
@@ -552,13 +583,13 @@ impl DemandProxyState {
         src_workload: &Workload,
         original_target_address: SocketAddr,
         ip_family_restriction: Option<IpFamily>,
-    ) -> Result<IpAddr, Error> {
+    ) -> Result<Option<IpAddr>, Error> {
         // If the user requested the pod by a specific IP, use that directly.
         if dst_workload
             .workload_ips
             .contains(&original_target_address.ip())
         {
-            return Ok(original_target_address.ip());
+            return Ok(Some(original_target_address.ip()));
         }
         // They may have 1 or 2 IPs (single/dual stack)
         // Ensure we are meeting the Service family restriction (if any is defined).
@@ -573,14 +604,19 @@ impl DemandProxyState {
             })
             .find_or_first(|ip| ip.is_ipv6() == original_target_address.is_ipv6())
         {
-            return Ok(*ip);
+            return Ok(Some(*ip));
         }
         if dst_workload.hostname.is_empty() {
-            debug!(
-                "workload {} has no suitable workload IPs for routing",
-                dst_workload.name
-            );
-            return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
+            if dst_workload.network_gateway.is_none() {
+                debug!(
+                    "workload {} has no suitable workload IPs for routing",
+                    dst_workload.name
+                );
+                return Err(Error::NoValidDestination(Box::new(dst_workload.clone())));
+            } else {
+                // We can route through network gateway
+                return Ok(None);
+            }
         }
         let ip = Box::pin(self.resolve_workload_address(
             dst_workload,
@@ -588,7 +624,7 @@ impl DemandProxyState {
             original_target_address,
         ))
         .await?;
-        Ok(ip)
+        Ok(Some(ip))
     }
 
     async fn resolve_workload_address(
@@ -630,14 +666,14 @@ impl DemandProxyState {
         let (matching, unmatching): (Vec<_>, Vec<_>) = resp
             .as_lookup()
             .record_iter()
-            .filter_map(|record| record.data().and_then(|d| d.ip_addr()))
+            .filter_map(|record| record.data().ip_addr())
             .partition(|record| record.is_ipv6() == original_target_address.is_ipv6());
         // Randomly pick an IP, prefer to match the IP family of the downstream request.
         // Without this, we run into trouble in pure v4 or pure v6 environments.
         matching
             .into_iter()
-            .choose(&mut rand::thread_rng())
-            .or_else(|| unmatching.into_iter().choose(&mut rand::thread_rng()))
+            .choose(&mut rand::rng())
+            .or_else(|| unmatching.into_iter().choose(&mut rand::rng()))
             .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
     }
 
@@ -652,7 +688,7 @@ impl DemandProxyState {
         debug!(%wl, "wait for workload");
 
         // Take a watch listener *before* checking state (so we don't miss anything)
-        let mut wl_sub = self.state.read().unwrap().workloads.new_subscriber();
+        let mut wl_sub = self.read().workloads.new_subscriber();
 
         debug!(%wl, "got sub, waiting for workload");
 
@@ -683,7 +719,7 @@ impl DemandProxyState {
     /// Finds the workload by workload information, as an arc.
     /// Note: this does not currently support on-demand.
     fn find_by_info(&self, wl: &WorkloadInfo) -> Option<Arc<Workload>> {
-        self.state.read().unwrap().workloads.find_by_info(wl)
+        self.read().workloads.find_by_info(wl)
     }
 
     // fetch_workload_by_address looks up a Workload by address.
@@ -693,21 +729,21 @@ impl DemandProxyState {
     pub async fn fetch_workload_by_address(&self, addr: &NetworkAddress) -> Option<Arc<Workload>> {
         // Wait for it on-demand, *if* needed
         debug!(%addr, "fetch workload");
-        if let Some(wl) = self.state.read().unwrap().workloads.find_address(addr) {
+        if let Some(wl) = self.read().workloads.find_address(addr) {
             return Some(wl);
         }
         if !self.supports_on_demand() {
             return None;
         }
         self.fetch_on_demand(addr.to_string().into()).await;
-        self.state.read().unwrap().workloads.find_address(addr)
+        self.read().workloads.find_address(addr)
     }
 
     // only support workload
     pub async fn fetch_workload_by_uid(&self, uid: &Strng) -> Option<Arc<Workload>> {
         // Wait for it on-demand, *if* needed
         debug!(%uid, "fetch workload");
-        if let Some(wl) = self.state.read().unwrap().workloads.find_uid(uid) {
+        if let Some(wl) = self.read().workloads.find_uid(uid) {
             return Some(wl);
         }
         if !self.supports_on_demand() {
@@ -766,6 +802,65 @@ impl DemandProxyState {
         Ok(Some(res))
     }
 
+    /// Returns destination address, upstream sans, and final sans, for
+    /// connecting to a remote workload through a gateway.
+    /// Would be nice to return this as an Upstream, but gateways don't necessarily
+    /// have workloads. That is, they could just be IPs without a corresponding workload.
+    pub async fn fetch_network_gateway(
+        &self,
+        gw_address: &GatewayAddress,
+        source_workload: &Workload,
+        original_destination_address: SocketAddr,
+    ) -> Result<Upstream, Error> {
+        let (res, target_address) = match &gw_address.destination {
+            Destination::Address(ip) => {
+                let addr = SocketAddr::new(ip.address, gw_address.hbone_mtls_port);
+                let us = self.state.read().unwrap().find_upstream(
+                    ip.network.clone(),
+                    source_workload,
+                    addr,
+                    ServiceResolutionMode::Standard,
+                );
+                // If the workload references a network gateway by IP, use that IP as the destination.
+                // Note this means that an IPv6 call may be translated to IPv4 if the network
+                // gateway is specified as an IPv4 address.
+                // For this reason, the Hostname method is preferred which can adapt to the callers IP family.
+                (us, addr)
+            }
+            Destination::Hostname(host) => {
+                let state = self.read();
+                match state.find_hostname(host) {
+                    Some(Address::Service(s)) => {
+                        let us = state.find_upstream_from_service(
+                            source_workload,
+                            gw_address.hbone_mtls_port,
+                            ServiceResolutionMode::Standard,
+                            s,
+                        );
+                        // For hostname, use the original_destination_address as the target so we can
+                        // adapt to the callers IP family.
+                        (us, original_destination_address)
+                    }
+                    Some(Address::Workload(w)) => {
+                        let us = Some((w, gw_address.hbone_mtls_port, None));
+                        (us, original_destination_address)
+                    }
+                    None => {
+                        return Err(Error::UnknownNetworkGateway(format!(
+                            "network gateway {} not found",
+                            host.hostname
+                        )));
+                    }
+                }
+            }
+        };
+        self.finalize_upstream(source_workload, target_address, res)
+            .await?
+            .ok_or_else(|| {
+                Error::UnknownNetworkGateway(format!("network gateway {:?} not found", gw_address))
+            })
+    }
+
     async fn fetch_waypoint(
         &self,
         gw_address: &GatewayAddress,
@@ -777,7 +872,7 @@ impl DemandProxyState {
         let (res, target_address) = match &gw_address.destination {
             Destination::Address(ip) => {
                 let addr = SocketAddr::new(ip.address, gw_address.hbone_mtls_port);
-                let us = self.state.read().unwrap().find_upstream(
+                let us = self.read().find_upstream(
                     ip.network.clone(),
                     source_workload,
                     addr,
@@ -811,7 +906,7 @@ impl DemandProxyState {
                         return Err(Error::UnknownWaypoint(format!(
                             "waypoint {} not found",
                             host.hostname
-                        )))
+                        )));
                     }
                 }
             }
@@ -865,7 +960,7 @@ impl DemandProxyState {
     pub async fn fetch_address(&self, network_addr: &NetworkAddress) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%network_addr.address, "fetch address");
-        if let Some(address) = self.state.read().unwrap().find_address(network_addr) {
+        if let Some(address) = self.read().find_address(network_addr) {
             return Some(address);
         }
         if !self.supports_on_demand() {
@@ -873,7 +968,7 @@ impl DemandProxyState {
         }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(network_addr.to_string().into()).await;
-        self.state.read().unwrap().find_address(network_addr)
+        self.read().find_address(network_addr)
     }
 
     /// Looks for the given hostname to find either a workload or service by IP. If not found
@@ -881,7 +976,7 @@ impl DemandProxyState {
     async fn fetch_hostname(&self, hostname: &NamespacedHostname) -> Option<Address> {
         // Wait for it on-demand, *if* needed
         debug!(%hostname, "fetch hostname");
-        if let Some(address) = self.state.read().unwrap().find_hostname(hostname) {
+        if let Some(address) = self.read().find_hostname(hostname) {
             return Some(address);
         }
         if !self.supports_on_demand() {
@@ -889,7 +984,7 @@ impl DemandProxyState {
         }
         // if both cache not found, start on demand fetch
         self.fetch_on_demand(hostname.to_string().into()).await;
-        self.state.read().unwrap().find_hostname(hostname)
+        self.read().find_hostname(hostname)
     }
 
     pub fn supports_on_demand(&self) -> bool {
@@ -996,7 +1091,7 @@ mod tests {
     use rbac::StringMatch;
     use std::{net::Ipv4Addr, net::SocketAddrV4, time::Duration};
 
-    use self::workload::{application_tunnel::Protocol as AppProtocol, ApplicationTunnel};
+    use self::workload::{ApplicationTunnel, application_tunnel::Protocol as AppProtocol};
 
     use super::*;
     use crate::test_helpers::helpers::initialize_telemetry;
@@ -1379,10 +1474,12 @@ mod tests {
 
         // test workload in ns2. this should work as ns2 doesn't have any policies. this tests:
         // 3. If there are no ALLOW policies for the workload, allow the request.
-        assert!(mock_proxy_state
-            .assert_rbac(&get_rbac_context(&mock_proxy_state, 2, "not-defaultacct"))
-            .await
-            .is_ok());
+        assert!(
+            mock_proxy_state
+                .assert_rbac(&get_rbac_context(&mock_proxy_state, 2, "not-defaultacct"))
+                .await
+                .is_ok()
+        );
 
         let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
         // 4. if any allow policies match, allow

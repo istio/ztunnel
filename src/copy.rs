@@ -18,14 +18,14 @@ use crate::proxy::Error::{BackendDisconnected, ClientDisconnected, ReceiveError,
 use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use std::future::Future;
-use std::io::{Error, IoSlice};
+use std::io::Error;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::trace;
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
@@ -340,14 +340,6 @@ impl<R: AsyncRead> BufReader<R> {
             buffer_size: INITIAL_BUFFER_SIZE,
         }
     }
-
-    fn get_ref(&self) -> &R {
-        &self.inner
-    }
-
-    fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut R> {
-        self.project().inner
-    }
 }
 
 impl<R: AsyncRead> ResizeBufRead for BufReader<R> {
@@ -363,36 +355,6 @@ impl<R: AsyncRead> ResizeBufRead for BufReader<R> {
     fn resize(self: Pin<&mut Self>, new_size: usize) {
         let me = self.project();
         *me.buffer_size = new_size;
-    }
-}
-
-impl<R: AsyncRead + AsyncWrite> AsyncWrite for BufReader<R> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.get_pin_mut().poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_pin_mut().poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_pin_mut().poll_shutdown(cx)
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        self.get_pin_mut().poll_write_vectored(cx, bufs)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.get_ref().is_write_vectored()
     }
 }
 
@@ -547,8 +509,8 @@ mod tests {
             if buf.is_empty() {
                 return Poll::Ready(Ok(0));
             }
-            let mut rng = rand::thread_rng();
-            let end = rng.gen_range(1..=buf.len()); // Ensure at least 1 byte is written
+            let mut rng = rand::rng();
+            let end = rng.random_range(1..=buf.len()); // Ensure at least 1 byte is written
             Pin::new(&mut self.0).poll_write(cx, &buf[0..end])
         }
 

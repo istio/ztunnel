@@ -19,8 +19,9 @@ use crate::dns::resolver::Resolver;
 use hickory_proto::op::{Message, MessageType, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
+use hickory_proto::xfer::Protocol;
 use hickory_server::authority::MessageRequest;
-use hickory_server::server::{Protocol, Request};
+use hickory_server::server::Request;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,12 +29,12 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
-use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
+use crate::drain::run_with_drain;
 use crate::proxy::outbound::OutboundConnection;
-use crate::proxy::{util, Error, ProxyInputs, TraceParent};
+use crate::proxy::{Error, ProxyInputs, TraceParent, util};
 use crate::{assertions, socket};
 
 pub(super) struct Socks5 {
@@ -76,46 +77,44 @@ impl Socks5 {
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
         );
-        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            async move {
-                loop {
-                    // Asynchronously wait for an inbound socket.
-                    let socket = self.listener.accept().await;
-                    let start = Instant::now();
-                    let drain = drain.clone();
-                    let mut force_shutdown = force_shutdown.clone();
-                    match socket {
-                        Ok((stream, _remote)) => {
-                            let oc = OutboundConnection {
-                                pi: self.pi.clone(),
-                                id: TraceParent::new(),
-                                pool: pool.clone(),
-                                hbone_port: self.pi.cfg.inbound_addr.port(),
-                            };
-                            let span = info_span!("socks5", id=%oc.id);
-                            let serve = (async move {
-                                debug!(component="socks5", "connection started");
-                                // Since this task is spawned, make sure we are guaranteed to terminate
-                                tokio::select! {
-                                    _ = force_shutdown.changed() => {
-                                        debug!(component="socks5", "connection forcefully terminated");
-                                    }
-                                    _ = handle_socks_connection(oc, stream) => {}
+        let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                let start = Instant::now();
+                let drain = drain.clone();
+                let mut force_shutdown = force_shutdown.clone();
+                match socket {
+                    Ok((stream, _remote)) => {
+                        let oc = OutboundConnection {
+                            pi: self.pi.clone(),
+                            id: TraceParent::new(),
+                            pool: pool.clone(),
+                            hbone_port: self.pi.cfg.inbound_addr.port(),
+                        };
+                        let span = info_span!("socks5", id=%oc.id);
+                        let serve = (async move {
+                            debug!(component="socks5", "connection started");
+                            // Since this task is spawned, make sure we are guaranteed to terminate
+                            tokio::select! {
+                                _ = force_shutdown.changed() => {
+                                    debug!(component="socks5", "connection forcefully terminated");
                                 }
-                                // Mark we are done with the connection, so drain can complete
-                                drop(drain);
-                                debug!(component="socks5", dur=?start.elapsed(), "connection completed");
-                            }).instrument(span);
-
-                            assertions::size_between_ref(1000, 2000, &serve);
-                            tokio::spawn(serve);
-                        }
-                        Err(e) => {
-                            if util::is_runtime_shutdown(&e) {
-                                return;
+                                _ = handle_socks_connection(oc, stream) => {}
                             }
-                            error!("Failed TCP handshake {}", e);
+                            // Mark we are done with the connection, so drain can complete
+                            drop(drain);
+                            debug!(component="socks5", dur=?start.elapsed(), "connection completed");
+                        }).instrument(span);
+
+                        assertions::size_between_ref(1000, 2000, &serve);
+                        tokio::spawn(serve);
+                    }
+                    Err(e) => {
+                        if util::is_runtime_shutdown(&e) {
+                            return;
                         }
+                        error!("Failed TCP handshake {}", e);
                     }
                 }
             }
@@ -317,7 +316,7 @@ async fn dns_lookup(
     let answer = resolver.lookup(&req).await?;
     let response = answer
         .record_iter()
-        .filter_map(|rec| rec.data().and_then(|d| d.ip_addr()))
+        .filter_map(|rec| rec.data().ip_addr())
         .next() // TODO: do not always use the first result
         .ok_or_else(|| Error::DnsEmpty)?;
 
@@ -350,7 +349,7 @@ async fn send_response(
     // https://www.rfc-editor.org/rfc/rfc1928#section-6
     let mut buf: Vec<u8> = Vec::with_capacity(10);
     buf.push(0x05); // version
-                    // Status
+    // Status
     buf.push(match err {
         None => 0,
         Some(SocksError::General(_)) => 1,

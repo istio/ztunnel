@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::sched::{setns, CloneFlags};
+use nix::sched::{CloneFlags, setns};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;

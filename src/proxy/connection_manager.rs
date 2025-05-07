@@ -24,6 +24,7 @@ use std::net::SocketAddr;
 
 use crate::drain;
 use crate::drain::{DrainTrigger, DrainWatcher};
+use crate::state::workload::{InboundProtocol, OutboundProtocol};
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -133,6 +134,7 @@ pub struct OutboundConnection {
     pub src: SocketAddr,
     pub original_dst: SocketAddr,
     pub actual_dst: SocketAddr,
+    pub protocol: OutboundProtocol,
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
@@ -141,6 +143,7 @@ pub struct InboundConnectionDump {
     pub src: SocketAddr,
     pub original_dst: Option<String>,
     pub actual_dst: SocketAddr,
+    pub protocol: InboundProtocol,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize)]
@@ -157,11 +160,13 @@ impl ConnectionManager {
         src: SocketAddr,
         original_dst: SocketAddr,
         actual_dst: SocketAddr,
+        protocol: OutboundProtocol,
     ) -> OutboundConnectionGuard {
         let c = OutboundConnection {
             src,
             original_dst,
             actual_dst,
+            protocol,
         };
 
         self.outbound_connections
@@ -278,6 +283,11 @@ impl Serialize for ConnectionManager {
                 src: c.ctx.conn.src,
                 original_dst: c.dest_service,
                 actual_dst: c.ctx.conn.dst,
+                protocol: if c.ctx.conn.src_identity.is_some() {
+                    InboundProtocol::HBONE
+                } else {
+                    InboundProtocol::TCP
+                },
             })
             .collect();
         let outbound: Vec<_> = self
@@ -345,8 +355,8 @@ mod tests {
     use crate::rbac::Connection;
     use crate::state::{DemandProxyState, ProxyState};
     use crate::test_helpers::test_default_workload;
-    use crate::xds::istio::security::{Action, Authorization, Scope};
     use crate::xds::ProxyStateUpdateMutator;
+    use crate::xds::istio::security::{Action, Authorization, Scope};
 
     use super::{ConnectionGuard, ConnectionManager, InboundConnection, PolicyWatcher};
 

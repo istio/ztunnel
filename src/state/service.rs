@@ -17,17 +17,16 @@ use itertools::Itertools;
 use serde::{Deserializer, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::ops::Deref;
 use std::sync::Arc;
 use tracing::trace;
 
 use xds::istio::workload::Service as XdsService;
 
 use crate::state::workload::{
-    byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
-    WorkloadError,
+    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, WorkloadError, byte_to_ip,
+    network_addr,
 };
-use crate::state::workload::{is_default, HealthStatus};
+use crate::state::workload::{HealthStatus, is_default};
 use crate::strng::Strng;
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::{IpFamilies, PortList};
@@ -358,13 +357,8 @@ impl ServiceStore {
     /// # Arguments
     ///
     /// * `hostname` - the hostname of the service.
-    pub fn get_by_host(&self, hostname: &Strng) -> Option<Vec<Service>> {
-        self.by_host.get(hostname).map(|services| {
-            services
-                .iter()
-                .map(|service| service.deref().clone())
-                .collect()
-        })
+    pub fn get_by_host(&self, hostname: &Strng) -> Option<Vec<Arc<Service>>> {
+        self.by_host.get(hostname).map(|v| v.to_vec())
     }
 
     pub fn get_by_workload(&self, workload: &Workload) -> Vec<Arc<Service>> {

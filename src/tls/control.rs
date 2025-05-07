@@ -16,8 +16,8 @@ use crate::config::RootCert;
 use crate::identity::AuthSource;
 use crate::tls::lib::provider;
 use crate::tls::{ControlPlaneClientCertProvider, Error, WorkloadCertificate};
-use hyper::body::Incoming;
 use hyper::Uri;
+use hyper::body::Incoming;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use itertools::Itertools;
@@ -30,7 +30,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tonic::body::BoxBody;
+use tonic::body::Body;
 use tracing::debug;
 
 async fn root_to_store(root_cert: &RootCert) -> Result<rustls::RootCertStore, Error> {
@@ -199,7 +199,7 @@ async fn control_plane_client_config(
 #[derive(Clone, Debug)]
 pub struct TlsGrpcChannel {
     uri: Uri,
-    client: hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, BoxBody>,
+    client: hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, Body>,
     auth: Arc<AuthSource>,
 }
 
@@ -244,7 +244,7 @@ pub fn grpc_connector(
     })
 }
 
-impl tower::Service<http::Request<BoxBody>> for TlsGrpcChannel {
+impl tower::Service<http::Request<Body>> for TlsGrpcChannel {
     type Response = http::Response<Incoming>;
     type Error = anyhow::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
@@ -253,7 +253,7 @@ impl tower::Service<http::Request<BoxBody>> for TlsGrpcChannel {
         Ok(()).into()
     }
 
-    fn call(&mut self, mut req: http::Request<BoxBody>) -> Self::Future {
+    fn call(&mut self, mut req: http::Request<Body>) -> Self::Future {
         let mut uri = Uri::builder();
         if let Some(scheme) = self.uri.scheme() {
             uri = uri.scheme(scheme.to_owned());

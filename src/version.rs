@@ -45,14 +45,24 @@ impl BuildInfo {
             build_profile: BUILD_RUST_PROFILE.to_string(),
             build_status: BUILD_STATUS.to_string(),
             git_tag: BUILD_TAG.to_string(),
-            istio_version: env::var("ISTIO_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+            istio_version: env::var("ISTIO_META_ISTIO_VERSION")
+                .unwrap_or_else(|_| "unknown".to_string()),
         }
     }
 }
 
 impl Display for BuildInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildProfile:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
-        self.version, self.git_revision, self.rust_version, self.build_profile, self.build_status, self.git_tag, self.istio_version)
+        write!(
+            f,
+            "version.BuildInfo{{Version:\"{}\", GitRevision:\"{}\", RustVersion:\"{}\", BuildProfile:\"{}\", BuildStatus:\"{}\", GitTag:\"{}\", IstioVersion:\"{}\"}}",
+            self.version,
+            self.git_revision,
+            self.rust_version,
+            self.build_profile,
+            self.build_status,
+            self.git_tag,
+            self.istio_version
+        )
     }
 }

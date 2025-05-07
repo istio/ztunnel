@@ -20,14 +20,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
 
-use hickory_proto::error::ProtoError;
+use hickory_proto::ProtoError;
 
 use crate::strng::Strng;
 use rand::Rng;
 use socket2::TcpKeepalive;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
-use tracing::{debug, trace, warn, Instrument};
+use tracing::{Instrument, debug, trace, warn};
 
 use inbound::Inbound;
 pub use metrics::*;
@@ -446,6 +446,24 @@ pub enum Error {
     #[error("unknown waypoint: {0}")]
     UnknownWaypoint(String),
 
+    #[error("unknown network gateway: {0}")]
+    UnknownNetworkGateway(String),
+
+    #[error("no service or workload for hostname: {0}")]
+    NoHostname(String),
+
+    #[error("no endpoints for workload: {0}")]
+    NoWorkloadEndpoints(String),
+
+    #[error("no valid authority pseudo header: {0}")]
+    NoValidAuthority(String),
+
+    #[error("no valid service port in authority header: {0}")]
+    NoValidServicePort(String, u16),
+
+    #[error("no valid target port for workload: {0}")]
+    NoValidTargetPort(String, u16),
+
     #[error("no valid routing destination for workload: {0}")]
     NoValidDestination(Box<Workload>),
 
@@ -454,6 +472,12 @@ pub enum Error {
 
     #[error("no ip addresses were resolved for workload: {0}")]
     NoResolvedAddresses(String),
+
+    #[error("requested service {0}:{1} found, but cannot resolve port")]
+    NoPortForServices(String, u16),
+
+    #[error("requested service {0} found, but has no IP addresses")]
+    NoIPForService(String),
 
     #[error(
         "ip addresses were resolved for workload {0}, but valid dns response had no A/AAAA records"
@@ -485,6 +509,7 @@ pub enum Error {
     DnsEmpty,
 }
 
+// Custom TLV for proxy protocol for the identity of the source
 const PROXY_PROTOCOL_AUTHORITY_TLV: u8 = 0xD0;
 
 pub async fn write_proxy_protocol<T>(
@@ -498,6 +523,10 @@ where
     use ppp::v2::{Builder, Command, Protocol, Version};
     use tokio::io::AsyncWriteExt;
 
+    // When the hbone_addr populated from the authority header contains a svc hostname, the address included
+    // with respect to the hbone_addr is the SocketAddr <dst svc IP>:<original dst port>.
+    // This is done since addresses doesn't support hostnames.
+    // See ref https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
     debug!("writing proxy protocol addresses: {:?}", addresses);
     let mut builder =
         Builder::with_addresses(Version::Two | Command::Proxy, Protocol::Stream, addresses);
@@ -529,11 +558,11 @@ impl TraceParent {
 }
 impl TraceParent {
     fn new() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         Self {
             version: 0,
-            trace_id: rng.gen(),
-            parent_id: rng.gen(),
+            trace_id: rng.random(),
+            parent_id: rng.random(),
             flags: 0,
         }
     }
@@ -709,17 +738,6 @@ async fn check_from_waypoint(
     check_gateway_address(state, upstream.waypoint.as_ref(), is_waypoint).await
 }
 
-// Checks if the connection's source identity is the identity for the upstream's network
-// gateway
-async fn check_from_network_gateway(
-    state: &DemandProxyState,
-    upstream: &Workload,
-    src_identity: Option<&Identity>,
-) -> bool {
-    let is_gateway = |wl: &Workload| Some(wl.identity()).as_ref() == src_identity;
-    check_gateway_address(state, upstream.network_gateway.as_ref(), is_gateway).await
-}
-
 // Check if the source's identity matches any workloads that make up the given gateway
 // TODO: This can be made more accurate by also checking addresses.
 async fn check_gateway_address<F>(
@@ -782,72 +800,85 @@ pub fn parse_forwarded_host(input: &str) -> Option<String> {
         .filter(|host| !host.is_empty())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum HboneAddress {
+    SocketAddr(SocketAddr),
+    SvcHostname(Strng, u16),
+}
+
+impl HboneAddress {
+    pub fn port(&self) -> u16 {
+        match self {
+            HboneAddress::SocketAddr(s) => s.port(),
+            HboneAddress::SvcHostname(_, p) => *p,
+        }
+    }
+
+    pub fn ip(&self) -> Option<IpAddr> {
+        match self {
+            HboneAddress::SocketAddr(s) => Some(s.ip()),
+            HboneAddress::SvcHostname(_, _) => None,
+        }
+    }
+
+    pub fn svc_hostname(&self) -> Option<Strng> {
+        match self {
+            HboneAddress::SocketAddr(_) => None,
+            HboneAddress::SvcHostname(s, _) => Some(s.into()),
+        }
+    }
+
+    pub fn hostname_addr(&self) -> Option<Strng> {
+        match self {
+            HboneAddress::SocketAddr(_) => None,
+            HboneAddress::SvcHostname(_, _) => Some(Strng::from(self.to_string())),
+        }
+    }
+}
+
+impl std::fmt::Display for HboneAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HboneAddress::SocketAddr(addr) => write!(f, "{}", addr),
+            HboneAddress::SvcHostname(host, port) => write!(f, "{}:{}", host, port),
+        }
+    }
+}
+
+impl From<SocketAddr> for HboneAddress {
+    fn from(socket_addr: SocketAddr) -> Self {
+        HboneAddress::SocketAddr(socket_addr)
+    }
+}
+
+impl From<(Strng, u16)> for HboneAddress {
+    fn from(svc_hostname: (Strng, u16)) -> Self {
+        HboneAddress::SvcHostname(svc_hostname.0, svc_hostname.1)
+    }
+}
+
+impl TryFrom<&http::Uri> for HboneAddress {
+    type Error = Error;
+
+    fn try_from(value: &http::Uri) -> Result<Self, Self::Error> {
+        match value.to_string().parse::<SocketAddr>() {
+            Ok(addr) => Ok(HboneAddress::SocketAddr(addr)),
+            Err(_) => {
+                let hbone_host = value
+                    .host()
+                    .ok_or_else(|| Error::NoValidAuthority(value.to_string()))?;
+                let hbone_port = value
+                    .port_u16()
+                    .ok_or_else(|| Error::NoValidAuthority(value.to_string()))?;
+                Ok(HboneAddress::SvcHostname(hbone_host.into(), hbone_port))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-
-    use crate::state::service::EndpointSet;
-    use crate::state::workload::NetworkAddress;
-    use crate::{
-        identity::Identity,
-        state::{
-            self,
-            service::{Endpoint, Service},
-            workload::gatewayaddress::Destination,
-        },
-    };
-    use prometheus_client::registry::Registry;
-    use std::{collections::HashMap, net::Ipv4Addr, sync::RwLock};
-
-    #[tokio::test]
-    async fn check_gateway() {
-        let w = mock_default_gateway_workload();
-        let s = mock_default_gateway_service();
-        let mut state = state::ProxyState::new(None);
-        state.workloads.insert(Arc::new(w));
-        state.services.insert(s);
-        let mut registry = Registry::default();
-        let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let state = state::DemandProxyState::new(
-            Arc::new(RwLock::new(state)),
-            None,
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-            metrics,
-        );
-
-        let gateawy_id = Identity::Spiffe {
-            trust_domain: "cluster.local".into(),
-            namespace: "gatewayns".into(),
-            service_account: "default".into(),
-        };
-        let from_gw_conn = Some(gateawy_id);
-        let not_from_gw_conn = Some(Identity::default());
-
-        let upstream_with_address = mock_wokload_with_gateway(Some(mock_default_gateway_address()));
-        assert!(
-            check_from_network_gateway(&state, &upstream_with_address, from_gw_conn.as_ref(),)
-                .await
-        );
-        assert!(
-            !check_from_network_gateway(&state, &upstream_with_address, not_from_gw_conn.as_ref(),)
-                .await
-        );
-
-        // using hostname (will check the service variant of address::Address)
-        let upstream_with_hostname =
-            mock_wokload_with_gateway(Some(mock_default_gateway_hostname()));
-        assert!(
-            check_from_network_gateway(&state, &upstream_with_hostname, from_gw_conn.as_ref(),)
-                .await
-        );
-        assert!(
-            !check_from_network_gateway(&state, &upstream_with_hostname, not_from_gw_conn.as_ref())
-                .await
-        );
-    }
 
     #[test]
     fn test_parse_forwarded_host() {
@@ -867,117 +898,5 @@ mod tests {
         assert_eq!(parse_forwarded_host(header), None);
         let header = r#"for=for;by=by;host=host;proto="pröto""#;
         assert_eq!(parse_forwarded_host(header), None);
-    }
-
-    // private helpers
-    fn mock_wokload_with_gateway(gw: Option<GatewayAddress>) -> Workload {
-        Workload {
-            workload_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
-            waypoint: None,
-            network_gateway: gw,
-            protocol: Default::default(),
-            network_mode: Default::default(),
-            uid: "".into(),
-            name: "app".into(),
-            namespace: "appns".into(),
-            trust_domain: "cluster.local".into(),
-            service_account: "default".into(),
-            network: "".into(),
-            workload_name: "app".into(),
-            workload_type: "deployment".into(),
-            canonical_name: "app".into(),
-            canonical_revision: "".into(),
-            hostname: "".into(),
-            node: "".into(),
-            status: Default::default(),
-            cluster_id: "Kubernetes".into(),
-
-            authorization_policies: Vec::new(),
-            native_tunnel: false,
-            application_tunnel: None,
-            locality: Default::default(),
-            services: Default::default(),
-        }
-    }
-
-    fn mock_default_gateway_workload() -> Workload {
-        Workload {
-            workload_ips: vec![IpAddr::V4(mock_default_gateway_ipaddr())],
-            waypoint: None,
-            network_gateway: None,
-            protocol: Default::default(),
-            network_mode: Default::default(),
-            uid: "".into(),
-            name: "gateway".into(),
-            namespace: "gatewayns".into(),
-            trust_domain: "cluster.local".into(),
-            service_account: "default".into(),
-            network: "".into(),
-            workload_name: "gateway".into(),
-            workload_type: "deployment".into(),
-            canonical_name: "".into(),
-            canonical_revision: "".into(),
-            hostname: "".into(),
-            node: "".into(),
-            status: Default::default(),
-            cluster_id: "Kubernetes".into(),
-
-            authorization_policies: Vec::new(),
-            native_tunnel: false,
-            application_tunnel: None,
-            locality: Default::default(),
-            services: Default::default(),
-        }
-    }
-
-    fn mock_default_gateway_service() -> Service {
-        let vip1 = NetworkAddress {
-            address: IpAddr::V4(Ipv4Addr::new(127, 0, 10, 1)),
-            network: "".into(),
-        };
-        let vips = vec![vip1];
-        let mut ports = HashMap::new();
-        ports.insert(8080, 80);
-        let endpoints = EndpointSet::from_list([Endpoint {
-            workload_uid: mock_default_gateway_workload().uid,
-            port: ports.clone(),
-            status: state::workload::HealthStatus::Healthy,
-        }]);
-        Service {
-            name: "gateway".into(),
-            namespace: "gatewayns".into(),
-            hostname: "gateway".into(),
-            vips,
-            ports,
-            endpoints,
-            subject_alt_names: vec![],
-            waypoint: None,
-            load_balancer: None,
-            ip_families: None,
-        }
-    }
-
-    fn mock_default_gateway_address() -> GatewayAddress {
-        GatewayAddress {
-            destination: Destination::Address(NetworkAddress {
-                network: "".into(),
-                address: IpAddr::V4(mock_default_gateway_ipaddr()),
-            }),
-            hbone_mtls_port: 15008,
-        }
-    }
-
-    fn mock_default_gateway_hostname() -> GatewayAddress {
-        GatewayAddress {
-            destination: Destination::Hostname(state::workload::NamespacedHostname {
-                namespace: "gatewayns".into(),
-                hostname: "gateway".into(),
-            }),
-            hbone_mtls_port: 15008,
-        }
-    }
-
-    fn mock_default_gateway_ipaddr() -> Ipv4Addr {
-        Ipv4Addr::new(127, 0, 0, 100)
     }
 }

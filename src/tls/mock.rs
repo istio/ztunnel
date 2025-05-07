@@ -15,9 +15,9 @@
 use crate::identity::Identity;
 use std::fmt::{Display, Formatter};
 
-use rand::rngs::SmallRng;
 use rand::RngCore;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rcgen::{Certificate, CertificateParams, KeyPair};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -33,6 +33,8 @@ pub const TEST_WORKLOAD_CERT: &[u8] = include_bytes!("cert.pem");
 pub const TEST_PKEY: &[u8] = include_bytes!("key.pem");
 pub const TEST_ROOT: &[u8] = include_bytes!("root-cert.pem");
 pub const TEST_ROOT_KEY: &[u8] = include_bytes!("ca-key.pem");
+pub const TEST_ROOT2: &[u8] = include_bytes!("root-cert2.pem");
+pub const TEST_ROOT2_KEY: &[u8] = include_bytes!("ca-key2.pem");
 
 /// TestIdentity is an identity used for testing. This extends the Identity with test-only types
 #[derive(Debug)]
@@ -103,18 +105,35 @@ pub fn generate_test_certs_at(
     not_after: SystemTime,
     rng: Option<&mut dyn rand::RngCore>,
 ) -> WorkloadCertificate {
+    let (key, cert) =
+        generate_test_certs_with_root(id, not_before, not_after, rng, TEST_ROOT_KEY, TEST_ROOT);
+    let mut workload =
+        WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
+    // Certificates do not allow sub-millisecond, but we need this for tests.
+    workload.cert.expiry.not_before = not_before;
+    workload.cert.expiry.not_after = not_after;
+    workload
+}
+
+pub fn generate_test_certs_with_root(
+    id: &TestIdentity,
+    not_before: SystemTime,
+    not_after: SystemTime,
+    rng: Option<&mut dyn rand::RngCore>,
+    ca_key: &[u8],
+    ca_cert: &[u8],
+) -> (String, String) {
     use rcgen::*;
     let serial_number = {
         let mut data = [0u8; 20];
         match rng {
-            None => rand::thread_rng().fill_bytes(&mut data),
+            None => rand::rng().fill_bytes(&mut data),
             Some(rng) => rng.fill_bytes(&mut data),
         }
         // Clear the most significant bit to make the resulting bignum effectively 159 bit long.
         data[0] &= 0x7f;
         data
     };
-    let ca_cert = test_ca();
     let mut p = CertificateParams::default();
     p.not_before = not_before.into();
     p.not_after = not_after.into();
@@ -136,16 +155,12 @@ pub fn generate_test_certs_at(
     }];
 
     let kp = KeyPair::from_pem(std::str::from_utf8(TEST_PKEY).unwrap()).unwrap();
-    let ca_kp = KeyPair::from_pem(std::str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
+    let ca_kp = KeyPair::from_pem(std::str::from_utf8(ca_key).unwrap()).unwrap();
     let key = kp.serialize_pem();
-    let cert = p.signed_by(&kp, &ca_cert, &ca_kp).unwrap();
+    let ca = test_ca(ca_key, ca_cert);
+    let cert = p.signed_by(&kp, &ca, &ca_kp).unwrap();
     let cert = cert.pem();
-    let mut workload =
-        WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
-    // Certificates do not allow sub-millisecond, but we need this for tests.
-    workload.cert.expiry.not_before = not_before;
-    workload.cert.expiry.not_after = not_after;
-    workload
+    (key, cert)
 }
 
 pub fn generate_test_certs(
@@ -157,10 +172,9 @@ pub fn generate_test_certs(
     generate_test_certs_at(id, not_before, not_before + duration_until_expiry, None)
 }
 
-fn test_ca() -> Certificate {
-    let key = KeyPair::from_pem(std::str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
-    let ca_param =
-        CertificateParams::from_ca_cert_pem(std::str::from_utf8(TEST_ROOT).unwrap()).unwrap();
+fn test_ca(key: &[u8], cert: &[u8]) -> Certificate {
+    let key = KeyPair::from_pem(std::str::from_utf8(key).unwrap()).unwrap();
+    let ca_param = CertificateParams::from_ca_cert_pem(std::str::from_utf8(cert).unwrap()).unwrap();
     ca_param.self_signed(&key).unwrap()
 }
 
@@ -181,7 +195,7 @@ impl ServerCertProvider for MockServerCertProvider {
             .expect("server config must be valid")
             .with_no_client_auth()
             .with_single_cert(
-                self.0.cert_and_intermediates(),
+                self.0.cert_and_intermediates_der(),
                 self.0.private_key.clone_key(),
             )
             .unwrap();

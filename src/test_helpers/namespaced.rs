@@ -34,12 +34,13 @@ macro_rules! function {
 /// and automatically setups up a namespace based on the test name (to avoid conflicts).
 #[macro_export]
 macro_rules! setup_netns_test {
-    ($mode:expr) => {{
+    ($mode:expr) => {{ setup_netns_test!($mode, ztunnel::function!()) }};
+    ($mode:expr, $function:expr) => {{
         if unsafe { libc::getuid() } != 0 {
             panic!("CI tests should run as root; this is supposed to happen automatically?");
         }
         ztunnel::test_helpers::helpers::initialize_telemetry();
-        let function_name = ztunnel::function!()
+        let function_name = $function
             .strip_prefix(module_path!())
             .unwrap()
             .strip_prefix("::")
@@ -67,8 +68,8 @@ macro_rules! setup_netns_test {
 /// The special ctor macro ensures this is run *before* any code. In particular, before tokio runtime.
 pub fn initialize_namespace_tests() {
     use libc::getuid;
-    use nix::mount::{mount, MsFlags};
-    use nix::sched::{unshare, CloneFlags};
+    use nix::mount::{MsFlags, mount};
+    use nix::sched::{CloneFlags, unshare};
     use std::io::Write;
 
     // First, drop into a new user namespace.

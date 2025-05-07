@@ -34,10 +34,12 @@ Ztunnel's TLS is built on [rustls](https://github.com/rustls/rustls).
 
 Rustls has support for plugging in various crypto providers to meet various needs (compliance, performance, etc).
 
-| Name                                          | How To Enable                                  |
-|-----------------------------------------------|------------------------------------------------|
-| [ring](https://github.com/briansmith/ring/)   | Default (or `--features tls-ring`)             |
-| [boring](https://github.com/cloudflare/boring) | `--features tls-boring --no-default-features` |
+| Name                                               | How To Enable                                  |
+|----------------------------------------------------|------------------------------------------------|
+| [aws-lc](https://github.com/aws/aws-lc-rs)         | Default (or `--features tls-aws-lc`)           |
+| [ring](https://github.com/briansmith/ring/)        | `--features tls-ring --no-default-features`    |
+| [boring](https://github.com/cloudflare/boring)     | `--features tls-boring --no-default-features`  |
+| [openssl](https://github.com/tofay/rustls-openssl) | `--features tls-openssl --no-default-features` |
 
 In all options, only TLS 1.3 with cipher suites `TLS13_AES_256_GCM_SHA384` and `TLS13_AES_128_GCM_SHA256` is used.
 
@@ -65,15 +67,15 @@ To use these vendored libraries and build ztunnel for either of these OS/arch co
 ##### For linux/x86_64
 
 ``` toml
-BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
-BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
+BORING_BSSL_FIPS_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
+BORING_BSSL_FIPS_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
 ```
 
 ##### For linux/arm64
 
 ``` toml
-BORING_BSSL_PATH = { value = "vendor/boringssl-fips/linux_arm64", force = true, relative = true }
-BORING_BSSL_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
+BORING_BSSL_FIPS_PATH = { value = "vendor/boringssl-fips/linux_arm64", force = true, relative = true }
+BORING_BSSL_FIPS_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
 ```
 
 Once that's done, you should be able to build:

@@ -15,10 +15,12 @@
 use std::fmt::Write;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{atomic, Arc};
+use std::sync::{Arc, atomic};
 use std::time::Instant;
 
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
+use prometheus_client::encoding::{
+    EncodeLabelSet, EncodeLabelValue, LabelSetEncoder, LabelValueEncoder,
+};
 use prometheus_client::metrics::counter::{Atomic, Counter};
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
@@ -28,12 +30,13 @@ use tracing_core::field::Value;
 
 use crate::identity::Identity;
 use crate::metrics::DefaultedUnknown;
-use crate::proxy;
+use crate::proxy::{self, HboneAddress};
 
 use crate::state::service::ServiceDescription;
 use crate::state::workload::Workload;
 use crate::strng::{RichStrng, Strng};
 
+#[derive(Debug)]
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
@@ -95,6 +98,8 @@ pub struct DerivedWorkload {
     pub namespace: Option<Strng>,
     pub identity: Option<Identity>,
     pub cluster_id: Option<Strng>,
+    pub region: Option<Strng>,
+    pub zone: Option<Strng>,
 }
 
 #[derive(Clone)]
@@ -123,6 +128,12 @@ impl CommonTrafficLabels {
         self.source_app = w.canonical_name.clone().into();
         self.source_version = w.canonical_revision.clone().into();
         self.source_cluster = w.cluster_id.to_string().into();
+
+        let mut local = self.locality.0.unwrap_or_default();
+        local.source_region = w.locality.region.clone().into();
+        local.source_zone = w.locality.zone.clone().into();
+        self.locality = OptionallyEncode(Some(local));
+
         self
     }
 
@@ -137,6 +148,12 @@ impl CommonTrafficLabels {
         self.source_cluster = w.cluster_id.clone().into();
         // This is the identity from the TLS handshake; this is the most trustworthy source so use it
         self.source_principal = w.identity.clone().into();
+
+        let mut local = self.locality.0.unwrap_or_default();
+        local.source_region = w.region.clone().into();
+        local.source_zone = w.zone.clone().into();
+        self.locality = OptionallyEncode(Some(local));
+
         self
     }
 
@@ -150,6 +167,12 @@ impl CommonTrafficLabels {
         self.destination_app = w.canonical_name.clone().into();
         self.destination_version = w.canonical_revision.clone().into();
         self.destination_cluster = w.cluster_id.to_string().into();
+
+        let mut local = self.locality.0.unwrap_or_default();
+        local.destination_region = w.locality.region.clone().into();
+        local.destination_zone = w.locality.zone.clone().into();
+        self.locality = OptionallyEncode(Some(local));
+
         self
     }
 
@@ -208,6 +231,30 @@ pub struct CommonTrafficLabels {
     request_protocol: RequestProtocol,
     response_flags: ResponseFlags,
     connection_security_policy: SecurityPolicy,
+
+    #[prometheus(flatten)]
+    locality: OptionallyEncode<LocalityLabels>,
+}
+
+/// OptionallyEncode is a wrapper that will optionally encode the entire label set.
+/// This differs from something like DefaultedUnknown which handles only the value - this makes the
+/// entire label not show up.
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq)]
+struct OptionallyEncode<T>(Option<T>);
+impl<T: EncodeLabelSet> EncodeLabelSet for OptionallyEncode<T> {
+    fn encode(&self, encoder: LabelSetEncoder) -> Result<(), std::fmt::Error> {
+        match &self.0 {
+            None => Ok(()),
+            Some(ll) => ll.encode(encoder),
+        }
+    }
+}
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
+struct LocalityLabels {
+    source_region: DefaultedUnknown<RichStrng>,
+    source_zone: DefaultedUnknown<RichStrng>,
+    destination_region: DefaultedUnknown<RichStrng>,
+    destination_zone: DefaultedUnknown<RichStrng>,
 }
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
@@ -293,13 +340,14 @@ impl Metrics {
     }
 }
 
+#[derive(Debug)]
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
 pub struct ConnectionResult {
     // Src address and name
     src: (SocketAddr, Option<RichStrng>),
     // Dst address and name
     dst: (SocketAddr, Option<RichStrng>),
-    hbone_target: Option<SocketAddr>,
+    hbone_target: Option<HboneAddress>,
     start: Instant,
 
     // TODO: storing CommonTrafficLabels adds ~600 bytes retained throughout a connection life time.
@@ -381,7 +429,7 @@ impl ConnectionResult {
         dst: SocketAddr,
         // If using hbone, the inner HBONE address
         // That is, dst is the L4 address, while is the :authority.
-        hbone_target: Option<SocketAddr>,
+        hbone_target: Option<HboneAddress>,
         start: Instant,
         conn: ConnectionOpen,
         metrics: Arc<Metrics>,
@@ -410,7 +458,7 @@ impl ConnectionResult {
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             dst.addr = %dst.0,
-            dst.hbone_addr = hbone_target.map(display),
+            dst.hbone_addr = hbone_target.as_ref().map(display),
             dst.service = tl.destination_service.to_value(),
             dst.workload = dst.1.as_deref().map(to_value),
             dst.namespace = tl.destination_workload_namespace.to_value(),
@@ -504,7 +552,7 @@ impl ConnectionResult {
             src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
 
             dst.addr = %self.dst.0,
-            dst.hbone_addr = self.hbone_target.map(display),
+            dst.hbone_addr = self.hbone_target.as_ref().map(display),
             dst.service = tl.destination_service.to_value(),
             dst.workload = self.dst.1.as_deref().map(to_value),
             dst.namespace = tl.destination_workload_namespace.to_value(),

@@ -19,13 +19,13 @@ use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
-use tracing::{debug, error, info, trace, Instrument};
+use tracing::{Instrument, debug, error, info, trace};
 
-use crate::drain::run_with_drain;
 use crate::drain::DrainWatcher;
-use crate::proxy::metrics::Reporter;
+use crate::drain::run_with_drain;
 use crate::proxy::Error;
-use crate::proxy::{metrics, util, ProxyInputs};
+use crate::proxy::metrics::Reporter;
+use crate::proxy::{ProxyInputs, metrics, util};
 use crate::state::workload::NetworkAddress;
 use crate::{assertions, copy, handle_connection, rbac, strng};
 use crate::{proxy, socket};
@@ -65,45 +65,41 @@ impl InboundPassthrough {
 
     pub(super) async fn run(self) {
         let pi = self.pi.clone();
-        let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
-            async move {
-                loop {
-                    // Asynchronously wait for an inbound socket.
-                    let socket = self.listener.accept().await;
-                    let start = Instant::now();
-                    let mut force_shutdown = force_shutdown.clone();
-                    let drain = drain.clone();
-                    let pi = self.pi.clone();
-                    match socket {
-                        Ok((stream, remote)) => {
-                            let serve_client = async move {
-                                debug!(component="inbound passthrough", "connection started");
+        let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
+            loop {
+                // Asynchronously wait for an inbound socket.
+                let socket = self.listener.accept().await;
+                let start = Instant::now();
+                let mut force_shutdown = force_shutdown.clone();
+                let drain = drain.clone();
+                let pi = self.pi.clone();
+                match socket {
+                    Ok((stream, remote)) => {
+                        let serve_client = async move {
+                            debug!(component="inbound passthrough", "connection started");
                                 // Since this task is spawned, make sure we are guaranteed to terminate
-                                tokio::select! {
-                                    _ = force_shutdown.changed() => {
-                                        debug!(component="inbound passthrough", "connection forcefully terminated");
-                                    }
-                                    _ = Self::proxy_inbound_plaintext(pi, socket::to_canonical(remote), stream, self.enable_orig_src) => {
-                                    }
+                            tokio::select! {
+                                _ = force_shutdown.changed() => {
+                                    debug!(component="inbound passthrough", "connection forcefully terminated");
                                 }
-                                // Mark we are done with the connection, so drain can complete
-                                drop(drain);
-                                debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
+                                _ = Self::proxy_inbound_plaintext(pi, socket::to_canonical(remote), stream, self.enable_orig_src) => {}
                             }
-                              .in_current_span();
+                            // Mark we are done with the connection, so drain can complete
+                            drop(drain);
+                            debug!(component="inbound passthrough", dur=?start.elapsed(), "connection completed");
+                        }.in_current_span();
 
-                            assertions::size_between_ref(1500, 3000, &serve_client);
-                            tokio::spawn(serve_client);
+                        assertions::size_between_ref(1500, 3000, &serve_client);
+                        tokio::spawn(serve_client);
+                    }
+                    Err(e) => {
+                        if util::is_runtime_shutdown(&e) {
+                            return;
                         }
-                        Err(e) => {
-                            if util::is_runtime_shutdown(&e) {
-                                return;
-                            }
-                            error!("Failed TCP handshake {}", e);
-                        }
+                        error!("Failed TCP handshake {}", e);
                     }
                 }
-            }.in_current_span()
+            }
         };
 
         run_with_drain(

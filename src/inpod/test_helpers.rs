@@ -17,7 +17,7 @@ use super::netns::InpodNetns;
 
 use crate::proxyfactory::ProxyFactory;
 use crate::state::{DemandProxyState, ProxyState};
-use nix::sched::{unshare, CloneFlags};
+use nix::sched::{CloneFlags, unshare};
 use prometheus_client::registry::Registry;
 
 use std::sync::{Arc, RwLock};
