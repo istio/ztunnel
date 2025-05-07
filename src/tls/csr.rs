@@ -123,8 +123,8 @@ impl CsrOptions {
 
 #[cfg(test)]
 mod tests {
-    use itertools::Itertools;
     use crate::tls;
+    use itertools::Itertools;
 
     #[test]
     fn test_csr() {
@@ -159,6 +159,9 @@ mod tests {
         let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() else {
             panic!("not a SubjectAlternativeName")
         };
-        assert_eq!(&format!("{san:?}"), "SubjectAlternativeName { general_names: [URI(\"spiffe://td/ns/ns1/sa/sa1\")] }")
+        assert_eq!(
+            &format!("{san:?}"),
+            "SubjectAlternativeName { general_names: [URI(\"spiffe://td/ns/ns1/sa/sa1\")] }"
+        )
     }
 }
