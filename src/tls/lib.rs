@@ -40,6 +40,15 @@ pub trait ServerCertProvider: Send + Sync + Clone {
 
 pub(super) static TLS_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
 
+#[cfg(feature = "tls-aws-lc")]
+pub static CRYPTO_PROVIDER: &str = "tls-aws-lc";
+#[cfg(feature = "tls-ring")]
+pub static CRYPTO_PROVIDER: &str = "tls-ring";
+#[cfg(feature = "tls-boring")]
+pub static CRYPTO_PROVIDER: &str = "tls-boring";
+#[cfg(feature = "tls-openssl")]
+pub static CRYPTO_PROVIDER: &str = "tls-openssl";
+
 // Ztunnel use `rustls` with pluggable crypto modules.
 // All crypto MUST be done via the below providers.
 //
