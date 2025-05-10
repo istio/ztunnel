@@ -52,6 +52,7 @@ pub struct TestApp {
 
     pub namespace: Option<super::netns::Namespace>,
     pub shutdown: ShutdownTrigger,
+    pub ztunnel_identity: Option<identity::Identity>,
 }
 
 impl From<(&Bound, Arc<SecretManager>)> for TestApp {
@@ -66,6 +67,7 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
             cert_manager,
             namespace: None,
             shutdown: app.shutdown.trigger(),
+            ztunnel_identity: None,
         }
     }
 }
