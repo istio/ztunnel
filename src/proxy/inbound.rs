@@ -245,7 +245,7 @@ impl Inbound {
                     SocketAddr::new(loopback, ri.upstream_addr.port()),
                 )
             } else {
-                // When ztunnel is proxying to its own internal endpoints (e.g., metrics server after HBONE termination),
+                // When ztunnel is proxying to its own internal endpoints (metrics server after HBONE termination),
                 // we must not attempt to use the original external client's IP as the source for this internal connection.
                 // Setting `disable_inbound_freebind` to true for such self-proxy scenarios ensures `upstream_src_ip` is `None`,
                 // causing `freebind_connect` to use a local IP for the connection to ztunnel's own service.
@@ -997,14 +997,13 @@ mod tests {
 
         let mut registry = Registry::default();
         let metrics = Arc::new(crate::proxy::Metrics::new(&mut registry));
-        let res = DemandProxyState::new(
+        Ok(DemandProxyState::new(
             Arc::new(RwLock::new(state)),
             None,
             ResolverConfig::default(),
             ResolverOpts::default(),
             metrics,
-        );
-        Ok(res)
+        ))
     }
 
     // tells the test if we're using workload-attached or svc-attached waypoints

@@ -1789,8 +1789,8 @@ mod namespaced {
         client
             .run(move || async move {
                 info!("Running client to {srv}");
-                let mut stream = TcpStream::connect(srv).await?;
-                hbone_read_write_stream(&mut stream).await?;
+                let mut stream = TcpStream::connect(srv).await.unwrap();
+                hbone_read_write_stream(&mut stream).await;
                 Ok(())
             })?
             .join()
@@ -1861,19 +1861,18 @@ mod namespaced {
         Ok(BODY.len() * 2)
     }
 
-    async fn hbone_read_write_stream(stream: &mut TcpStream) -> anyhow::Result<()> {
+    async fn hbone_read_write_stream(stream: &mut TcpStream) {
         const BODY: &[u8] = b"hello world";
         stream
             .write_all(BODY)
             .await
-            .expect("HBONE stream write failed");
+            .unwrap();
         let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
         stream
             .read_exact(&mut buf)
             .await
-            .expect("HBONE stream read failed");
+            .unwrap();
         assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
-        Ok(())
     }
 
     #[derive(PartialEq, Copy, Clone, Debug)]
