@@ -1863,15 +1863,9 @@ mod namespaced {
 
     async fn hbone_read_write_stream(stream: &mut TcpStream) {
         const BODY: &[u8] = b"hello world";
-        stream
-            .write_all(BODY)
-            .await
-            .unwrap();
+        stream.write_all(BODY).await.unwrap();
         let mut buf = [0; BODY.len() + WAYPOINT_MESSAGE.len()];
-        stream
-            .read_exact(&mut buf)
-            .await
-            .unwrap();
+        stream.read_exact(&mut buf).await.unwrap();
         assert_eq!([WAYPOINT_MESSAGE, BODY].concat(), buf);
     }
 
