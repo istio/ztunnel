@@ -1909,7 +1909,7 @@ mod namespaced {
                 for (target, port, failure) in cases {
                     let tgt = SocketAddr::from((target, port));
                     info!("send to {tgt}, want {failure:?} error");
-                    let stream = timeout(Duration::from_secs(3), TcpStream::connect(tgt)).await?;
+                    let stream = timeout(Duration::from_secs(1), TcpStream::connect(tgt)).await?;
                     error!("stream {stream:?}");
                     if failure == Connection {
                         assert!(stream.is_err(), "expected connection to fail for {tgt}");
@@ -1917,7 +1917,7 @@ mod namespaced {
                     }
                     let mut stream = stream.unwrap();
 
-                    let res = timeout(Duration::from_secs(3), send_traffic(&mut stream)).await?;
+                    let res = timeout(Duration::from_secs(1), send_traffic(&mut stream)).await?;
                     if failure == Request {
                         assert!(res.is_err(), "expected request to fail for {tgt}");
                         continue;
