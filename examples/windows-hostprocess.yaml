@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    pod: hpc
+  name: hpc
+spec:
+  securityContext:
+    windowsOptions:
+      hostProcess: true
+      runAsUserName: "NT AUTHORITY\\SYSTEM"
+  hostNetwork: true
+  containers:
+    - name: hpc
+      image: mcr.microsoft.com/windows/servercore:ltsc2022 # Use servercore:1809 for WS2019
+      command:
+        - powershell.exe
+        - -Command
+        - "Start-Sleep 2147483"
+      imagePullPolicy: IfNotPresent
+  nodeSelector:
+    kubernetes.io/os: windows
+    kubernetes.io/hostname: akswin000000
+  tolerations:
+    - effect: NoSchedule
+      key: node.kubernetes.io/unschedulable
+      operator: Exists
+    - effect: NoSchedule
+      key: node.kubernetes.io/network-unavailable
+      operator: Exists
+    - effect: NoExecute
+      key: node.kubernetes.io/unreachable
+      operator: Exists

@@ -93,6 +93,7 @@ impl Inbound {
         let accept = |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             async move {
                 while let Some(tls) = stream.next().await {
+                    info!("received connection on HBONE inbound stream");
                     let pi = self.pi.clone();
                     let (raw_socket, ssl) = tls.get_ref();
                     let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
@@ -108,7 +109,7 @@ impl Inbound {
                             dst_network: strng::new(&network), // inbound request must be on our network
                             dst,
                         };
-                        debug!(%conn, "accepted connection");
+                        info!(%conn, "accepted connection");
                         let cfg = pi.cfg.clone();
                         let request_handler = move |req| {
                             let id = Self::extract_traceparent(&req);

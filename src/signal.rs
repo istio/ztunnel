@@ -12,11 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// #[async_trait::async_trait]
-// pub trait Shutdown {
-//     async fn shutdown();
-// }
-
 use tokio::sync::mpsc;
 
 pub struct Shutdown {
