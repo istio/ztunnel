@@ -18,6 +18,18 @@ Test a build with:
 cargo build --target x86_64-pc-windows-gnu
 ```
 
+Docker does support cross-building for Windows, but it is a bit of a pain. You can use the `docker buildx` command to build images for Windows. First, you need to create a new builder instance:
+
+```bash
+docker buildx create --name windows-builder --platform=windows/amd64 # change to windows/arm64 if you want to build for arm64
+```
+
+Then, build a docker image with:
+
+```bash
+docker buildx build . -f Dockerfile.ztunnel-windows --platform=windows/amd64 --output type=registry -t localhost:5000/ztunnel-windows --builder windows-builder
+```
+
 ## DNS
 
 HostProcess pods in Windows can't resolve cluster local DNS names. This is a known issue. In the meantime, you can use ALT_XDS_HOSTNAME and ALT_CA_HOSTNAME environment variables to set the expected certificate dns names for both XDS and CA clients.
