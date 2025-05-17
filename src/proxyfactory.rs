@@ -22,9 +22,8 @@ use crate::dns;
 use crate::drain::DrainWatcher;
 
 use crate::proxy::connection_manager::ConnectionManager;
+use crate::proxy::{DefaultSocketFactory, Proxy, inbound::Inbound};
 use crate::proxy::{Error, LocalWorkloadInformation, Metrics};
-
-use crate::proxy::Proxy;
 
 // Proxy factory creates ztunnel proxies using a socket factory.
 // this allows us to create our proxies the same way in regular mode and in inpod mode.
@@ -130,12 +129,59 @@ impl ProxyFactory {
                 socket_factory.clone(),
                 resolver,
                 local_workload_information,
+                false,
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
         }
 
         Ok(result)
+    }
+
+    /// Creates an inbound listener specifically for ztunnel's own internal endpoints (metrics).
+    /// This allows ztunnel to act as its own workload, enforcing policies on traffic directed to itself.
+    /// This is distinct from the main inbound listener which handles traffic for other workloads proxied by ztunnel.
+    pub async fn create_ztunnel_self_proxy_listener(
+        &self,
+    ) -> Result<Option<crate::proxy::inbound::Inbound>, Error> {
+        if self.config.proxy_mode != config::ProxyMode::Shared {
+            return Ok(None);
+        }
+
+        if let (Some(ztunnel_identity), Some(ztunnel_workload)) =
+            (&self.config.ztunnel_identity, &self.config.ztunnel_workload)
+        {
+            tracing::info!(
+                "creating ztunnel self-proxy listener with identity: {:?}",
+                ztunnel_identity
+            );
+
+            let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+                Arc::new(ztunnel_workload.clone()),
+                self.state.clone(),
+                self.cert_manager.clone(),
+            ));
+
+            let socket_factory = Arc::new(DefaultSocketFactory(self.config.socket_config));
+
+            let cm = ConnectionManager::default();
+
+            let pi = crate::proxy::ProxyInputs::new(
+                self.config.clone(),
+                cm.clone(),
+                self.state.clone(),
+                self.proxy_metrics.clone(),
+                socket_factory,
+                None,
+                local_workload_information,
+                true,
+            );
+
+            let inbound = Inbound::new(pi, self.drain.clone()).await?;
+            Ok(Some(inbound))
+        } else {
+            Ok(None)
+        }
     }
 }
 

@@ -297,6 +297,10 @@ pub struct Config {
 
     // If true, when AppTunnel is set for
     pub localhost_app_tunnel: bool,
+
+    pub ztunnel_identity: Option<identity::Identity>,
+
+    pub ztunnel_workload: Option<state::WorkloadInfo>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -604,6 +608,29 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     let socket_config_defaults = SocketConfig::default();
 
+    // Read ztunnel identity and workload info from Downward API if available
+    let (ztunnel_identity, ztunnel_workload) = match (
+        parse::<String>("POD_NAMESPACE")?,
+        parse::<String>("SERVICE_ACCOUNT")?,
+        parse::<String>("POD_NAME")?,
+    ) {
+        (Some(namespace), Some(service_account), Some(pod_name)) => {
+            let trust_domain = std::env::var("TRUST_DOMAIN")
+                .unwrap_or_else(|_| crate::identity::manager::DEFAULT_TRUST_DOMAIN.to_string());
+
+            let identity = identity::Identity::from_parts(
+                trust_domain.into(),
+                namespace.clone().into(),
+                service_account.clone().into(),
+            );
+
+            let workload = state::WorkloadInfo::new(pod_name, namespace, service_account);
+
+            (Some(identity), Some(workload))
+        }
+        _ => (None, None),
+    };
+
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
         // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
@@ -763,6 +790,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ca_headers: parse_headers(ISTIO_CA_HEADER_PREFIX)?,
 
         localhost_app_tunnel: parse_default(LOCALHOST_APP_TUNNEL, true)?,
+        ztunnel_identity,
+        ztunnel_workload,
     })
 }
 
