@@ -38,6 +38,9 @@ use keyed_priority_queue::KeyedPriorityQueue;
 
 const CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(150);
 
+/// Default trust domain to use if not otherwise specified.
+pub const DEFAULT_TRUST_DOMAIN: &str = "cluster.local";
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash)]
 pub enum Identity {
     Spiffe {
@@ -130,11 +133,10 @@ impl Identity {
 #[cfg(any(test, feature = "testing"))]
 impl Default for Identity {
     fn default() -> Self {
-        const TRUST_DOMAIN: &str = "cluster.local";
         const SERVICE_ACCOUNT: &str = "ztunnel";
         const NAMESPACE: &str = "istio-system";
         Identity::Spiffe {
-            trust_domain: TRUST_DOMAIN.into(),
+            trust_domain: DEFAULT_TRUST_DOMAIN.into(),
             namespace: NAMESPACE.into(),
             service_account: SERVICE_ACCOUNT.into(),
         }

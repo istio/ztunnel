@@ -136,6 +136,25 @@ pub async fn build_with_cert(
 
     if config.proxy_mode == config::ProxyMode::Shared {
         tracing::info!("shared proxy mode - in-pod mode enabled");
+
+        // Create ztunnel inbound listener only if its specific identity and workload info are configured.
+        if let Some(inbound) = proxy_gen.create_ztunnel_self_proxy_listener().await? {
+            // Run the inbound listener in the data plane worker pool
+            let mut xds_rx_for_inbound = xds_rx.clone();
+            data_plane_pool.send(DataPlaneTask {
+                block_shutdown: true,
+                fut: Box::pin(async move {
+                    tracing::info!("Starting ztunnel inbound listener task");
+                    let _ = xds_rx_for_inbound.changed().await;
+                    tokio::task::spawn(async move {
+                        inbound.run().in_current_span().await;
+                    })
+                    .await?;
+                    Ok(())
+                }),
+            })?;
+        }
+
         let run_future = init_inpod_proxy_mgr(
             &mut registry,
             &mut admin_server,

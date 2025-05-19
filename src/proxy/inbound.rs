@@ -45,7 +45,7 @@ use crate::state::{DemandProxyState, ProxyRbacContext};
 use crate::strng::Strng;
 use crate::tls::TlsError;
 
-pub(super) struct Inbound {
+pub struct Inbound {
     listener: socket::Listener,
     drain: DrainWatcher,
     pi: Arc<ProxyInputs>,
@@ -53,7 +53,7 @@ pub(super) struct Inbound {
 }
 
 impl Inbound {
-    pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
+    pub(crate) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.inbound_addr)
@@ -74,11 +74,12 @@ impl Inbound {
         })
     }
 
-    pub(super) fn address(&self) -> SocketAddr {
+    /// Returns the socket address this proxy is listening on.
+    pub fn address(&self) -> SocketAddr {
         self.listener.local_addr()
     }
 
-    pub(super) async fn run(self) {
+    pub async fn run(self) {
         let pi = self.pi.clone();
         let acceptor = InboundCertProvider {
             local_workload: self.pi.local_workload_information.clone(),
@@ -122,7 +123,7 @@ impl Inbound {
                     let conn = Connection {
                         src_identity,
                         src,
-                        dst_network: strng::new(&network), // inbound request must be on our network
+                        dst_network: network.clone(), // inbound request must be on our network
                         dst,
                     };
                     debug!(%conn, "accepted connection");
@@ -244,10 +245,18 @@ impl Inbound {
                     SocketAddr::new(loopback, ri.upstream_addr.port()),
                 )
             } else {
-                (
-                    enable_original_source.then_some(ri.rbac_ctx.conn.src.ip()),
-                    ri.upstream_addr,
-                )
+                // When ztunnel is proxying to its own internal endpoints (metrics server after HBONE termination),
+                // we must not attempt to use the original external client's IP as the source for this internal connection.
+                // Setting `disable_inbound_freebind` to true for such self-proxy scenarios ensures `upstream_src_ip` is `None`,
+                // causing `freebind_connect` to use a local IP for the connection to ztunnel's own service.
+                // For regular inbound traffic to other workloads, `disable_inbound_freebind` is false, and original source
+                // preservation depends on `enable_original_source`.
+                let upstream_src_ip = if pi.disable_inbound_freebind {
+                    None
+                } else {
+                    enable_original_source.then_some(ri.rbac_ctx.conn.src.ip())
+                };
+                (upstream_src_ip, ri.upstream_addr)
             };
 
             // Establish upstream connection between original source and destination
@@ -536,7 +545,7 @@ impl Inbound {
 
     /// find_inbound_upstream determines the next hop for an inbound request.
     #[expect(clippy::type_complexity)]
-    fn find_inbound_upstream(
+    pub(super) fn find_inbound_upstream(
         cfg: &Config,
         state: &DemandProxyState,
         conn: &Connection,
@@ -545,6 +554,7 @@ impl Inbound {
     ) -> Result<(SocketAddr, Option<TunnelRequest>, Vec<Arc<Service>>), Error> {
         // We always target the local workload IP as the destination. But we need to determine the port to send to.
         let target_ip = conn.dst.ip();
+
         // First, fetch the actual target SocketAddr as well as all possible services this could be for.
         // Given they may request the pod directly, there may be multiple possible services; we will
         // select a final one (if any) later.
@@ -640,7 +650,7 @@ impl Inbound {
 }
 
 #[derive(Debug)]
-struct TunnelRequest {
+pub(super) struct TunnelRequest {
     tunnel_target: SocketAddr,
     protocol: Protocol,
 }
@@ -702,37 +712,36 @@ fn build_response(status: StatusCode) -> Response<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 mod tests {
     use super::{Inbound, ProxyInputs};
-    use crate::{config, proxy::ConnectionManager, proxy::inbound::HboneAddress, strng};
-
     use crate::{
+        config,
+        identity::manager::mock::new_secret_manager,
+        proxy::{
+            ConnectionManager, DefaultSocketFactory, LocalWorkloadInformation,
+            h2::server::RequestParts, inbound::HboneAddress,
+        },
         rbac::Connection,
         state::{
-            self, DemandProxyState,
+            self, DemandProxyState, WorkloadInfo,
             service::{Endpoint, EndpointSet, Service},
             workload::{
-                ApplicationTunnel, GatewayAddress, InboundProtocol, NetworkAddress, Workload,
-                application_tunnel::Protocol as AppProtocol, gatewayaddress::Destination,
+                ApplicationTunnel, GatewayAddress, HealthStatus, InboundProtocol, NetworkAddress,
+                NetworkMode, Workload, application_tunnel::Protocol as AppProtocol,
+                gatewayaddress::Destination,
             },
         },
-        test_helpers,
+        strng, test_helpers,
     };
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use http::{Method, Uri};
+    use prometheus_client::registry::Registry;
     use std::{
         net::SocketAddr,
         sync::{Arc, RwLock},
         time::Duration,
     };
-
-    use crate::identity::manager::mock::new_secret_manager;
-    use crate::proxy::DefaultSocketFactory;
-    use crate::proxy::LocalWorkloadInformation;
-    use crate::proxy::h2::server::RequestParts;
-    use crate::state::WorkloadInfo;
-    use crate::state::workload::HealthStatus;
-    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-    use http::{Method, Uri};
-    use prometheus_client::registry::Registry;
     use test_case::test_case;
 
     const CLIENT_POD_IP: &str = "10.0.0.1";
@@ -904,6 +913,7 @@ mod tests {
             sf,
             None,
             local_workload,
+            false,
         ));
         let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;
         match want {
@@ -959,7 +969,6 @@ mod tests {
                 "waypoint",
                 WAYPOINT_POD_IP,
                 Waypoint::None,
-                // the waypoint's _workload_ gets the app tunnel field
                 server_waypoint.app_tunnel(),
             ),
             ("client", CLIENT_POD_IP, Waypoint::None, None),
@@ -975,6 +984,7 @@ mod tests {
             namespace: "default".into(),
             service_account: strng::format!("service-account-{name}"),
             application_tunnel: app_tunnel,
+            network_mode: NetworkMode::Standard,
             ..test_helpers::test_default_workload()
         });
 

@@ -18,14 +18,16 @@ mod namespaced {
     use futures::future::poll_fn;
     use http_body_util::Empty;
     use std::collections::HashMap;
+    use ztunnel::state::workload::ApplicationTunnel;
+    use ztunnel::state::workload::application_tunnel::Protocol;
     use ztunnel::state::workload::gatewayaddress::Destination;
     use ztunnel::state::workload::{GatewayAddress, NamespacedHostname};
+    use ztunnel::test_helpers::linux::TestMode;
 
     use std::net::{IpAddr, SocketAddr};
 
     use anyhow::Context;
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
     use std::time::Duration;
     use ztunnel::rbac::{Authorization, RbacMatch, StringMatch};
@@ -39,18 +41,17 @@ mod namespaced {
     use tokio::time::timeout;
     use tracing::{error, info};
 
-    use ztunnel::state::workload::{ApplicationTunnel, NetworkAddress};
-    use ztunnel::test_helpers::app::ParsedMetrics;
-    use ztunnel::test_helpers::app::TestApp;
+    use ztunnel::state::workload::NetworkAddress;
+    use ztunnel::test_helpers::app::{ParsedMetrics, TestApp};
+    use ztunnel::test_helpers::linux::TestMode::{Dedicated, Shared};
+    use ztunnel::test_helpers::linux::WorkloadManager;
+    use ztunnel::test_helpers::netns::{Namespace, Resolver};
+    use ztunnel::test_helpers::*;
 
     use ztunnel::{identity, strng, telemetry};
 
     use crate::namespaced::WorkloadMode::Captured;
     use ztunnel::setup_netns_test;
-    use ztunnel::test_helpers::linux::TestMode::{Dedicated, Shared};
-    use ztunnel::test_helpers::linux::WorkloadManager;
-    use ztunnel::test_helpers::netns::{Namespace, Resolver};
-    use ztunnel::test_helpers::*;
 
     const WAYPOINT_MESSAGE: &[u8] = b"waypoint\n";
 
@@ -926,27 +927,12 @@ mod namespaced {
         // Now shutdown the server. In real world, the server app would shutdown, then ztunnel would remove itself.
         // In this test, we will leave the server app running, but shutdown ztunnel.
         manager.delete_workload("server").await.unwrap();
-        // Request should fail now
-        let tx = Arc::new(Mutex::new(tx));
-        #[allow(clippy::await_holding_lock)]
-        assert_eventually(
-            Duration::from_secs(2),
-            || async { tx.lock().unwrap().send_and_wait(()).await.is_err() },
-            true,
-        )
-        .await;
-        // Close the connection
-        drop(tx);
 
-        // Should fail as the last request fails
-        assert!(cjh.join().unwrap().is_err());
-
-        // Now try to connect and make sure it fails
+        // In shared mode, verify that new connections succeed but data transfer fails
         client
             .run_and_wait(move || async move {
                 let mut stream = TcpStream::connect(srv).await.unwrap();
                 // We should be able to connect (since client is running), but not send a request
-
                 const BODY: &[u8] = b"hello world";
                 stream.write_all(BODY).await.unwrap();
                 let mut buf = [0; BODY.len() * 2];
@@ -955,6 +941,16 @@ mod namespaced {
                 Ok(())
             })
             .unwrap();
+
+        // The long running connection should also fail on next attempt
+        let tx_send_result = tx.send_and_wait(()).await;
+        assert!(
+            tx_send_result.is_err(),
+            "long running connection should fail after workload deletion"
+        );
+
+        drop(tx);
+        assert!(cjh.join().unwrap().is_err());
         Ok(())
     }
 
@@ -1220,7 +1216,7 @@ mod namespaced {
             vec![
                 (zt, 15001, Request), // Outbound: should be blocked due to recursive call
                 (zt, 15006, Request), // Inbound: should be blocked due to recursive call
-                (zt, 15008, Request), // HBONE: expected TLS, reject
+                (zt, 15008, Request), // HBONE: Connection succeeds (ztunnel listens) but request fails due to TLS
                 // Localhost still get connection established, as ztunnel accepts anything. But they are dropped immediately.
                 (zt, 15080, Request),      // socks5: localhost
                 (zt, 15000, Request),      // admin: localhost
@@ -1252,7 +1248,7 @@ mod namespaced {
                 // Ztunnel doesn't listen on these ports...
                 (zt, 15001, Connection), // Outbound: should be blocked due to recursive call
                 (zt, 15006, Connection), // Inbound: should be blocked due to recursive call
-                (zt, 15008, Connection), // HBONE: expected TLS, reject
+                (zt, 15008, Request), // HBONE: Connection succeeds (ztunnel listens) but request fails due to TLS
                 // Localhost is not accessible
                 (zt, 15080, Connection), // socks5: localhost
                 (zt, 15000, Connection), // admin: localhost
@@ -1329,63 +1325,188 @@ mod namespaced {
         let id1s = id1.to_string();
 
         let ta = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let ztunnel_identity_obj = ta.ztunnel_identity.as_ref().unwrap().clone();
+        ta.cert_manager
+            .fetch_certificate(&ztunnel_identity_obj)
+            .await?;
+        let ztunnel_identity_str = ztunnel_identity_obj.to_string();
 
         let check = |want: Vec<String>, help: &str| {
             let cm = ta.cert_manager.clone();
             let help = help.to_string();
+            let mut sorted_want = want.clone();
+            sorted_want.sort();
             async move {
-                // Cert manager is async, so we need to wait
                 let res = check_eventually(
                     Duration::from_secs(2),
-                    || cm.collect_certs(|a, _b| a.to_string()),
-                    want,
+                    || async {
+                        let mut certs = cm.collect_certs(|a, _b| a.to_string()).await;
+                        certs.sort();
+                        certs
+                    },
+                    sorted_want,
                 )
                 .await;
                 assert!(res.is_ok(), "{}: got {:?}", help, res.err().unwrap());
             }
         };
-        check(vec![], "initially empty").await;
+        check(
+            vec![ztunnel_identity_str.clone()],
+            "initially only ztunnel cert",
+        )
+        .await;
+
         manager
             .workload_builder("id1-a-remote-node", REMOTE_NODE)
             .identity(id1.clone())
             .register()
             .await?;
-        check(vec![], "we should not prefetch remote nodes").await;
+        check(
+            vec![ztunnel_identity_str.clone()],
+            "we should not prefetch remote nodes",
+        )
+        .await;
+
         manager
             .workload_builder("id1-a-same-node", DEFAULT_NODE)
             .identity(id1.clone())
             .register()
             .await?;
-        check(vec![id1s.clone()], "we should prefetch our nodes").await;
+        check(
+            vec![ztunnel_identity_str.clone(), id1s.clone()],
+            "we should prefetch our nodes",
+        )
+        .await;
+
         manager
             .workload_builder("id1-b-same-node", DEFAULT_NODE)
             .identity(id1.clone())
             .register()
             .await?;
         check(
-            vec![id1s.clone()],
+            vec![ztunnel_identity_str.clone(), id1s.clone()],
             "multiple of same identity shouldn't do anything",
         )
         .await;
         manager.delete_workload("id1-a-remote-node").await?;
+        // Deleting remote node should not affect local certs if local workloads still exist
         check(
-            vec![id1s.clone()],
+            vec![ztunnel_identity_str.clone(), id1s.clone()],
             "removing remote node shouldn't impact anything",
         )
         .await;
         manager.delete_workload("id1-b-same-node").await?;
+        // Deleting one local node shouldn't impact certs if another local workload still exists
         check(
-            vec![id1s.clone()],
+            vec![ztunnel_identity_str.clone(), id1s.clone()],
             "removing local node shouldn't impact anything if I still have some running",
         )
         .await;
         manager.delete_workload("id1-a-same-node").await?;
-        // TODO: this should be vec![], but our testing setup doesn't exercise the real codepath
+        // After deleting all workloads using sa1, give cert manager time to clean up
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // In shared mode, certificates may be kept alive by the inbound listener
+        // for handling inbound connections, even after workload deletion
+        let expected_certs = match manager.mode() {
+            TestMode::Shared => vec![ztunnel_identity_str.clone(), id1s.clone()],
+            TestMode::Dedicated => vec![ztunnel_identity_str.clone()],
+        };
         check(
-            vec![id1s.clone()],
-            "removing final workload should clear things out",
+            expected_certs,
+            "removing final workload should clear certs except those needed by inbound listener",
         )
         .await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_hbone_metrics_access() -> Result<(), anyhow::Error> {
+        let mut manager = setup_netns_test!(Shared);
+
+        // Deploy ztunnel for the node
+        let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
+        let ztunnel_node_ip = manager.resolve("ztunnel-node")?;
+        // Use the actual metrics address ztunnel is listening on (e.g., [::]:15020)
+        // but combine it with the node IP for the client to target.
+        let target_metrics_addr = SocketAddr::new(ztunnel_node_ip, zt.metrics_address.port());
+        let target_metrics_url = format!("http://{}/metrics", target_metrics_addr);
+
+        // Deploy a client workload (simulating Prometheus)
+        let client = manager
+            .workload_builder("client", DEFAULT_NODE)
+            .register()
+            .await?;
+
+        let zt_identity_str = zt.ztunnel_identity.as_ref().unwrap().to_string();
+
+        // Client makes a standard HTTP GET request to ztunnel's metrics endpoint
+        // Ztunnel's outbound capture should intercept this, initiate HBONE to its own inbound,
+        // which then proxies to the internal metrics server.
+        client
+            .run(move || async move {
+                info!(target=%target_metrics_url, "Client attempting standard HTTP GET to metrics endpoint");
+
+                let client = hyper_util::client::legacy::Client::builder(
+                    ztunnel::hyper_util::TokioExecutor,
+                )
+                .build_http();
+
+                let req = hyper::Request::builder()
+                    .method(Method::GET)
+                    .uri(&target_metrics_url)
+                    .body(Empty::<Bytes>::new())?;
+
+                let response = client.request(req).await?;
+
+                info!("Received response status: {:?}", response.status());
+                assert_eq!(response.status(), StatusCode::OK, "GET request failed");
+
+                let body_bytes = http_body_util::BodyExt::collect(response.into_body())
+                    .await?
+                    .to_bytes();
+                let response_str = String::from_utf8_lossy(&body_bytes);
+
+                assert!(
+                    response_str.contains("# TYPE"),
+                    "Expected Prometheus metrics (# TYPE) in response, got:\n{}",
+                    response_str
+                );
+                info!("Successfully verified metrics response body");
+
+                Ok(())
+            })?
+            .join()
+            .unwrap()?;
+
+        // Verify metrics from the DESTINATION perspective (ztunnel handling its own inbound)
+        let metrics = [
+            (CONNECTIONS_OPENED, 1), // One connection opened (client -> zt inbound via HBONE)
+            (CONNECTIONS_CLOSED, 1), // One connection closed
+        ];
+        verify_metrics(&zt, &metrics, &destination_labels()).await;
+
+        // Verify INBOUND telemetry log for the metrics connection
+        let dst_addr_log = format!("{}:15008", ztunnel_node_ip);
+        let dst_hbone_addr_log = format!("{}", target_metrics_addr);
+
+        // We don't know exact byte counts, so omit them from the check for now
+        let want = HashMap::from([
+            ("scope", "access"),
+            ("src.workload", "client"),
+            ("dst.workload", "ztunnel-node"), // ztunnel's workload name
+            ("dst.addr", dst_addr_log.as_str()), // Connected to HBONE port
+            ("dst.hbone_addr", dst_hbone_addr_log.as_str()), // Original target
+            ("direction", "inbound"),
+            ("message", "connection complete"), // Assuming success
+            (
+                "src.identity",
+                "spiffe://cluster.local/ns/default/sa/client",
+            ), // Client identity
+            ("dst.identity", zt_identity_str.as_str()), // Ztunnel identity
+        ]);
+        telemetry::testing::assert_contains(want);
+
         Ok(())
     }
 
@@ -1759,7 +1880,6 @@ mod namespaced {
     }
     use Failure::*;
     use ztunnel::state::WorkloadInfo;
-    use ztunnel::state::workload::application_tunnel::Protocol;
 
     async fn malicious_calls_test(
         client: Namespace,
@@ -1786,14 +1906,14 @@ mod namespaced {
                     let stream = timeout(Duration::from_secs(1), TcpStream::connect(tgt)).await?;
                     error!("stream {stream:?}");
                     if failure == Connection {
-                        assert!(stream.is_err());
+                        assert!(stream.is_err(), "expected connection to fail for {tgt}");
                         continue;
                     }
                     let mut stream = stream.unwrap();
 
                     let res = timeout(Duration::from_secs(1), send_traffic(&mut stream)).await?;
                     if failure == Request {
-                        assert!(res.is_err());
+                        assert!(res.is_err(), "expected request to fail for {tgt}");
                         continue;
                     }
                     res.unwrap();
