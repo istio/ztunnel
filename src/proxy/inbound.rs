@@ -475,7 +475,7 @@ impl Inbound {
             return Ok(());
         };
         if conn.dst.ip() == hbone_addr.ip() {
-            // Normal case: both are aligned. This is allowed
+            // Normal case: both are aligned. This is allowed (we really only need the HBONE address for the port.)
             return Ok(());
         }
         if local_workload.application_tunnel.is_some() {
