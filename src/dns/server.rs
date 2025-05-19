@@ -47,7 +47,7 @@ use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::state::DemandProxyState;
-use crate::state::service::IpFamily;
+use crate::state::service::{IpFamily, Service};
 use crate::state::workload::Workload;
 use crate::state::workload::address::Address;
 use crate::{config, dns};
@@ -359,7 +359,7 @@ impl Store {
                 let search_name_str = search_name.to_string().into();
                 search_name.set_fqdn(true);
 
-                let service = state
+                let services: Vec<Arc<Service>> = state
                     .services
                     .get_by_host(&search_name_str)
                     .iter()
@@ -382,13 +382,27 @@ impl Store {
                     })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
-                    .find_or_first(|service| service.namespace == client.namespace)
-                    .cloned();
+                    // .find_or_first(|service| service.namespace == client.namespace)
+                    .cloned()
+                    .collect();
+
+                // TODO: don't hardcode istio-system, use rootNamespace
+                // TODO: ideally we'd sort these by creation time so that the oldest would be used if there are no namespace matches
+                // presently service doesn't have creation time in WDS, but we could add it
+                let service = match services
+                    .iter()
+                    .find(|service| service.namespace == client.namespace)
+                {
+                    Some(service) => Some(service),
+                    None => services
+                        .iter()
+                        .find_or_first(|service| service.namespace == "istio-system"),
+                };
 
                 // First, lookup the host as a service.
                 if let Some(service) = service {
                     return Some(ServerMatch {
-                        server: Address::Service(service),
+                        server: Address::Service(service.clone()),
                         name: search_name,
                         alias,
                     });
