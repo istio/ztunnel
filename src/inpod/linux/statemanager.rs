@@ -14,7 +14,8 @@
 
 use crate::drain;
 use crate::drain::DrainTrigger;
-use crate::inpod::{metrics::Metrics, Error, WorkloadMessage};
+use crate::inpod::linux::WorkloadMessage;
+use crate::inpod::{metrics::Metrics, Error};
 use std::sync::Arc;
 use tracing::{Instrument, debug, info};
 

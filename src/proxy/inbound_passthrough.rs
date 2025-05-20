@@ -19,6 +19,7 @@ use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
+use tracing::debug;
 use tracing::{Instrument, error, info};
 
 use crate::drain::DrainWatcher;
