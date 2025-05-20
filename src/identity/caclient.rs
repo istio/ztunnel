@@ -112,6 +112,7 @@ impl CaClient {
             warn!("no chain certs for: {}", id);
             vec![]
         };
+        debug!("received certificate for {:?}", id);
         let certs = tls::WorkloadCertificate::new(&private_key, leaf, chain)?;
         // Make the certificate actually matches the identity we requested.
         if self.enable_impersonated_identity && certs.identity().as_ref() != Some(id) {

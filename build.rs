@@ -74,7 +74,19 @@ fn main() -> Result<(), anyhow::Error> {
         .nth_back(3)
         .unwrap();
 
-    match Command::new("common/scripts/report_build_info.sh").output() {
+    
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "windows")] {
+           let  output = Command::new("powershell.exe")
+            .arg("common/scripts/report_build_info.ps1")
+            .output();
+        } else {
+            let output: std::io::Result<std::process::Output> = Command::new("common/scripts/report_build_info.sh").output();
+
+        }
+    }
+
+    match output {
         Ok(output) => {
             for line in String::from_utf8(output.stdout).unwrap().lines() {
                 // Each line looks like `istio.io/pkg/version.buildGitRevision=abc`

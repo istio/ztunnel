@@ -14,10 +14,10 @@
 
 use crate::drain;
 use crate::drain::DrainTrigger;
+use crate::inpod::linux::WorkloadMessage;
+use crate::inpod::{metrics::Metrics, Error};
 use std::sync::Arc;
 use tracing::{Instrument, debug, info};
-
-use super::{Error, WorkloadMessage, metrics::Metrics};
 
 use crate::proxyfactory::ProxyFactory;
 use crate::state::WorkloadInfo;
@@ -388,8 +388,8 @@ impl WorkloadProxyManagerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inpod::WorkloadData;
-    use crate::inpod::test_helpers::{self, create_proxy_conflict, new_netns, uid};
+    use crate::inpod::linux::test_helpers::{self, create_proxy_conflict, new_netns, uid};
+    use crate::inpod::linux::WorkloadData;
 
     use crate::inpod::istio::zds;
     use matches::assert_matches;
@@ -398,7 +398,7 @@ mod tests {
 
     struct Fixture {
         state: WorkloadProxyManagerState,
-        metrics: Arc<crate::inpod::Metrics>,
+        metrics: Arc<crate::inpod::metrics::Metrics>,
     }
 
     fn workload_info() -> Option<zds::WorkloadInfo> {
@@ -406,6 +406,7 @@ mod tests {
             name: "name".to_string(),
             namespace: "ns".to_string(),
             service_account: "sa".to_string(),
+            windows_namespace: None,
         })
     }
 

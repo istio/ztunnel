@@ -278,7 +278,7 @@ impl OutboundConnection {
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+        let upgraded: H2Stream = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
         copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
     }
 
