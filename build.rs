@@ -77,7 +77,7 @@ fn main() -> Result<(), anyhow::Error> {
     
     cfg_if::cfg_if! {
         if #[cfg(target_os = "windows")] {
-            output = Command::new("powershell.exe")
+           let  output = Command::new("powershell.exe")
             .arg("common/scripts/report_build_info.ps1")
             .output();
         } else {
