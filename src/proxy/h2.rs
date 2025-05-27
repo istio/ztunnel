@@ -158,13 +158,10 @@ impl tokio::io::AsyncRead for TokioH2Stream {
         copy::ResizeBufRead::poll_bytes(pinned, cx).map(|r| match r {
             Ok(bytes) => {
                 if buf.remaining() < bytes.len() {
-                    Err(Error::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "kould overflow buffer of with {} remaining",
-                            buf.remaining()
-                        ),
-                    ))
+                    Err(Error::other(format!(
+                        "kould overflow buffer of with {} remaining",
+                        buf.remaining()
+                    )))
                 } else {
                     buf.put(bytes);
                     Ok(())
@@ -302,6 +299,6 @@ fn h2_to_io_error(e: h2::Error) -> std::io::Error {
     if e.is_io() {
         e.into_io().unwrap()
     } else {
-        std::io::Error::new(std::io::ErrorKind::Other, e)
+        std::io::Error::other(e)
     }
 }
