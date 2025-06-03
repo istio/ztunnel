@@ -266,7 +266,8 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
             .thread_name_fn(|| {
                 static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
                 let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-                format!("ztunnel-proxy-{id}")
+                // Thread name can only be 16 chars so keep it short
+                format!("ztunnel-{id}")
             })
             .enable_all()
             .build()

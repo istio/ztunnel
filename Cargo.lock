@@ -4441,6 +4441,7 @@ dependencies = [
  "matches",
  "netns-rs",
  "nix 0.29.0",
+ "num_cpus",
  "oid-registry",
  "once_cell",
  "openssl",

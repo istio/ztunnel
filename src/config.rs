@@ -58,6 +58,7 @@ const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
+const ZTUNNEL_CPU_LIMIT: &str = "ZTUNNEL_CPU_LIMIT";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
 // CONNECTION_TERMINATION_DEADLINE configures an explicit deadline
@@ -407,6 +408,60 @@ fn parse_headers(prefix: &str) -> Result<MetadataVector, Error> {
     Ok(metadata)
 }
 
+fn get_cpu_count() -> Result<usize, Error> {
+    // Allow overriding the count with an env var. This can be used to pass the CPU limit on Kubernetes
+    // from the downward API.
+    // Note the downward API will return the total thread count ("logical cores") if no limit is set,
+    // so it is really the same as num_cpus.
+    // We allow num_cpus for cases its not set (not on Kubernetes, etc).
+    match parse::<usize>(ZTUNNEL_CPU_LIMIT)? {
+        Some(limit) => Ok(limit),
+        // This is *logical cores*
+        None => Ok(num_cpus::get()),
+    }
+}
+
+/// Parse worker threads configuration, supporting both fixed numbers and percentages
+fn parse_worker_threads(default: usize) -> Result<usize, Error> {
+    match parse::<String>(ZTUNNEL_WORKER_THREADS)? {
+        Some(value) => {
+            if let Some(percent_str) = value.strip_suffix('%') {
+                // Parse as percentage
+                let percent: f64 = percent_str.parse().map_err(|e| {
+                    Error::EnvVar(
+                        ZTUNNEL_WORKER_THREADS.to_string(),
+                        value.clone(),
+                        format!("invalid percentage: {}", e),
+                    )
+                })?;
+
+                if percent <= 0.0 || percent > 100.0 {
+                    return Err(Error::EnvVar(
+                        ZTUNNEL_WORKER_THREADS.to_string(),
+                        value,
+                        "percentage must be between 0 and 100".to_string(),
+                    ));
+                }
+
+                let cpu_count = get_cpu_count()?;
+                // Round up, minimum of 1
+                let threads = ((cpu_count as f64 * percent / 100.0).ceil() as usize).max(1);
+                Ok(threads)
+            } else {
+                // Parse as fixed number
+                value.parse::<usize>().map_err(|e| {
+                    Error::EnvVar(
+                        ZTUNNEL_WORKER_THREADS.to_string(),
+                        value,
+                        format!("invalid number: {}", e),
+                    )
+                })
+            }
+        }
+        None => Ok(default),
+    }
+}
+
 pub fn parse_config() -> Result<Config, Error> {
     let pc = parse_proxy_config()?;
     construct_config(pc)
@@ -725,8 +780,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         fake_ca,
         auth,
 
-        num_worker_threads: parse_default(
-            ZTUNNEL_WORKER_THREADS,
+        num_worker_threads: parse_worker_threads(
             pc.concurrency.unwrap_or(DEFAULT_WORKER_THREADS).into(),
         )?,
 
@@ -1092,6 +1146,63 @@ pub mod tests {
             let key: AsciiMetadataKey = AsciiMetadataKey::from_str(&k).unwrap();
             let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
             assert!(metadata.vec.contains(&(key, value)));
+        }
+    }
+
+    #[test]
+    fn test_parse_worker_threads() {
+        unsafe {
+            // Test fixed number
+            env::set_var(ZTUNNEL_WORKER_THREADS, "4");
+            assert_eq!(parse_worker_threads(2).unwrap(), 4);
+
+            // Test percentage with CPU limit
+            env::set_var(ZTUNNEL_CPU_LIMIT, "8");
+            env::set_var(ZTUNNEL_WORKER_THREADS, "50%");
+            assert_eq!(parse_worker_threads(2).unwrap(), 4); // 50% of 8 CPUs = 4 threads
+
+            // Test percentage with CPU limit
+            env::set_var(ZTUNNEL_CPU_LIMIT, "16");
+            env::set_var(ZTUNNEL_WORKER_THREADS, "30%");
+            assert_eq!(parse_worker_threads(2).unwrap(), 5); // Round up to 5
+
+            // Test low percentage that rounds up to 1
+            env::set_var(ZTUNNEL_CPU_LIMIT, "4");
+            env::set_var(ZTUNNEL_WORKER_THREADS, "10%");
+            assert_eq!(parse_worker_threads(2).unwrap(), 1); // 10% of 4 CPUs = 0.4, rounds up to 1
+
+            // Test default when no env var is set
+            env::remove_var(ZTUNNEL_WORKER_THREADS);
+            assert_eq!(parse_worker_threads(2).unwrap(), 2);
+
+            // Test invalid percentage
+            env::set_var(ZTUNNEL_WORKER_THREADS, "150%");
+            assert!(parse_worker_threads(2).is_err());
+
+            // Test invalid number
+            env::set_var(ZTUNNEL_WORKER_THREADS, "invalid");
+            assert!(parse_worker_threads(2).is_err());
+
+            // Clean up
+            env::remove_var(ZTUNNEL_WORKER_THREADS);
+            env::remove_var(ZTUNNEL_CPU_LIMIT);
+        }
+    }
+
+    #[test]
+    fn test_get_cpu_count() {
+        unsafe {
+            // Test without CPU limit (should use system CPU count)
+            env::remove_var(ZTUNNEL_CPU_LIMIT);
+            let system_cpus = num_cpus::get();
+            assert_eq!(get_cpu_count().unwrap(), system_cpus);
+
+            // Test with CPU limit
+            env::set_var(ZTUNNEL_CPU_LIMIT, "12");
+            assert_eq!(get_cpu_count().unwrap(), 12);
+
+            // Clean up
+            env::remove_var(ZTUNNEL_CPU_LIMIT);
         }
     }
 }
