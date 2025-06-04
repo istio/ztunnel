@@ -1183,15 +1183,6 @@ pub mod tests {
             env::set_var(ZTUNNEL_WORKER_THREADS, "invalid");
             assert!(parse_worker_threads(2).is_err());
 
-            // Clean up
-            env::remove_var(ZTUNNEL_WORKER_THREADS);
-            env::remove_var(ZTUNNEL_CPU_LIMIT);
-        }
-    }
-
-    #[test]
-    fn test_get_cpu_count() {
-        unsafe {
             // Test without CPU limit (should use system CPU count)
             env::remove_var(ZTUNNEL_CPU_LIMIT);
             let system_cpus = num_cpus::get();
@@ -1202,6 +1193,7 @@ pub mod tests {
             assert_eq!(get_cpu_count().unwrap(), 12);
 
             // Clean up
+            env::remove_var(ZTUNNEL_WORKER_THREADS);
             env::remove_var(ZTUNNEL_CPU_LIMIT);
         }
     }
