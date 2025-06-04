@@ -362,6 +362,10 @@ impl Worker {
                             // Note that we are using a backoff-per-unique-identity-request. This is to prevent issues
                             // when a cert cannot be fetched for Pod A, but that should not stall retries for
                             // pods B, C, and D.
+
+                            // Check if we should retain the existing valid certificate
+                            let existing_cert_info = self.get_existing_cert_info(&id).await;
+
                             let mut keyed_backoff = match pending_backoffs_by_id.remove(&id) {
                                 Some(backoff) => {
                                     backoff
@@ -382,12 +386,24 @@ impl Worker {
                                     }
                                 }
                             };
-                            let retry = keyed_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            let retry_delay = keyed_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
                             // Store the per-key backoff, we're gonna retry.
                             pending_backoffs_by_id.insert(id.clone(), keyed_backoff);
-                            tracing::debug!(%id, "certificate fetch failed ({err}), retrying in {retry:?}");
-                            let refresh_at = Instant::now() + retry;
-                            (CertState::Unavailable(err), refresh_at)
+                            tracing::debug!(%id, "certificate fetch failed ({err}), retrying in {retry_delay:?}");
+                            let refresh_at = Instant::now() + retry_delay;
+
+                            match existing_cert_info {
+                                // we do have a valid existing certificate, schedule retry
+                                Some((valid_cert, cert_expiry_instant)) => {
+                                    let effective_refresh_at = std::cmp::min(refresh_at, cert_expiry_instant);
+                                    (CertState::Available(valid_cert), effective_refresh_at)
+                                },
+                                // we don't have a valid existing certificate
+                                None => {
+                                    tracing::debug!(%id, "certificate fetch failed ({err}) and no valid existing certificate, retrying in {retry_delay:?}");
+                                    (CertState::Unavailable(err), refresh_at)
+                                }
+                            }
                         },
                         Ok(certs) => {
                              tracing::debug!(%id, "certificate fetch succeeded");
@@ -443,6 +459,40 @@ impl Worker {
             }
             None => false,
         }
+    }
+
+    /// Returns existing valid certificate and its expiry time, or None if unavailable/expired
+    async fn get_existing_cert_info(
+        &self,
+        id: &Identity,
+    ) -> Option<(Arc<tls::WorkloadCertificate>, Instant)> {
+        if let Some(cert_channel) = self.certs.lock().await.get(id) {
+            match &*cert_channel.rx.borrow() {
+                CertState::Available(cert) => {
+                    let now = self
+                        .time_conv
+                        .instant_to_system_time(std::time::Instant::now());
+                    if let Some(now) = now {
+                        let cert_expiry = cert.cert.expiration().not_after;
+
+                        if now < cert_expiry {
+                            if let Some(expiry_instant) =
+                                self.time_conv.system_time_to_instant(cert_expiry)
+                            {
+                                tracing::debug!(%id, "existing certificate valid until {:?}", cert_expiry);
+                                return Some((cert.clone(), expiry_instant.into()));
+                            }
+                        } else {
+                            tracing::debug!(%id, "existing certificate expired at {:?}", cert_expiry);
+                        }
+                    }
+                }
+                _ => {
+                    tracing::debug!(%id, "no valid certificate available to retain");
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1107,6 +1157,36 @@ mod tests {
         assert!(sm.fetch_certificate(&id).await.is_err());
         tokio::time::sleep(SEC * 3).await;
         assert!(sm.fetch_certificate(&id).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_get_existing_cert_info_basic() {
+        let test = setup(1);
+        let id = identity("basic-test");
+        let info = test.secret_manager.worker.get_existing_cert_info(&id).await;
+        assert!(info.is_none());
+
+        // cleanup
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_certificate_retention_functionality() {
+        let test = setup(1);
+        let id = identity("retention-test");
+        let sm = test.secret_manager.clone();
+        let info = test.secret_manager.worker.get_existing_cert_info(&id).await;
+        assert!(info.is_none());
+        let _cert = sm.fetch_certificate(&id).await.unwrap();
+        let info = test.secret_manager.worker.get_existing_cert_info(&id).await;
+        assert!(info.is_some());
+        let (retained_cert, expiry) = info.unwrap();
+        assert!(!retained_cert.cert.serial().is_empty());
+        assert!(expiry > Instant::now());
+
+        // cleanup
+        sm.forget_certificate(&id).await;
+        std::mem::forget(test);
     }
 
     #[test]
