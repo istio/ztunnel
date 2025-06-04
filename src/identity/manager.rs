@@ -1171,22 +1171,32 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_certificate_retention_functionality() {
-        let test = setup(1);
+    async fn test_certificate_retention_on_refresh_failure() {
+        let mut test = setup(1);
         let id = identity("retention-test");
-        let sm = test.secret_manager.clone();
-        let info = test.secret_manager.worker.get_existing_cert_info(&id).await;
-        assert!(info.is_none());
-        let _cert = sm.fetch_certificate(&id).await.unwrap();
-        let info = test.secret_manager.worker.get_existing_cert_info(&id).await;
-        assert!(info.is_some());
-        let (retained_cert, expiry) = info.unwrap();
-        assert!(!retained_cert.cert.serial().is_empty());
-        assert!(expiry > Instant::now());
+        let start = Instant::now();
 
-        // cleanup
-        sm.forget_certificate(&id).await;
-        std::mem::forget(test);
+        // get initial certificate
+        let initial_cert = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        let initial_serial = initial_cert.cert.serial().clone();
+        let initial_fetch_count = test.caclient.fetches().await.len();
+
+        // simulate ca errors
+        test.caclient.set_error(true).await;
+        assert!(test.caclient.fetch_certificate(&id).await.is_err());
+
+        // wait for background refresh
+        tokio::time::sleep_until(start + CERT_HALFLIFE + SEC).await;
+
+        // verify background refresh was attempted and valid certs were retained
+        let post_refresh_fetch_count = test.caclient.fetches().await.len();
+        let current_cert = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        let current_serial = current_cert.cert.serial().clone();
+
+        assert!(post_refresh_fetch_count > initial_fetch_count);
+        assert_eq!(initial_serial, current_serial);
+
+        test.tear_down().await;
     }
 
     #[test]
