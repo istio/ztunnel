@@ -3843,6 +3843,7 @@ dependencies = [
  "log",
  "netns-rs",
  "nix 0.29.0",
+ "num_cpus",
  "once_cell",
  "pin-project-lite",
  "pingora-pool",
