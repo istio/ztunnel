@@ -366,6 +366,19 @@ impl ProxyState {
                 debug!("failed to fetch workload for {}", ep.workload_uid);
                 return None;
             };
+
+            let in_network = wl.network == src.network;
+            let has_network_gateway = wl.network_gateway.is_some();
+            let has_address = !wl.workload_ips.is_empty() || !wl.hostname.is_empty();
+            if !has_address {
+                // Workload has no IP. We can only reach it via a network gateway
+                // WDS is client-agnostic, so we will get a network gateway for a workload
+                // even if it's in the same network; we should never use it.
+                if in_network || !has_network_gateway {
+                    return None;
+                }
+            }
+
             match resolution_mode {
                 ServiceResolutionMode::Standard => {
                     if target_port.unwrap_or_default() == 0 && !ep.port.contains_key(&svc_port) {
