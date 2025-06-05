@@ -1584,6 +1584,22 @@ mod tests {
             },
             ..test_helpers::test_default_workload()
         };
+        let wl_empty_ip = Workload {
+            uid: "cluster1//v1/Pod/default/wl_empty_ip".into(),
+            name: "wl_empty_ip".into(),
+            namespace: "default".into(),
+            trust_domain: "cluster.local".into(),
+            service_account: "default".into(),
+            workload_ips: vec![], // none!
+            network: "network".into(),
+            locality: Locality {
+                region: "reg".into(),
+                zone: "zone".into(),
+                subzone: "".into(),
+            },
+            ..test_helpers::test_default_workload()
+        };
+
         let _ep_almost = Workload {
             uid: "cluster1//v1/Pod/default/ep_almost".into(),
             name: "wl_almost".into(),
@@ -1630,6 +1646,11 @@ mod tests {
                 port: HashMap::from([(80u16, 80u16)]),
                 status: HealthStatus::Healthy,
             },
+            Endpoint {
+                workload_uid: "cluster1//v1/Pod/default/wl_empty_ip".into(),
+                port: HashMap::from([(80u16, 80u16)]),
+                status: HealthStatus::Healthy,
+            },
         ]);
         let strict_svc = Service {
             endpoints: endpoints.clone(),
@@ -1662,6 +1683,7 @@ mod tests {
         state.workloads.insert(Arc::new(wl_no_locality.clone()));
         state.workloads.insert(Arc::new(wl_match.clone()));
         state.workloads.insert(Arc::new(wl_almost.clone()));
+        state.workloads.insert(Arc::new(wl_empty_ip.clone()));
         state.services.insert(strict_svc.clone());
         state.services.insert(failover_svc.clone());
 
@@ -1676,6 +1698,15 @@ mod tests {
                 assert!(want.contains(&got.unwrap()), "{}", desc);
             }
         };
+        let assert_not_endpoint =
+            |src: &Workload, svc: &Service, uid: &str, tries: usize, desc: &str| {
+                for _ in 0..tries {
+                    let got = state
+                        .load_balance(src, svc, 80, ServiceResolutionMode::Standard)
+                        .map(|(ep, _)| ep.workload_uid.as_str());
+                    assert!(got != Some(uid), "{}", desc);
+                }
+            };
 
         assert_endpoint(
             &wl_no_locality,
@@ -1720,6 +1751,13 @@ mod tests {
             &failover_svc,
             vec!["cluster1//v1/Pod/default/wl_match"],
             "failover full match selects closest match",
+        );
+        assert_not_endpoint(
+            &wl_no_locality,
+            &failover_svc,
+            "cluster1//v1/Pod/default/wl_empty_ip",
+            10,
+            "failover no match can select any endpoint",
         );
     }
 }
