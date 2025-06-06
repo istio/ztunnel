@@ -36,6 +36,7 @@ use {crate::test_helpers::MpscAckReceiver, crate::xds::LocalConfig, tokio::sync:
 
 const ENABLE_PROXY: &str = "ENABLE_PROXY";
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
+const REVISION: &str = "REVISION";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
 const PROXY_MODE: &str = "PROXY_MODE";
@@ -57,6 +58,7 @@ const XDS_ADDRESS: &str = "XDS_ADDRESS";
 const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
+const USE_ENV_FOR_DEFAULT_ISTIOD_ADDR: &str = "USE_ENV_FOR_DEFAULT_ISTIOD_ADDR";
 const ZTUNNEL_WORKER_THREADS: &str = "ZTUNNEL_WORKER_THREADS";
 const POOL_MAX_STREAMS_PER_CONNECTION: &str = "POOL_MAX_STREAMS_PER_CONNECTION";
 const POOL_UNUSED_RELEASE_TIMEOUT: &str = "POOL_UNUSED_RELEASE_TIMEOUT";
@@ -321,6 +323,7 @@ impl Default for SocketConfig {
             keepalive_retries: 9,
             keepalive_enabled: true,
             // Might be a good idea but for now we haven't proven this out enough.
+            // TODO: Compile out from windows if we turn this on
             user_timeout_enabled: false,
         }
     }
@@ -435,12 +438,22 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     } else {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     };
+
+    let revision = env::var(REVISION);
+    let cluster_domain = parse_default(CLUSTER_DOMAIN, DEFAULT_CLUSTER_DOMAIN.to_string())?;
     let default_istiod_address = if env::var(KUBERNETES_SERVICE_HOST).is_ok() {
-        "https://istiod.istio-system.svc:15012".to_string()
+        if revision.as_ref().is_ok() {
+            format!(
+                "https://istiod-{}.istio-system.svc:15012",
+                revision.as_ref().ok().unwrap(),
+            )
+        } else {
+            "https://istiod.istio-system.svc:15012".to_string()
+        }
     } else {
         "https://localhost:15012".to_string()
     };
-    let xds_address = validate_uri(empty_to_none(
+    let mut xds_address = validate_uri(empty_to_none(
         parse(XDS_ADDRESS)?
             .or(pc.discovery_address)
             .or_else(|| Some(default_istiod_address.clone())),
@@ -451,14 +464,32 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         Some(id) => id,
         None => parse_default::<String>(CLUSTER_ID, DEFAULT_CLUSTER_ID.to_string())?,
     };
-    let cluster_domain = parse_default(CLUSTER_DOMAIN, DEFAULT_CLUSTER_DOMAIN.to_string())?;
 
     let fake_ca = parse_default(FAKE_CA, false)?;
-    let ca_address = validate_uri(empty_to_none(if fake_ca {
+    let mut ca_address = validate_uri(empty_to_none(if fake_ca {
         None
     } else {
         Some(parse_default(CA_ADDRESS, default_istiod_address)?)
     }))?;
+
+    match parse::<bool>(USE_ENV_FOR_DEFAULT_ISTIOD_ADDR)? {
+        Some(true) => {
+            // If we are using the environment for XDS and CA addresses, we should override the
+            // values we just parsed with the environment variables.
+            // However, we need to keep the hosts around for SNI purposes.
+            let mut istiod_addr_env = "ISTIOD_SERVICE_HOST".to_string();
+            if revision.as_ref().is_ok() {
+                istiod_addr_env = format!("ISTIOD_{}_SERVICE_HOST", revision.ok().unwrap().replace("-", "_"));
+            }
+            let istiod_host = env::var(istiod_addr_env.clone()).unwrap();
+            let istiod_addr = format!("https://{}:15012", istiod_host);
+            let validated_addr = validate_uri(Some(istiod_addr))?;
+            xds_address = validated_addr.clone();
+            ca_address = validated_addr.clone();
+        }
+        Some(false) => {}
+        None => {}
+    }
 
     let xds_root_cert_provider =
         parse_default(XDS_ROOT_CA_ENV, DEFAULT_ROOT_CERT_PROVIDER.to_string())?;
