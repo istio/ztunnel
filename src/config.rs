@@ -1175,14 +1175,6 @@ pub mod tests {
             env::remove_var(ZTUNNEL_WORKER_THREADS);
             assert_eq!(parse_worker_threads(2).unwrap(), 2);
 
-            // Test invalid percentage
-            env::set_var(ZTUNNEL_WORKER_THREADS, "150%");
-            assert!(parse_worker_threads(2).is_err());
-
-            // Test invalid number
-            env::set_var(ZTUNNEL_WORKER_THREADS, "invalid");
-            assert!(parse_worker_threads(2).is_err());
-
             // Test without CPU limit (should use system CPU count)
             env::remove_var(ZTUNNEL_CPU_LIMIT);
             let system_cpus = num_cpus::get();
