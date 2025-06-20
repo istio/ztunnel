@@ -87,7 +87,7 @@ pub struct H2StreamWriteHalf {
 
 pub struct TokioH2Stream {
     stream: H2Stream,
-    prev_bytes: Bytes,
+    prev_unread: Bytes,
 }
 
 struct DropCounter {
@@ -149,7 +149,7 @@ impl TokioH2Stream {
     pub fn new(stream: H2Stream) -> Self {
         Self {
             stream,
-            prev_bytes: Bytes::new(),
+            prev_unread: Bytes::new(),
         }
     }
 }
@@ -163,12 +163,12 @@ impl tokio::io::AsyncRead for TokioH2Stream {
         // Just return the bytes we have left over and don't poll the stream because
         // its unclear what to do if there are bytes left over from the previous read, and when we
         // poll, we get an error.
-        if !self.prev_bytes.is_empty() {
-            let to_write_from_prev = Ord::min(buf.remaining(), self.prev_bytes.len());
-            buf.put(self.prev_bytes.slice(0..to_write_from_prev));
-            self.prev_bytes = self
-                .prev_bytes
-                .slice(to_write_from_prev..self.prev_bytes.len());
+        if !self.prev_unread.is_empty() {
+            let to_write_from_prev = Ord::min(buf.remaining(), self.prev_unread.len());
+            buf.put(self.prev_unread.slice(0..to_write_from_prev));
+            self.prev_unread = self
+                .prev_unread
+                .slice(to_write_from_prev..self.prev_unread.len());
             return Poll::Ready(Ok(()));
         }
 
@@ -178,7 +178,7 @@ impl tokio::io::AsyncRead for TokioH2Stream {
                 let to_write = Ord::min(buf.remaining(), bytes.len());
                 buf.put(bytes.slice(0..to_write));
                 // prev_bytes must be empty, so its safe to overwrite.
-                self.prev_bytes = bytes.slice(to_write..bytes.len());
+                self.prev_unread = bytes.slice(to_write..bytes.len());
                 Ok(())
             }
             Err(e) => Err(e),
