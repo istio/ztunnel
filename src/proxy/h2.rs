@@ -85,7 +85,10 @@ pub struct H2StreamWriteHalf {
     _dropped: Option<DropCounter>,
 }
 
-pub struct TokioH2Stream(H2Stream);
+pub struct TokioH2Stream {
+    stream: H2Stream,
+    prev_bytes: Bytes,
+}
 
 struct DropCounter {
     // Whether the other end of this shared counter has already dropped.
@@ -144,7 +147,10 @@ impl Drop for DropCounter {
 // then the specific implementation will conflict with the generic one.
 impl TokioH2Stream {
     pub fn new(stream: H2Stream) -> Self {
-        Self(stream)
+        Self {
+            stream,
+            prev_bytes: Bytes::new(),
+        }
     }
 }
 
@@ -154,18 +160,26 @@ impl tokio::io::AsyncRead for TokioH2Stream {
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let pinned = std::pin::Pin::new(&mut self.0.read);
+        // Just return the bytes we have left over and don't poll the stream because
+        // its unclear what to do if there are bytes left over from the previous read, and when we
+        // poll, we get an error.
+        if !self.prev_bytes.is_empty() {
+            let to_write_from_prev = Ord::min(buf.remaining(), self.prev_bytes.len());
+            buf.put(self.prev_bytes.slice(0..to_write_from_prev));
+            self.prev_bytes = self
+                .prev_bytes
+                .slice(to_write_from_prev..self.prev_bytes.len());
+            return Poll::Ready(Ok(()));
+        }
+
+        let pinned = std::pin::Pin::new(&mut self.stream.read);
         copy::ResizeBufRead::poll_bytes(pinned, cx).map(|r| match r {
             Ok(bytes) => {
-                if buf.remaining() < bytes.len() {
-                    Err(Error::other(format!(
-                        "kould overflow buffer of with {} remaining",
-                        buf.remaining()
-                    )))
-                } else {
-                    buf.put(bytes);
-                    Ok(())
-                }
+                let to_write = Ord::min(buf.remaining(), bytes.len());
+                buf.put(bytes.slice(0..to_write));
+                // prev_bytes must be empty, so its safe to overwrite.
+                self.prev_bytes = bytes.slice(to_write..bytes.len());
+                Ok(())
             }
             Err(e) => Err(e),
         })
@@ -178,7 +192,7 @@ impl tokio::io::AsyncWrite for TokioH2Stream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, tokio::io::Error>> {
-        let pinned = std::pin::Pin::new(&mut self.0.write);
+        let pinned = std::pin::Pin::new(&mut self.stream.write);
         let buf = Bytes::copy_from_slice(buf);
         copy::AsyncWriteBuf::poll_write_buf(pinned, cx, buf)
     }
@@ -187,7 +201,7 @@ impl tokio::io::AsyncWrite for TokioH2Stream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let pinned = std::pin::Pin::new(&mut self.0.write);
+        let pinned = std::pin::Pin::new(&mut self.stream.write);
         copy::AsyncWriteBuf::poll_flush(pinned, cx)
     }
 
@@ -195,7 +209,7 @@ impl tokio::io::AsyncWrite for TokioH2Stream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let pinned = std::pin::Pin::new(&mut self.0.write);
+        let pinned = std::pin::Pin::new(&mut self.stream.write);
         copy::AsyncWriteBuf::poll_shutdown(pinned, cx)
     }
 }
