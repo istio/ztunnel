@@ -14,8 +14,9 @@
 
 use super::Error;
 
-use crate::identity::{self, Identity};
+#[allow(unused_imports)]
 use crate::PQC_ENABLED;
+use crate::identity::{self, Identity};
 
 use std::fmt::Debug;
 

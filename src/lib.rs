@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
 use once_cell::sync::Lazy;
+use std::env;
 
 pub mod admin;
 pub mod app;
@@ -46,6 +46,6 @@ pub mod xds;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
-static PQC_ENABLED: Lazy<bool> = Lazy::new(|| {
-    env::var("COMPLIANCE_POLICY").unwrap_or_default() == "pqc"
-});
+#[allow(dead_code)]
+static PQC_ENABLED: Lazy<bool> =
+    Lazy::new(|| env::var("COMPLIANCE_POLICY").unwrap_or_default() == "pqc");
