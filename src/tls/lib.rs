@@ -15,6 +15,7 @@
 use super::Error;
 
 use crate::identity::{self, Identity};
+use crate::PQC_ENABLED;
 
 use std::fmt::Debug;
 
@@ -77,12 +78,8 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
         ..rustls::crypto::aws_lc_rs::default_provider()
     };
 
-    let kx_groups = match std::env::var("COMPLIANCE_POLICY").as_deref() {
-        Ok("pqc") => Some(vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]),
-        _ => None,
-    };
-    if let Some(kx) = kx_groups {
-        provider.kx_groups = kx;
+    if *PQC_ENABLED {
+        provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
     }
 
     Arc::new(provider)
