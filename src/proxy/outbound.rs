@@ -458,8 +458,9 @@ impl OutboundConnection {
                     .destination_service
                     .as_ref()
                     .expect("Workloads with network gateways must be service addressed.");
+                // Use the service port
                 let hbone_target_destination =
-                    Some(HboneAddress::SvcHostname(svc.hostname.clone(), us.port));
+                    Some(HboneAddress::SvcHostname(svc.hostname.clone(), target.port()));
 
                 return Ok(Request {
                     protocol: OutboundProtocol::DOUBLEHBONE,
@@ -867,7 +868,7 @@ mod tests {
             ],
             Some(ExpectedRequest {
                 protocol: OutboundProtocol::DOUBLEHBONE,
-                hbone_destination: "example.com:8080",
+                hbone_destination: "example.com:80",
                 destination: "10.22.1.1:15009",
             }),
         )
@@ -944,7 +945,7 @@ mod tests {
             ],
             Some(ExpectedRequest {
                 protocol: OutboundProtocol::DOUBLEHBONE,
-                hbone_destination: "example.com:8080",
+                hbone_destination: "example.com:80",
                 destination: "127.0.0.5:15008",
             }),
         )
