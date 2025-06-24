@@ -534,8 +534,17 @@ impl OutboundConnection {
         // Check whether we are using an E/W gateway and sending cross network traffic
         if us.workload.network != source_workload.network {
             // Workloads on remote network must be service addressed, so if we got here
-            // and we don't have a service for the oriuginal target address then it's a
+            // and we don't have a service for the original target address then it's a
             // bug either in ztunnel itself or in istiod.
+            //
+            // For a double HBONE protocol implementation we have to know the
+            // destination service and if there is no service for the target it's a bug.
+            //
+            // This situation "should never happen" because for workloads fetch_upstream
+            // above only checks the workloads on the same network as this ztunnel
+            // instance and therefore it should not be able to find a workload on a
+            // different network.
+            debug_assert!(service.is_some(), "workload on remote network is not service addressed");
             let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
                 .build_request_through_gateway(source_workload.clone(), us, service, target)
