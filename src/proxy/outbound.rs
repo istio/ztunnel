@@ -428,12 +428,11 @@ impl OutboundConnection {
                 // The outer tunnel of double HBONE is terminated by the E/W
                 // gateway and so for the credentials of the next hop
                 // (upstream_sans) we use gateway credentials.
-                //
+                upstream_sans: gateway_upstream.workload_and_services_san(),
                 // The inner HBONE tunnel is terminated by either the server
                 // we want to reach or a Waypoint in front of it, depending on
                 // the configuration. So for the final destination credentials
                 // (final_sans) we use the upstream workload credentials.
-                upstream_sans: gateway_upstream.workload_and_services_san(),
                 final_sans: upstream.service_sans(),
             })
         } else {
