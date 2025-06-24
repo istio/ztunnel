@@ -532,15 +532,12 @@ impl OutboundConnection {
 
         // Check whether we are using an E/W gateway and sending cross network traffic
         if us.workload.network != source_workload.network {
+            // Workloads on remote network must be service addressed, so if we got here
+            // and we don't have a service for the oriuginal target address then it's a
+            // bug either in ztunnel itself or in istiod.
+            let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
-                .build_request_through_gateway(
-                    source_workload.clone(),
-                    us,
-                    service
-                        .as_ref()
-                        .expect("Workloads with network gateways must be service addressed."),
-                    target,
-                )
+                .build_request_through_gateway(source_workload.clone(), us, service, target)
                 .await;
         }
 
