@@ -544,7 +544,10 @@ impl OutboundConnection {
             // above only checks the workloads on the same network as this ztunnel
             // instance and therefore it should not be able to find a workload on a
             // different network.
-            debug_assert!(service.is_some(), "workload on remote network is not service addressed");
+            debug_assert!(
+                service.is_some(),
+                "workload on remote network is not service addressed"
+            );
             let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
                 .build_request_through_gateway(source_workload.clone(), us, service, target)
