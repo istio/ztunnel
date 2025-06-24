@@ -369,6 +369,29 @@ impl OutboundConnection {
         }
     }
 
+    // This function is called when the select next hop is on a different network,
+    // so we expect the upstream workload to have a network gatewy configured.
+    //
+    // When we use a gateway to reach to a workload on a remote network we have to
+    // use double HBONE (HBONE incapsulated inside HBONE). The gateway will
+    // terminate the outer HBONE tunnel and forward the inner HBONE to the actual
+    // destination as a opaque stream of bytes and the actual destination will
+    // interpret it as an HBONE connection.
+    //
+    // If the upstream workload does not have an E/W gateway this function returns
+    // an error indicating that it could not find a valid destination.
+    //
+    // A note about double HBONE, in double HBONE both inner and outer HBONE use
+    // destination service name as HBONE target URI.
+    //
+    // Having target URI in the outer HBONE tunnel allows E/W gateway to figure out
+    // where to route the data next witout the need to terminate inner HBONE tunnel.
+    // In other words, it could forward inner HBONE as if it's an opaque stream of
+    // bytes without trying to interpret it.
+    //
+    // NOTE: when connecting through an E/W gateway, regardless of whether there is
+    // a waypoint or not, we always use service hostname and the service port. It's
+    // somewhat different from how regular HBONE works, so I'm calling it out here.
     async fn build_request_through_gateway(
         &self,
         source: Arc<Workload>,
@@ -384,33 +407,12 @@ impl OutboundConnection {
         service: &Service,
         target: SocketAddr,
     ) -> Result<Request, Error> {
-        // This function is called when the next hop we selected is on a
-        // different network, so we expect the upstream workload to have
-        // a network gatewy configured.
-        //
-        // And when we use a gateway to reach to a workload on a remote network
-        // we have to use double HBONE (HBONE incapsulated inside HBONE). The
-        // gateway will terminate the outer HBONE tunnel and forward the inner
-        // HBONE to the destination as a opaque stream of bytes.
         if let Some(gateway) = &upstream.workload.network_gateway {
             let gateway_upstream = self
                 .pi
                 .state
                 .fetch_network_gateway(gateway, &source, target)
                 .await?;
-            // In double HBONE both inner and outer HBONE use destination
-            // service name as HBONE target URI.
-            //
-            // Having target URI in the outer HBONE allows E/W gateway to
-            // figure out where to route the data next (e.g., a pod backing the
-            // service or a waypoint) without need to terminate inner HBONE
-            // tunnel, so it could forward the data as if it's a stream of
-            // bytes.
-            //
-            // NOTE: when connecting through an E/W gateway, regardless of
-            // whether there is a waypoint or not, we always use service
-            // hostname and the service port. Calling it out here because
-            // that's somewhat different from how regular HBONE works.
             let hbone_target_destination = Some(HboneAddress::SvcHostname(
                 service.hostname.clone(),
                 target.port(),
