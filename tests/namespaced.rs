@@ -197,8 +197,9 @@ mod namespaced {
         Ok(())
     }
 
+    /// Test having an IP address in the network gateway
     #[tokio::test]
-    async fn double_hbone1() -> anyhow::Result<()> {
+    async fn double_hbone_ip_addressed_network_gateway() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(Shared);
 
         let zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
@@ -214,7 +215,7 @@ mod namespaced {
                 address: TEST_VIP.parse::<IpAddr>()?,
             }])
             .subject_alt_names(vec!["spiffe://cluster.local/ns/default/sa/echo".into()])
-            .ports(HashMap::from([(8080, 8080)]))
+            .ports(HashMap::from([(80, 8080)]))
             .register()
             .await?;
 
@@ -231,7 +232,7 @@ mod namespaced {
         // represents workloads in the remote cluster.
         // Its a little weird because we do give it a namespaced/ip,
         // but that's because of how the tests infra works.
-        let _local_remote_workload = manager
+        let _split_horizon_workload = manager
             .workload_builder("local-remote-workload", "remote-node")
             .hbone()
             .network("remote".into())
@@ -247,7 +248,7 @@ mod namespaced {
                 namespace: "default".into(),
                 service_account: "actual-ew-gtw".into(),
             })
-            .service("default/remote.default.svc.cluster.local", 8080, 8080)
+            .service("default/remote.default.svc.cluster.local", 80, 8080)
             .register()
             .await?;
         let echo = manager
@@ -279,7 +280,7 @@ mod namespaced {
         run_tcp_to_hbone_client(
             client.clone(),
             manager.resolver(),
-            &format!("{TEST_VIP}:8080"),
+            &format!("{TEST_VIP}:80"),
         )?;
 
         let metrics = [
@@ -297,7 +298,7 @@ mod namespaced {
             ("scope", "access"),
             ("src.workload", "client"),
             ("dst.workload", "actual-ew-gtw"),
-            ("dst.hbone_addr", "remote.default.svc.cluster.local:8080"),
+            ("dst.hbone_addr", "remote.default.svc.cluster.local:80"),
             ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),
             ("bytes_recv", &recv),
@@ -317,7 +318,7 @@ mod namespaced {
     }
 
     #[tokio::test]
-    async fn double_hbone2() -> anyhow::Result<()> {
+    async fn double_hbone_hostname_addressed_network_gateway() -> anyhow::Result<()> {
         let mut manager = setup_netns_test!(Shared);
 
         let _zt = manager.deploy_ztunnel(DEFAULT_NODE).await?;
