@@ -112,6 +112,7 @@ impl ProxyFactory {
                 drain.clone(),
                 socket_factory.as_ref(),
                 local_workload_information.as_fetcher(),
+                self.config.prefered_service_namespace.clone(),
             )
             .await?;
             resolver = Some(server.resolver());

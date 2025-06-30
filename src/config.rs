@@ -54,6 +54,7 @@ const LOCAL_XDS_PATH: &str = "LOCAL_XDS_PATH";
 const LOCAL_XDS: &str = "LOCAL_XDS";
 const XDS_ON_DEMAND: &str = "XDS_ON_DEMAND";
 const XDS_ADDRESS: &str = "XDS_ADDRESS";
+const PREFERED_SERVICE_NAMESPACE: &str = "PREFERED_SERVICE_NAMESPACE";
 const CA_ADDRESS: &str = "CA_ADDRESS";
 const SECRET_TTL: &str = "SECRET_TTL";
 const FAKE_CA: &str = "FAKE_CA";
@@ -241,6 +242,12 @@ pub struct Config {
     pub xds_root_cert: RootCert,
     // Allow custom alternative XDS hostname verification
     pub alt_xds_hostname: Option<String>,
+
+    /// Prefered service namespace to use for service resolution.
+    /// If unset, local namespaces is preferred and other namespaces have equal priority.
+    /// If set, the local namespace is preferred, then the defined prefered_service_namespace
+    /// and finally other namespaces at an equal priority.
+    pub prefered_service_namespace: Option<String>,
 
     /// TTL for CSR requests
     pub secret_ttl: Duration,
@@ -500,6 +507,14 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .or(pc.discovery_address)
             .or_else(|| Some(default_istiod_address.clone())),
     ))?;
+
+    let prefered_service_namespace = match parse::<String>(PREFERED_SERVICE_NAMESPACE) {
+        Ok(ns) => ns,
+        Err(e) => {
+            warn!(err=?e, "failed to parse {PREFERED_SERVICE_NAMESPACE}, continuing with default behavior");
+            None
+        }
+    };
 
     let istio_meta_cluster_id = ISTIO_META_PREFIX.to_owned() + CLUSTER_ID;
     let cluster_id: String = match parse::<String>(&istio_meta_cluster_id)? {
@@ -767,6 +782,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         xds_address,
         xds_root_cert,
+        prefered_service_namespace,
         ca_address,
         ca_root_cert,
         alt_xds_hostname: parse(ALT_XDS_HOSTNAME)?,

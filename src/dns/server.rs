@@ -85,6 +85,7 @@ impl Server {
         drain: DrainWatcher,
         socket_factory: &(dyn SocketFactory + Send + Sync),
         local_workload_information: Arc<LocalWorkloadFetcher>,
+        prefered_service_namespace: Option<String>,
     ) -> Result<Self, Error> {
         // if the address we got from config is supposed to be v6-enabled,
         // actually check if the local pod context our socketfactory operates in supports V6.
@@ -102,6 +103,7 @@ impl Server {
             forwarder,
             metrics,
             local_workload_information,
+            prefered_service_namespace,
         );
         let store = Arc::new(store);
         let handler = dns::handler::Handler::new(store.clone());
@@ -191,6 +193,7 @@ struct Store {
     svc_domain: Name,
     metrics: Arc<Metrics>,
     local_workload: Arc<LocalWorkloadFetcher>,
+    prefered_service_namespace: Option<String>,
 }
 
 impl Store {
@@ -200,6 +203,7 @@ impl Store {
         forwarder: Arc<dyn Forwarder>,
         metrics: Arc<Metrics>,
         local_workload_information: Arc<LocalWorkloadFetcher>,
+        prefered_service_namespace: Option<String>,
     ) -> Self {
         let domain = as_name(domain);
         let svc_domain = append_name(as_name("svc"), &domain);
@@ -211,6 +215,7 @@ impl Store {
             svc_domain,
             metrics,
             local_workload: local_workload_information,
+            prefered_service_namespace,
         }
     }
 
@@ -386,17 +391,20 @@ impl Store {
                     .cloned()
                     .collect();
 
-                // TODO: don't hardcode istio-system, use rootNamespace
                 // TODO: ideally we'd sort these by creation time so that the oldest would be used if there are no namespace matches
                 // presently service doesn't have creation time in WDS, but we could add it
+                // TODO: if the local namespace doesn't define a service, kube service should be prioritized over se
                 let service = match services
                     .iter()
                     .find(|service| service.namespace == client.namespace)
                 {
                     Some(service) => Some(service),
-                    None => services
-                        .iter()
-                        .find_or_first(|service| service.namespace == "istio-system"),
+                    None => match self.prefered_service_namespace.as_ref() {
+                        Some(prefered_namespace) => services.iter().find_or_first(|service| {
+                            service.namespace == prefered_namespace.as_str()
+                        }),
+                        None => services.first(),
+                    },
                 };
 
                 // First, lookup the host as a service.
@@ -970,6 +978,7 @@ mod tests {
 
     const NS1: &str = "ns1";
     const NS2: &str = "ns2";
+    const PREFERRED: &str = "preferred-ns";
     const NW1: Strng = strng::literal!("nw1");
     const NW2: Strng = strng::literal!("nw2");
 
@@ -1077,6 +1086,7 @@ mod tests {
                 forwarder,
                 metrics: test_metrics(),
                 local_workload,
+                prefered_service_namespace: None,
             };
 
             let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
@@ -1392,6 +1402,18 @@ mod tests {
                 expect_code: ResponseCode::NXDomain,
                 ..Default::default()
             },
+            Case {
+                name: "success: preferred namespace is chosen if local namespace is not defined",
+                host: "preferred.io.",
+                expect_records: vec![a(n("preferred.io."), ipv4("10.10.10.211"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: external service resolves to local namespace's address",
+                host: "everywhere.io.",
+                expect_records: vec![a(n("everywhere.io."), ipv4("10.10.10.112"))],
+                ..Default::default()
+            },
         ];
 
         // Create and start the proxy.
@@ -1409,6 +1431,7 @@ mod tests {
             drain,
             &factory,
             local_workload,
+            Some(PREFERRED.to_string()),
         )
         .await
         .unwrap();
@@ -1495,6 +1518,7 @@ mod tests {
             drain,
             &factory,
             local_workload,
+            None,
         )
         .await
         .unwrap();
@@ -1544,6 +1568,7 @@ mod tests {
                 }),
                 state.clone(),
             ),
+            prefered_service_namespace: None,
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1577,6 +1602,7 @@ mod tests {
             drain,
             &factory,
             local_workload,
+            None,
         )
         .await
         .unwrap();
@@ -1693,6 +1719,16 @@ mod tests {
             xds_external_service("www.google.com", &[na(NW1, "1.1.1.1")]),
             xds_service("productpage", NS1, &[na(NW1, "9.9.9.9")]),
             xds_service("example", NS2, &[na(NW1, "10.10.10.10")]),
+            // Service with the same name in another namespace
+            // This should not be used if the preferred service namespace is set
+            xds_namespaced_external_service("everywhere.io", NS2, &[na(NW1, "10.10.10.110")]),
+            xds_namespaced_external_service("preferred.io", NS2, &[na(NW1, "10.10.10.210")]),
+            // Preferred service namespace
+            xds_namespaced_external_service("everywhere.io", PREFERRED, &[na(NW1, "10.10.10.111")]),
+            xds_namespaced_external_service("preferred.io", PREFERRED, &[na(NW1, "10.10.10.211")]),
+            // Service with the same name in the same namespace
+            // Client in NS1 should use this service
+            xds_namespaced_external_service("everywhere.io", NS1, &[na(NW1, "10.10.10.112")]),
             with_fqdn(
                 "details.ns2.svc.cluster.remote",
                 xds_service(
@@ -1843,9 +1879,17 @@ mod tests {
     }
 
     fn xds_external_service<S: AsRef<str>>(hostname: S, addrs: &[NetworkAddress]) -> XdsService {
+        xds_namespaced_external_service(hostname, NS1, addrs)
+    }
+
+    fn xds_namespaced_external_service<S1: AsRef<str>, S2: AsRef<str>>(
+        hostname: S1,
+        ns: S2,
+        vips: &[NetworkAddress],
+    ) -> XdsService {
         with_fqdn(
             hostname.as_ref(),
-            xds_service(hostname.as_ref(), NS1, addrs),
+            xds_service(hostname.as_ref(), ns.as_ref(), vips),
         )
     }
 
