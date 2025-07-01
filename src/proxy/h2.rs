@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::copy;
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use futures_core::ready;
 use h2::Reason;
 use std::io::Error;
@@ -87,7 +87,7 @@ pub struct H2StreamWriteHalf {
 
 pub struct TokioH2Stream {
     stream: H2Stream,
-    prev_unread: Bytes,
+    buf: Bytes,
 }
 
 struct DropCounter {
@@ -149,7 +149,7 @@ impl TokioH2Stream {
     pub fn new(stream: H2Stream) -> Self {
         Self {
             stream,
-            prev_unread: Bytes::new(),
+            buf: Bytes::new(),
         }
     }
 }
@@ -163,26 +163,18 @@ impl tokio::io::AsyncRead for TokioH2Stream {
         // Just return the bytes we have left over and don't poll the stream because
         // its unclear what to do if there are bytes left over from the previous read, and when we
         // poll, we get an error.
-        if !self.prev_unread.is_empty() {
-            let to_write_from_prev = Ord::min(buf.remaining(), self.prev_unread.len());
-            buf.put(self.prev_unread.slice(0..to_write_from_prev));
-            self.prev_unread = self
-                .prev_unread
-                .slice(to_write_from_prev..self.prev_unread.len());
-            return Poll::Ready(Ok(()));
+        if self.buf.is_empty() {
+            // If we have no unread bytes, we can poll the stream
+            // and fill self.buf with the bytes we read.
+            let pinned = std::pin::Pin::new(&mut self.stream.read);
+            let res = ready!(copy::ResizeBufRead::poll_bytes(pinned, cx))?;
+            self.buf = res;
         }
-
-        let pinned = std::pin::Pin::new(&mut self.stream.read);
-        copy::ResizeBufRead::poll_bytes(pinned, cx).map(|r| match r {
-            Ok(bytes) => {
-                let to_write = Ord::min(buf.remaining(), bytes.len());
-                buf.put(bytes.slice(0..to_write));
-                // prev_bytes must be empty, so its safe to overwrite.
-                self.prev_unread = bytes.slice(to_write..bytes.len());
-                Ok(())
-            }
-            Err(e) => Err(e),
-        })
+        // Copy as many bytes as we can from self.buf.
+        let cnt = Ord::min(buf.remaining(), self.buf.len());
+        buf.put_slice(&self.buf[..cnt]);
+        self.buf = self.buf.split_off(cnt);
+        Poll::Ready(Ok(()))
     }
 }
 
