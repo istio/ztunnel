@@ -14,8 +14,9 @@
 
 extern crate core;
 
+use nix::sys::resource::{Resource, getrlimit, setrlimit};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 use ztunnel::*;
 
 #[cfg(feature = "jemalloc")]
@@ -42,6 +43,19 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1)
         }
     };
+
+    if let Ok((soft_limit, hard_limit)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, hard_limit, hard_limit) {
+            warn!("failed to set file descriptor limits: {e}");
+        } else {
+            info!(
+                "set file descriptor limits from {} to {}",
+                soft_limit, hard_limit
+            );
+        }
+    } else {
+        warn!("failed to get file descriptor limits");
+    }
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
