@@ -71,7 +71,7 @@ itertools = "0.14"
 keyed_priority_queue = "0.4"
 libc = "0.2"
 log = "0.4"
-nix = { version = "0.29", features = ["socket", "sched", "uio", "fs", "ioctl", "user", "net", "mount"] }
+nix = { version = "0.29", features = ["socket", "sched", "uio", "fs", "ioctl", "user", "net", "mount", "resource" ] }
 once_cell = "1.21"
 num_cpus = "1.16"
 ppp = "2.3"
