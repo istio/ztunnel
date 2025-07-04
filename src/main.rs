@@ -31,7 +31,8 @@ pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0
 
 // We use this on Unix systems to increase the number of open file descriptors
 // if possible. This is useful for high-load scenarios where the default limit
-// is too low, which can lead to droopped connections and other issues (#1585).
+// is too low, which can lead to droopped connections and other issues:
+// see: https://github.com/istio/ztunnel/issues/1585
 fn increase_open_files_limit() {
     #[cfg(unix)]
     if let Ok((soft_limit, hard_limit)) = getrlimit(Resource::RLIMIT_NOFILE) {
