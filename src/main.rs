@@ -29,6 +29,22 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
+fn increase_open_files_limit() {
+    #[cfg(unix)]
+    if let Ok((soft_limit, hard_limit)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, hard_limit, hard_limit) {
+            warn!("failed to set file descriptor limits: {e}");
+        } else {
+            info!(
+                "set file descriptor limits from {} to {}",
+                soft_limit, hard_limit
+            );
+        }
+    } else {
+        warn!("failed to get file descriptor limits");
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let _log_flush = telemetry::setup_logging();
 
@@ -43,19 +59,6 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1)
         }
     };
-
-    if let Ok((soft_limit, hard_limit)) = getrlimit(Resource::RLIMIT_NOFILE) {
-        if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, hard_limit, hard_limit) {
-            warn!("failed to set file descriptor limits: {e}");
-        } else {
-            info!(
-                "set file descriptor limits from {} to {}",
-                soft_limit, hard_limit
-            );
-        }
-    } else {
-        warn!("failed to get file descriptor limits");
-    }
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -88,6 +91,7 @@ fn version() -> anyhow::Result<()> {
 
 async fn proxy(cfg: Arc<config::Config>) -> anyhow::Result<()> {
     info!("version: {}", version::BuildInfo::new());
+    increase_open_files_limit();
     info!("running with config: {}", serde_yaml::to_string(&cfg)?);
     app::build(cfg).await?.wait_termination().await
 }
