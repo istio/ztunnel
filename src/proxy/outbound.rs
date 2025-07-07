@@ -418,6 +418,7 @@ impl OutboundConnection {
                 target.port(),
             ));
 
+            debug!("built request to a destination on another network through an E/W gateway");
             Ok(Request {
                 protocol: OutboundProtocol::DOUBLEHBONE,
                 source,
@@ -470,6 +471,7 @@ impl OutboundConnection {
                 .await?
             {
                 if waypoint.workload.network != source_workload.network {
+                    debug!("picked a waypoint on remote network");
                     return self
                         .build_request_through_gateway(
                             source_workload.clone(),
@@ -548,6 +550,7 @@ impl OutboundConnection {
                 service.is_some(),
                 "workload on remote network is not service addressed"
             );
+            debug!("picked a workload on remote network");
             let service = service.as_ref().ok_or(Error::NoService(target))?;
             return self
                 .build_request_through_gateway(source_workload.clone(), us, service, target)
