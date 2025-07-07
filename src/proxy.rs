@@ -484,6 +484,9 @@ pub enum Error {
     #[error("requested service {0} found, but has no IP addresses")]
     NoIPForService(String),
 
+    #[error("no service for target address: {0}")]
+    NoService(SocketAddr),
+
     #[error(
         "ip addresses were resolved for workload {0}, but valid dns response had no A/AAAA records"
     )]
