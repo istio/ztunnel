@@ -389,11 +389,20 @@ impl WorkloadHBONEPool {
         let mut s = DefaultHasher::new();
         workload_key.hash(&mut s);
         let hash_key = s.finish();
+
+        // Unfortunately, `pingora_pool` crate doesn't make its Connection ID type visible to external modules.
+        // Without Connection ID type we cannot transparently support compilation for Windows.
+        // As a workaround, we define `pingora_pool`'s Connection ID type in-place.
+        #[cfg(unix)]
+        type ConnectionID = i32;
+        #[cfg(windows)]
+        type ConnectionID = usize;
+
         let pool_key = pingora_pool::ConnectionMeta::new(
             hash_key,
             self.state
                 .pool_global_conn_count
-                .fetch_add(1, Ordering::SeqCst),
+                .fetch_add(1, Ordering::SeqCst) as ConnectionID,
         );
         // First, see if we can naively take an inner lock for our specific key, and get a connection.
         // This should be the common case, except for the first establishment of a new connection/key.

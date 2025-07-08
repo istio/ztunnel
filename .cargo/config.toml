@@ -3,3 +3,12 @@ target-dir = "out/rust"
 [env]
 BORING_BSSL_FIPS_PATH = { value = "vendor/boringssl-fips/linux_x86_64", force = true, relative = true }
 BORING_BSSL_FIPS_INCLUDE_PATH = { value = "vendor/boringssl-fips/include/", force = true, relative = true }
+
+# When targeting MSVC, link statically to MSVCRT in order to create a portable binary.
+#
+# Otherwise, to be able to use ztunnel binary on Windows a user would need to explicitly install
+# C Runtime (CRT) libraries as part of the "Microsoft Visual C++ Redistributable".
+#
+# See https://github.com/rust-lang/rfcs/blob/master/text/1721-crt-static.md
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

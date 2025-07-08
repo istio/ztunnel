@@ -113,13 +113,15 @@ impl DefaultSocketFactory {
         if cfg.keepalive_enabled {
             let ka = TcpKeepalive::new()
                 .with_time(cfg.keepalive_time)
-                .with_retries(cfg.keepalive_retries)
                 .with_interval(cfg.keepalive_interval);
+            #[cfg(unix)]
+            let ka = ka.with_retries(cfg.keepalive_retries);
             tracing::trace!(
                 "set keepalive: {:?}",
                 socket2::SockRef::from(&s).set_tcp_keepalive(&ka)
             );
         }
+        #[cfg(target_os = "linux")]
         if cfg.user_timeout_enabled {
             // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
             // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.

@@ -74,7 +74,9 @@ fn main() -> Result<(), anyhow::Error> {
         .nth_back(3)
         .unwrap();
 
-    match Command::new("common/scripts/report_build_info.sh").output() {
+    // When building on Windows, e.g. in Git Bash or in MinGW's MSYS environment,
+    // we have to explicitly specify "bash" as a program.
+    match Command::new("bash").arg("common/scripts/report_build_info.sh").output() {
         Ok(output) => {
             for line in String::from_utf8(output.stdout).unwrap().lines() {
                 // Each line looks like `istio.io/pkg/version.buildGitRevision=abc`
