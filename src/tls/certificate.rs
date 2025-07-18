@@ -428,7 +428,6 @@ mod test {
             SystemTime::now() + Duration::from_secs(60),
             None,
             TEST_ROOT_KEY,
-            TEST_ROOT,
         );
         let cert1 =
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
@@ -440,7 +439,6 @@ mod test {
             SystemTime::now() + Duration::from_secs(60),
             None,
             TEST_ROOT2_KEY,
-            TEST_ROOT2,
         );
         let cert2 =
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();

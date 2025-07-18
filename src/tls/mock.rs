@@ -18,7 +18,6 @@ use std::fmt::{Display, Formatter};
 use rand::RngCore;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use rcgen::{Certificate, CertificateParams, KeyPair};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -106,7 +105,7 @@ pub fn generate_test_certs_at(
     rng: Option<&mut dyn rand::RngCore>,
 ) -> WorkloadCertificate {
     let (key, cert) =
-        generate_test_certs_with_root(id, not_before, not_after, rng, TEST_ROOT_KEY, TEST_ROOT);
+        generate_test_certs_with_root(id, not_before, not_after, rng, TEST_ROOT_KEY);
     let mut workload =
         WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
     // Certificates do not allow sub-millisecond, but we need this for tests.
@@ -121,7 +120,6 @@ pub fn generate_test_certs_with_root(
     not_after: SystemTime,
     rng: Option<&mut dyn rand::RngCore>,
     ca_key: &[u8],
-    ca_cert: &[u8],
 ) -> (String, String) {
     use rcgen::*;
     let serial_number = {
@@ -150,15 +148,15 @@ pub fn generate_test_certs_with_root(
         ExtendedKeyUsagePurpose::ClientAuth,
     ];
     p.subject_alt_names = vec![match id {
-        TestIdentity::Identity(i) => SanType::URI(Ia5String::try_from(i.to_string()).unwrap()),
+        TestIdentity::Identity(i) => SanType::URI(string::Ia5String::try_from(i.to_string()).unwrap()),
         TestIdentity::Ip(i) => SanType::IpAddress(*i),
     }];
 
     let kp = KeyPair::from_pem(std::str::from_utf8(TEST_PKEY).unwrap()).unwrap();
     let ca_kp = KeyPair::from_pem(std::str::from_utf8(ca_key).unwrap()).unwrap();
     let key = kp.serialize_pem();
-    let ca = test_ca(ca_key, ca_cert);
-    let cert = p.signed_by(&kp, &ca, &ca_kp).unwrap();
+    let issuer = Issuer::from_params(&p, &ca_kp);
+    let cert = p.signed_by(&kp, &issuer).unwrap();
     let cert = cert.pem();
     (key, cert)
 }
@@ -170,12 +168,6 @@ pub fn generate_test_certs(
 ) -> WorkloadCertificate {
     let not_before = SystemTime::now() + duration_until_valid;
     generate_test_certs_at(id, not_before, not_before + duration_until_expiry, None)
-}
-
-fn test_ca(key: &[u8], cert: &[u8]) -> Certificate {
-    let key = KeyPair::from_pem(std::str::from_utf8(key).unwrap()).unwrap();
-    let ca_param = CertificateParams::from_ca_cert_pem(std::str::from_utf8(cert).unwrap()).unwrap();
-    ca_param.self_signed(&key).unwrap()
 }
 
 #[derive(Debug, Clone)]
