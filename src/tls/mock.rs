@@ -104,8 +104,7 @@ pub fn generate_test_certs_at(
     not_after: SystemTime,
     rng: Option<&mut dyn rand::RngCore>,
 ) -> WorkloadCertificate {
-    let (key, cert) =
-        generate_test_certs_with_root(id, not_before, not_after, rng, TEST_ROOT_KEY);
+    let (key, cert) = generate_test_certs_with_root(id, not_before, not_after, rng, TEST_ROOT_KEY);
     let mut workload =
         WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
     // Certificates do not allow sub-millisecond, but we need this for tests.
@@ -148,7 +147,9 @@ pub fn generate_test_certs_with_root(
         ExtendedKeyUsagePurpose::ClientAuth,
     ];
     p.subject_alt_names = vec![match id {
-        TestIdentity::Identity(i) => SanType::URI(string::Ia5String::try_from(i.to_string()).unwrap()),
+        TestIdentity::Identity(i) => {
+            SanType::URI(string::Ia5String::try_from(i.to_string()).unwrap())
+        }
         TestIdentity::Ip(i) => SanType::IpAddress(*i),
     }];
 
