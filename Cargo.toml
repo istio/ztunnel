@@ -80,7 +80,7 @@ prometheus-parse = "0.2"
 prost = "0.13"
 prost-types = "0.13"
 rand = { version = "0.9" , features = ["small_rng"]}
-rcgen = { version = "0.13", optional = true, features = ["pem"] }
+rcgen = { version = "0.14", optional = true, features = ["pem"] }
 rustls = { version = "0.23", default-features = false }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2.2"

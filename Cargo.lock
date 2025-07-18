@@ -1802,7 +1802,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -2767,6 +2767,21 @@ name = "rcgen"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "887a643fa081058097896d87764863994f6c32a1716e76adc479bd283974a825"
+dependencies = [
+ "aws-lc-rs",
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "x509-parser",
+ "yasna",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49bc8ffa8a832eb1d7c8000337f8b0d2f4f2f5ec3cf4ddc26f125e3ad2451824"
 dependencies = [
  "aws-lc-rs",
  "pem",
@@ -4455,7 +4470,8 @@ dependencies = [
  "prost-build",
  "prost-types",
  "rand 0.9.0",
- "rcgen",
+ "rcgen 0.13.3",
+ "rcgen 0.14.2",
  "ring",
  "rustc_version",
  "rustls",
