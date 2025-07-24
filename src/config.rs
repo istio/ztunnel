@@ -309,6 +309,8 @@ pub struct Config {
     pub ztunnel_identity: Option<identity::Identity>,
 
     pub ztunnel_workload: Option<state::WorkloadInfo>,
+
+    pub ipv6_enabled: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -862,6 +864,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         localhost_app_tunnel: parse_default(LOCALHOST_APP_TUNNEL, true)?,
         ztunnel_identity,
         ztunnel_workload,
+        ipv6_enabled,
     })
 }
 
