@@ -86,6 +86,7 @@ impl Server {
         socket_factory: &(dyn SocketFactory + Send + Sync),
         local_workload_information: Arc<LocalWorkloadFetcher>,
         prefered_service_namespace: Option<String>,
+        ipv6_enabled: bool,
     ) -> Result<Self, Error> {
         // if the address we got from config is supposed to be v6-enabled,
         // actually check if the local pod context our socketfactory operates in supports V6.
@@ -104,6 +105,7 @@ impl Server {
             metrics,
             local_workload_information,
             prefered_service_namespace,
+            ipv6_enabled,
         );
         let store = Arc::new(store);
         let handler = dns::handler::Handler::new(store.clone());
@@ -194,6 +196,7 @@ struct Store {
     metrics: Arc<Metrics>,
     local_workload: Arc<LocalWorkloadFetcher>,
     prefered_service_namespace: Option<String>,
+    ipv6_enabled: bool,
 }
 
 impl Store {
@@ -204,6 +207,7 @@ impl Store {
         metrics: Arc<Metrics>,
         local_workload_information: Arc<LocalWorkloadFetcher>,
         prefered_service_namespace: Option<String>,
+        ipv6_enabled: bool,
     ) -> Self {
         let domain = as_name(domain);
         let svc_domain = append_name(as_name("svc"), &domain);
@@ -216,6 +220,7 @@ impl Store {
             metrics,
             local_workload: local_workload_information,
             prefered_service_namespace,
+            ipv6_enabled,
         }
     }
 
@@ -422,6 +427,13 @@ impl Store {
         None
     }
 
+    fn record_type_enabled(&self, addr: &IpAddr) -> bool {
+        match addr {
+            IpAddr::V4(_) => true,              // IPv4 always
+            IpAddr::V6(_) => self.ipv6_enabled, // IPv6 must be not be disabled in config
+        }
+    }
+
     /// Gets the list of addresses of the requested record type from the server.
     fn get_addresses(
         &self,
@@ -434,7 +446,7 @@ impl Store {
                 .workload_ips
                 .iter()
                 .filter_map(|addr| {
-                    if is_record_type(addr, record_type) {
+                    if is_record_type(addr, record_type) && self.record_type_enabled(addr) {
                         Some(*addr)
                     } else {
                         None
@@ -453,10 +465,9 @@ impl Store {
                                 debug!("failed to fetch workload for {}", ep.workload_uid);
                                 return None;
                             };
-                            wl.workload_ips
-                                .iter()
-                                .copied()
-                                .find(|addr| is_record_type(addr, record_type))
+                            wl.workload_ips.iter().copied().find(|addr| {
+                                is_record_type(addr, record_type) && self.record_type_enabled(addr)
+                            })
                         })
                         .collect()
                 } else {
@@ -468,6 +479,7 @@ impl Store {
                         .filter_map(|vip| {
                             if is_record_type(&vip.address, record_type)
                                 && client.network == vip.network
+                                && self.record_type_enabled(&vip.address)
                             {
                                 Some(vip.address)
                             } else {
@@ -637,7 +649,7 @@ impl Resolver for Store {
         // From this point on, we are the authority for the response.
         let is_authoritative = true;
 
-        if !service_family_allowed(&service_match.server, record_type) {
+        if !service_family_allowed(&service_match.server, record_type, self.ipv6_enabled) {
             access_log(
                 request,
                 Some(&client),
@@ -706,7 +718,13 @@ impl Resolver for Store {
 /// anyway, so would naturally work.
 /// Headless services, however, do not have VIPs, and the Pods behind them can have dual stack IPs even with
 /// the Service being single-stack. In this case, we are NOT supposed to return both IPs.
-fn service_family_allowed(server: &Address, record_type: RecordType) -> bool {
+/// If IPv6 is globally disabled, AAAA records are not allowed.
+fn service_family_allowed(server: &Address, record_type: RecordType, ipv6_enabled: bool) -> bool {
+    // If IPv6 is globally disabled, don't allow AAAA records
+    if !ipv6_enabled && record_type == RecordType::AAAA {
+        return false;
+    }
+
     match server {
         Address::Service(service) => match service.ip_families {
             Some(IpFamily::IPv4) if record_type == RecordType::AAAA => false,
@@ -1087,6 +1105,7 @@ mod tests {
                 metrics: test_metrics(),
                 local_workload,
                 prefered_service_namespace: None,
+                ipv6_enabled: true,
             };
 
             let namespaced_domain = n(format!("{}.svc.cluster.local", c.client_namespace));
@@ -1432,6 +1451,7 @@ mod tests {
             &factory,
             local_workload,
             Some(PREFERRED.to_string()),
+            true, // ipv6_enabled for tests
         )
         .await
         .unwrap();
@@ -1519,6 +1539,7 @@ mod tests {
             &factory,
             local_workload,
             None,
+            true, // ipv6_enabled for tests
         )
         .await
         .unwrap();
@@ -1569,6 +1590,7 @@ mod tests {
                 state.clone(),
             ),
             prefered_service_namespace: None,
+            ipv6_enabled: true,
         };
 
         let ip4n6_client_ip = ip("::ffff:202:202");
@@ -1603,6 +1625,7 @@ mod tests {
             &factory,
             local_workload,
             None,
+            true, // ipv6_enabled for tests
         )
         .await
         .unwrap();
