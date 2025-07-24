@@ -113,6 +113,7 @@ impl ProxyFactory {
                 socket_factory.as_ref(),
                 local_workload_information.as_fetcher(),
                 self.config.prefered_service_namespace.clone(),
+                self.config.ipv6_enabled,
             )
             .await?;
             resolver = Some(server.resolver());
