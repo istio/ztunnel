@@ -116,7 +116,7 @@ educe = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"
-pprof = { version = "0.14", features = ["protobuf", "protobuf-codec", "criterion"] }
+pprof = { version = "0.15", features = ["protobuf", "protobuf-codec", "criterion"] }
 
 [build-dependencies]
 tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
