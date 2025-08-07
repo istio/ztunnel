@@ -82,7 +82,7 @@ mod tests {
 
     use super::*;
 
-    fn new_namespace() -> Namespace {
+    fn new_namespace() -> NetworkNamespace {
         let api_namespace = hcn::schema::HostComputeNamespace::default();
 
         let api_namespace = serde_json::to_string(&api_namespace).unwrap();
@@ -97,9 +97,9 @@ mod tests {
         let api_namespace: hcn::schema::HostComputeNamespace =
             serde_json::from_str(&api_namespace).unwrap();
 
-        Namespace {
-            id: api_namespace.namespace_id.unwrap(),
-            guid: api_namespace.id,
+        NetworkNamespace {
+            compartment_id: api_namespace.namespace_id.unwrap(),
+            namespace_guid: api_namespace.id,
         }
     }
 
