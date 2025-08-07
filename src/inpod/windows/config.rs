@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
-
-use crate::inpod::windows::namespace::InpodNamespace;
+use crate::inpod::windows::namespace::NetworkNamespace;
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
 
@@ -36,14 +34,14 @@ impl InPodConfig {
             ..cfg.socket_config
         };
         Ok(InPodConfig {
-            cur_namespace: InpodNamespace::current()?,
+            cur_namespace: NetworkNamespace::current()?,
             reuse_port: cfg.inpod_port_reuse,
             socket_config,
         })
     }
     pub fn socket_factory(
         &self,
-        netns: InpodNamespace,
+        netns: NetworkNamespace,
     ) -> Box<dyn crate::proxy::SocketFactory + Send + Sync> {
         let base = crate::proxy::DefaultSocketFactory(self.socket_config);
         let sf = InPodSocketFactory::from_cfg(base, self, netns);
@@ -62,14 +60,14 @@ impl InPodConfig {
 
 struct InPodSocketFactory {
     inner: DefaultSocketFactory,
-    netns: InpodNamespace,
+    netns: NetworkNamespace,
 }
 impl InPodSocketFactory {
-    fn from_cfg(inner: DefaultSocketFactory, _: &InPodConfig, netns: InpodNamespace) -> Self {
+    fn from_cfg(inner: DefaultSocketFactory, _: &InPodConfig, netns: NetworkNamespace) -> Self {
         Self::new(inner, netns)
     }
-    fn new(inner: DefaultSocketFactory,netns: InpodNamespace) -> Self {
-        Self {inner, netns }
+    fn new(inner: DefaultSocketFactory, netns: NetworkNamespace) -> Self {
+        Self { inner, netns }
     }
 
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
@@ -96,7 +94,7 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = self.configure( || std::net::TcpListener::bind(addr))?;
+        let std_sock = self.configure(|| std::net::TcpListener::bind(addr))?;
         std_sock.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(std_sock).map(socket::Listener::new)
     }
