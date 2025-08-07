@@ -1028,8 +1028,8 @@ mod tests {
             },
         )]);
 
-        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip1);
-        let uid2 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip2);
+        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{ip1:?}");
+        let uid2 = format!("cluster1//v1/Pod/default/my-pod/{ip2:?}");
 
         updater
             .insert_workload(
@@ -1734,7 +1734,7 @@ mod tests {
 
         let xds_ip1 = Bytes::copy_from_slice(&[127, 0, 0, 1]);
         let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{:?}", ip1);
+        let uid1 = format!("cluster1//v1/Pod/default/my-pod/{ip1:?}");
 
         let services = HashMap::from([(
             "ns/svc1.ns.svc.cluster.local".to_string(),

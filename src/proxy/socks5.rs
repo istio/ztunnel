@@ -203,8 +203,7 @@ async fn negotiate_socks_connection(
 
     if version != 0x05 {
         return Err(SocksError::invalid_protocol(format!(
-            "unsupported version {}",
-            version
+            "unsupported version {version}",
         )));
     }
 

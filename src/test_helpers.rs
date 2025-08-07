@@ -169,10 +169,9 @@ pub fn localhost_error_message() -> String {
         TEST_VIP,
     ];
     format!(
-        "These tests use the following loopback addresses: {:?}. \
+        "These tests use the following loopback addresses: {addrs:?}. \
     Your OS may require an explicit alias for each. If so, you'll need to manually \
     configure your system for each IP (e.g. `sudo ifconfig lo0 alias 127.0.0.2 up`).",
-        addrs
     )
 }
 
@@ -239,7 +238,7 @@ fn test_custom_workload(
     hostname_only: bool,
 ) -> anyhow::Result<LocalWorkload> {
     let host = match hostname_only {
-        true => format!("{}.reflect.internal.", ip_str),
+        true => format!("{ip_str}.reflect.internal."),
         false => "".to_string(),
     };
     let wips = match hostname_only {
@@ -250,7 +249,7 @@ fn test_custom_workload(
         workload_ips: wips,
         hostname: host.into(),
         protocol,
-        uid: format!("cluster1//v1/Pod/default/{}", name).into(),
+        uid: format!("cluster1//v1/Pod/default/{name}").into(),
         name: name.into(),
         namespace: "default".into(),
         service_account: "default".into(),
@@ -282,7 +281,7 @@ fn test_custom_svc(
         }],
         ports: HashMap::from([(80u16, echo_port)]),
         endpoints: EndpointSet::from_list([Endpoint {
-            workload_uid: format!("cluster1//v1/Pod/default/{}", workload_name).into(),
+            workload_uid: format!("cluster1//v1/Pod/default/{workload_name}").into(),
             port: HashMap::from([(80u16, echo_port)]),
             status: HealthStatus::Healthy,
         }]),

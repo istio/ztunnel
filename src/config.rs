@@ -440,7 +440,7 @@ fn parse_worker_threads(default: usize) -> Result<usize, Error> {
                     Error::EnvVar(
                         ZTUNNEL_WORKER_THREADS.to_string(),
                         value.clone(),
-                        format!("invalid percentage: {}", e),
+                        format!("invalid percentage: {e}"),
                     )
                 })?;
 
@@ -462,7 +462,7 @@ fn parse_worker_threads(default: usize) -> Result<usize, Error> {
                     Error::EnvVar(
                         ZTUNNEL_WORKER_THREADS.to_string(),
                         value,
-                        format!("invalid number: {}", e),
+                        format!("invalid number: {e}"),
                     )
                 })
             }
@@ -599,7 +599,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
     // on a pod-by-pod basis.
     let dns_proxy_addr: Address = match pc.proxy_metadata.get(DNS_PROXY_ADDR_METADATA) {
         Some(dns_addr) => Address::new(ipv6_localhost_enabled, dns_addr)
-            .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {}", dns_addr)),
+            .unwrap_or_else(|_| panic!("failed to parse DNS_PROXY_ADDR: {dns_addr}")),
         None => Address::Localhost(ipv6_localhost_enabled, DEFAULT_DNS_PORT),
     };
 
