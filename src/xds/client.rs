@@ -876,7 +876,7 @@ mod tests {
 
     fn get_auth(i: usize) -> ProtoResource {
         let addr = XdsAuthorization {
-            name: format!("foo{}", i),
+            name: format!("foo{i}"),
             namespace: "default".to_string(),
             scope: crate::xds::istio::security::Scope::Global as i32,
             action: crate::xds::istio::security::Action::Deny as i32,
@@ -890,7 +890,7 @@ mod tests {
             }],
         };
         ProtoResource {
-            name: format!("foo{}", i),
+            name: format!("foo{i}"),
             aliases: vec![],
             version: "0.0.1".to_string(),
             resource: Some(Any {
@@ -908,8 +908,8 @@ mod tests {
         };
         let addr = XdsAddress {
             r#type: Some(XdsType::Workload(XdsWorkload {
-                name: format!("foo{}", i),
-                uid: format!("default/foo{}", i),
+                name: format!("foo{i}"),
+                uid: format!("default/foo{i}"),
                 namespace: "default".to_string(),
                 addresses: vec![octets.into()],
                 tunnel_protocol: 0,
@@ -924,7 +924,7 @@ mod tests {
         };
 
         ProtoResource {
-            name: format!("foo{}", i),
+            name: format!("foo{i}"),
             aliases: vec![],
             version: "0.0.1".to_string(),
             resource: Some(Any {

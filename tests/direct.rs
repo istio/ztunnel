@@ -282,8 +282,7 @@ fn on_demand_dns_assertions(metrics: ParsedMetrics) {
         };
         assert!(
             value == expected,
-            "expected metric {metric} to be 1, was {:?}",
-            value
+            "expected metric {metric} to be 1, was {value:?}",
         );
     }
 }
@@ -361,9 +360,9 @@ async fn test_stats_exist() {
         {
             for (name, doc) in metric_info {
                 if stable_metrics.contains(&*name) {
-                    assert!(!doc.contains("unstable"), "{}: {}", name, doc);
+                    assert!(!doc.contains("unstable"), "{name}: {doc}");
                 } else {
-                    assert!(doc.contains("unstable"), "{}: {}", name, doc);
+                    assert!(doc.contains("unstable"), "{name}: {doc}");
                 }
             }
         }

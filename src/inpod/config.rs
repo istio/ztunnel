@@ -148,7 +148,7 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
         })?;
 
         if let Err(e) = sock.set_reuseport(true) {
-            tracing::warn!("setting set_reuseport failed: {} addr: {}", e, addr);
+            tracing::warn!("setting set_reuseport failed: {e} addr: {addr}");
         }
 
         sock.bind(addr)?;

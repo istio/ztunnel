@@ -94,9 +94,6 @@ fn main() -> Result<(), anyhow::Error> {
         "cargo:rustc-env=ZTUNNEL_BUILD_RUSTC_VERSION={}",
         rustc_version::version().unwrap()
     );
-    println!(
-        "cargo:rustc-env=ZTUNNEL_BUILD_PROFILE_NAME={}",
-        profile_name
-    );
+    println!("cargo:rustc-env=ZTUNNEL_BUILD_PROFILE_NAME={profile_name}");
     Ok(())
 }

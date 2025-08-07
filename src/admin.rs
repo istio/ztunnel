@@ -390,7 +390,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
             // Invalid level provided
             return plaintext_response(
                 hyper::StatusCode::BAD_REQUEST,
-                format!("Invalid level provided: {}\n{}", level, HELP_STRING),
+                format!("Invalid level provided: {level}\n{HELP_STRING}"),
             );
         };
     }
@@ -398,7 +398,7 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
         Ok(_) => list_loggers(),
         Err(e) => plaintext_response(
             hyper::StatusCode::BAD_REQUEST,
-            format!("Failed to set new level: {}\n{}", e, HELP_STRING),
+            format!("Failed to set new level: {e}\n{HELP_STRING}"),
         ),
     }
 }

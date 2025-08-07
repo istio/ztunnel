@@ -391,7 +391,7 @@ pub fn log_early_deny<E: std::error::Error>(
                 "inbound"
             },
 
-            error = format!("{}", err),
+            error = format!("{err}"),
 
             "connection failed"
     );
