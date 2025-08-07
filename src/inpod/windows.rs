@@ -34,8 +34,7 @@ mod workloadmanager;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WorkloadData {
     workload_uid: WorkloadUid,
     workload_info: Option<WorkloadInfo>,
