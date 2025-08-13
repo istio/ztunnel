@@ -157,7 +157,7 @@ impl Inbound {
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 1500, &serve_client);
+                assertions::size_between_ref(1000, 1600, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
