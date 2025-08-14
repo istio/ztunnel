@@ -32,12 +32,12 @@ pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
     let socket = SockRef::from(socket);
     match socket.domain()? {
         Domain::IPV4 => {
-            socket.set_ip_transparent(true)?;
-            socket.set_freebind(true)?;
+            socket.set_ip_transparent_v4(true)?;
+            socket.set_freebind_v4(true)?;
         }
         Domain::IPV6 => {
             linux::set_ipv6_transparent(&socket)?;
-            socket.set_freebind_ipv6(true)?
+            socket.set_freebind_v6(true)?
         }
         _ => return Err(Error::new(ErrorKind::Unsupported, "unsupported domain")),
     };
@@ -66,7 +66,7 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
         Err(e4) => match linux::original_dst_ipv6(&sock) {
             Ok(addr) => Ok(addr.as_socket().expect("failed to convert to SocketAddr")),
             Err(e6) => {
-                if !sock.ip_transparent().unwrap_or(false) {
+                if !sock.ip_transparent_v4().unwrap_or(false) {
                     // In TPROXY mode, this is normal, so don't bother logging
                     warn!(
                         peer=?stream.peer_addr().unwrap(),
@@ -136,11 +136,11 @@ mod linux {
     }
 
     pub fn original_dst(sock: &SockRef) -> io::Result<SockAddr> {
-        sock.original_dst()
+        sock.original_dst_v4()
     }
 
     pub fn original_dst_ipv6(sock: &SockRef) -> io::Result<SockAddr> {
-        sock.original_dst_ipv6()
+        sock.original_dst_v6()
     }
 }
 
@@ -167,7 +167,7 @@ impl Listener {
 #[cfg(target_os = "linux")]
 impl Listener {
     pub fn set_transparent(&self) -> io::Result<()> {
-        SockRef::from(&self.0).set_ip_transparent(true)
+        SockRef::from(&self.0).set_ip_transparent_v4(true)
     }
 }
 

@@ -110,7 +110,7 @@ pub fn identities(cert: X509Certificate) -> Result<Vec<Identity>, Error> {
 
 impl Certificate {
     // TODO: I would love to parse this once, but ran into lifetime issues.
-    fn parsed(&self) -> X509Certificate {
+    fn parsed(&self) -> X509Certificate<'_> {
         x509_parser::parse_x509_certificate(&self.der)
             .expect("certificate was already parsed successfully before")
             .1

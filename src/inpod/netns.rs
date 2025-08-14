@@ -65,7 +65,7 @@ impl InpodNetns {
             }),
         })
     }
-    pub fn workload_netns(&self) -> std::os::fd::BorrowedFd {
+    pub fn workload_netns(&self) -> std::os::fd::BorrowedFd<'_> {
         use std::os::fd::AsFd;
         self.inner.netns.as_fd()
     }
