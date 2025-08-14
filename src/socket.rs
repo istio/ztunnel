@@ -33,7 +33,7 @@ pub fn set_freebind_and_transparent(socket: &TcpSocket) -> io::Result<()> {
     match socket.domain()? {
         Domain::IPV4 => {
             socket.set_ip_transparent_v4(true)?;
-            socket.set_freebind_v6(true)?;
+            socket.set_freebind_v4(true)?;
         }
         Domain::IPV6 => {
             linux::set_ipv6_transparent(&socket)?;
