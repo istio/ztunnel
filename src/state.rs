@@ -558,12 +558,14 @@ impl DemandProxyState {
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
+                pol.stats.hit();
                 debug!(policy = pol.to_key().as_str(), "deny policy match");
                 return Err(proxy::AuthorizationRejectionError::ExplicitlyDenied(
                     pol.namespace.to_owned(),
                     pol.name.to_owned(),
                 ));
             } else {
+                pol.stats.miss();
                 trace!(policy = pol.to_key().as_str(), "deny policy does not match");
             }
         }
@@ -575,9 +577,11 @@ impl DemandProxyState {
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
+                pol.stats.hit();
                 debug!(policy = pol.to_key().as_str(), "allow policy match");
                 return Ok(());
             } else {
+                pol.stats.miss();
                 trace!(
                     policy = pol.to_key().as_str(),
                     "allow policy does not match"
@@ -1459,6 +1463,7 @@ mod tests {
                     ],
                 ],
                 scope: rbac::RbacScope::Namespace,
+                stats: Default::default(),
             },
         );
         state.policies.insert(
@@ -1480,6 +1485,7 @@ mod tests {
                     ],
                 ],
                 scope: rbac::RbacScope::Namespace,
+                stats: Default::default(),
             },
         );
 
