@@ -306,7 +306,7 @@ impl Proxy {
             old_cfg.inbound_addr = inbound.address();
             let mut new_pi = (*pi).clone();
             new_pi.cfg = Arc::new(old_cfg);
-            std::mem::swap(&mut pi, &mut Arc::new(new_pi));
+            pi = Arc::new(new_pi);
             warn!("TEST FAKE: new address is {:?}", pi.cfg.inbound_addr);
         }
 
@@ -373,7 +373,7 @@ impl fmt::Display for AuthorizationRejectionError {
         match self {
             Self::NoWorkload => write!(fmt, "workload not found"),
             Self::WorkloadMismatch => write!(fmt, "workload mismatch"),
-            Self::ExplicitlyDenied(a, b) => write!(fmt, "explicitly denied by: {}/{}", a, b),
+            Self::ExplicitlyDenied(a, b) => write!(fmt, "explicitly denied by: {a}/{b}"),
             Self::NotAllowed => write!(fmt, "allow policies exist, but none allowed"),
         }
     }
@@ -847,8 +847,8 @@ impl HboneAddress {
 impl std::fmt::Display for HboneAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HboneAddress::SocketAddr(addr) => write!(f, "{}", addr),
-            HboneAddress::SvcHostname(host, port) => write!(f, "{}:{}", host, port),
+            HboneAddress::SocketAddr(addr) => write!(f, "{addr}"),
+            HboneAddress::SvcHostname(host, port) => write!(f, "{host}:{port}"),
         }
     }
 }

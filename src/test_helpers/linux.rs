@@ -341,7 +341,7 @@ impl WorkloadManager {
     }
 
     /// workload_builder allows creating a new workload. It will run in its own network namespace.
-    pub fn workload_builder(&mut self, name: &str, node: &str) -> TestWorkloadBuilder {
+    pub fn workload_builder(&mut self, name: &str, node: &str) -> TestWorkloadBuilder<'_> {
         TestWorkloadBuilder::new(name, self)
             .on_node(node)
             .identity(identity::Identity::Spiffe {
@@ -352,7 +352,7 @@ impl WorkloadManager {
     }
 
     /// service_builder allows creating a new service
-    pub fn service_builder(&mut self, name: &str) -> TestServiceBuilder {
+    pub fn service_builder(&mut self, name: &str) -> TestServiceBuilder<'_> {
         TestServiceBuilder::new(name, self)
     }
 

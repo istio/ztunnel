@@ -870,7 +870,7 @@ impl DemandProxyState {
         self.finalize_upstream(source_workload, target_address, res)
             .await?
             .ok_or_else(|| {
-                Error::UnknownNetworkGateway(format!("network gateway {:?} not found", gw_address))
+                Error::UnknownNetworkGateway(format!("network gateway {gw_address:?} not found"))
             })
     }
 
@@ -926,7 +926,7 @@ impl DemandProxyState {
         };
         self.finalize_upstream(source_workload, target_address, res)
             .await?
-            .ok_or_else(|| Error::UnknownWaypoint(format!("waypoint {:?} not found", gw_address)))
+            .ok_or_else(|| Error::UnknownWaypoint(format!("waypoint {gw_address:?} not found")))
     }
 
     pub async fn fetch_service_waypoint(
@@ -1378,17 +1378,17 @@ mod tests {
     fn create_workload(dest_uid: u8) -> Workload {
         Workload {
             name: "test".into(),
-            namespace: format!("ns{}", dest_uid).into(),
+            namespace: format!("ns{dest_uid}").into(),
             trust_domain: "cluster.local".into(),
             service_account: "defaultacct".into(),
             workload_ips: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 0, dest_uid))],
-            uid: format!("{}", dest_uid).into(),
+            uid: format!("{dest_uid}").into(),
             ..test_helpers::test_default_workload()
         }
     }
 
     fn get_workload(state: &DemandProxyState, dest_uid: u8) -> Arc<Workload> {
-        let key: Strng = format!("{}", dest_uid).into();
+        let key: Strng = format!("{dest_uid}").into();
         state.read().workloads.by_uid[&key].clone()
     }
 
@@ -1397,7 +1397,7 @@ mod tests {
         dest_uid: u8,
         src_svc_acct: &str,
     ) -> crate::state::ProxyRbacContext {
-        let key: Strng = format!("{}", dest_uid).into();
+        let key: Strng = format!("{dest_uid}").into();
         let workload = &state.read().workloads.by_uid[&key];
         crate::state::ProxyRbacContext {
             conn: rbac::Connection {

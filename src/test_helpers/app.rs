@@ -105,7 +105,7 @@ impl TestApp {
         let get_resp = move || async move {
             let req = Request::builder()
                 .method(Method::GET)
-                .uri(format!("http://localhost:{}/{path}", port))
+                .uri(format!("http://localhost:{port}/{path}"))
                 .header("content-type", "application/json")
                 .body(Empty::<Bytes>::new())
                 .unwrap();
@@ -130,7 +130,7 @@ impl TestApp {
         let get_resp = move || async move {
             let req = Request::builder()
                 .method(Method::GET)
-                .uri(format!("http://localhost:{}/{path}", port))
+                .uri(format!("http://localhost:{port}/{path}"))
                 .header("content-type", "application/json")
                 .body(Empty::<Bytes>::new())
                 .unwrap();

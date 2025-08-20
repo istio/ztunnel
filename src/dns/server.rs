@@ -1471,8 +1471,8 @@ mod tests {
                 tasks.push(async move {
                     let name = format!("[{protocol}] {}", c.name);
                     let resp = send_request(&mut client, n(c.host), c.query_type).await;
-                    assert_eq!(c.expect_authoritative, resp.authoritative(), "{}", name);
-                    assert_eq!(c.expect_code, resp.response_code(), "{}", name);
+                    assert_eq!(c.expect_authoritative, resp.authoritative(), "{name}");
+                    assert_eq!(c.expect_code, resp.response_code(), "{name}");
 
                     if c.expect_code == ResponseCode::NoError {
                         let mut actual = resp.answers().to_vec();
@@ -1483,7 +1483,7 @@ mod tests {
                         if c.expect_authoritative {
                             sort_records(&mut actual);
                         }
-                        assert_eq!(c.expect_records, actual, "{}", name);
+                        assert_eq!(c.expect_records, actual, "{name}");
                     }
                 });
             }
@@ -1554,7 +1554,7 @@ mod tests {
             for (protocol, client) in [("tcp", &mut tcp_client), ("udp", &mut udp_client)] {
                 let name = format!("[{protocol}] {}", c.name);
                 let resp = send_request(client, n(c.host), RecordType::A).await;
-                assert_eq!(c.expect_code, resp.response_code(), "{}", name);
+                assert_eq!(c.expect_code, resp.response_code(), "{name}");
                 if c.expect_code == ResponseCode::NoError {
                     assert!(!resp.answers().is_empty());
                 }
@@ -1598,7 +1598,7 @@ mod tests {
         match store.lookup(&req).await {
             Ok(_) => {}
             Err(e) => {
-                panic!("IPv6 encoded IPv4 should work! Error was {:?}", e)
+                panic!("IPv6 encoded IPv4 should work! Error was {e:?}");
             }
         }
     }

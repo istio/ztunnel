@@ -458,10 +458,10 @@ fn hbone_connection_config() -> ztunnel::config::ConfigSource {
             workload: Workload {
                 workload_ips: vec![hbone_connection_ip(i)],
                 protocol: InboundProtocol::HBONE,
-                uid: strng::format!("cluster1//v1/Pod/default/remote{}", i),
-                name: strng::format!("workload-{}", i),
-                namespace: strng::format!("namespace-{}", i),
-                service_account: strng::format!("service-account-{}", i),
+                uid: strng::format!("cluster1//v1/Pod/default/remote{i}"),
+                name: strng::format!("workload-{i}"),
+                namespace: strng::format!("namespace-{i}"),
+                service_account: strng::format!("service-account-{i}"),
                 ..test_helpers::test_default_workload()
             },
             services: Default::default(),
