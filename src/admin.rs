@@ -385,15 +385,15 @@ fn change_log_level(reset: bool, level: &str) -> Response<Full<Bytes>> {
     if !reset && level.is_empty() {
         return list_loggers();
     }
-    if !level.is_empty() {
-        if let Err(_e) = validate_log_level(level) {
-            // Invalid level provided
-            return plaintext_response(
-                hyper::StatusCode::BAD_REQUEST,
-                format!("Invalid level provided: {level}\n{HELP_STRING}"),
-            );
-        };
-    }
+    if !level.is_empty()
+        && let Err(_e) = validate_log_level(level)
+    {
+        // Invalid level provided
+        return plaintext_response(
+            hyper::StatusCode::BAD_REQUEST,
+            format!("Invalid level provided: {level}\n{HELP_STRING}"),
+        );
+    };
     match telemetry::set_level(reset, level) {
         Ok(_) => list_loggers(),
         Err(e) => plaintext_response(

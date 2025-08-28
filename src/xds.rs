@@ -62,10 +62,10 @@ impl fmt::Display for DisplayStatus<'_> {
                 " (hint: check the control plane logs for more information)"
             )?;
         }
-        if !s.details().is_empty() {
-            if let Ok(st) = std::str::from_utf8(s.details()) {
-                write!(f, ", details: {st}")?;
-            }
+        if !s.details().is_empty()
+            && let Ok(st) = std::str::from_utf8(s.details())
+        {
+            write!(f, ", details: {st}")?;
         }
         if let Some(src) = s.source().and_then(|s| s.source()) {
             write!(f, ", source: {src}")?;

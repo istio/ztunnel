@@ -982,10 +982,10 @@ fn construct_proxy_config(mc_path: &str, pc_env: Option<&str>) -> anyhow::Result
 }
 
 pub fn empty_to_none<A: AsRef<str>>(inp: Option<A>) -> Option<A> {
-    if let Some(inner) = &inp {
-        if inner.as_ref().is_empty() {
-            return None;
-        }
+    if let Some(inner) = &inp
+        && inner.as_ref().is_empty()
+    {
+        return None;
     }
     inp
 }
