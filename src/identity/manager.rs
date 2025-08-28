@@ -609,10 +609,10 @@ impl SecretManager {
                 let rx = st.rx.clone();
                 drop(certs);
 
-                if let Some(existing_pri) = init_pri(&rx) {
-                    if pri > existing_pri {
-                        self.post(Request::Fetch(id.clone(), pri)).await;
-                    }
+                if let Some(existing_pri) = init_pri(&rx)
+                    && pri > existing_pri
+                {
+                    self.post(Request::Fetch(id.clone(), pri)).await;
                 }
                 Ok(rx)
             }
