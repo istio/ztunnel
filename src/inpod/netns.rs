@@ -109,6 +109,7 @@ mod tests {
     use nix::sched::unshare;
     use nix::unistd::gettid;
     use std::assert;
+    use std::os::fd::AsRawFd;
     use std::os::fd::OwnedFd;
     use std::process::Command;
 
