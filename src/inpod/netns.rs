@@ -14,7 +14,6 @@
 
 use nix::sched::{CloneFlags, setns};
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
