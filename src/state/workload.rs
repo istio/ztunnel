@@ -283,6 +283,8 @@ pub struct Workload {
 
     #[serde(default = "default_capacity")]
     pub capacity: u32,
+
+    pub pid: i32,
 }
 
 fn default_capacity() -> u32 {
@@ -510,6 +512,7 @@ impl TryFrom<XdsWorkload> for (Workload, HashMap<String, PortList>) {
 
             capacity: resource.capacity.unwrap_or(1),
             services,
+            pid: 0,
         };
         // Return back part we did not use (service) so it can be consumed without cloning
         Ok((wl, resource.services))

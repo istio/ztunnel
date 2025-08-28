@@ -24,6 +24,7 @@ use tracing::{debug, error, instrument, warn};
 use crate::identity::Error;
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
+use crate::inpod::WorkloadPid;
 use crate::tls::{self, TlsGrpcChannel};
 use crate::xds::istio::ca::IstioCertificateRequest;
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
@@ -124,7 +125,7 @@ impl CaClient {
 
 #[async_trait]
 impl crate::identity::CaClientTrait for CaClient {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+    async fn fetch_certificate(&self, id: &Identity, pid: Option<WorkloadPid>) -> Result<tls::WorkloadCertificate, Error> {
         self.fetch_certificate(id).await
     }
 }
@@ -247,6 +248,7 @@ pub mod mock {
         async fn fetch_certificate(
             &self,
             id: &Identity,
+            _pid: Option<WorkloadPid>,
         ) -> Result<tls::WorkloadCertificate, Error> {
             self.fetch_certificate(id).await
         }

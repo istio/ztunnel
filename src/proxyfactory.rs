@@ -14,6 +14,7 @@
 
 use crate::config;
 use crate::identity::SecretManager;
+use crate::inpod::WorkloadPid;
 use crate::state::{DemandProxyState, WorkloadInfo};
 use std::sync::Arc;
 use tracing::error;
@@ -68,6 +69,7 @@ impl ProxyFactory {
     pub async fn new_proxies_for_dedicated(
         &self,
         proxy_workload_info: WorkloadInfo,
+        pid: WorkloadPid
     ) -> Result<ProxyResult, Error> {
         let base = crate::proxy::DefaultSocketFactory(self.config.socket_config);
         let factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync> =
@@ -76,7 +78,7 @@ impl ProxyFactory {
             } else {
                 Arc::new(base)
             };
-        self.new_proxies_from_factory(None, proxy_workload_info, factory)
+        self.new_proxies_from_factory(None, proxy_workload_info, factory, pid)
             .await
     }
 
@@ -85,6 +87,7 @@ impl ProxyFactory {
         proxy_drain: Option<DrainWatcher>,
         proxy_workload_info: WorkloadInfo,
         socket_factory: Arc<dyn crate::proxy::SocketFactory + Send + Sync>,
+        pid: WorkloadPid,
     ) -> Result<ProxyResult, Error> {
         let mut result: ProxyResult = Default::default();
         let drain = proxy_drain.unwrap_or_else(|| self.drain.clone());
@@ -95,6 +98,7 @@ impl ProxyFactory {
             Arc::new(proxy_workload_info),
             self.state.clone(),
             self.cert_manager.clone(),
+            Arc::new(pid),
         ));
 
         // Optionally create the DNS proxy.
@@ -150,8 +154,8 @@ impl ProxyFactory {
             return Ok(None);
         }
 
-        if let (Some(ztunnel_identity), Some(ztunnel_workload)) =
-            (&self.config.ztunnel_identity, &self.config.ztunnel_workload)
+        if let (Some(ztunnel_identity), Some(ztunnel_workload), Some(ztunnel_pid)) =
+            (&self.config.ztunnel_identity, &self.config.ztunnel_workload, &self.config.ztunnel_pid)
         {
             tracing::info!(
                 "creating ztunnel self-proxy listener with identity: {:?}",
@@ -162,6 +166,7 @@ impl ProxyFactory {
                 Arc::new(ztunnel_workload.clone()),
                 self.state.clone(),
                 self.cert_manager.clone(),
+                Arc::new(ztunnel_pid.clone()),
             ));
 
             let socket_factory = Arc::new(DefaultSocketFactory(self.config.socket_config));

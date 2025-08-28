@@ -16,6 +16,7 @@ use crate::config as zconfig;
 use crate::readiness;
 use metrics::Metrics;
 use std::sync::Arc;
+use std::cmp::Ordering;
 use workloadmanager::WorkloadProxyManager;
 
 use crate::proxyfactory::ProxyFactory;
@@ -68,11 +69,24 @@ impl WorkloadUid {
     }
 }
 
+#[derive(Eq, PartialEq, Hash, Debug,Clone)]
+pub struct WorkloadPid(i32);
+
+impl WorkloadPid {
+    pub fn new(pid: i32) -> Self {
+        Self(pid)
+    }
+    pub fn into_u32(self) -> i32 {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkloadData {
     netns: std::os::fd::OwnedFd,
     workload_uid: WorkloadUid,
     workload_info: Option<istio::zds::WorkloadInfo>,
+    pid: WorkloadPid,
 }
 
 #[derive(Debug)]

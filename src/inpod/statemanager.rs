@@ -14,6 +14,7 @@
 
 use crate::drain;
 use crate::drain::DrainTrigger;
+use crate::inpod::WorkloadPid;
 use std::sync::Arc;
 use tracing::{Instrument, debug, info};
 
@@ -68,7 +69,7 @@ pub struct WorkloadProxyManagerState {
     // workloads we wanted to start but couldn't because we had an error starting them.
     // This happened to use mainly in testing when we redeploy ztunnel, and the old pod was
     // not completely drained yet.
-    pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, InpodNetns)>,
+    pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, InpodNetns, WorkloadPid)>,
     draining: DrainingTasks,
 
     // new connection stuff
@@ -149,7 +150,7 @@ impl WorkloadProxyManagerState {
                     namespace: wli.namespace,
                     service_account: wli.service_account,
                 };
-                self.add_workload(&poddata.workload_uid, info, netns)
+                self.add_workload(&poddata.workload_uid, info, netns, poddata.pid)
                     .await
                     .map_err(|e| Error::ProxyError(poddata.workload_uid.0, e))
             }
@@ -234,9 +235,10 @@ impl WorkloadProxyManagerState {
         workload_uid: &WorkloadUid,
         workload_info: WorkloadInfo,
         netns: InpodNetns,
+        pid: WorkloadPid,
     ) -> Result<(), crate::proxy::Error> {
         match self
-            .add_workload_inner(workload_uid, &workload_info, netns.clone())
+            .add_workload_inner(workload_uid, &workload_info, netns.clone(), pid.clone())
             .await
         {
             Ok(()) => {
@@ -247,7 +249,7 @@ impl WorkloadProxyManagerState {
             }
             Err(e) => {
                 self.pending_workloads
-                    .insert(workload_uid.clone(), (workload_info, netns));
+                    .insert(workload_uid.clone(), (workload_info, netns, pid));
                 self.update_proxy_count_metrics();
                 Err(e)
             }
@@ -258,6 +260,7 @@ impl WorkloadProxyManagerState {
         workload_uid: &WorkloadUid,
         workload_info: &WorkloadInfo,
         netns: InpodNetns,
+        pid: WorkloadPid
     ) -> Result<(), crate::proxy::Error> {
         // check if we have a proxy already
         let maybe_existing = self.workload_states.get(workload_uid);
@@ -297,6 +300,7 @@ impl WorkloadProxyManagerState {
                 Some(drain_rx),
                 workload_info.clone(),
                 Arc::from(self.inpod_config.socket_factory(netns)),
+                pid,
             )
             .await?;
 
@@ -351,9 +355,9 @@ impl WorkloadProxyManagerState {
     pub async fn retry_pending(&mut self) {
         let current_pending_workloads = std::mem::take(&mut self.pending_workloads);
 
-        for (uid, (info, netns)) in current_pending_workloads {
+        for (uid, (info, netns,pid)) in current_pending_workloads {
             info!(uid = uid.0, "retrying workload");
-            match self.add_workload(&uid, info, netns).await {
+            match self.add_workload(&uid, info, netns, pid).await {
                 Ok(()) => {}
                 Err(e) => {
                     info!(uid = uid.0, "retrying workload failed: {}", e);

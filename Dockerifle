@@ -1,0 +1,25 @@
+# Dockerfile
+FROM rust:1.88 as builder
+
+# Install protobuf compiler
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+# Build ztunnel with release optimizations
+RUN cargo build
+
+# Runtime image
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/out/rust/debug/ztunnel /usr/local/bin/ztunnel
+
+EXPOSE 15008 15006
+ENTRYPOINT ["/usr/local/bin/ztunnel"]

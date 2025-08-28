@@ -21,8 +21,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::config::ProxyMode;
+use crate::inpod::WorkloadPid;
 use async_trait::async_trait;
-
+use spire_api::DelegatedIdentityClient;
+use super::SpireClient;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
@@ -145,7 +147,7 @@ impl Default for Identity {
 
 #[async_trait]
 pub trait CaClientTrait: Send + Sync {
-    async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error>;
+    async fn fetch_certificate(&self, id: &Identity, pid: Option<WorkloadPid>) -> Result<tls::WorkloadCertificate, Error>;
 }
 
 #[derive(PartialOrd, PartialEq, Eq, Ord, Debug, Copy, Clone)]
@@ -216,7 +218,7 @@ struct Worker {
     // TODO: Change tls::Certs to use Instant instead of SystemTime.
     time_conv: crate::time::Converter,
     // Maps Identity to the certificate state.
-    certs: Mutex<HashMap<Identity, CertChannel>>,
+    certs: Mutex<HashMap<(Identity, WorkloadPid), CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
 }
@@ -243,8 +245,8 @@ impl Worker {
         (worker, tokio::spawn(async move { w.run(requests).await }))
     }
 
-    async fn has_id(&self, id: &Identity) -> bool {
-        self.certs.lock().await.contains_key(id)
+    async fn has_id(&self, id: Identity, pid: WorkloadPid) -> bool {
+        self.certs.lock().await.contains_key(&(id,pid))
     }
 
     // Manages certificate updates. Since all the work is done in a single task, the code is
@@ -258,7 +260,6 @@ impl Worker {
             Processing,
             Forgetting,
         }
-
         // A set of futures refreshing the certificates. Each future completes with the identity for
         // which it was invoked and a resulting certificate or error.
         let mut fetches = FuturesUnordered::new();
@@ -273,7 +274,7 @@ impl Worker {
         // the future, for all other priorities Instant::now() is used as the scheduled time of the
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
-        let mut pending: KeyedPriorityQueue<Identity, PendingPriority> = KeyedPriorityQueue::new();
+        let mut pending: KeyedPriorityQueue<(Identity,WorkloadPid), PendingPriority> = KeyedPriorityQueue::new();
         // The set of pending Identity requests with backoffs (i.e. pending requests that have already failed at least once).
         // Basically, each cert fetch attempt gets its own backoff.
         // This avoids delays where a fetch of identity A for pod A needlessly stalls the refetch of
@@ -298,26 +299,26 @@ impl Worker {
                 // call made later by the client would result in another request being delivered to
                 // the worker.
                 res = requests.recv() => match res {
-                    Some(Request::Fetch(id, pri)) => {
-                        if !self.has_id(&id).await {
+                    Some(Request::Fetch(id,pid, pri)) => {
+                        if !self.has_id(id,pid).await {
                             // Nobody interested in the Identity anymore, do nothing.
                             continue 'main;
                         }
                         match processing.get(&id) {
                             None => {
-                                push_increase(&mut pending, id, PendingPriority(pri, Instant::now()));
+                                push_increase(&mut pending, (id,pid), PendingPriority(pri, Instant::now()));
                             },
                             Some(Fetch::Forgetting) => {
                                 // Once the associated future completes, the result will be dropped
                                 // instead of communicated back to the `certs` map and queued for
                                 // refresh.
-                                processing.insert(id, Fetch::Processing);
+                                processing.insert((id,pid), Fetch::Processing);
                             },
                             Some(Fetch::Processing) => (),
                         }
                     },
-                    Some(Request::Forget(id)) => {
-                        if self.has_id(&id).await {
+                    Some(Request::Forget(id, pid)) => {
+                        if self.has_id(id, pid).await {
                             // After the forget was queued, there was another request to start
                             // managing the Identity. Do nothing.
                             continue 'main;
@@ -417,10 +418,10 @@ impl Worker {
                 },
                 // Initiate the next fetch.
                 true = maybe_sleep_until(next), if fetches.len() < self.concurrency as usize => {
-                    let (id, _) = pending.pop().expect("pending should always have an element at this point");
+                    let ((id,pid), _) = pending.pop().expect("pending should always have an element at this point");
                     processing.insert(id.to_owned(), Fetch::Processing);
                     fetches.push(async move {
-                        let res = self.client.fetch_certificate(&id).await;
+                        let res = self.client.fetch_certificate(&id, Some(pid)).await;
                         (id, res)
                     });
                 },
@@ -431,12 +432,12 @@ impl Worker {
     }
 
     // Returns whether the Identity is still managed.
-    async fn update_certs(&self, id: &Identity, certs: CertState) -> bool {
+    async fn update_certs(&self, id: &Identity, pid: WorkloadPid, certs: CertState) -> bool {
         // Both errors (lack of entry in the `certs` map and a send error) are handled the same way
         // (by returning false): either (a) there was no entry in the `certs` map due to a
         // forget_certificate call some time ago or (b) a forget_certificate call was made and
         // finished just after the lock was released (but before certs was sent)
-        match self.certs.lock().await.get(id) {
+        match self.certs.lock().await.get(&(id.clone(), pid)) {
             Some(state) => {
                 state.tx.send(certs).expect("state.rx cannot be gone");
                 true
@@ -459,8 +460,8 @@ async fn maybe_sleep_until(till: Option<Instant>) -> bool {
 }
 
 pub enum Request {
-    Fetch(Identity, Priority),
-    Forget(Identity),
+    Fetch(Identity, WorkloadPid, Priority),
+    Forget(Identity, WorkloadPid),
 }
 
 pub struct SecretManagerConfig {
@@ -515,6 +516,14 @@ impl SecretManager {
         Ok(Self::new_with_client(caclient))
     }
 
+    pub async fn new_with_spire_client(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
+        let dc = DelegatedIdentityClient::default().await.unwrap();
+        
+        let client = SpireClient::new(dc).unwrap();
+
+        Ok(Self::new_with_client(client))
+    }
+
     pub fn new_with_client<C: 'static + CaClientTrait>(client: C) -> Self {
         Self::new_internal(
             Box::new(client),
@@ -550,10 +559,11 @@ impl SecretManager {
     async fn start_fetch(
         &self,
         id: &Identity,
+        pid: &WorkloadPid,
         pri: Priority,
     ) -> Result<watch::Receiver<CertState>, Error> {
         let mut certs = self.worker.certs.lock().await;
-        match certs.get(id) {
+        match certs.get(&(id,pid)) {
             // Identity found in cache and is already being refreshed. Bump the priority if needed.
             Some(st) => {
                 let rx = st.rx.clone();
@@ -606,26 +616,28 @@ impl SecretManager {
     pub async fn fetch_certificate_pri(
         &self,
         id: &Identity,
+        pid: &WorkloadPid,
         pri: Priority,
     ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
         // This method is intentionally left simple, since unit tests are based on start_fetch
         // and wait. Any changes should go to one of those two methods, and if that proves
         // impossible - unit testing strategy may need to be rethinked.
-        self.wait(self.start_fetch(id, pri).await?).await
+        self.wait(self.start_fetch(id, pid, pri).await?).await
     }
 
     pub async fn fetch_certificate(
         &self,
         id: &Identity,
+        pid: &WorkloadPid,
     ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
-        self.fetch_certificate_pri(id, Priority::RealTime).await
+        self.fetch_certificate_pri(id, pid, Priority::RealTime).await
     }
 
-    pub async fn forget_certificate(&self, id: &Identity) {
+    pub async fn forget_certificate(&self, id: &Identity, pid: &WorkloadPid) {
         // TODO: consider keeping the cert around for a minute or so to avoid churn
         // We would ideally drop any pending or new requests to rotate.
-        if self.worker.certs.lock().await.remove(id).is_some() {
-            self.post(Request::Forget(id.clone())).await;
+        if self.worker.certs.lock().await.remove(&(id,pid)).is_some() {
+            self.post(Request::Forget(id.clone(), pid.clone())).await;
         }
     }
 

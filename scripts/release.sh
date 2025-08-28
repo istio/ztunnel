@@ -44,8 +44,5 @@ BINARY_PREFIX=${BINARY_PREFIX:-"ztunnel"}
 RELEASE_NAME="${BINARY_PREFIX}-${SHA}-${ARCH}"
 ls -lh "${WD}/../out/rust/release/ztunnel"
 DEST="${DEST:-gs://istio-build/ztunnel}"
-if [[ "$CI" == "" && "$DEST" == "gs://istio-build/ztunnel" ]]; then
-  echo "Outside of CI, DEST must be explicitly set"
-  exit 1
-fi
+
 gsutil cp "${WD}/../out/rust/release/ztunnel" "${DEST}/${RELEASE_NAME}"

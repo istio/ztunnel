@@ -29,6 +29,7 @@ use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
 use hyper::Uri;
 use hyper::http::uri::InvalidUri;
 
+use crate::inpod::WorkloadPid;
 use crate::strng::Strng;
 use crate::{identity, state};
 #[cfg(any(test, feature = "testing"))]
@@ -113,6 +114,8 @@ const PROXY_MODE_DEDICATED: &str = "dedicated";
 const PROXY_MODE_SHARED: &str = "shared";
 
 const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
+
+const USE_SPIRE: &str = "USE_SPIRE";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -310,7 +313,10 @@ pub struct Config {
 
     pub ztunnel_workload: Option<state::WorkloadInfo>,
 
+    pub ztunnel_pid: Option<WorkloadPid>,
+
     pub ipv6_enabled: bool,
+    pub use_spire: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -865,6 +871,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_identity,
         ztunnel_workload,
         ipv6_enabled,
+        use_spire: parse_default(USE_SPIRE, false)?,
+        ztunnel_pid: None,
     })
 }
 

@@ -35,6 +35,7 @@ use xds::istio::workload::address::Type as XdsType;
 
 use crate::cert_fetcher::{CertFetcher, NoCertFetcher};
 use crate::config::ConfigSource;
+use crate::inpod::WorkloadPid;
 use crate::rbac::Authorization;
 use crate::state::ProxyState;
 use crate::state::service::{Endpoint, Service, ServiceStore};
@@ -189,7 +190,7 @@ impl ProxyStateUpdateMutator {
                     .workloads
                     .was_last_identity_on_node(&prev.node, &prev.identity())
             {
-                self.cert_fetcher.clear_cert(&prev.identity());
+                self.cert_fetcher.clear_cert(&prev.identity(), &WorkloadPid::new(prev.pid));
             }
             // We removed a workload, no reason to attempt to remove a service with the same name
             return;

@@ -16,6 +16,7 @@ use crate::config;
 use crate::config::ProxyMode;
 use crate::identity::Priority::Warmup;
 use crate::identity::{Identity, Request, SecretManager};
+use crate::inpod::WorkloadPid;
 use crate::state::workload::{InboundProtocol, Workload};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -24,7 +25,7 @@ use tracing::{debug, error, info};
 /// Responsible for pre-fetching certs for workloads.
 pub trait CertFetcher: Send + Sync {
     fn prefetch_cert(&self, w: &Workload);
-    fn clear_cert(&self, id: &Identity);
+    fn clear_cert(&self, id: &Identity, pid: &WorkloadPid);
 }
 
 /// A no-op implementation of [CertFetcher].
@@ -32,7 +33,7 @@ pub struct NoCertFetcher();
 
 impl CertFetcher for NoCertFetcher {
     fn prefetch_cert(&self, _: &Workload) {}
-    fn clear_cert(&self, _: &Identity) {}
+    fn clear_cert(&self, _: &Identity, _: &WorkloadPid) {}
 }
 
 /// Constructs an appropriate [CertFetcher] for the proxy config.
@@ -58,9 +59,9 @@ impl CertFetcherImpl {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 match req {
-                    Request::Fetch(workload_identity, priority) => {
+                    Request::Fetch(workload_identity,pid, priority) => {
                         match cert_manager
-                            .fetch_certificate_pri(&workload_identity, priority)
+                            .fetch_certificate_pri(&workload_identity,&pid, priority)
                             .await
                         {
                             Ok(_) => {
@@ -73,8 +74,8 @@ impl CertFetcherImpl {
                             ),
                         }
                     }
-                    Request::Forget(workload_identity) => {
-                        cert_manager.forget_certificate(&workload_identity).await;
+                    Request::Forget(workload_identity, pid) => {
+                        cert_manager.forget_certificate(&workload_identity, &pid).await;
                     }
                 }
             }
@@ -103,14 +104,14 @@ impl CertFetcherImpl {
 impl CertFetcher for CertFetcherImpl {
     fn prefetch_cert(&self, w: &Workload) {
         if self.should_prefetch_certificate(w) {
-            if let Err(e) = self.tx.try_send(Request::Fetch(w.identity(), Warmup)) {
+            if let Err(e) = self.tx.try_send(Request::Fetch(w.identity(),WorkloadPid::new(w.pid), Warmup)) {
                 info!("couldn't prefetch: {:?}", e)
             }
         }
     }
 
-    fn clear_cert(&self, id: &Identity) {
-        if let Err(e) = self.tx.try_send(Request::Forget(id.clone())) {
+    fn clear_cert(&self, id: &Identity, pid: &WorkloadPid) {
+        if let Err(e) = self.tx.try_send(Request::Forget(id.clone(), pid.clone())) {
             info!("couldn't clear identity: {:?}", e)
         }
     }

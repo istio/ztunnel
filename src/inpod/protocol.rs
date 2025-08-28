@@ -159,6 +159,7 @@ fn get_workload_data(
                 netns: our_netns,
                 workload_uid: super::WorkloadUid::new(uid),
                 workload_info: a.workload_info,
+                pid: super::WorkloadPid::new(a.pid),
             }))
         }
         (Payload::Add(_), None) => Err(anyhow::anyhow!("No control message")),
@@ -294,6 +295,7 @@ mod tests {
             istio::zds::AddWorkload {
                 uid: uid.clone().into_string(),
                 workload_info: Some(wi.clone()),
+                pid: Some(1234),
             },
         ));
 

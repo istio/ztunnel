@@ -22,6 +22,7 @@ use std::{fmt, io};
 
 use hickory_proto::ProtoError;
 
+use crate::inpod::WorkloadPid;
 use crate::strng::Strng;
 use rand::Rng;
 use socket2::TcpKeepalive;
@@ -180,6 +181,7 @@ pub struct LocalWorkloadInformation {
     // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
     // access to the appropriate certificates
     full_cert_manager: Arc<SecretManager>,
+    pid: Arc<WorkloadPid>,
 }
 
 impl LocalWorkloadInformation {
@@ -187,11 +189,13 @@ impl LocalWorkloadInformation {
         wi: Arc<WorkloadInfo>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
+        pid: Arc<WorkloadPid>,
     ) -> LocalWorkloadInformation {
         LocalWorkloadInformation {
             wi,
             state,
             full_cert_manager: cert_manager,
+            pid,
         }
     }
 
@@ -212,7 +216,7 @@ impl LocalWorkloadInformation {
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
-        self.full_cert_manager.fetch_certificate(id).await
+        self.full_cert_manager.fetch_certificate(id, &WorkloadPid::new(wl.pid)).await
     }
 
     pub fn workload_info(&self) -> Arc<WorkloadInfo> {

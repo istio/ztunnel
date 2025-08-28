@@ -28,6 +28,7 @@ message WorkloadInfo {
 message AddWorkload {
   string uid = 1;
   WorkloadInfo workload_info = 2;
+  int32 pid = 3; // Optional PID of the workload's main process
 }
 
 // Keep workload that we can't find in the fd cache. This can only be sent before SnapshotSent is sent

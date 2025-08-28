@@ -113,6 +113,7 @@ tracing-core = "0.1"
 tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
 educe = "0.6"
+spire-api = "0.3.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"

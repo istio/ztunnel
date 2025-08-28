@@ -19,6 +19,9 @@ use std::sync::Arc;
 mod caclient;
 pub use caclient::*;
 
+mod spireclient;
+pub use spireclient::*;
+
 pub mod manager;
 pub use manager::*;
 
@@ -54,6 +57,8 @@ pub enum Error {
     Forgotten,
     #[error("BUG: identity requested {0}, but only allowed {1:?}")]
     BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
+    #[error("missing pid for spire identity request: {0}")]
+    MissingPidForSpireIdentity(Identity),
 }
 
 impl From<tls::Error> for Error {
