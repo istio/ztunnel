@@ -436,7 +436,7 @@ async fn handle_jemalloc_pprof_heapgen(
         .expect("builder with known status code should not fail"))
 }
 
-#[cfg(not(feature = "jemalloc"))]
+#[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
 async fn handle_jemalloc_pprof_heapgen(
     _req: Request<Incoming>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {

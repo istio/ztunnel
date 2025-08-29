@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
-
 use crate::inpod::windows::namespace::InpodNamespace;
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
@@ -68,8 +66,8 @@ impl InPodSocketFactory {
     fn from_cfg(inner: DefaultSocketFactory, _: &InPodConfig, netns: InpodNamespace) -> Self {
         Self::new(inner, netns)
     }
-    fn new(inner: DefaultSocketFactory,netns: InpodNamespace) -> Self {
-        Self {inner, netns }
+    fn new(inner: DefaultSocketFactory, netns: InpodNamespace) -> Self {
+        Self { inner, netns }
     }
 
     fn run_in_ns<S, F: FnOnce() -> std::io::Result<S>>(&self, f: F) -> std::io::Result<S> {
@@ -96,7 +94,7 @@ impl crate::proxy::SocketFactory for InPodSocketFactory {
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<socket::Listener> {
-        let std_sock = self.configure( || std::net::TcpListener::bind(addr))?;
+        let std_sock = self.configure(|| std::net::TcpListener::bind(addr))?;
         std_sock.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(std_sock).map(socket::Listener::new)
     }

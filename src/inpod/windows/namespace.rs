@@ -1,24 +1,16 @@
-use std::sync::Arc;
 use tracing::warn;
 use windows::Win32::NetworkManagement::IpHelper::{
     GetCurrentThreadCompartmentId, SetCurrentThreadCompartmentId,
 };
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
-pub struct Namespace {
-    pub id: u32,
-    pub guid: String,
-}
-
-#[derive(Clone, Debug)]
 pub struct InpodNamespace {
-    inner: Arc<NetnsInner>,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct NetnsInner {
-    current_namespace: u32,
-    workload_namespace: Namespace,
+    // On Windows every network namespace is based
+    // on a network compartment ID. This is the reference
+    // we need when we want to create sockets inside
+    // a network namespace or change IP stack configuration.
+    pub compartment_id: u32,
+    pub namespace_guid: String,
 }
 
 impl InpodNamespace {
@@ -32,13 +24,12 @@ impl InpodNamespace {
     }
 
     pub fn capable() -> std::io::Result<()> {
-        // set the netns to our current netns. This is intended to be a no-op,
-        // and meant to be used as a test, so we can fail early if we can't set the netns
-        let curr_namespace = Self::current()?;
-        setns(curr_namespace)
+        // Set the network compartment to the host compartment. This is intended to be a no-op,
+        // and meant to be used as a test, so we can fail early if we can't set the netns.
+        set_compartment(1)
     }
 
-    pub fn new(cur_namespace: u32, workload_namespace: String) -> std::io::Result<Self> {
+    pub fn new(workload_namespace: String) -> std::io::Result<Self> {
         let ns = hcn::get_namespace(&workload_namespace);
         match ns {
             Err(e) => {
@@ -46,42 +37,37 @@ impl InpodNamespace {
                 Err(std::io::Error::last_os_error())
             }
             Ok(ns) => Ok(InpodNamespace {
-                inner: Arc::new(NetnsInner {
-                    current_namespace: cur_namespace,
-                    workload_namespace: Namespace {
-                        id: ns
-                            .namespace_id
-                            .expect("There must always be a namespace id"),
-                        guid: ns.id,
-                    },
-                }),
+                compartment_id: ns
+                    .namespace_id
+                    // Compartment ID 0 means undefined compartment ID.
+                    // At the moment the JSON serialization ommits the field
+                    // if it is set to 0. This happens when the compartment
+                    // for the container is not yet available.
+                    .unwrap_or(0),
+                namespace_guid: ns.id,
             }),
         }
-    }
-
-    pub fn workload_namespace(&self) -> u32 {
-        self.inner.workload_namespace.id
-    }
-
-    // Useful for logging / debugging
-    pub fn workload_namespace_guid(&self) -> String {
-        self.inner.workload_namespace.guid.clone()
     }
 
     pub fn run<F, T>(&self, f: F) -> std::io::Result<T>
     where
         F: FnOnce() -> T,
     {
-        setns(self.inner.workload_namespace.id)?;
+        set_compartment(self.compartment_id)?;
         let ret = f();
-        setns(self.inner.current_namespace).expect("this must never fail");
+        // The Windows API defines the network compartment ID 1 as the
+        // comapartment backing up the host network namespace.
+        set_compartment(1).expect("failed to switch to host namespace");
         Ok(ret)
     }
 }
 
-// hop into a namespace
-fn setns(namespace: u32) -> std::io::Result<()> {
-    let error = unsafe { SetCurrentThreadCompartmentId(namespace) };
+// Hop into a network compartment
+fn set_compartment(compartment_id: u32) -> std::io::Result<()> {
+    if compartment_id == 0 {
+        return Err(std::io::Error::other("undefined compartment ID"));
+    }
+    let error = unsafe { SetCurrentThreadCompartmentId(compartment_id) };
     if error.0 != 0 {
         return Err(std::io::Error::from_raw_os_error(error.0 as i32));
     }
@@ -90,13 +76,13 @@ fn setns(namespace: u32) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use hcn::schema::HostComputeQuery;
     use hcn::api;
+    use hcn::schema::HostComputeQuery;
     use windows::core::GUID;
 
     use super::*;
 
-    fn new_namespace() -> Namespace {
+    fn new_namespace() -> InpodNamespace {
         let api_namespace = hcn::schema::HostComputeNamespace::default();
 
         let api_namespace = serde_json::to_string(&api_namespace).unwrap();
@@ -111,9 +97,9 @@ mod tests {
         let api_namespace: hcn::schema::HostComputeNamespace =
             serde_json::from_str(&api_namespace).unwrap();
 
-        Namespace {
-            id: api_namespace.namespace_id.unwrap(),
-            guid: api_namespace.id,
+        InpodNamespace {
+            compartment_id: api_namespace.namespace_id.unwrap(),
+            namespace_guid: api_namespace.id,
         }
     }
 
