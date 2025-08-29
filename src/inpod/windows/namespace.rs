@@ -4,7 +4,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
-pub struct NetworkNamespace {
+pub struct InpodNamespace {
     // On Windows every network namespace is based
     // on a network compartment ID. This is the reference
     // we need when we want to create sockets inside
@@ -13,7 +13,7 @@ pub struct NetworkNamespace {
     pub namespace_guid: String,
 }
 
-impl NetworkNamespace {
+impl InpodNamespace {
     pub fn current() -> std::io::Result<u32> {
         let curr_namespace = unsafe { GetCurrentThreadCompartmentId() };
         if curr_namespace.0 == 0 {
@@ -36,7 +36,7 @@ impl NetworkNamespace {
                 warn!("Failed to get namespace: {}", e);
                 Err(std::io::Error::last_os_error())
             }
-            Ok(ns) => Ok(NetworkNamespace {
+            Ok(ns) => Ok(InpodNamespace {
                 compartment_id: ns
                     .namespace_id
                     // Compartment ID 0 means undefined compartment ID.
@@ -82,7 +82,7 @@ mod tests {
 
     use super::*;
 
-    fn new_namespace() -> NetworkNamespace {
+    fn new_namespace() -> InpodNamespace {
         let api_namespace = hcn::schema::HostComputeNamespace::default();
 
         let api_namespace = serde_json::to_string(&api_namespace).unwrap();
@@ -97,7 +97,7 @@ mod tests {
         let api_namespace: hcn::schema::HostComputeNamespace =
             serde_json::from_str(&api_namespace).unwrap();
 
-        NetworkNamespace {
+        InpodNamespace {
             compartment_id: api_namespace.namespace_id.unwrap(),
             namespace_guid: api_namespace.id,
         }

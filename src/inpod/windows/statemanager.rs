@@ -3,6 +3,7 @@ use crate::drain::DrainTrigger;
 use crate::inpod::Error;
 use crate::inpod::metrics::Metrics;
 use crate::inpod::windows::WorkloadData;
+use crate::inpod::windows::admin::State;
 use std::sync::Arc;
 
 use crate::proxyfactory::ProxyFactory;
@@ -14,7 +15,7 @@ use windows::core::GUID;
 
 use super::WorkloadMessage;
 use super::WorkloadUid;
-use super::namespace::NetworkNamespace;
+use super::namespace::InpodNamespace;
 
 // Note: we can't drain on drop, as drain is async (it waits for the drain to finish).
 pub(super) struct WorkloadState {
@@ -62,12 +63,12 @@ pub struct WorkloadProxyManagerState {
     // workloads we wanted to start but couldn't because we had an error starting them.
     // This happened to use mainly in testing when we redeploy ztunnel, and the old pod was
     // not completely drained yet.
-    pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, NetworkNamespace)>,
+    pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, InpodNamespace)>,
     draining: DrainingTasks,
 
     // Here we keep track of workloads that belong to pods that have already a network
     // namespace, but they don't have a network compartment yet available.
-    compartmentless_workloads: Vec<(WorkloadUid, WorkloadInfo, NetworkNamespace)>,
+    compartmentless_workloads: Vec<(WorkloadUid, WorkloadInfo, InpodNamespace)>,
 
     // new connection stuff
     snapshot_received: bool,
@@ -139,7 +140,7 @@ impl WorkloadProxyManagerState {
                     .windows_namespace
                     .as_ref()
                     .expect("pod should have windows namespace");
-                let netns = NetworkNamespace::new(ns.guid.clone()).map_err(|e| {
+                let netns = InpodNamespace::new(ns.guid.clone()).map_err(|e| {
                     Error::ProxyError(poddata.workload_uid.0.clone(), crate::proxy::Error::Io(e))
                 })?;
                 let info = WorkloadInfo {
@@ -152,8 +153,11 @@ impl WorkloadProxyManagerState {
                         "network compartment not yet available for workload {:?}, waiting for compartment...",
                         poddata.workload_uid
                     );
-                    self.admin_handler
-                        .proxy_waiting_compartment(&poddata.workload_uid, &info);
+                    self.admin_handler.proxy_pending(
+                        State::WaitingCompartment,
+                        &poddata.workload_uid,
+                        &info,
+                    );
                     self.compartmentless_workloads.push((
                         poddata.workload_uid.clone(),
                         info.clone(),
@@ -240,7 +244,7 @@ impl WorkloadProxyManagerState {
         &mut self,
         workload_uid: &WorkloadUid,
         workload_info: WorkloadInfo,
-        netns: NetworkNamespace,
+        netns: InpodNamespace,
     ) -> Result<(), crate::proxy::Error> {
         match self
             .add_workload_inner(workload_uid, &workload_info, netns.clone())
@@ -262,7 +266,7 @@ impl WorkloadProxyManagerState {
         &mut self,
         workload_uid: &WorkloadUid,
         workload_info: &WorkloadInfo,
-        netns: NetworkNamespace,
+        netns: InpodNamespace,
     ) -> Result<(), crate::proxy::Error> {
         // check if we have a proxy already
         let maybe_existing = self.workload_states.get(workload_uid);
@@ -281,7 +285,7 @@ impl WorkloadProxyManagerState {
             }
         }
         self.admin_handler
-            .proxy_pending(workload_uid, workload_info);
+            .proxy_pending(State::Pending, workload_uid, workload_info);
 
         debug!(
             workload=?workload_uid,
@@ -362,10 +366,10 @@ impl WorkloadProxyManagerState {
         }
     }
 
-    pub async fn retry_comparmentless(&mut self, poddata: &WorkloadData) -> Result<(), Error> {
+    pub async fn retry_compartmentless(&mut self, poddata: &WorkloadData) -> Result<(), Error> {
         let uid = &poddata.workload_uid;
         let info = poddata.workload_info.as_ref().unwrap();
-        let netns = NetworkNamespace::new(
+        let netns = InpodNamespace::new(
             info.windows_namespace
                 .as_ref()
                 .expect("unable to retry invalid namespace")
@@ -438,7 +442,7 @@ impl WorkloadProxyManagerState {
             "compartment id {} found for network namespace {}",
             compartment_id, netns.namespace_guid
         );
-        let new_netns = NetworkNamespace::new(netns.namespace_guid.clone()).map_err(|e| {
+        let new_netns = InpodNamespace::new(netns.namespace_guid.clone()).map_err(|e| {
             self.compartmentless_workloads
                 .push((uid.clone(), info.clone(), netns.clone()));
             Error::NamespaceError(format!("unable to create new network namespace: {}", e))

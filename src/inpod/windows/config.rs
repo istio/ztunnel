@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::inpod::windows::namespace::NetworkNamespace;
+use crate::inpod::windows::namespace::InpodNamespace;
 use crate::proxy::DefaultSocketFactory;
 use crate::{config, socket};
 
@@ -34,14 +34,14 @@ impl InPodConfig {
             ..cfg.socket_config
         };
         Ok(InPodConfig {
-            cur_namespace: NetworkNamespace::current()?,
+            cur_namespace: InpodNamespace::current()?,
             reuse_port: cfg.inpod_port_reuse,
             socket_config,
         })
     }
     pub fn socket_factory(
         &self,
-        netns: NetworkNamespace,
+        netns: InpodNamespace,
     ) -> Box<dyn crate::proxy::SocketFactory + Send + Sync> {
         let base = crate::proxy::DefaultSocketFactory(self.socket_config);
         let sf = InPodSocketFactory::from_cfg(base, self, netns);
@@ -60,13 +60,13 @@ impl InPodConfig {
 
 struct InPodSocketFactory {
     inner: DefaultSocketFactory,
-    netns: NetworkNamespace,
+    netns: InpodNamespace,
 }
 impl InPodSocketFactory {
-    fn from_cfg(inner: DefaultSocketFactory, _: &InPodConfig, netns: NetworkNamespace) -> Self {
+    fn from_cfg(inner: DefaultSocketFactory, _: &InPodConfig, netns: InpodNamespace) -> Self {
         Self::new(inner, netns)
     }
-    fn new(inner: DefaultSocketFactory, netns: NetworkNamespace) -> Self {
+    fn new(inner: DefaultSocketFactory, netns: InpodNamespace) -> Self {
         Self { inner, netns }
     }
 

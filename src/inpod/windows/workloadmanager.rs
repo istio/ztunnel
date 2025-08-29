@@ -26,7 +26,7 @@ use tracing::{debug, error, info, warn};
 use super::statemanager::WorkloadProxyManagerState;
 use crate::inpod::Error;
 
-use crate::inpod::windows::namespace::NetworkNamespace;
+use crate::inpod::windows::namespace::InpodNamespace;
 
 use super::protocol::WorkloadStreamProcessor;
 
@@ -156,7 +156,7 @@ impl WorkloadProxyNetworkHandler {
 impl WorkloadProxyManager {
     pub fn verify_syscalls() -> anyhow::Result<()> {
         // verify that we are capable, so we can fail early if not.
-        NetworkNamespace::capable().map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))
+        InpodNamespace::capable().map_err(|e| anyhow::anyhow!("failed to set netns: {:?}", e))
     }
 
     pub fn new(
@@ -283,7 +283,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
             match &event.event_type {
                 EventType::RetryAllPendingWorkloads => self.retry_proxies().await,
                 EventType::RetryWorkload(previous_timeout, poddata) => {
-                    if let Err(e) = self.state.retry_comparmentless(poddata).await {
+                    if let Err(e) = self.state.retry_compartmentless(poddata).await {
                         // We can't tell the CNI that a node needs to be removed due
                         // to an unretriable error. So at the moment we always retry,
                         // always increasing the the timeout by a factor on each attempt.
