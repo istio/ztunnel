@@ -123,6 +123,9 @@ pub enum LoadBalancerMode {
     Strict,
     // Prefer select endpoints matching all LoadBalancerScopes when picking endpoints but allow mismatches
     Failover,
+    // In PASSTHROUGH mode, endpoint selection will not be done and traffic passes directly through to the original
+    // desitnation address.
+    Passthrough,
 }
 
 impl From<xds::istio::workload::load_balancing::Mode> for LoadBalancerMode {
@@ -132,7 +135,8 @@ impl From<xds::istio::workload::load_balancing::Mode> for LoadBalancerMode {
             xds::istio::workload::load_balancing::Mode::Failover => LoadBalancerMode::Failover,
             xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
                 LoadBalancerMode::Standard
-            }
+            },
+            xds::istio::workload::load_balancing::Mode::Passthrough => LoadBalancerMode::Passthrough,
         }
     }
 }

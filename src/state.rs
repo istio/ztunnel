@@ -73,6 +73,12 @@ pub struct Upstream {
     pub destination_service: Option<ServiceDescription>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UpstreamDestination {
+    UpstreamParts(Arc<Workload>, u16, Option<Arc<Service>>),
+    OriginalDestination,
+}
+
 impl Upstream {
     pub fn workload_socket_addr(&self) -> Option<SocketAddr> {
         self.selected_workload_ip
@@ -288,11 +294,16 @@ impl ProxyState {
         source_workload: &Workload,
         addr: SocketAddr,
         resolution_mode: ServiceResolutionMode,
-    ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
+    ) -> Option<UpstreamDestination> {
         if let Some(svc) = self
             .services
             .get_by_vip(&network_addr(network.clone(), addr.ip()))
         {
+            if let Some(lb) = &svc.load_balancer {
+                if lb.mode == LoadBalancerMode::Passthrough {
+                    return Some(UpstreamDestination::OriginalDestination);
+                }
+            }
             return self.find_upstream_from_service(
                 source_workload,
                 addr.port(),
@@ -304,7 +315,7 @@ impl ProxyState {
             .workloads
             .find_address(&network_addr(network, addr.ip()))
         {
-            return Some((wl, addr.port(), None));
+            return Some(UpstreamDestination::UpstreamParts(wl, addr.port(), None));
         }
         None
     }
@@ -315,7 +326,7 @@ impl ProxyState {
         svc_port: u16,
         resolution_mode: ServiceResolutionMode,
         svc: Arc<Service>,
-    ) -> Option<(Arc<Workload>, u16, Option<Arc<Service>>)> {
+    ) -> Option<UpstreamDestination> {
         // Randomly pick an upstream
         // TODO: do this more efficiently, and not just randomly
         let Some((ep, wl)) = self.load_balance(source_workload, &svc, svc_port, resolution_mode)
@@ -343,7 +354,7 @@ impl ProxyState {
             return None;
         };
 
-        Some((wl, target_port, Some(svc)))
+        Some(UpstreamDestination::UpstreamParts(wl, target_port, Some(svc)))
     }
 
     fn load_balance<'a>(
@@ -789,10 +800,11 @@ impl DemandProxyState {
         &self,
         source_workload: &Workload,
         original_target_address: SocketAddr,
-        upstream: Option<(Arc<Workload>, u16, Option<Arc<Service>>)>,
+        upstream: Option<UpstreamDestination>,
     ) -> Result<Option<Upstream>, Error> {
-        let Some((wl, port, svc)) = upstream else {
-            return Ok(None);
+        let (wl, port, svc) = match upstream {
+            Some(UpstreamDestination::UpstreamParts(wl, port, svc)) => (wl, port, svc),
+            None | Some(UpstreamDestination::OriginalDestination) => return Ok(None),
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
@@ -855,7 +867,11 @@ impl DemandProxyState {
                         (us, original_destination_address)
                     }
                     Some(Address::Workload(w)) => {
-                        let us = Some((w, gw_address.hbone_mtls_port, None));
+                        let us = Some(UpstreamDestination::UpstreamParts(
+                            w,
+                            gw_address.hbone_mtls_port,
+                            None,
+                        ));
                         (us, original_destination_address)
                     }
                     None => {
@@ -912,7 +928,11 @@ impl DemandProxyState {
                         (us, original_destination_address)
                     }
                     Some(Address::Workload(w)) => {
-                        let us = Some((w, gw_address.hbone_mtls_port, None));
+                        let us = Some(UpstreamDestination::UpstreamParts(
+                            w,
+                            gw_address.hbone_mtls_port,
+                            None,
+                        ));
                         (us, original_destination_address)
                     }
                     None => {
@@ -1369,9 +1389,13 @@ mod tests {
             _ => ServiceResolutionMode::Standard,
         };
 
-        let (_, port, _) = state
+        let port = match state
             .find_upstream("".into(), &wl, "10.0.0.1:80".parse().unwrap(), mode)
-            .expect("upstream to be found");
+        {
+            Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
+            _ => panic!("upstream to be found"),
+        };
+
         assert_eq!(port, tc.expected_port());
     }
 

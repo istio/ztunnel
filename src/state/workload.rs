@@ -906,7 +906,7 @@ pub enum WorkloadError {
 mod tests {
     use super::*;
     use crate::config::ConfigSource;
-    use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode};
+    use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode, UpstreamDestination};
     use crate::test_helpers::helpers::initialize_telemetry;
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
@@ -1828,7 +1828,7 @@ mod tests {
         .try_into()
         .unwrap();
         for _ in 0..1000 {
-            if let Some((workload, _, _)) = state.state.read().unwrap().find_upstream(
+            if let Some(UpstreamDestination::UpstreamParts(workload, _, _)) = state.state.read().unwrap().find_upstream(
                 strng::EMPTY,
                 &wl,
                 "127.0.1.1:80".parse().unwrap(),
@@ -1871,7 +1871,8 @@ mod tests {
         // Make sure we get a valid workload
         assert!(wl.is_some());
         assert_eq!(wl.as_ref().unwrap().service_account, "default");
-        let (_, port, svc) = demand
+
+        let (port, svc) = match demand
             .state
             .read()
             .unwrap()
@@ -1881,7 +1882,10 @@ mod tests {
                 "127.10.0.1:80".parse().unwrap(),
                 ServiceResolutionMode::Standard,
             )
-            .expect("should get");
+        {
+            Some(UpstreamDestination::UpstreamParts(_, port, svc)) => (port, svc),
+            _ => panic!("should get"),
+        };
         // Make sure we get a valid VIP
         assert_eq!(port, 8080);
         assert_eq!(
@@ -1890,7 +1894,7 @@ mod tests {
         );
 
         // test that we can have a service in another network than workloads it selects
-        let (_, port, _) = demand
+        let port = match demand
             .state
             .read()
             .unwrap()
@@ -1900,7 +1904,10 @@ mod tests {
                 "127.10.0.2:80".parse().unwrap(),
                 ServiceResolutionMode::Standard,
             )
-            .expect("should get");
+            {
+                Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
+                _ => panic!("should get"),
+            };
         // Make sure we get a valid VIP
         assert_eq!(port, 8080);
     }
