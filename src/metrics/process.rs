@@ -21,7 +21,7 @@ use tracing::error;
 // Track open fds
 #[derive(Debug)]
 pub struct ProcessMetrics {}
-const FD_PATH: &str = "/proc/self/fd";
+const FD_PATH: &str = "/dev/fd";
 
 impl ProcessMetrics {
     pub fn new() -> Self {
@@ -37,7 +37,8 @@ impl ProcessMetrics {
                 0
             }
         };
-        let gauge = metrics::gauge::ConstGauge::new(open_fds);
+        // exclude the fd used to read the directory
+        let gauge = metrics::gauge::ConstGauge::new(open_fds - 1);
         let metric_encoder = encoder.encode_descriptor(
             "process_open_fds",
             "Number of open file descriptors",
