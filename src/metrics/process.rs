@@ -68,6 +68,12 @@ impl ProcessMetrics {
     }
 }
 
+impl Default for ProcessMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Collector for ProcessMetrics {
     fn encode(&self, mut encoder: DescriptorEncoder) -> Result<(), std::fmt::Error> {
         match self.encode_open_fds(&mut encoder) {
