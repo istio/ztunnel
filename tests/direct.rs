@@ -198,8 +198,36 @@ async fn test_quit_lifecycle() {
         .expect("app exits without error");
 }
 
+fn process_metrics_assertions(metrics: &ParsedMetrics) {
+    for metric in ["process_open_fds", "process_max_fds"] {
+        let metric = &(metric);
+        let m = metrics.query(metric, &Default::default());
+        assert!(m.is_some(), "expected metric {metric}");
+        assert!(
+            m.to_owned().unwrap().len() == 1,
+            "expected metric {metric} to have len(1)"
+        );
+        let value = m.unwrap()[0].value.clone();
+        match value {
+            prometheus_parse::Value::Gauge(v) => {
+                assert!(
+                    v > 0.0,
+                    "expected metric {metric} to be positive, was {value:?}",
+                );
+            }
+            _ => {
+                panic!("unexpected metric type");
+            }
+        }
+    }
+}
+
+fn base_metrics_assertions(metrics: ParsedMetrics) {
+    process_metrics_assertions(&metrics);
+}
+
 async fn run_request_test(target: &str, node: &str) {
-    run_requests_test(target, node, 1, None, false).await
+    run_requests_test(target, node, 1, Some(base_metrics_assertions), false).await
 }
 
 async fn run_requests_test(
@@ -264,27 +292,25 @@ async fn test_vip_request() {
 }
 
 fn on_demand_dns_assertions(metrics: ParsedMetrics) {
-    {
-        let metric = &("istio_on_demand_dns_total");
-        let m = metrics.query(metric, &Default::default());
-        assert!(m.is_some(), "expected metric {metric}");
-        // expecting one cache hit and one cache miss
-        assert!(
-            m.to_owned().unwrap().len() == 1,
-            "expected metric {metric} to have len(1)"
-        );
-        let value = m.unwrap()[0].value.clone();
-        let expected = match *metric {
-            "istio_on_demand_dns_total" => prometheus_parse::Value::Untyped(2.0),
-            &_ => {
-                panic!("dev error; unexpected metric");
-            }
-        };
-        assert!(
-            value == expected,
-            "expected metric {metric} to be 1, was {value:?}",
-        );
-    }
+    let metric = &("istio_on_demand_dns_total");
+    let m = metrics.query(metric, &Default::default());
+    assert!(m.is_some(), "expected metric {metric}");
+    // expecting one cache hit and one cache miss
+    assert!(
+        m.to_owned().unwrap().len() == 1,
+        "expected metric {metric} to have len(1)"
+    );
+    let value = m.unwrap()[0].value.clone();
+    let expected = match *metric {
+        "istio_on_demand_dns_total" => prometheus_parse::Value::Untyped(2.0),
+        &_ => {
+            panic!("dev error; unexpected metric");
+        }
+    };
+    assert!(
+        value == expected,
+        "expected metric {metric} to be 1, was {value:?}",
+    );
 }
 
 #[tokio::test]
@@ -356,6 +382,8 @@ async fn test_stats_exist() {
             "istio_tcp_connections_closed",
             "istio_tcp_received_bytes",
             "istio_tcp_sent_bytes",
+            "process_max_fds",
+            "process_open_fds",
         ]);
         {
             for (name, doc) in metric_info {

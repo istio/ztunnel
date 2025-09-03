@@ -77,6 +77,7 @@ pub async fn build_with_cert(
 
     // Register metrics.
     let mut registry = Registry::default();
+    register_process_metrics(&mut registry);
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
     let xds_metrics = xds::Metrics::new(istio_registry);
@@ -248,6 +249,11 @@ pub async fn build_with_cert(
         tcp_dns_proxy_address,
         udp_dns_proxy_address,
     })
+}
+
+fn register_process_metrics(registry: &mut Registry) {
+    #[cfg(unix)]
+    registry.register_collector(Box::new(metrics::process::ProcessMetrics::new()));
 }
 
 struct DataPlaneTask {

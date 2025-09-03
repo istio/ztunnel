@@ -25,6 +25,7 @@ use crate::identity::Identity;
 
 pub mod meta;
 pub mod server;
+pub mod process;
 
 use crate::strng::{RichStrng, Strng};
 pub use server::*;
