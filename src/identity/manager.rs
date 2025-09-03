@@ -345,6 +345,9 @@ impl Worker {
                     }
                     let (state, refresh_at) = match res {
                         Err(err) => {
+                            // Check if we should retain the existing valid certificate
+                            let existing_cert_info = self.get_existing_cert_info(&id).await;
+
                             // Use the next backoff to determine when to retry the fetch and default
                             // to the constant value if the backoff has been reset. In the case of
                             // None we'll use the max_interval to retry the fetch. The max_interval
@@ -362,9 +365,6 @@ impl Worker {
                             // Note that we are using a backoff-per-unique-identity-request. This is to prevent issues
                             // when a cert cannot be fetched for Pod A, but that should not stall retries for
                             // pods B, C, and D.
-
-                            // Check if we should retain the existing valid certificate
-                            let existing_cert_info = self.get_existing_cert_info(&id).await;
 
                             let mut keyed_backoff = match pending_backoffs_by_id.remove(&id) {
                                 Some(backoff) => {
@@ -389,18 +389,18 @@ impl Worker {
                             let retry_delay = keyed_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
                             // Store the per-key backoff, we're gonna retry.
                             pending_backoffs_by_id.insert(id.clone(), keyed_backoff);
-                            tracing::debug!(%id, "certificate fetch failed ({err}), retrying in {retry_delay:?}");
                             let refresh_at = Instant::now() + retry_delay;
 
                             match existing_cert_info {
                                 // we do have a valid existing certificate, schedule retry
                                 Some((valid_cert, cert_expiry_instant)) => {
                                     let effective_refresh_at = std::cmp::min(refresh_at, cert_expiry_instant);
+                                    tracing::info!(%id, "certificate renewal failed ({err}); retaining existing valid certificate until {:?}; next retry at {:?}", cert_expiry_instant, effective_refresh_at);
                                     (CertState::Available(valid_cert), effective_refresh_at)
                                 },
                                 // we don't have a valid existing certificate
                                 None => {
-                                    tracing::debug!(%id, "certificate fetch failed ({err}) and no valid existing certificate, retrying in {retry_delay:?}");
+                                    tracing::warn!(%id, "certificate fetch failed ({err}) and no valid existing certificate; will retry in {retry_delay:?} (backoff capped at {CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL:?})");
                                     (CertState::Unavailable(err), refresh_at)
                                 }
                             }
