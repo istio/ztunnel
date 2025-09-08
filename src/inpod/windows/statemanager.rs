@@ -10,7 +10,7 @@ use crate::proxyfactory::ProxyFactory;
 use crate::state::WorkloadInfo;
 
 use super::config::InPodConfig;
-use tracing::{Instrument, debug, error, info};
+use tracing::{Instrument, debug, info};
 use windows::core::GUID;
 
 use super::WorkloadMessage;
@@ -66,10 +66,6 @@ pub struct WorkloadProxyManagerState {
     pending_workloads: hashbrown::HashMap<WorkloadUid, (WorkloadInfo, InpodNamespace)>,
     draining: DrainingTasks,
 
-    // Here we keep track of workloads that belong to pods that have already a network
-    // namespace, but they don't have a network compartment yet available.
-    compartmentless_workloads: Vec<(WorkloadUid, WorkloadInfo, InpodNamespace)>,
-
     // new connection stuff
     snapshot_received: bool,
     snapshot_names: std::collections::HashSet<WorkloadUid>,
@@ -91,7 +87,6 @@ impl WorkloadProxyManagerState {
             workload_states: Default::default(),
             pending_workloads: Default::default(),
             draining: Default::default(),
-            compartmentless_workloads: Default::default(),
             snapshot_received: false,
             snapshot_names: Default::default(),
             inpod_config,
@@ -107,7 +102,6 @@ impl WorkloadProxyManagerState {
     pub fn reset_snapshot(&mut self) {
         self.snapshot_names.clear();
         self.pending_workloads.clear();
-        self.compartmentless_workloads.clear();
         self.snapshot_received = false;
     }
 
@@ -158,11 +152,6 @@ impl WorkloadProxyManagerState {
                         &poddata.workload_uid,
                         &info,
                     );
-                    self.compartmentless_workloads.push((
-                        poddata.workload_uid.clone(),
-                        info.clone(),
-                        netns,
-                    ));
                     return Ok(ProxyState::PendingCompartment);
                 }
                 let res = self.add_workload(&poddata.workload_uid, info, netns).await;
@@ -430,31 +419,28 @@ impl WorkloadProxyManagerState {
         };
 
         if compartment_id == 0 {
-            info!(
+            return Err(Error::NamespaceError(format!(
                 "network compartment ID not yet available for namespace {}",
                 netns.namespace_guid
-            );
-            self.compartmentless_workloads
-                .push((uid.clone(), info.clone(), netns.clone()));
+            )));
         }
 
         debug!(
             "compartment id {} found for network namespace {}",
             compartment_id, netns.namespace_guid
         );
+
         let new_netns = InpodNamespace::new(netns.namespace_guid.clone()).map_err(|e| {
-            self.compartmentless_workloads
-                .push((uid.clone(), info.clone(), netns.clone()));
             Error::NamespaceError(format!("unable to create new network namespace: {}", e))
         })?;
-        match self.add_workload(&uid, info.clone(), new_netns).await {
-            Ok(()) => {}
-            Err(e) => {
-                self.compartmentless_workloads
-                    .push((uid.clone(), info.clone(), netns.clone()));
-                error!("retrying compartmentless workload {:?} failed: {}", uid, e);
-            }
-        }
+        self.add_workload(&uid, info.clone(), new_netns)
+            .await
+            .map_err(|e| {
+                Error::NamespaceError(format!(
+                    "unable to add workload from namespace {}: {}",
+                    netns.namespace_guid, e
+                ))
+            })?;
         return Ok(());
     }
 
