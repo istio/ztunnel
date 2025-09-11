@@ -4521,7 +4521,6 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "uuid",
  "windows",
  "x509-parser",
  "ztunnel",
