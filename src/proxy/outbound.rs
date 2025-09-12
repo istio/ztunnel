@@ -524,7 +524,8 @@ impl OutboundConnection {
                 // If we are not a passthrough service, we should have an upstream
                 map(|lb| lb.mode != LoadBalancerMode::Passthrough).
                 // If the service had no lb, we should have an upstream
-                unwrap_or(true) {
+                unwrap_or(true)
+                {
                     return Err(Error::NoHealthyUpstream(target));
                 }
             }

@@ -354,7 +354,11 @@ impl ProxyState {
             return None;
         };
 
-        Some(UpstreamDestination::UpstreamParts(wl, target_port, Some(svc)))
+        Some(UpstreamDestination::UpstreamParts(
+            wl,
+            target_port,
+            Some(svc),
+        ))
     }
 
     fn load_balance<'a>(
@@ -1389,9 +1393,7 @@ mod tests {
             _ => ServiceResolutionMode::Standard,
         };
 
-        let port = match state
-            .find_upstream("".into(), &wl, "10.0.0.1:80".parse().unwrap(), mode)
-        {
+        let port = match state.find_upstream("".into(), &wl, "10.0.0.1:80".parse().unwrap(), mode) {
             Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
             _ => panic!("upstream to be found"),
         };

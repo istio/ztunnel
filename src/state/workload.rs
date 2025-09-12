@@ -1828,12 +1828,14 @@ mod tests {
         .try_into()
         .unwrap();
         for _ in 0..1000 {
-            if let Some(UpstreamDestination::UpstreamParts(workload, _, _)) = state.state.read().unwrap().find_upstream(
-                strng::EMPTY,
-                &wl,
-                "127.0.1.1:80".parse().unwrap(),
-                ServiceResolutionMode::Standard,
-            ) {
+            if let Some(UpstreamDestination::UpstreamParts(workload, _, _)) =
+                state.state.read().unwrap().find_upstream(
+                    strng::EMPTY,
+                    &wl,
+                    "127.0.1.1:80".parse().unwrap(),
+                    ServiceResolutionMode::Standard,
+                )
+            {
                 let n = &workload.name; // borrow name instead of cloning
                 found.insert(n.to_string()); // insert an owned copy of the borrowed n
                 wants.remove(&n.to_string()); // remove using the borrow
@@ -1872,17 +1874,12 @@ mod tests {
         assert!(wl.is_some());
         assert_eq!(wl.as_ref().unwrap().service_account, "default");
 
-        let (port, svc) = match demand
-            .state
-            .read()
-            .unwrap()
-            .find_upstream(
-                strng::EMPTY,
-                wl.as_ref().unwrap(),
-                "127.10.0.1:80".parse().unwrap(),
-                ServiceResolutionMode::Standard,
-            )
-        {
+        let (port, svc) = match demand.state.read().unwrap().find_upstream(
+            strng::EMPTY,
+            wl.as_ref().unwrap(),
+            "127.10.0.1:80".parse().unwrap(),
+            ServiceResolutionMode::Standard,
+        ) {
             Some(UpstreamDestination::UpstreamParts(_, port, svc)) => (port, svc),
             _ => panic!("should get"),
         };
@@ -1894,20 +1891,15 @@ mod tests {
         );
 
         // test that we can have a service in another network than workloads it selects
-        let port = match demand
-            .state
-            .read()
-            .unwrap()
-            .find_upstream(
-                "remote".into(),
-                wl.as_ref().unwrap(),
-                "127.10.0.2:80".parse().unwrap(),
-                ServiceResolutionMode::Standard,
-            )
-            {
-                Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
-                _ => panic!("should get"),
-            };
+        let port = match demand.state.read().unwrap().find_upstream(
+            "remote".into(),
+            wl.as_ref().unwrap(),
+            "127.10.0.2:80".parse().unwrap(),
+            ServiceResolutionMode::Standard,
+        ) {
+            Some(UpstreamDestination::UpstreamParts(_, port, _)) => port,
+            _ => panic!("should get"),
+        };
         // Make sure we get a valid VIP
         assert_eq!(port, 8080);
     }

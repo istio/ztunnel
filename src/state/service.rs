@@ -135,8 +135,10 @@ impl From<xds::istio::workload::load_balancing::Mode> for LoadBalancerMode {
             xds::istio::workload::load_balancing::Mode::Failover => LoadBalancerMode::Failover,
             xds::istio::workload::load_balancing::Mode::UnspecifiedMode => {
                 LoadBalancerMode::Standard
-            },
-            xds::istio::workload::load_balancing::Mode::Passthrough => LoadBalancerMode::Passthrough,
+            }
+            xds::istio::workload::load_balancing::Mode::Passthrough => {
+                LoadBalancerMode::Passthrough
+            }
         }
     }
 }
