@@ -711,10 +711,10 @@ mod tests {
     use crate::state::WorkloadInfo;
     use crate::test_helpers::helpers::{initialize_telemetry, test_proxy_metrics};
     use crate::test_helpers::new_proxy_state;
-    use crate::xds::istio::workload::TunnelProtocol as XdsProtocol;
     use crate::xds::istio::workload::Workload as XdsWorkload;
     use crate::xds::istio::workload::address::Type as XdsAddressType;
     use crate::xds::istio::workload::{IpFamilies, Port};
+    use crate::xds::istio::workload::{LoadBalancing, TunnelProtocol as XdsProtocol};
     use crate::xds::istio::workload::{
         NamespacedHostname as XdsNamespacedHostname, NetworkAddress as XdsNetworkAddress, PortList,
     };
@@ -1755,6 +1755,88 @@ mod tests {
                 protocol: OutboundProtocol::HBONE,
                 hbone_destination: "[ff06::c3]:80",
                 destination: "[ff06::c3]:15008",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_passthrough_svc() {
+        run_build_request(
+            "127.0.0.1",
+            "1.2.3.4:80",
+            XdsAddressType::Service(XdsService {
+                hostname: "example.com".to_string(),
+                waypoint: None,
+                load_balancing: Some(LoadBalancing {
+                    mode: xds::istio::workload::load_balancing::Mode::Passthrough.into(),
+                    ..Default::default()
+                }),
+                addresses: vec![
+                    XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vec![1, 2, 3, 4],
+                    },
+                    XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vec![1, 5, 6, 7],
+                    },
+                ],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 80,
+                }],
+                ..Default::default()
+            }),
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::TCP,
+                hbone_destination: "",
+                destination: "1.2.3.4:80",
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_passthrough_svc_with_waypoint() {
+        run_build_request(
+            "127.0.0.1",
+            "1.2.3.4:80",
+            XdsAddressType::Service(XdsService {
+                hostname: "example.com".to_string(),
+                waypoint: Some(xds::istio::workload::GatewayAddress {
+                    destination: Some(xds::istio::workload::gateway_address::Destination::Address(
+                        XdsNetworkAddress {
+                            network: "".to_string(),
+                            address: [127, 0, 0, 10].to_vec(),
+                        },
+                    )),
+                    hbone_mtls_port: 15008,
+                }),
+                load_balancing: Some(LoadBalancing {
+                    mode: xds::istio::workload::load_balancing::Mode::Passthrough.into(),
+                    ..Default::default()
+                }),
+                addresses: vec![
+                    XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vec![1, 2, 3, 4],
+                    },
+                    XdsNetworkAddress {
+                        network: "".to_string(),
+                        address: vec![1, 5, 6, 7],
+                    },
+                ],
+                ports: vec![Port {
+                    service_port: 80,
+                    target_port: 80,
+                }],
+                ..Default::default()
+            }),
+            Some(ExpectedRequest {
+                protocol: OutboundProtocol::HBONE,
+                destination: "127.0.0.10:15008",
+                hbone_destination: "1.2.3.4:80",
             }),
         )
         .await;
