@@ -275,22 +275,24 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
 
     async fn process_local_events(&mut self) {
         let now = tokio::time::Instant::now();
-        for i in 0..self.event_queue.len() {
-            let event = &self.event_queue[i];
-            if event.expiration > now {
-                continue;
-            }
-            match &event.event_type {
+        let index = self
+            .event_queue
+            .partition_point(|event| event.expiration > now);
+        let due_events = self.event_queue.split_off(index);
+        for due_event in due_events {
+            match &due_event.event_type {
                 EventType::RetryAllPendingWorkloads => self.retry_proxies().await,
                 EventType::RetryWorkload(previous_timeout, poddata) => {
                     if let Err(e) = self.state.retry_compartmentless(poddata).await {
-                        // We can't tell the CNI that a node needs to be removed due
-                        // to an unretriable error. So at the moment we always retry,
-                        // always increasing the the timeout by a factor on each attempt.
-                        warn!("error while retyring workload: {}", e);
+                        // There's nothing we can do at the moment if a workload fails its
+                        // retry attempt. From the CNI's perspective, we've already returned
+                        // an ACK, so if we fail again, we just keep retrying forever... This
+                        // should be addressed by issue #1609.
+                        warn!("error while retrying workload: {}", e);
+                        warn!("if this keeps happening, refer to issue #1609");
                         let new_timeout = previous_timeout.mul(2);
                         debug!(
-                            "retyring workload {:?} in {} seconds",
+                            "retrying workload {:?} in {} seconds",
                             poddata,
                             new_timeout.as_secs()
                         );
@@ -302,7 +304,6 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                 }
             }
         }
-        self.event_queue.retain(|event| event.expiration > now)
     }
 
     fn enqueue_local_event(&mut self, delay: Duration, event_type: EventType) {
@@ -311,13 +312,10 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
             event_type,
             expiration,
         };
-        match self
+        let index = self
             .event_queue
-            .binary_search_by_key(&expiration, |event| event.expiration)
-        {
-            Ok(pos) => self.event_queue.insert(pos, new_event),
-            Err(pos) => self.event_queue.insert(pos, new_event),
-        }
+            .partition_point(|event| event.expiration > expiration);
+        self.event_queue.insert(index, new_event);
         match self.next_event_timer.take() {
             Some(_) => {
                 self.next_event_timer = Some(Box::pin(tokio::time::sleep_until(
