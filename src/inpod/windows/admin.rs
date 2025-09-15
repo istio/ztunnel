@@ -24,6 +24,7 @@ use std::sync::RwLock;
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum State {
     Pending,
+    WaitingCompartment,
     Up,
 }
 
@@ -63,6 +64,7 @@ pub struct WorkloadManagerAdminHandler {
 impl WorkloadManagerAdminHandler {
     pub fn proxy_pending(
         &self,
+        workload_state: State,
         uid: &crate::inpod::WorkloadUid,
         workload_info: &WorkloadInfo,
     ) {
@@ -71,13 +73,13 @@ impl WorkloadManagerAdminHandler {
         // don't increment count here, as it is only for up and down. see comment in count.
         match state.get_mut(uid) {
             Some(key) => {
-                key.state = State::Pending;
+                key.state = workload_state;
             }
             None => {
                 state.insert(
                     uid.clone(),
                     ProxyState {
-                        state: State::Pending,
+                        state: workload_state,
                         connections: None,
                         count: 0,
                         info: workload_info.clone(),

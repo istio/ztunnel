@@ -24,6 +24,8 @@ pub enum Error {
     ProtocolError(String),
     #[error("announce error: {0}")]
     AnnounceError(String),
+    #[error("namespace error: {0}")]
+    NamespaceError(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
