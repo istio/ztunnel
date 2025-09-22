@@ -788,12 +788,12 @@ fn append_name(name1: Name, name2: &Name) -> Name {
 /// will begin with the requested hostname, followed by wildcards of decreasing
 /// specificity. For example, a request of 'svc1.ns1.svc.cluster.local` will return
 /// ['svc1.ns1.svc.cluster.local`, '*.ns1.svc.cluster.local`, '*.svc.cluster.local`,
-/// '*.cluster.local`, '*.local`].
+/// '*.cluster.local`, '*.local`, "*."].
 fn get_wildcards(name: &Name) -> Vec<Name> {
     let mut out = vec![name.clone()];
 
     let mut name = name.clone();
-    while name.num_labels() > 1 {
+    while name.num_labels() > 0 {
         // Replace the first label with a wildcard (e.g. www.example.com -> *.example.com).
         out.push(name.clone().into_wildcard());
 
@@ -1128,6 +1128,7 @@ mod tests {
             n("*.svc.cluster.local."),
             n("*.cluster.local."),
             n("*.local."),
+            n("*."),
         ];
         assert_eq!(expected, actual);
     }
