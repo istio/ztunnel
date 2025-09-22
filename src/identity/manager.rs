@@ -345,6 +345,9 @@ impl Worker {
                     }
                     let (state, refresh_at) = match res {
                         Err(err) => {
+                            // Check if we should retain the existing valid certificate
+                            let existing_cert_info = self.get_existing_cert_info(&id).await;
+
                             // Use the next backoff to determine when to retry the fetch and default
                             // to the constant value if the backoff has been reset. In the case of
                             // None we'll use the max_interval to retry the fetch. The max_interval
@@ -362,6 +365,7 @@ impl Worker {
                             // Note that we are using a backoff-per-unique-identity-request. This is to prevent issues
                             // when a cert cannot be fetched for Pod A, but that should not stall retries for
                             // pods B, C, and D.
+
                             let mut keyed_backoff = match pending_backoffs_by_id.remove(&id) {
                                 Some(backoff) => {
                                     backoff
@@ -382,12 +386,24 @@ impl Worker {
                                     }
                                 }
                             };
-                            let retry = keyed_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
+                            let retry_delay = keyed_backoff.next_backoff().unwrap_or(CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL);
                             // Store the per-key backoff, we're gonna retry.
                             pending_backoffs_by_id.insert(id.clone(), keyed_backoff);
-                            tracing::debug!(%id, "certificate fetch failed ({err}), retrying in {retry:?}");
-                            let refresh_at = Instant::now() + retry;
-                            (CertState::Unavailable(err), refresh_at)
+                            let refresh_at = Instant::now() + retry_delay;
+
+                            match existing_cert_info {
+                                // we do have a valid existing certificate, schedule retry
+                                Some((valid_cert, cert_expiry_instant)) => {
+                                    let effective_refresh_at = std::cmp::min(refresh_at, cert_expiry_instant);
+                                    tracing::info!(%id, "certificate renewal failed ({err}); retaining existing valid certificate until {:?}; next retry at {:?}", cert_expiry_instant, effective_refresh_at);
+                                    (CertState::Available(valid_cert), effective_refresh_at)
+                                },
+                                // we don't have a valid existing certificate
+                                None => {
+                                    tracing::warn!(%id, "certificate fetch failed ({err}) and no valid existing certificate; will retry in {retry_delay:?} (backoff capped at {CERT_REFRESH_FAILURE_RETRY_DELAY_MAX_INTERVAL:?})");
+                                    (CertState::Unavailable(err), refresh_at)
+                                }
+                            }
                         },
                         Ok(certs) => {
                              tracing::debug!(%id, "certificate fetch succeeded");
@@ -443,6 +459,40 @@ impl Worker {
             }
             None => false,
         }
+    }
+
+    /// Returns existing valid certificate and its expiry time, or None if unavailable/expired
+    async fn get_existing_cert_info(
+        &self,
+        id: &Identity,
+    ) -> Option<(Arc<tls::WorkloadCertificate>, Instant)> {
+        if let Some(cert_channel) = self.certs.lock().await.get(id) {
+            match &*cert_channel.rx.borrow() {
+                CertState::Available(cert) => {
+                    let now = self
+                        .time_conv
+                        .instant_to_system_time(std::time::Instant::now());
+                    if let Some(now) = now {
+                        let cert_expiry = cert.cert.expiration().not_after;
+
+                        if now < cert_expiry {
+                            if let Some(expiry_instant) =
+                                self.time_conv.system_time_to_instant(cert_expiry)
+                            {
+                                tracing::debug!(%id, "existing certificate valid until {:?}", cert_expiry);
+                                return Some((cert.clone(), expiry_instant.into()));
+                            }
+                        } else {
+                            tracing::debug!(%id, "existing certificate expired at {:?}", cert_expiry);
+                        }
+                    }
+                }
+                _ => {
+                    tracing::debug!(%id, "no valid certificate available to retain");
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1107,6 +1157,46 @@ mod tests {
         assert!(sm.fetch_certificate(&id).await.is_err());
         tokio::time::sleep(SEC * 3).await;
         assert!(sm.fetch_certificate(&id).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_get_existing_cert_info_basic() {
+        let test = setup(1);
+        let id = identity("basic-test");
+        let info = test.secret_manager.worker.get_existing_cert_info(&id).await;
+        assert!(info.is_none());
+
+        // cleanup
+        test.tear_down().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_certificate_retention_on_refresh_failure() {
+        let mut test = setup(1);
+        let id = identity("retention-test");
+        let start = Instant::now();
+
+        // get initial certificate
+        let initial_cert = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        let initial_serial = initial_cert.cert.serial().clone();
+        let initial_fetch_count = test.caclient.fetches().await.len();
+
+        // simulate ca errors
+        test.caclient.set_error(true).await;
+        assert!(test.caclient.fetch_certificate(&id).await.is_err());
+
+        // wait for background refresh
+        tokio::time::sleep_until(start + CERT_HALFLIFE + SEC).await;
+
+        // verify background refresh was attempted and valid certs were retained
+        let post_refresh_fetch_count = test.caclient.fetches().await.len();
+        let current_cert = test.secret_manager.fetch_certificate(&id).await.unwrap();
+        let current_serial = current_cert.cert.serial().clone();
+
+        assert!(post_refresh_fetch_count > initial_fetch_count);
+        assert_eq!(initial_serial, current_serial);
+
+        test.tear_down().await;
     }
 
     #[test]

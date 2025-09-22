@@ -226,13 +226,13 @@ pub mod mock {
             let not_after = not_before + self.cfg.cert_lifetime;
 
             let mut state = self.state.write().await;
+            state.fetches.push(id.to_owned());
             if state.error {
                 return Err(Error::Spiffe("injected test error".into()));
             }
             let certs = state
                 .cert_gen
                 .new_certs(&id.to_owned().into(), not_before, not_after);
-            state.fetches.push(id.to_owned());
             Ok(certs)
         }
 
