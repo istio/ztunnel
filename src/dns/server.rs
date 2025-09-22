@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn test_get_wildcards() {
         let actual = get_wildcards(&n("svc1."));
-        let expected: Vec<Name> = vec![n("svc1.")];
+        let expected: Vec<Name> = vec![n("svc1."), n("*.")];
         assert_eq!(expected, actual);
 
         let actual = get_wildcards(&n("svc1.ns1.svc.cluster.local."));
