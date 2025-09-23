@@ -84,12 +84,11 @@ impl PolicyStore {
             RbacScope::Global => Some(strng::EMPTY),
             RbacScope::Namespace => Some(rbac.namespace),
             RbacScope::WorkloadSelector => None,
-        } {
-            if let Some(pl) = self.by_namespace.get_mut(&key) {
-                pl.remove(&xds_name);
-                if pl.is_empty() {
-                    self.by_namespace.remove(&key);
-                }
+        } && let Some(pl) = self.by_namespace.get_mut(&key)
+        {
+            pl.remove(&xds_name);
+            if pl.is_empty() {
+                self.by_namespace.remove(&key);
             }
         }
     }
