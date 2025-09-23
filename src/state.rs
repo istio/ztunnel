@@ -299,10 +299,10 @@ impl ProxyState {
             .services
             .get_by_vip(&network_addr(network.clone(), addr.ip()))
         {
-            if let Some(lb) = &svc.load_balancer {
-                if lb.mode == LoadBalancerMode::Passthrough {
-                    return Some(UpstreamDestination::OriginalDestination);
-                }
+            if let Some(lb) = &svc.load_balancer
+                && lb.mode == LoadBalancerMode::Passthrough
+            {
+                return Some(UpstreamDestination::OriginalDestination);
             }
             return self.find_upstream_from_service(
                 source_workload,
