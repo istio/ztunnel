@@ -75,6 +75,7 @@ impl InboundPassthrough {
                 let pi = self.pi.clone();
                 match socket {
                     Ok((stream, remote)) => {
+                        proxy::setup_steam(&self.pi.cfg.socket_config, &stream).unwrap();
                         let serve_client = async move {
                             debug!(component="inbound passthrough", "connection started");
                                 // Since this task is spawned, make sure we are guaranteed to terminate
