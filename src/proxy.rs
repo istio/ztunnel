@@ -34,7 +34,6 @@ pub use metrics::*;
 
 use crate::identity::{Identity, SecretManager};
 
-use crate::config::SocketConfig;
 use crate::dns::resolver::Resolver;
 use crate::drain::DrainWatcher;
 use crate::proxy::connection_manager::{ConnectionManager, PolicyWatcher};
@@ -134,29 +133,6 @@ impl DefaultSocketFactory {
     }
 }
 
-fn setup_steam(cfg: &SocketConfig, s: &TcpStream) -> io::Result<()> {
-    s.set_nodelay(true)?;
-    if cfg.keepalive_enabled {
-        let ka = TcpKeepalive::new()
-            .with_time(cfg.keepalive_time)
-            .with_retries(cfg.keepalive_retries)
-            .with_interval(cfg.keepalive_interval);
-        tracing::trace!(
-            "set keepalive: {:?}",
-            socket2::SockRef::from(&s).set_tcp_keepalive(&ka)
-        );
-    }
-    if cfg.user_timeout_enabled {
-        // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
-        // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
-        let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-        tracing::trace!(
-            "set user timeout: {:?}",
-            socket2::SockRef::from(&s).set_tcp_user_timeout(Some(ut))
-        );
-    }
-    Ok(())
-}
 pub struct MarkSocketFactory {
     pub inner: DefaultSocketFactory,
     pub mark: u32,
