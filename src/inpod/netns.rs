@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use nix::sched::{CloneFlags, setns};
-use std::os::fd::OwnedFd;
-use std::os::unix::io::AsRawFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -53,7 +52,7 @@ impl InpodNetns {
     }
 
     pub fn new(cur_netns: Arc<OwnedFd>, workload_netns: OwnedFd) -> std::io::Result<Self> {
-        let res = nix::sys::stat::fstat(workload_netns.as_raw_fd())
+        let res = nix::sys::stat::fstat(workload_netns.as_fd())
             .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
         let inode = res.st_ino;
         let dev = res.st_dev;
@@ -110,6 +109,7 @@ mod tests {
     use nix::sched::unshare;
     use nix::unistd::gettid;
     use std::assert;
+    use std::os::fd::AsRawFd;
     use std::os::fd::OwnedFd;
     use std::process::Command;
 
