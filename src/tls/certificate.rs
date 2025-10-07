@@ -36,8 +36,8 @@ use x509_parser::certificate::X509Certificate;
 
 #[derive(Clone, Debug)]
 pub struct Certificate {
-    pub(in crate::tls) expiry: Expiration,
-    der: CertificateDer<'static>,
+    pub expiry: Expiration,
+    pub der: CertificateDer<'static>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,7 +52,7 @@ pub struct WorkloadCertificate {
     pub cert: Certificate,
     /// chain is the entire trust chain, excluding the leaf and root
     pub chain: Vec<Certificate>,
-    pub(in crate::tls) private_key: PrivateKeyDer<'static>,
+    pub private_key: PrivateKeyDer<'static>,
 
     /// precomputed roots. This is used for verification
     root_store: Arc<RootCertStore>,
