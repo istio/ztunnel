@@ -810,14 +810,14 @@ mod tests {
         let resp_str = get_response_str(resp).await;
         assert_eq!(
             resp_str,
-            "current log level is hickory_server::server::server_future=off,info\n"
+            "current log level is hickory_server::server=off,info\n"
         );
 
         let resp = change_log_level(true, "");
         let resp_str = get_response_str(resp).await;
         assert_eq!(
             resp_str,
-            "current log level is hickory_server::server::server_future=off,info\n"
+            "current log level is hickory_server::server=off,info\n"
         );
 
         let resp = change_log_level(true, "invalid_level");
@@ -831,49 +831,40 @@ mod tests {
         let resp_str = get_response_str(resp).await;
         assert_eq!(
             resp_str,
-            "current log level is hickory_server::server::server_future=off,debug\n"
+            "current log level is hickory_server::server=off,debug\n"
         );
 
         let resp = change_log_level(true, "access=debug,info");
         let resp_str = get_response_str(resp).await;
         assert_eq!(
             resp_str,
-            "current log level is hickory_server::server::server_future=off,access=debug,info\n"
+            "current log level is hickory_server::server=off,access=debug,info\n"
         );
 
         let resp = change_log_level(true, "warn");
         let resp_str = get_response_str(resp).await;
         assert_eq!(
             resp_str,
-            "current log level is hickory_server::server::server_future=off,warn\n"
+            "current log level is hickory_server::server=off,warn\n"
         );
 
         let resp = change_log_level(true, "error");
         let resp_str = get_response_str(resp).await;
         assert_eq!(
             resp_str,
-            "current log level is hickory_server::server::server_future=off,error\n"
+            "current log level is hickory_server::server=off,error\n"
         );
 
         let resp = change_log_level(true, "trace");
         let resp_str = get_response_str(resp).await;
-        assert!(
-            resp_str
-                .contains("current log level is hickory_server::server::server_future=off,trace\n")
-        );
+        assert!(resp_str.contains("current log level is hickory_server::server=off,trace\n"));
 
         let resp = change_log_level(true, "info");
         let resp_str = get_response_str(resp).await;
-        assert!(
-            resp_str
-                .contains("current log level is hickory_server::server::server_future=off,info\n")
-        );
+        assert!(resp_str.contains("current log level is hickory_server::server=off,info\n"));
 
         let resp = change_log_level(true, "off");
         let resp_str = get_response_str(resp).await;
-        assert!(
-            resp_str
-                .contains("current log level is hickory_server::server::server_future=off,off\n")
-        );
+        assert!(resp_str.contains("current log level is hickory_server::server=off,off\n"));
     }
 }

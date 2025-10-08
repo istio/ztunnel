@@ -88,8 +88,8 @@ fn default_filter() -> filter::Targets {
     // Read from env var, but prefix with setting DNS logs to warn as they are noisy; they can be explicitly overriden
     let var: String = env::var("RUST_LOG")
         .map_err(|_| ())
-        .map(|v| "hickory_server::server::server_future=off,".to_string() + v.as_str())
-        .unwrap_or("hickory_server::server::server_future=off,info".to_string());
+        .map(|v| "hickory_server::server=off,".to_string() + v.as_str())
+        .unwrap_or("hickory_server::server=off,info".to_string());
     filter::Targets::from_str(&var).expect("static filter should build")
 }
 
