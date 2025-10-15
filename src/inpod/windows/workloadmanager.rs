@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use crate::drain::DrainWatcher;
+use crate::inpod::windows::{WorkloadData, WorkloadMessage, statemanager};
 use crate::readiness;
-use backoff::{backoff::Backoff, ExponentialBackoff};
+use backoff::{ExponentialBackoff, backoff::Backoff};
+use std::ops::Mul;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::time::sleep;
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use super::statemanager::WorkloadProxyManagerState;
@@ -29,6 +31,9 @@ use crate::inpod::windows::namespace::InpodNamespace;
 use super::protocol::WorkloadStreamProcessor;
 
 const RETRY_DURATION: Duration = Duration::from_secs(5);
+
+// This is a delay used by pods that don't have a network compartment yet.
+const COMPARTMENTLESS_DELAY: Duration = Duration::from_millis(500);
 
 const CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -51,11 +56,26 @@ pub struct WorkloadProxyManager {
     readiness: WorkloadProxyReadinessHandler,
 }
 
+enum EventType {
+    RetryAllPendingWorkloads,
+    RetryWorkload(Duration, WorkloadData),
+}
+
+// As opposed to messages incoming from external sources,
+// these are internal events that are triggered internally
+// from the WorkloadManager itself.
+struct InternalEvent {
+    expiration: tokio::time::Instant,
+    event_type: EventType,
+}
+
 struct WorkloadProxyManagerProcessor<'a> {
     state: &'a mut super::statemanager::WorkloadProxyManagerState,
     readiness: &'a mut WorkloadProxyReadinessHandler,
 
     next_pending_retry: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    next_event_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    event_queue: Vec<InternalEvent>,
 }
 
 impl WorkloadProxyReadinessHandler {
@@ -106,33 +126,6 @@ impl WorkloadProxyNetworkHandler {
         Ok(Self { uds })
     }
 
-    // OLD CODE USING UNIX STREAM
-    // async fn connect(&self) -> UnixStream {
-    //     let mut backoff = Duration::from_millis(10);
-
-    //     debug!("connecting to server: {:?}", self.uds);
-
-    //     loop {
-    //         match super::packet::connect(&self.uds).await {
-    //             Err(e) => {
-    //                 backoff =
-    //                     std::cmp::min(CONNECTION_FAILURE_RETRY_DELAY_MAX_INTERVAL, backoff * 2);
-    //                 warn!(
-    //                     "failed to connect to the Istio CNI node agent over {:?}, is the node agent healthy? details: {:?}. retrying in {:?}",
-    //                     &self.uds, e, backoff
-    //                 );
-    //                 tokio::time::sleep(backoff).await;
-    //                 continue;
-    //             }
-
-    //             Ok(conn) => {
-    //                 return conn;
-    //             }
-    //         };
-    //     }
-    // }
-
-    // TODO make this work without UnixStream
     async fn connect(&self) -> Result<NamedPipeClient, anyhow::Error> {
         let mut backoff = Duration::from_millis(10);
 
@@ -140,15 +133,18 @@ impl WorkloadProxyNetworkHandler {
 
         loop {
             let client_options = ClientOptions::new()
-            .pipe_mode(tokio::net::windows::named_pipe::PipeMode::Message)
-            .open(&self.uds);
+                .pipe_mode(tokio::net::windows::named_pipe::PipeMode::Message)
+                .open(&self.uds);
             match client_options {
                 Ok(client) => {
                     info!("connected to server: {:?}", self.uds);
                     return Ok(client);
                 }
                 Err(ref e) => {
-                    error!("failed to connect to server: {:?}, error: {:?}", self.uds, e);
+                    error!(
+                        "failed to connect to server: {:?}, error: {:?}",
+                        self.uds, e
+                    );
                     sleep(backoff).await;
                     backoff *= 2;
                 }
@@ -272,6 +268,63 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
             state,
             readiness,
             next_pending_retry: None,
+            next_event_timer: None,
+            event_queue: Default::default(),
+        }
+    }
+
+    async fn process_local_events(&mut self) {
+        let now = tokio::time::Instant::now();
+        let index = self
+            .event_queue
+            .partition_point(|event| event.expiration > now);
+        let due_events = self.event_queue.split_off(index);
+        for due_event in due_events {
+            match &due_event.event_type {
+                EventType::RetryAllPendingWorkloads => self.retry_proxies().await,
+                EventType::RetryWorkload(previous_timeout, poddata) => {
+                    if let Err(e) = self.state.retry_compartmentless(poddata).await {
+                        // There's nothing we can do at the moment if a workload fails its
+                        // retry attempt. From the CNI's perspective, we've already returned
+                        // an ACK, so if we fail again, we just keep retrying forever... This
+                        // should be addressed by issue #1609.
+                        warn!("error while retrying workload: {}", e);
+                        warn!("if this keeps happening, refer to issue #1609");
+                        let new_timeout = previous_timeout.mul(2);
+                        debug!(
+                            "retrying workload {:?} in {} seconds",
+                            poddata,
+                            new_timeout.as_secs()
+                        );
+                        self.enqueue_local_event(
+                            new_timeout,
+                            EventType::RetryWorkload(new_timeout, poddata.clone()),
+                        );
+                    };
+                }
+            }
+        }
+    }
+
+    fn enqueue_local_event(&mut self, delay: Duration, event_type: EventType) {
+        let expiration = tokio::time::Instant::now() + delay;
+        let new_event = InternalEvent {
+            event_type,
+            expiration,
+        };
+        let index = self
+            .event_queue
+            .partition_point(|event| event.expiration > expiration);
+        self.event_queue.insert(index, new_event);
+        match self.next_event_timer.take() {
+            Some(_) => {
+                self.next_event_timer = Some(Box::pin(tokio::time::sleep_until(
+                    self.event_queue.first().unwrap().expiration,
+                )))
+            }
+            None => {
+                self.next_event_timer = Some(Box::pin(tokio::time::sleep_until(expiration)));
+            }
         }
     }
 
@@ -284,14 +337,15 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
         // return without completing it.
         futures::pin_mut!(readmsg);
         loop {
-            match self.next_pending_retry.take() {
+            //match self.next_pending_retry.take() {
+            match self.next_event_timer.take() {
                 None => {
                     return readmsg.await;
                 }
                 Some(timer) => {
                     match futures_util::future::select(timer, readmsg).await {
                         futures_util::future::Either::Left((_, readmsg_fut)) => {
-                            self.retry_proxies().await;
+                            self.process_local_events().await;
                             // we have an uncompleted future. It might be in the middle of recvmsg.
                             // to make sure we don't drop messages, we complete the original
                             // future and not start a new one.
@@ -300,7 +354,7 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
                         futures_util::future::Either::Right((res, timer)) => {
                             // we have a message before the timer expired
                             // put the timer back so we will wait for the time remaining next time.
-                            self.next_pending_retry = Some(timer);
+                            self.next_event_timer = Some(timer);
                             return res;
                         }
                     };
@@ -347,13 +401,26 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
             debug!("received message: {:?}", msg);
 
             // send ack:
-            match self.state.process_msg(msg).await {
-                Ok(()) => {
+            match self.state.process_msg(&msg).await {
+                Ok(statemanager::ProxyState::Up) => {
                     self.check_ready();
                     processor
                         .send_ack()
                         .await
                         .map_err(|e| Error::SendAckError(e.to_string()))?;
+                }
+                Ok(statemanager::ProxyState::PendingCompartment) => {
+                    self.check_ready();
+                    processor
+                        .send_ack()
+                        .await
+                        .map_err(|e| Error::SendAckError(e.to_string()))?;
+                    if let WorkloadMessage::AddWorkload(poddata) = msg {
+                        self.enqueue_local_event(
+                            COMPARTMENTLESS_DELAY,
+                            EventType::RetryWorkload(COMPARTMENTLESS_DELAY, poddata),
+                        );
+                    }
                 }
                 Err(Error::ProxyError(uid, e)) => {
                     error!(%uid, "failed to start proxy: {:?}", e);
@@ -382,10 +449,8 @@ impl<'a> WorkloadProxyManagerProcessor<'a> {
     }
 
     fn schedule_retry(&mut self) {
-        if self.next_pending_retry.is_none() {
-            info!("scheduling retry");
-            self.next_pending_retry = Some(Box::pin(tokio::time::sleep(RETRY_DURATION)));
-        }
+        info!("scheduling retry");
+        self.enqueue_local_event(RETRY_DURATION, EventType::RetryAllPendingWorkloads);
     }
     fn check_ready(&mut self) {
         if self.state.ready() {

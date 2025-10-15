@@ -1,13 +1,12 @@
 use crate::drain::DrainWatcher;
-use crate::inpod::windows::{WorkloadData, WorkloadMessage, WorkloadUid};
 use crate::inpod::istio::zds::{
-    self, workload_request::Payload, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello,
+    self, Ack, Version, WorkloadRequest, WorkloadResponse, ZdsHello, workload_request::Payload,
 };
+use crate::inpod::windows::{WorkloadData, WorkloadMessage, WorkloadUid};
 use prost::Message;
-use tracing::info;
 use std::io::{IoSlice, IoSliceMut};
 use tokio::net::windows::named_pipe::*;
-
+use tracing::info;
 
 pub struct WorkloadStreamProcessor {
     client: NamedPipeClient,
