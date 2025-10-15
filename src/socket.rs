@@ -144,7 +144,7 @@ mod linux {
 }
 
 /// Listener is a wrapper For TCPListener with sane defaults. Notably, setting NODELAY
-/// You pass also pass it additional socket options to set on accepted connections.
+/// You can also pass it additional socket options to set on accepted connections.
 pub struct Listener {
     listener: TcpListener,
     cfg: Option<SocketConfig>,
