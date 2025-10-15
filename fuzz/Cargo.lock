@@ -1600,9 +1600,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "227748d55f2f0ab4735d87fd623798cb6b664512fe979705f829c9f81c934465"
+checksum = "9f8cc7106155f10bdf99a6f379688f543ad6596a415375b36a59a054ceda1198"
 dependencies = [
  "hashbrown",
 ]
@@ -1751,9 +1751,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.29.0"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
 dependencies = [
  "bitflags 2.8.0",
  "cfg-if",
@@ -1961,9 +1961,9 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pingora-pool"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bacdd5dbdec690d468856d988b170c8bb4ab62e0edefc0f432ba5e326489f421"
+checksum = "996c574f30a6e1ad10b47ac1626a86e0e47d5075953dd049d60df16ba5f7076e"
 dependencies = [
  "crossbeam-queue",
  "log",
@@ -1976,9 +1976,9 @@ dependencies = [
 
 [[package]]
 name = "pingora-timeout"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "685bb8808cc1919c63a06ab14fdac9b84a4887ced49259a5c0adc8bfb2ffe558"
+checksum = "548cd21d41611c725827677937e68f2cd008bbfa09f3416d3fbad07e1e42f6d7"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -2100,9 +2100,9 @@ dependencies = [
 
 [[package]]
 name = "prometheus-client"
-version = "0.23.1"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf41c1a7c32ed72abe5082fb19505b969095c12da9f5732a4bc9878757fd087c"
+checksum = "e4500adecd7af8e0e9f4dbce15cfee07ce913fbf6ad605cc468b83f2d531ee94"
 dependencies = [
  "dtoa",
  "itoa",
@@ -2112,9 +2112,9 @@ dependencies = [
 
 [[package]]
 name = "prometheus-client-derive-encode"
-version = "0.4.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "440f724eba9f6996b75d63681b0a92b06947f1457076d503a4d2e2c8f56442b8"
+checksum = "9adf1691c04c0a5ff46ff8f262b58beb07b0dbb61f96f9f54f6cbd82106ed87f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3887,7 +3887,7 @@ dependencies = [
  "libc",
  "log",
  "netns-rs",
- "nix 0.29.0",
+ "nix 0.30.1",
  "num_cpus",
  "once_cell",
  "pin-project-lite",
