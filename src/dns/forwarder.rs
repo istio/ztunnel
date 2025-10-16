@@ -180,12 +180,12 @@ mod tests {
             .expect("expected resolve error");
 
         // Expect NoRecordsFound with a NXDomain response code.
-        if let ResolveErrorKind::Proto(proto) = err.kind() {
-            if let ProtoErrorKind::NoRecordsFound { response_code, .. } = proto.kind() {
-                // Respond with the error code.
-                assert_eq!(&ResponseCode::NXDomain, response_code);
-                return;
-            }
+        if let ResolveErrorKind::Proto(proto) = err.kind()
+            && let ProtoErrorKind::NoRecordsFound { response_code, .. } = proto.kind()
+        {
+            // Respond with the error code.
+            assert_eq!(&ResponseCode::NXDomain, response_code);
+            return;
         }
         panic!("unexpected error kind {}", err.kind())
     }

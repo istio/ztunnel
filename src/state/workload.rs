@@ -825,10 +825,9 @@ impl WorkloadStore {
                     for wip in prev.workload_ips.iter() {
                         if let Entry::Occupied(mut o) =
                             self.by_addr.entry(network_addr(prev.network.clone(), *wip))
+                            && o.get_mut().remove_uid(prev.uid.clone())
                         {
-                            if o.get_mut().remove_uid(prev.uid.clone()) {
-                                o.remove();
-                            }
+                            o.remove();
                         }
                     }
                 }

@@ -242,7 +242,7 @@ pub struct CommonTrafficLabels {
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq)]
 struct OptionallyEncode<T>(Option<T>);
 impl<T: EncodeLabelSet> EncodeLabelSet for OptionallyEncode<T> {
-    fn encode(&self, encoder: LabelSetEncoder) -> Result<(), std::fmt::Error> {
+    fn encode(&self, encoder: &mut LabelSetEncoder) -> Result<(), std::fmt::Error> {
         match &self.0 {
             None => Ok(()),
             Some(ll) => ll.encode(encoder),

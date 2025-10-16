@@ -102,10 +102,10 @@ impl CertFetcherImpl {
 
 impl CertFetcher for CertFetcherImpl {
     fn prefetch_cert(&self, w: &Workload) {
-        if self.should_prefetch_certificate(w) {
-            if let Err(e) = self.tx.try_send(Request::Fetch(w.identity(), Warmup)) {
-                info!("couldn't prefetch: {:?}", e)
-            }
+        if self.should_prefetch_certificate(w)
+            && let Err(e) = self.tx.try_send(Request::Fetch(w.identity(), Warmup))
+        {
+            info!("couldn't prefetch: {:?}", e)
         }
     }
 

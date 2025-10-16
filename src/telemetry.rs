@@ -241,10 +241,10 @@ where
             for span in scope.from_root() {
                 write!(writer, ":{}", span.metadata().name())?;
                 let ext = span.extensions();
-                if let Some(fields) = &ext.get::<FormattedFields<N>>() {
-                    if !fields.is_empty() {
-                        write!(writer, "{{{fields}}}")?;
-                    }
+                if let Some(fields) = &ext.get::<FormattedFields<N>>()
+                    && !fields.is_empty()
+                {
+                    write!(writer, "{{{fields}}}")?;
                 }
             }
         };

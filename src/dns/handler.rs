@@ -118,11 +118,11 @@ async fn send_lookup_error<R: ResponseHandler>(
         }
         LookupError::ResponseCode(code) => send_error(request, response_handle, code).await,
         LookupError::ResolveError(e) => {
-            if let ResolveErrorKind::Proto(proto) = e.kind() {
-                if let ProtoErrorKind::NoRecordsFound { response_code, .. } = proto.kind() {
-                    // Respond with the error code.
-                    return send_error(request, response_handle, *response_code).await;
-                }
+            if let ResolveErrorKind::Proto(proto) = e.kind()
+                && let ProtoErrorKind::NoRecordsFound { response_code, .. } = proto.kind()
+            {
+                // Respond with the error code.
+                return send_error(request, response_handle, *response_code).await;
             }
             // TODO(nmittler): log?
             send_error(request, response_handle, ResponseCode::ServFail).await

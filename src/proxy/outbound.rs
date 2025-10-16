@@ -517,17 +517,16 @@ impl OutboundConnection {
             )
             .await?
         else {
-            if let Some(service) = service {
-                if service.
+            if let Some(service) = service
+                && service.
                 load_balancer.
                 as_ref().
                 // If we are not a passthrough service, we should have an upstream
                 map(|lb| lb.mode != LoadBalancerMode::Passthrough).
                 // If the service had no lb, we should have an upstream
                 unwrap_or(true)
-                {
-                    return Err(Error::NoHealthyUpstream(target));
-                }
+            {
+                return Err(Error::NoHealthyUpstream(target));
             }
             debug!("built request as passthrough; no upstream found");
             return Ok(Request {

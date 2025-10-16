@@ -666,14 +666,13 @@ impl AdsClient {
                     if !self.types_to_expect.is_empty() {
                         received_type = Some(msg.type_url.clone())
                     }
-                    if let XdsSignal::Ack = self.handle_stream_event(msg, &discovery_req_tx).await? {
-                        if let Some(received_type) = received_type {
+                    if let XdsSignal::Ack = self.handle_stream_event(msg, &discovery_req_tx).await?
+                        && let Some(received_type) = received_type {
                             self.types_to_expect.remove(&received_type);
                             if self.types_to_expect.is_empty() {
                                 mem::drop(mem::take(&mut self.block_ready));
                             }
-                        }
-                    };
+                        };
                 }
             }
         }
