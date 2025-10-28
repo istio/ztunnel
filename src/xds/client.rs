@@ -887,6 +887,7 @@ mod tests {
                     }],
                 }],
             }],
+            dry_run: false,
         };
         ProtoResource {
             name: format!("foo{i}"),

@@ -36,6 +36,7 @@ policies:
     name: deny-9999
     namespace: default
     scope: Namespace
+    dryRun: false
 services:
 - name: local
   namespace: default
