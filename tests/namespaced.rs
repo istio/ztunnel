@@ -997,6 +997,7 @@ mod namespaced {
                     )],
                     ..Default::default()
                 }]]],
+                dry_run: false,
             })
             .await?;
         let _ = manager
