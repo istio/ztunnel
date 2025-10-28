@@ -1471,7 +1471,7 @@ mod tests {
 
     fn create_dry_run_wildcard_rbac_policy(action: rbac::RbacAction) -> rbac::Authorization {
         rbac::Authorization {
-            action: action,
+            action,
             namespace: "ns1".into(),
             name: "wildcard".into(),
             rules: vec![vec![]],
