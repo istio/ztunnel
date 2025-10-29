@@ -80,7 +80,12 @@ impl Outbound {
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
+            self.pi.crl_manager.clone(),
         );
+
+        // Register pool with registry for CRL-triggered draining
+        self.pi.pool_registry.register(pool.clone());
+
         let pi = self.pi.clone();
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             loop {
@@ -248,7 +253,8 @@ impl OutboundConnection {
             .local_workload_information
             .fetch_certificate()
             .await?;
-        let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
+        let connector =
+            cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
         let tls_stream = connector.connect(upgraded).await?;
 
         // Spawn inner CONNECT tunnel
@@ -804,12 +810,15 @@ mod tests {
                 connection_manager: ConnectionManager::default(),
                 resolver: None,
                 disable_inbound_freebind: false,
+                crl_manager: None,
+                pool_registry: crate::proxy::pool::PoolRegistry::default(),
             }),
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
                 cfg.clone(),
                 sock_fact,
                 local_workload_information.clone(),
+                None,
             ),
             hbone_port: cfg.inbound_addr.port(),
         };

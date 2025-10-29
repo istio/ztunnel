@@ -76,7 +76,12 @@ impl Socks5 {
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
+            self.pi.crl_manager.clone(),
         );
+
+        // Register pool with registry for CRL-triggered draining
+        self.pi.pool_registry.register(pool.clone());
+
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             loop {
                 // Asynchronously wait for an inbound socket.

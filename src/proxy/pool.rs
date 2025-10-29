@@ -22,6 +22,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use tokio::sync::watch;
@@ -73,6 +74,7 @@ struct ConnSpawner {
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     local_workload: Arc<LocalWorkloadInformation>,
     timeout_rx: watch::Receiver<bool>,
+    crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
 }
 
 // Does nothing but spawn new conns when asked
@@ -81,7 +83,7 @@ impl ConnSpawner {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
-        let connector = cert.outbound_connector(key.dst_id.clone())?;
+        let connector = cert.outbound_connector(key.dst_id.clone(), self.crl_manager.clone())?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await
             .map_err(|e: io::Error| match e.kind() {
@@ -337,6 +339,7 @@ impl WorkloadHBONEPool {
         cfg: Arc<crate::config::Config>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         local_workload: Arc<LocalWorkloadInformation>,
+        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
         let (timeout_send, timeout_recv) = watch::channel(false);
@@ -347,6 +350,7 @@ impl WorkloadHBONEPool {
             socket_factory,
             local_workload,
             timeout_rx: timeout_recv.clone(),
+            crl_manager,
         };
 
         Self {
@@ -503,6 +507,52 @@ impl WorkloadHBONEPool {
             }
         };
         Ok(res)
+    }
+
+    /// Drain all connections in this pool
+    /// This triggers all connection drivers to shut down gracefully via timeout_tx
+    pub fn drain_all_connections(&self) {
+        tracing::debug!("Draining all connections in WorkloadHBONEPool");
+        let _ = self.state.timeout_tx.send(true);
+        tracing::debug!("Drain signal sent to all connection drivers");
+    }
+}
+
+/// Global registry for managing all connection pools
+/// Used to drain all pools when CRL is reloaded with new revocations
+#[derive(Clone, Default)]
+pub struct PoolRegistry {
+    pools: Arc<RwLock<Vec<WorkloadHBONEPool>>>,
+}
+
+impl PoolRegistry {
+    pub fn new() -> Self {
+        Self {
+            pools: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Register a pool with the registry
+    pub fn register(&self, pool: WorkloadHBONEPool) {
+        let mut pools = self.pools.write().unwrap();
+        pools.push(pool);
+        tracing::debug!("Registered pool with registry (total: {})", pools.len());
+    }
+
+    /// Drain all registered pools
+    /// This triggers all connection drivers across all pools to shut down
+    pub fn drain_all(&self) {
+        let pools = self.pools.read().unwrap();
+        if pools.is_empty() {
+            tracing::warn!("No pools registered in registry");
+            return;
+        }
+
+        tracing::info!("Draining {} pool(s)", pools.len());
+        for pool in pools.iter() {
+            pool.drain_all_connections();
+        }
+        tracing::debug!("All pools drained");
     }
 }
 
@@ -1027,7 +1077,7 @@ mod test {
             mock_proxy_state,
             identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload, None);
         let server = TestServer {
             conn_counter,
             drop_rx,
