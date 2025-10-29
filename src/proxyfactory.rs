@@ -15,6 +15,7 @@
 use crate::config;
 use crate::identity::SecretManager;
 use crate::state::{DemandProxyState, WorkloadInfo};
+use crate::tls;
 use std::sync::Arc;
 use tracing::error;
 
@@ -34,6 +35,8 @@ pub struct ProxyFactory {
     proxy_metrics: Arc<Metrics>,
     dns_metrics: Option<Arc<dns::Metrics>>,
     drain: DrainWatcher,
+    crl_manager: Option<Arc<tls::crl::CrlManager>>,
+    pool_registry: crate::proxy::pool::PoolRegistry,
 }
 
 impl ProxyFactory {
@@ -55,6 +58,38 @@ impl ProxyFactory {
             }
         };
 
+        // Initialize CRL manager ONCE if enabled
+        let pool_registry = crate::proxy::pool::PoolRegistry::new();
+
+        let crl_manager = if config.enable_crl {
+            tracing::info!("CRL support is ENABLED");
+            match tls::crl::CrlManager::new(config.crl_path.clone(), config.allow_expired_crl) {
+                Ok(manager) => {
+                    tracing::info!("CRL Manager initialized successfully");
+                    let manager_arc = Arc::new(manager);
+
+                    // Register pool registry with CRL manager for pool draining on revocation
+                    manager_arc.register_pool_registry(pool_registry.clone());
+                    tracing::info!("pool registry registered with CRL manager");
+
+                    if let Err(e) = manager_arc.start_file_watcher() {
+                        tracing::error!("failed to start CRL file watcher: {}", e);
+                    } else {
+                        tracing::info!("CRL file watcher active");
+                    }
+
+                    Some(manager_arc)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize CRL manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!("CRL support is DISABLED");
+            None
+        };
+
         Ok(ProxyFactory {
             config,
             state,
@@ -62,6 +97,8 @@ impl ProxyFactory {
             proxy_metrics,
             dns_metrics,
             drain,
+            crl_manager,
+            pool_registry,
         })
     }
 
@@ -132,6 +169,8 @@ impl ProxyFactory {
                 resolver,
                 local_workload_information,
                 false,
+                self.crl_manager.clone(),
+                self.pool_registry.clone(),
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
@@ -177,6 +216,8 @@ impl ProxyFactory {
                 None,
                 local_workload_information,
                 true,
+                self.crl_manager.clone(),
+                self.pool_registry.clone(),
             );
 
             let inbound = Inbound::new(pi, self.drain.clone()).await?;
