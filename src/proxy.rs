@@ -120,6 +120,7 @@ impl DefaultSocketFactory {
                 socket2::SockRef::from(&s).set_tcp_keepalive(&ka)
             );
         }
+        #[cfg(target_os = "linux")]
         if cfg.user_timeout_enabled {
             // https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/
             // TCP_USER_TIMEOUT = TCP_KEEPIDLE + TCP_KEEPINTVL * TCP_KEEPCNT.
@@ -262,6 +263,10 @@ pub(super) struct ProxyInputs {
     resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     // If true, inbound connections created with these inputs will not attempt to preserve the original source IP.
     pub disable_inbound_freebind: bool,
+    // CRL manager for certificate revocation checking
+    pub(super) crl_manager: Option<Arc<tls::crl::CrlManager>>,
+    // Pool registry for draining HTTP/2 connection pools on CRL reload
+    pub(super) pool_registry: pool::PoolRegistry,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -275,6 +280,8 @@ impl ProxyInputs {
         resolver: Option<Arc<dyn Resolver + Send + Sync>>,
         local_workload_information: Arc<LocalWorkloadInformation>,
         disable_inbound_freebind: bool,
+        crl_manager: Option<Arc<tls::crl::CrlManager>>,
+        pool_registry: pool::PoolRegistry,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
@@ -285,6 +292,8 @@ impl ProxyInputs {
             local_workload_information,
             resolver,
             disable_inbound_freebind,
+            crl_manager,
+            pool_registry,
         })
     }
 }
