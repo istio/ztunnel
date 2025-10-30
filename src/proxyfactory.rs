@@ -36,7 +36,6 @@ pub struct ProxyFactory {
     dns_metrics: Option<Arc<dns::Metrics>>,
     drain: DrainWatcher,
     crl_manager: Option<Arc<tls::crl::CrlManager>>,
-    pool_registry: crate::proxy::pool::PoolRegistry,
 }
 
 impl ProxyFactory {
@@ -59,18 +58,12 @@ impl ProxyFactory {
         };
 
         // Initialize CRL manager ONCE if enabled
-        let pool_registry = crate::proxy::pool::PoolRegistry::new();
-
         let crl_manager = if config.enable_crl {
             tracing::info!("CRL support is ENABLED");
             match tls::crl::CrlManager::new(config.crl_path.clone(), config.allow_expired_crl) {
                 Ok(manager) => {
                     tracing::info!("CRL Manager initialized successfully");
                     let manager_arc = Arc::new(manager);
-
-                    // Register pool registry with CRL manager for pool draining on revocation
-                    manager_arc.register_pool_registry(pool_registry.clone());
-                    tracing::info!("pool registry registered with CRL manager");
 
                     if let Err(e) = manager_arc.start_file_watcher() {
                         tracing::error!("failed to start CRL file watcher: {}", e);
@@ -98,7 +91,6 @@ impl ProxyFactory {
             dns_metrics,
             drain,
             crl_manager,
-            pool_registry,
         })
     }
 
@@ -170,7 +162,6 @@ impl ProxyFactory {
                 local_workload_information,
                 false,
                 self.crl_manager.clone(),
-                self.pool_registry.clone(),
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
@@ -217,7 +208,6 @@ impl ProxyFactory {
                 local_workload_information,
                 true,
                 self.crl_manager.clone(),
-                self.pool_registry.clone(),
             );
 
             let inbound = Inbound::new(pi, self.drain.clone()).await?;
