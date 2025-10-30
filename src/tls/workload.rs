@@ -35,9 +35,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::strng::Strng;
 use crate::tls;
+use crate::tls::crl::CrlManager;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -54,11 +55,20 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
     trust_domain: Option<Strng>,
+    crl_manager: Option<Arc<CrlManager>>,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
-        Arc::new(Self { base, trust_domain })
+    pub fn new(
+        base: Arc<dyn ClientCertVerifier>,
+        trust_domain: Option<Strng>,
+        crl_manager: Option<Arc<CrlManager>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            base,
+            trust_domain,
+            crl_manager,
+        })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
@@ -108,10 +118,37 @@ impl ClientCertVerifier for TrustDomainVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
+        debug!(
+            "Verifying client certificate (chain length: {})",
+            1 + intermediates.len()
+        );
+
         let res = self
             .base
             .verify_client_cert(end_entity, intermediates, now)?;
         self.verify_trust_domain(end_entity)?;
+
+        // Check CRL if enabled
+        if let Some(crl_manager) = &self.crl_manager {
+            debug!("CRL checking enabled for client certificate");
+            match crl_manager.is_revoked_chain(end_entity, intermediates) {
+                Ok(true) => {
+                    error!("Client certificate or intermediate CA is REVOKED");
+                    return Err(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::Revoked,
+                    ));
+                }
+                Ok(false) => {
+                    debug!("Client certificate chain is valid (not revoked)");
+                }
+                Err(e) => {
+                    error!("Failed to check CRL: {}, allowing certificate", e);
+                }
+            }
+        } else {
+            debug!("CRL checking disabled for client certificate");
+        }
+
         Ok(res)
     }
 
@@ -182,6 +219,7 @@ impl OutboundConnector {
 pub struct IdentityVerifier {
     pub(super) roots: Arc<RootCertStore>,
     pub(super) identity: Vec<Identity>,
+    pub(super) crl_manager: Option<Arc<CrlManager>>,
 }
 
 impl IdentityVerifier {
@@ -264,6 +302,27 @@ impl ServerCertVerifier for IdentityVerifier {
         }
 
         self.verify_full_san(end_entity)?;
+
+        // Check CRL if enabled
+        if let Some(crl_manager) = &self.crl_manager {
+            debug!("CRL checking enabled for server certificate");
+            match crl_manager.is_revoked_chain(end_entity, intermediates) {
+                Ok(true) => {
+                    error!("Server certificate or intermediate CA is REVOKED");
+                    return Err(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::Revoked,
+                    ));
+                }
+                Ok(false) => {
+                    debug!("Server certificate chain is valid (not revoked)");
+                }
+                Err(e) => {
+                    error!("Failed to check CRL: {}, allowing certificate", e);
+                }
+            }
+        } else {
+            debug!("CRL checking disabled for server certificate");
+        }
 
         Ok(ServerCertVerified::assertion())
     }

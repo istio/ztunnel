@@ -38,6 +38,8 @@ pub struct H2ConnectClient {
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
     wl_key: WorkloadKey,
+    // Peer certificate serial number (used for selective connection closure on revocation)
+    pub peer_cert_serial: Option<Vec<u8>>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -148,6 +150,7 @@ pub async fn spawn_connection(
     s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     driver_drain: Receiver<bool>,
     wl_key: WorkloadKey,
+    peer_cert_serial: Option<Vec<u8>>,
 ) -> Result<H2ConnectClient, Error> {
     let mut builder = h2::client::Builder::new();
     builder
@@ -188,6 +191,7 @@ pub async fn spawn_connection(
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
         wl_key,
+        peer_cert_serial,
     };
     Ok(c)
 }
