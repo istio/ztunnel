@@ -917,7 +917,6 @@ mod tests {
             local_workload,
             false,
             None,
-            crate::proxy::pool::PoolRegistry::new(),
         ));
         let inbound_request = Inbound::build_inbound_request(&pi, conn, &request_parts).await;
         match want {

@@ -261,8 +261,6 @@ pub(super) struct ProxyInputs {
     pub disable_inbound_freebind: bool,
     // CRL manager for certificate revocation checking
     pub(super) crl_manager: Option<Arc<tls::crl::CrlManager>>,
-    // Pool registry for draining HTTP/2 connection pools on CRL reload
-    pub(super) pool_registry: pool::PoolRegistry,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,7 +275,6 @@ impl ProxyInputs {
         local_workload_information: Arc<LocalWorkloadInformation>,
         disable_inbound_freebind: bool,
         crl_manager: Option<Arc<tls::crl::CrlManager>>,
-        pool_registry: pool::PoolRegistry,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
@@ -289,7 +286,6 @@ impl ProxyInputs {
             resolver,
             disable_inbound_freebind,
             crl_manager,
-            pool_registry,
         })
     }
 }

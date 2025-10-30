@@ -83,9 +83,6 @@ impl Outbound {
             self.pi.crl_manager.clone(),
         );
 
-        // Register pool with registry for CRL-triggered draining
-        self.pi.pool_registry.register(pool.clone());
-
         let pi = self.pi.clone();
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             loop {
@@ -259,9 +256,16 @@ impl OutboundConnection {
 
         // Spawn inner CONNECT tunnel
         let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-        let mut sender =
-            super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, wl_key)
-                .await?;
+        // peer_cert_serial is None here because SOCKS5 connections are not pooled,
+        // so we don't need to track certificate serial for revocation checking on next request
+        let mut sender = super::h2::client::spawn_connection(
+            self.pi.cfg.clone(),
+            tls_stream,
+            drain_rx,
+            wl_key,
+            None,
+        )
+        .await?;
         let http_request = self.create_hbone_request(remote_addr, req);
         let inner_upgraded = sender.send_request(http_request).await?;
 
@@ -811,7 +815,6 @@ mod tests {
                 resolver: None,
                 disable_inbound_freebind: false,
                 crl_manager: None,
-                pool_registry: crate::proxy::pool::PoolRegistry::default(),
             }),
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(

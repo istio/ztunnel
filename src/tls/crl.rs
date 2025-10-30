@@ -57,7 +57,6 @@ struct CrlManagerInner {
     last_load_time: Option<SystemTime>,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
     revoked_serials: HashSet<Vec<u8>>,
-    pool_registry: Option<crate::proxy::pool::PoolRegistry>,
 }
 
 impl CrlManager {
@@ -76,7 +75,6 @@ impl CrlManager {
                 last_load_time: None,
                 _debouncer: None,
                 revoked_serials: HashSet::new(),
-                pool_registry: None,
             })),
         };
 
@@ -98,13 +96,6 @@ impl CrlManager {
         }
 
         Ok(manager)
-    }
-
-    /// Register pool registry for draining HTTP/2 pools when CRL is reloaded with new revocations
-    pub fn register_pool_registry(&self, registry: crate::proxy::pool::PoolRegistry) {
-        let mut inner = self.inner.write().unwrap();
-        inner.pool_registry = Some(registry);
-        debug!("registered pool registry with CRL manager");
     }
 
     /// Load or reload the CRL from disk
@@ -264,6 +255,14 @@ impl CrlManager {
         Ok(())
     }
 
+    /// Check if a certificate serial number is in the revoked set
+    /// This is used for revocation checking on pooled connections
+    /// when next request is received
+    pub fn is_serial_revoked(&self, serial: &[u8]) -> bool {
+        let inner = self.inner.read().unwrap();
+        inner.revoked_serials.contains(serial)
+    }
+
     /// Check if any certificate in the chain is revoked
     pub fn is_revoked_chain(
         &self,
@@ -404,8 +403,7 @@ impl CrlManager {
                                 Ok(has_new_revocations) => {
                                     debug!("CRL reloaded successfully after file change");
                                     if has_new_revocations {
-                                        warn!("NEW REVOCATIONS DETECTED - Closing all connections to force re-validation");
-                                        manager.close_all_connections();
+                                        info!("NEW REVOCATIONS DETECTED - revoked certificates will be rejected on next connection checkout");
                                     }
                                 }
                                 Err(e) => error!("failed to reload CRL: {}", e),
@@ -436,22 +434,6 @@ impl CrlManager {
 
         debug!("CRL file watcher started successfully");
         Ok(())
-    }
-
-    /// Close all connections when new certificate revocations are detected
-    /// This drains HTTP/2 connection pools, forcing clients to reconnect and re-validate certificates
-    fn close_all_connections(&self) {
-        let inner = self.inner.read().unwrap();
-
-        // drain HTTP/2 connection pools
-        if let Some(ref registry) = inner.pool_registry {
-            info!("draining HTTP/2 connection pools");
-            registry.drain_all();
-        } else {
-            warn!("no pool registry registered - cannot drain HTTP/2 pools");
-        }
-
-        debug!("connection pools drained - clients will reconnect and re-validate certificates");
     }
 }
 
