@@ -260,6 +260,39 @@ impl ConnectionManager {
         // potentially large copy under read lock, could require optimization
         self.drains.read().expect("mutex").keys().cloned().collect()
     }
+
+    /// Close all inbound and outbound connections
+    /// This is called when certificate revocations are detected
+    pub fn close_all_connections(&self) {
+        // Close all inbound connections
+        let inbound_conns = self.connections();
+        let inbound_count = inbound_conns.len();
+
+        if inbound_count > 0 {
+            tracing::info!("Closing {} inbound connection(s)", inbound_count);
+            // Spawn async tasks to close connections without blocking
+            for conn in inbound_conns {
+                let cm = self.clone();
+                tokio::spawn(async move {
+                    cm.close(&conn).await;
+                });
+            }
+        }
+
+        // Clear outbound connections (they will be recreated on next use)
+        let mut outbound = self.outbound_connections.write().expect("mutex");
+        let outbound_count = outbound.len();
+        if outbound_count > 0 {
+            tracing::info!("Clearing {} outbound connection(s)", outbound_count);
+            outbound.clear();
+        }
+
+        tracing::info!(
+            "Connection closure initiated: {} inbound, {} outbound",
+            inbound_count,
+            outbound_count
+        );
+    }
 }
 
 #[derive(serde::Serialize)]
