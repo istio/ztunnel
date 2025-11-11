@@ -640,8 +640,6 @@ impl Resolver for Store {
             return result;
         };
 
-        trace!("grnmeira: matched service: {:?}", service_match);
-
         // Increment counter for all requests.
         self.metrics.increment(&DnsRequest {
             request,
