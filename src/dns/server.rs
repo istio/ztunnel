@@ -640,6 +640,8 @@ impl Resolver for Store {
             return result;
         };
 
+        trace!("grnmeira: matched service: {:?}", service_match);
+
         // Increment counter for all requests.
         self.metrics.increment(&DnsRequest {
             request,
@@ -677,32 +679,15 @@ impl Resolver for Store {
         let mut ip_record_name = requested_name.clone();
 
         // If the service was found by stripping off one of the search domains, create a
-        // CNAME record to map to the appropriate canonical name.
-        if let Some(stripped) = service_match.alias.stripped {
-            if service_match.name.is_wildcard() {
-                // The match is a wildcard...
+        // CNAME record to map to the appropriate canonical name. If the match is to a wildcard,
+        // we don't add a CNAME record.
+        if let Some(stripped) = service_match.alias.stripped && !service_match.name.is_wildcard(){
+            // Create a CNAME record to map from the requested name -> stripped name.
+            let canonical_name = stripped.name;
+            records.push(cname_record(requested_name.clone(), canonical_name.clone()));
 
-                // Create a CNAME record that maps from the wildcard with the search domain to
-                // the wildcard without it.
-                let cname_record_name = service_match
-                    .name
-                    .clone()
-                    .append_domain(&stripped.search_domain)
-                    .unwrap();
-                let canonical_name = service_match.name;
-                records.push(cname_record(cname_record_name, canonical_name));
-
-                // For wildcards, continue using the original requested hostname for IP records.
-            } else {
-                // The match is NOT a wildcard...
-
-                // Create a CNAME record to map from the requested name -> stripped name.
-                let canonical_name = stripped.name;
-                records.push(cname_record(requested_name.clone(), canonical_name.clone()));
-
-                // Also use the stripped name as the IP record name.
-                ip_record_name = canonical_name;
-            }
+            // Also use the stripped name as the IP record name.
+            ip_record_name = canonical_name;
         }
 
         access_log(request, Some(&client), "success", records.len());
