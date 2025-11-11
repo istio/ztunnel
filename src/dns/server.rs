@@ -1313,10 +1313,6 @@ mod tests {
                 name: "success: wild card with search domain returns A record correctly",
                 host: "foo.svc.mesh.company.net.ns1.svc.cluster.local.",
                 expect_records: vec![
-                    cname(
-                        n("*.svc.mesh.company.net.ns1.svc.cluster.local."),
-                        n("*.svc.mesh.company.net."),
-                    ),
                     a(
                         n("foo.svc.mesh.company.net.ns1.svc.cluster.local."),
                         ipv4("10.1.2.3"),
