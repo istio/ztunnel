@@ -360,6 +360,7 @@ impl Store {
             //   '*.example.com'
             //   '*.com'
             trace!(
+                alias=%alias.name,
                 "checking against wildcards {:#?}",
                 get_wildcards(&alias.name)
             );
@@ -368,6 +369,7 @@ impl Store {
                 search_name.set_fqdn(false);
                 let search_name_str = search_name.to_string().into();
                 search_name.set_fqdn(true);
+                tracing::error!("howardjohn: lookup {search_name_str}...");
 
                 let services: Vec<Arc<Service>> = state
                     .services
@@ -388,6 +390,7 @@ impl Store {
                         let domain = domain
                             .strip_suffix('.')
                             .expect("the svc domain must have a trailing '.'");
+                        tracing::error!("howardjohn: svc hostname {} vs {}", service.hostname, domain);
                         !service.vips.is_empty() || service.hostname.ends_with(domain)
                     })
                     // Get the service matching the client namespace. If no match exists, just
@@ -414,6 +417,7 @@ impl Store {
 
                 // First, lookup the host as a service.
                 if let Some(service) = service {
+                    tracing::error!("howardjohn: FOUND!");
                     return Some(ServerMatch {
                         server: Address::Service(service.clone()),
                         name: search_name,
@@ -646,6 +650,7 @@ impl Resolver for Store {
             source: Some(&client),
         });
 
+        trace!("found {:#?}", service_match);
         // From this point on, we are the authority for the response.
         let is_authoritative = true;
 
@@ -683,21 +688,21 @@ impl Resolver for Store {
                 // The match is a wildcard...
 
                 // Create a CNAME record that maps from the wildcard with the search domain to
-                // the wildcard without it.
+                // the wildcard witqhout it.
                 let cname_record_name = service_match
                     .name
                     .clone()
                     .append_domain(&stripped.search_domain)
                     .unwrap();
                 let canonical_name = service_match.name;
-                records.push(cname_record(cname_record_name, canonical_name));
+                records.push(dbg!(cname_record(cname_record_name, canonical_name)));
 
                 // For wildcards, continue using the original requested hostname for IP records.
             } else {
                 // The match is NOT a wildcard...
 
                 // Create a CNAME record to map from the requested name -> stripped name.
-                let canonical_name = stripped.name;
+                let canonical_name = service_match.name;
                 records.push(cname_record(requested_name.clone(), canonical_name.clone()));
 
                 // Also use the stripped name as the IP record name.
