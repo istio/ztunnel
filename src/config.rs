@@ -317,13 +317,13 @@ pub struct Config {
 
     pub ipv6_enabled: bool,
 
-    /// Enable CRL (Certificate Revocation List) checking
+    // Enable CRL (Certificate Revocation List) checking
     pub enable_crl: bool,
 
-    /// Path to CRL file
+    // Path to CRL file
     pub crl_path: PathBuf,
 
-    /// Allow expired CRL (for testing/rollout scenarios)
+    // Allow expired CRL (for testing/rollout scenarios)
     pub allow_expired_crl: bool,
 }
 

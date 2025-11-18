@@ -20,7 +20,7 @@ use std::time::Instant;
 use tls_listener::AsyncTls;
 use tokio::sync::watch;
 
-use tracing::{Instrument, debug, error, info, info_span, trace_span};
+use tracing::{Instrument, debug, error, info, info_span, trace_span, warn};
 
 use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, ResponseFlags, util};
 use crate::baggage::parse_baggage_header;
@@ -121,6 +121,35 @@ impl Inbound {
                     debug!(latency=?start.elapsed(), "accepted TLS connection");
                     let (_, ssl) = tls.get_ref();
                     let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
+                    let client_cert_serials: Option<Vec<Vec<u8>>> =
+                        tls::cert_serial_from_connection(ssl);
+
+                    // Debug log certificate serial extraction
+                    match &client_cert_serials {
+                        Some(serials) => {
+                            debug!(
+                                "extracted {} certificate serial(s) from chain",
+                                serials.len()
+                            );
+                            for (idx, serial) in serials.iter().enumerate() {
+                                debug!(
+                                    "  cert {} serial: {} bytes (hex: {})",
+                                    idx,
+                                    serial.len(),
+                                    serial
+                                        .iter()
+                                        .map(|b| format!("{:02x}", b))
+                                        .collect::<String>()
+                                );
+                            }
+                        }
+                        None => {
+                            debug!(
+                                "no client certificate serials extracted (TLS connection without client cert or extraction failed)"
+                            );
+                        }
+                    }
+
                     let conn = Connection {
                         src_identity,
                         src,
@@ -128,6 +157,56 @@ impl Inbound {
                         dst,
                     };
                     debug!(%conn, "accepted connection");
+
+                    // Register TLS connection for tracking (for certificate revocation termination)
+                    let destination_workload =
+                        match pi.local_workload_information.get_workload().await {
+                            Ok(wl) => wl,
+                            Err(e) => {
+                                warn!("failed to get workload for TLS connection tracking: {}", e);
+                                // continue anyway, worst case we can't track this connection for termination
+                                // but the connection can still proceed
+                                let cfg = pi.cfg.clone();
+                                let request_handler = move |req| {
+                                    let id = Self::extract_traceparent(&req);
+                                    let peer = conn.src;
+                                    let req_handler = Self::serve_connect(
+                                        pi.clone(),
+                                        conn.clone(),
+                                        self.enable_orig_src,
+                                        req,
+                                        None,
+                                    )
+                                    .instrument(info_span!("inbound", %id, %peer));
+                                    assertions::size_between_ref(1500, 2500, &req_handler);
+                                    req_handler
+                                };
+                                let serve_conn = h2::server::serve_connection(
+                                    cfg,
+                                    tls,
+                                    drain,
+                                    force_shutdown,
+                                    request_handler,
+                                );
+                                let serve =
+                                    Box::pin(assertions::size_between(6000, 8000, serve_conn));
+                                let _ = serve.await;
+                                return Ok(());
+                            }
+                        };
+
+                    let rbac_ctx = ProxyRbacContext {
+                        conn: conn.clone(),
+                        dest_workload: destination_workload,
+                    };
+                    let mut tls_guard = pi
+                        .connection_manager
+                        .register_tls_connection(&rbac_ctx, client_cert_serials.clone());
+                    debug!("TLS connection registered for revocation tracking");
+
+                    // Get watcher BEFORE serving to listen for revocation-based termination
+                    let tls_drain_watch = tls_guard.watcher();
+
                     let cfg = pi.cfg.clone();
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
@@ -137,6 +216,7 @@ impl Inbound {
                             conn.clone(),
                             self.enable_orig_src,
                             req,
+                            None,
                         )
                         .instrument(info_span!("inbound", %id, %peer));
                         // This is for each user connection, so most important to keep small
@@ -154,11 +234,29 @@ impl Inbound {
                     // This is per HBONE connection, so while would be nice to be small, at least it
                     // is pooled so typically fewer of these.
                     let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
-                    serve.await
+
+                    // Use tokio::select! to race between serving and drain signal
+                    // This allows CRL revocation to terminate the connection immediately
+                    tokio::select! {
+                        result = serve => {
+                            tls_guard.release();
+                            result
+                        }
+                        _ = tls_drain_watch.wait_for_drain() => {
+                            debug!("TLS connection terminated due to certificate revocation");
+                            tls_guard.release();
+                            // Return an error to signal abnormal termination
+                            // This helps with proper cleanup and error reporting
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::ConnectionAborted,
+                                "connection terminated due to certificate revocation"
+                            ).into())
+                        }
+                    }
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 1600, &serve_client);
+                assertions::size_between_ref(1000, 2200, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
@@ -187,6 +285,7 @@ impl Inbound {
         conn: Connection,
         enable_original_source: bool,
         req: H2Request,
+        client_cert_serials: Option<Vec<Vec<u8>>>,
     ) {
         let src = conn.src;
         let dst = conn.dst;
@@ -216,7 +315,7 @@ impl Inbound {
             // Define a connection guard to ensure rbac conditions are maintained for the duration of the connection
             let conn_guard = pi
                 .connection_manager
-                .assert_rbac(&pi.state, &ri.rbac_ctx, ri.for_host)
+                .assert_rbac(&pi.state, &ri.rbac_ctx, ri.for_host, client_cert_serials)
                 .await
                 .map_err(InboundFlagError::build(
                     StatusCode::UNAUTHORIZED,

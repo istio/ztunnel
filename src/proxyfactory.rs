@@ -59,16 +59,12 @@ impl ProxyFactory {
 
         // Initialize CRL manager ONCE if enabled
         let crl_manager = if config.enable_crl {
-            tracing::info!("CRL support is ENABLED");
             match tls::crl::CrlManager::new(config.crl_path.clone(), config.allow_expired_crl) {
                 Ok(manager) => {
-                    tracing::info!("CRL Manager initialized successfully");
                     let manager_arc = Arc::new(manager);
 
                     if let Err(e) = manager_arc.start_file_watcher() {
                         tracing::error!("failed to start CRL file watcher: {}", e);
-                    } else {
-                        tracing::info!("CRL file watcher active");
                     }
 
                     Some(manager_arc)
@@ -79,7 +75,6 @@ impl ProxyFactory {
                 }
             }
         } else {
-            tracing::info!("CRL support is DISABLED");
             None
         };
 
@@ -151,7 +146,11 @@ impl ProxyFactory {
 
         // Optionally create the HBONE proxy.
         if self.config.proxy {
-            let cm = ConnectionManager::default();
+            let cm = if self.crl_manager.is_some() {
+                ConnectionManager::new_with_crl_support()
+            } else {
+                ConnectionManager::default()
+            };
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
                 cm.clone(),
@@ -196,7 +195,11 @@ impl ProxyFactory {
 
             let socket_factory = Arc::new(DefaultSocketFactory(self.config.socket_config));
 
-            let cm = ConnectionManager::default();
+            let cm = if self.crl_manager.is_some() {
+                ConnectionManager::new_with_crl_support()
+            } else {
+                ConnectionManager::default()
+            };
 
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
