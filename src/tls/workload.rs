@@ -131,20 +131,22 @@ impl ClientCertVerifier for TrustDomainVerifier {
         // Check CRL if enabled
         if let Some(crl_manager) = &self.crl_manager {
             debug!("CRL checking enabled for client certificate");
-            match crl_manager.is_revoked_chain(end_entity, intermediates) {
-                Ok(true) => {
-                    error!("Client certificate or intermediate CA is REVOKED");
-                    return Err(rustls::Error::InvalidCertificate(
-                        rustls::CertificateError::Revoked,
-                    ));
-                }
-                Ok(false) => {
-                    debug!("Client certificate chain is valid (not revoked)");
-                }
-                Err(e) => {
-                    error!("Failed to check CRL: {}, allowing certificate", e);
-                }
+            // Fail-closed: reject connection if CRL check returns an error OR if cert is revoked
+            let is_revoked = crl_manager
+                .is_revoked_chain(end_entity, intermediates)
+                .map_err(|e| {
+                    error!("CRL validation failed for client certificate: {}", e);
+                    rustls::Error::General(format!("Certificate revocation check failed: {}", e))
+                })?;
+
+            if is_revoked {
+                error!("Client certificate is REVOKED - rejecting connection");
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::Revoked,
+                ));
             }
+
+            debug!("Client certificate chain is valid (not revoked)");
         } else {
             debug!("CRL checking disabled for client certificate");
         }
@@ -219,7 +221,6 @@ impl OutboundConnector {
 pub struct IdentityVerifier {
     pub(super) roots: Arc<RootCertStore>,
     pub(super) identity: Vec<Identity>,
-    pub(super) crl_manager: Option<Arc<CrlManager>>,
 }
 
 impl IdentityVerifier {
@@ -302,27 +303,6 @@ impl ServerCertVerifier for IdentityVerifier {
         }
 
         self.verify_full_san(end_entity)?;
-
-        // Check CRL if enabled
-        if let Some(crl_manager) = &self.crl_manager {
-            debug!("CRL checking enabled for server certificate");
-            match crl_manager.is_revoked_chain(end_entity, intermediates) {
-                Ok(true) => {
-                    error!("Server certificate or intermediate CA is REVOKED");
-                    return Err(rustls::Error::InvalidCertificate(
-                        rustls::CertificateError::Revoked,
-                    ));
-                }
-                Ok(false) => {
-                    debug!("Server certificate chain is valid (not revoked)");
-                }
-                Err(e) => {
-                    error!("Failed to check CRL: {}, allowing certificate", e);
-                }
-            }
-        } else {
-            debug!("CRL checking disabled for server certificate");
-        }
 
         Ok(ServerCertVerified::assertion())
     }

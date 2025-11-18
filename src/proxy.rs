@@ -259,7 +259,6 @@ pub(super) struct ProxyInputs {
     resolver: Option<Arc<dyn Resolver + Send + Sync>>,
     // If true, inbound connections created with these inputs will not attempt to preserve the original source IP.
     pub disable_inbound_freebind: bool,
-    // CRL manager for certificate revocation checking
     pub(super) crl_manager: Option<Arc<tls::crl::CrlManager>>,
 }
 
@@ -298,6 +297,10 @@ impl Proxy {
     ) -> Result<Self, Error> {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
+
+        if let Some(ref crl_mgr) = pi.crl_manager {
+            crl_mgr.register_connection_manager(pi.connection_manager.clone());
+        }
 
         // This exists for `direct` integ tests, no other reason
         #[cfg(any(test, feature = "testing"))]

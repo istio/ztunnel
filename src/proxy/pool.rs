@@ -73,51 +73,15 @@ struct ConnSpawner {
     socket_factory: Arc<dyn SocketFactory + Send + Sync>,
     local_workload: Arc<LocalWorkloadInformation>,
     timeout_rx: watch::Receiver<bool>,
-    crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
-}
-
-/// Extract peer certificate serial number from TLS stream
-/// Returns None if extraction fails (connection will still work, just can't be selectively drained)
-fn extract_peer_cert_serial(
-    tls_stream: &tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-) -> Option<Vec<u8>> {
-    use x509_parser::prelude::*;
-
-    let (_, client_conn) = tls_stream.get_ref();
-    client_conn
-        .peer_certificates()
-        .and_then(|certs| certs.first())
-        .and_then(|cert| {
-            let (_, parsed) = X509Certificate::from_der(cert).ok()?;
-            Some(parsed.serial.to_bytes_be())
-        })
 }
 
 // Does nothing but spawn new conns when asked
 impl ConnSpawner {
-    /// Check if a certificate serial number is revoked
-    /// Returns false if no CRL manager, no serial, or not revoked
-    /// Returns true only if serial exists AND is in the revoked set
-    fn is_serial_revoked(&self, peer_cert_serial: &Option<Vec<u8>>) -> bool {
-        let Some(serial) = peer_cert_serial else {
-            // no serial available, can't check - assume not revoked
-            return false;
-        };
-
-        let Some(ref crl_mgr) = self.crl_manager else {
-            // no CRL manager, can't check - assume not revoked
-            return false;
-        };
-
-        // check if this serial is in the revoked set
-        crl_mgr.is_serial_revoked(serial)
-    }
-
     async fn new_pool_conn(&self, key: WorkloadKey) -> Result<H2ConnectClient, Error> {
         debug!("spawning new pool conn for {}", key);
 
         let cert = self.local_workload.fetch_certificate().await?;
-        let connector = cert.outbound_connector(key.dst_id.clone(), self.crl_manager.clone())?;
+        let connector = cert.outbound_connector(key.dst_id.clone())?;
         let tcp_stream = super::freebind_connect(None, key.dst, self.socket_factory.as_ref())
             .await
             .map_err(|e: io::Error| match e.kind() {
@@ -127,21 +91,11 @@ impl ConnSpawner {
 
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
-
-        // extract peer certificate serial BEFORE H2 handshake (for selective connection closure)
-        let peer_cert_serial = extract_peer_cert_serial(&tls_stream);
-        if let Some(ref serial) = peer_cert_serial {
-            trace!("extracted peer certificate serial: {} bytes", serial.len());
-        } else {
-            debug!("could not extract peer certificate serial");
-        }
-
         let sender = h2::client::spawn_connection(
             self.cfg.clone(),
             tls_stream,
             self.timeout_rx.clone(),
             key,
-            peer_cert_serial,
         )
         .await?;
         Ok(sender)
@@ -347,17 +301,6 @@ impl PoolState {
                         );
                         continue;
                     }
-
-                    // check if this connection's certificate has been revoked
-                    if self.spawner.is_serial_revoked(&existing.peer_cert_serial) {
-                        // certificate has been revoked - discard this connection and create a new one
-                        tracing::warn!(
-                            "connection for {} uses revoked certificate, discarding and creating new connection",
-                            workload_key
-                        );
-                        continue;
-                    }
-
                     debug!("re-using connection for {}", workload_key);
                     break existing;
                 }
@@ -394,7 +337,6 @@ impl WorkloadHBONEPool {
         cfg: Arc<crate::config::Config>,
         socket_factory: Arc<dyn SocketFactory + Send + Sync>,
         local_workload: Arc<LocalWorkloadInformation>,
-        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
     ) -> WorkloadHBONEPool {
         let (timeout_tx, timeout_rx) = watch::channel(false);
         let (timeout_send, timeout_recv) = watch::channel(false);
@@ -405,7 +347,6 @@ impl WorkloadHBONEPool {
             socket_factory,
             local_workload,
             timeout_rx: timeout_recv.clone(),
-            crl_manager,
         };
 
         Self {
@@ -1086,7 +1027,7 @@ mod test {
             mock_proxy_state,
             identity::mock::new_secret_manager(Duration::from_secs(10)),
         ));
-        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload, None);
+        let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload);
         let server = TestServer {
             conn_counter,
             drop_rx,

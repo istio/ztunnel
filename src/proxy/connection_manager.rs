@@ -59,6 +59,7 @@ impl ConnectionDrain {
 pub struct ConnectionManager {
     drains: Arc<RwLock<HashMap<InboundConnection, ConnectionDrain>>>,
     outbound_connections: Arc<RwLock<HashSet<OutboundConnection>>>,
+    close_tx: Option<tokio::sync::mpsc::UnboundedSender<InboundConnection>>,
 }
 
 impl std::fmt::Debug for ConnectionManager {
@@ -72,6 +73,7 @@ impl Default for ConnectionManager {
         ConnectionManager {
             drains: Arc::new(RwLock::new(HashMap::new())),
             outbound_connections: Arc::new(RwLock::new(HashSet::new())),
+            close_tx: None,
         }
     }
 }
@@ -152,9 +154,43 @@ pub struct InboundConnection {
     #[serde(flatten)]
     pub ctx: ProxyRbacContext,
     pub dest_service: Option<String>,
+    #[serde(skip)]
+    pub client_cert_serials: Option<Vec<Vec<u8>>>, // ALL serials in chain (leaf + intermediates)
 }
 
 impl ConnectionManager {
+    // Initialize the connection manager with CRL support
+    // This spawns an async task that handles connection closes from the CRL watcher
+    pub fn new_with_crl_support() -> Self {
+        let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<InboundConnection>();
+
+        let cm = ConnectionManager {
+            drains: Arc::new(RwLock::new(HashMap::new())),
+            outbound_connections: Arc::new(RwLock::new(HashSet::new())),
+            close_tx: Some(close_tx),
+        };
+
+        // Spawn async task to handle close requests
+        let cm_clone = ConnectionManager {
+            drains: cm.drains.clone(),
+            outbound_connections: cm.outbound_connections.clone(),
+            close_tx: None,
+        };
+
+        tokio::spawn(async move {
+            while let Some(conn) = close_rx.recv().await {
+                tracing::debug!(
+                    "Processing close request for connection from {}",
+                    conn.ctx.conn.src
+                );
+                cm_clone.close(&conn).await;
+            }
+            tracing::debug!("Connection close handler terminated");
+        });
+
+        cm
+    }
+
     pub fn track_outbound(
         &self,
         src: SocketAddr,
@@ -185,12 +221,14 @@ impl ConnectionManager {
         state: &DemandProxyState,
         ctx: &ProxyRbacContext,
         dest_service: Option<String>,
+        client_cert_serials: Option<Vec<Vec<u8>>>,
     ) -> Result<ConnectionGuard, Error> {
         // Register before our initial assert. This prevents a race if policy changes between assert() and
         // track()
         let conn = InboundConnection {
             ctx: ctx.clone(),
             dest_service,
+            client_cert_serials,
         };
         let Some(watch) = self.register(&conn) else {
             warn!("failed to track {conn:?}");
@@ -207,6 +245,29 @@ impl ConnectionManager {
             watch: Some(watch),
         })
     }
+
+    /// Register a TLS connection for tracking and potential termination on certificate revocation
+    pub fn register_tls_connection(
+        &self,
+        ctx: &ProxyRbacContext,
+        client_cert_serials: Option<Vec<Vec<u8>>>,
+    ) -> ConnectionGuard {
+        let conn = InboundConnection {
+            ctx: ctx.clone(),
+            dest_service: None,
+            client_cert_serials,
+        };
+        let watch = self.register(&conn);
+        if watch.is_none() {
+            warn!("failed to track TLS connection {conn:?}");
+        }
+        ConnectionGuard {
+            cm: self.clone(),
+            conn,
+            watch,
+        }
+    }
+
     // register a connection with the connection manager
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
@@ -261,37 +322,118 @@ impl ConnectionManager {
         self.drains.read().expect("mutex").keys().cloned().collect()
     }
 
-    /// Close all inbound and outbound connections
-    /// This is called when certificate revocations are detected
-    pub fn close_all_connections(&self) {
-        // Close all inbound connections
-        let inbound_conns = self.connections();
-        let inbound_count = inbound_conns.len();
+    /// Close only inbound connections whose client certificates have been revoked
+    /// This is called when CRL updates with new revocations
+    pub fn close_revoked_connections(&self, revoked_serials: &std::collections::HashSet<Vec<u8>>) {
+        let conns = self.connections();
 
-        if inbound_count > 0 {
-            tracing::info!("Closing {} inbound connection(s)", inbound_count);
-            // Spawn async tasks to close connections without blocking
-            for conn in inbound_conns {
-                let cm = self.clone();
-                tokio::spawn(async move {
-                    cm.close(&conn).await;
-                });
+        tracing::debug!(
+            "checking {} active inbound connections against {} revoked serial(s)",
+            conns.len(),
+            revoked_serials.len()
+        );
+
+        // Log all revoked serials we're checking against
+        for (idx, serial) in revoked_serials.iter().enumerate() {
+            tracing::debug!(
+                "revoked serial {}: {} bytes (hex: {})",
+                idx + 1,
+                serial.len(),
+                serial
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
+            );
+        }
+
+        let mut closed_count = 0;
+        let mut no_serial_count = 0;
+
+        for (idx, conn) in conns.iter().enumerate() {
+            tracing::debug!(
+                "connection {}: src={}, has_serials={}",
+                idx + 1,
+                conn.ctx.conn.src,
+                conn.client_cert_serials.is_some()
+            );
+
+            if let Some(ref serials) = conn.client_cert_serials {
+                tracing::debug!(
+                    "  connection {} has {} certificate(s) in chain",
+                    idx + 1,
+                    serials.len()
+                );
+
+                // Check if ANY certificate in the chain is revoked
+                let mut is_revoked = false;
+                for (cert_idx, serial) in serials.iter().enumerate() {
+                    let serial_hex = serial
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>();
+                    tracing::debug!(
+                        "    cert {} serial: {} bytes (hex: {})",
+                        cert_idx,
+                        serial.len(),
+                        serial_hex
+                    );
+
+                    if revoked_serials.contains(serial) {
+                        is_revoked = true;
+                        tracing::warn!("    cert {} serial MATCHES revoked serial!", cert_idx);
+                        break;
+                    }
+                }
+
+                tracing::debug!(
+                    "  connection {} has revoked certificate: {}",
+                    idx + 1,
+                    is_revoked
+                );
+
+                if is_revoked {
+                    tracing::warn!(
+                        "closing inbound connection {} from {} due to revoked certificate in chain",
+                        idx + 1,
+                        conn.ctx.conn.src
+                    );
+
+                    // Send close request through channel (works from blocking context)
+                    if let Some(ref tx) = self.close_tx {
+                        if let Err(e) = tx.send(conn.clone()) {
+                            tracing::error!("failed to send close request: {}", e);
+                        } else {
+                            closed_count += 1;
+                        }
+                    } else {
+                        tracing::warn!("CRL support not initialized - cannot close connection");
+                    }
+                }
+            } else {
+                no_serial_count += 1;
+                tracing::debug!(
+                    "  connection {} has no client certificate serials (skipping)",
+                    idx + 1
+                );
             }
         }
 
-        // Clear outbound connections (they will be recreated on next use)
-        let mut outbound = self.outbound_connections.write().expect("mutex");
-        let outbound_count = outbound.len();
-        if outbound_count > 0 {
-            tracing::info!("Clearing {} outbound connection(s)", outbound_count);
-            outbound.clear();
-        }
-
         tracing::info!(
-            "Connection closure initiated: {} inbound, {} outbound",
-            inbound_count,
-            outbound_count
+            "connection closure summary: {} total connections checked, {} with serials, {} without serials, {} closed",
+            conns.len(),
+            conns.len() - no_serial_count,
+            no_serial_count,
+            closed_count
         );
+
+        if closed_count > 0 {
+            tracing::info!(
+                "closed {} inbound connection(s) with revoked certificates",
+                closed_count
+            );
+        } else {
+            tracing::debug!("no active connections with newly revoked certificates");
+        }
     }
 }
 
@@ -431,6 +573,7 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
+            client_cert_serials: None,
         };
 
         // ensure drains contains exactly 1 item
@@ -465,6 +608,7 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
+            client_cert_serials: None,
         };
 
         let mut close2 = register(&cm, &rbac_ctx2);
@@ -533,6 +677,7 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
+            client_cert_serials: None,
         };
 
         // create a second connection
@@ -553,6 +698,7 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
+            client_cert_serials: None,
         };
         let another_conn1 = conn1.clone();
 
@@ -649,6 +795,7 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
+            client_cert_serials: None,
         };
         // watch the connection
         let close1 = connection_manager
