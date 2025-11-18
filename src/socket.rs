@@ -175,7 +175,7 @@ impl Listener {
                     .with_time(cfg.keepalive_time)
                     .with_retries(cfg.keepalive_retries)
                     .with_interval(cfg.keepalive_interval);
-                tracing::trace!(
+                tracing::error!(
                     "set keepalive: {:?}",
                     SockRef::from(&stream).set_tcp_keepalive(&ka)
                 );

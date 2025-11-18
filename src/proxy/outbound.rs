@@ -51,11 +51,12 @@ pub struct Outbound {
 
 impl Outbound {
     pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Outbound, Error> {
-        let listener = pi
+        let mut listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
+        listener.set_socket_options(Some(pi.cfg.socket_config));
 
         info!(
             address=%listener.local_addr(),
@@ -327,11 +328,11 @@ impl OutboundConnection {
 
     async fn proxy_to_tcp(
         &mut self,
-        stream: TcpStream,
+        mut stream: TcpStream,
         req: &Request,
         connection_stats: &ConnectionResult,
     ) -> Result<(), Error> {
-        let outbound = super::freebind_connect(
+        let mut outbound = super::freebind_connect(
             None, // No need to spoof source IP on outbound
             req.actual_destination,
             self.pi.socket_factory.as_ref(),
@@ -339,6 +340,7 @@ impl OutboundConnection {
         .await?;
 
         // Proxying data between downstream and upstream
+        // tokio::io::copy_bidirectional(&mut stream, &mut outbound).await.map(|_| ()).map_err(|_| Error::BackendDisconnected)
         copy::copy_bidirectional(
             copy::TcpStreamSplitter(stream),
             copy::TcpStreamSplitter(outbound),
