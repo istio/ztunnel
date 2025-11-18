@@ -80,6 +80,21 @@ pub fn identity_from_connection(conn: &server::ServerConnection) -> Option<Ident
         })
 }
 
+/// Extract ALL certificate serial numbers from server TLS connection
+pub fn cert_serial_from_connection(conn: &server::ServerConnection) -> Option<Vec<Vec<u8>>> {
+    use x509_parser::prelude::*;
+
+    conn.peer_certificates().map(|certs| {
+        certs
+            .iter()
+            .filter_map(|cert| {
+                let (_, parsed) = X509Certificate::from_der(cert).ok()?;
+                Some(parsed.serial.to_bytes_be())
+            })
+            .collect()
+    })
+}
+
 pub fn identities(cert: X509Certificate) -> Result<Vec<Identity>, Error> {
     use x509_parser::prelude::*;
     let names = cert
@@ -328,17 +343,9 @@ impl WorkloadCertificate {
         Ok(sc)
     }
 
-    pub fn outbound_connector(
-        &self,
-        identity: Vec<Identity>,
-        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
-    ) -> Result<OutboundConnector, Error> {
+    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
         let roots = self.root_store.clone();
-        let verifier = IdentityVerifier {
-            roots,
-            identity,
-            crl_manager,
-        };
+        let verifier = IdentityVerifier { roots, identity };
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("client config must be valid")
@@ -469,7 +476,7 @@ mod test {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        let client = cert2.outbound_connector(vec![id], None).unwrap();
+        let client = cert2.outbound_connector(vec![id]).unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
         let _ = tls.write(b"hi").await.unwrap();

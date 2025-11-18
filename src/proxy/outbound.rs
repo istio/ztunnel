@@ -80,9 +80,7 @@ impl Outbound {
             self.pi.cfg.clone(),
             self.pi.socket_factory.clone(),
             self.pi.local_workload_information.clone(),
-            self.pi.crl_manager.clone(),
         );
-
         let pi = self.pi.clone();
         let accept = async move |drain: DrainWatcher, force_shutdown: watch::Receiver<()>| {
             loop {
@@ -250,22 +248,14 @@ impl OutboundConnection {
             .local_workload_information
             .fetch_certificate()
             .await?;
-        let connector =
-            cert.outbound_connector(wl_key.dst_id.clone(), self.pi.crl_manager.clone())?;
+        let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
         let tls_stream = connector.connect(upgraded).await?;
 
         // Spawn inner CONNECT tunnel
         let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-        // peer_cert_serial is None here because SOCKS5 connections are not pooled,
-        // so we don't need to track certificate serial for revocation checking on next request
-        let mut sender = super::h2::client::spawn_connection(
-            self.pi.cfg.clone(),
-            tls_stream,
-            drain_rx,
-            wl_key,
-            None,
-        )
-        .await?;
+        let mut sender =
+            super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, wl_key)
+                .await?;
         let http_request = self.create_hbone_request(remote_addr, req);
         let inner_upgraded = sender.send_request(http_request).await?;
 
@@ -821,7 +811,6 @@ mod tests {
                 cfg.clone(),
                 sock_fact,
                 local_workload_information.clone(),
-                None,
             ),
             hbone_port: cfg.inbound_addr.port(),
         };

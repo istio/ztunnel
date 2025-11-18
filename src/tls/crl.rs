@@ -57,6 +57,7 @@ struct CrlManagerInner {
     last_load_time: Option<SystemTime>,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
     revoked_serials: HashSet<Vec<u8>>,
+    connection_manager: Option<crate::proxy::connection_manager::ConnectionManager>,
 }
 
 impl CrlManager {
@@ -75,6 +76,7 @@ impl CrlManager {
                 last_load_time: None,
                 _debouncer: None,
                 revoked_serials: HashSet::new(),
+                connection_manager: None,
             })),
         };
 
@@ -263,16 +265,50 @@ impl CrlManager {
         inner.revoked_serials.contains(serial)
     }
 
+    /// Register connection manager for automatic connection closure on CRL updates
+    pub fn register_connection_manager(
+        &self,
+        conn_mgr: crate::proxy::connection_manager::ConnectionManager,
+    ) {
+        let mut inner = self.inner.write().unwrap();
+        inner.connection_manager = Some(conn_mgr);
+        debug!("connection manager registered with CRL manager for inbound connection termination");
+    }
+
+    /// Get the current set of all revoked certificate serials
+    pub fn get_revoked_serials(&self) -> HashSet<Vec<u8>> {
+        let inner = self.inner.read().unwrap();
+        inner.revoked_serials.clone()
+    }
+
     /// Check if any certificate in the chain is revoked
     pub fn is_revoked_chain(
         &self,
         end_entity: &CertificateDer,
         intermediates: &[CertificateDer],
     ) -> Result<bool, CrlError> {
+        use x509_parser::prelude::*;
+
         debug!(
             "checking certificate chain against CRL (chain length: {})",
             1 + intermediates.len()
         );
+
+        // Log end-entity certificate serial
+        if let Ok((_, parsed)) = X509Certificate::from_der(end_entity) {
+            debug!("  end-entity serial: {:?}", parsed.serial.to_bytes_be());
+        }
+
+        // Log intermediate certificate serials
+        for (idx, intermediate) in intermediates.iter().enumerate() {
+            if let Ok((_, parsed)) = X509Certificate::from_der(intermediate) {
+                debug!(
+                    "  intermediate {} serial: {:?}",
+                    idx,
+                    parsed.serial.to_bytes_be()
+                );
+            }
+        }
 
         debug!("checking leaf certificate");
         if self.is_cert_revoked(end_entity)? {
@@ -403,7 +439,19 @@ impl CrlManager {
                                 Ok(has_new_revocations) => {
                                     debug!("CRL reloaded successfully after file change");
                                     if has_new_revocations {
-                                        info!("NEW REVOCATIONS DETECTED - revoked certificates will be rejected on next connection checkout");
+                                        info!("NEW REVOCATIONS DETECTED - closing affected inbound connections");
+
+                                        // close connections with revoked certificates
+                                        let (conn_mgr_opt, revoked_serials) = {
+                                            let inner = manager.inner.read().unwrap();
+                                            (inner.connection_manager.clone(), inner.revoked_serials.clone())
+                                        };
+
+                                        if let Some(conn_mgr) = conn_mgr_opt {
+                                            conn_mgr.close_revoked_connections(&revoked_serials);
+                                        } else {
+                                            warn!("connection manager not registered - cannot close revoked connections");
+                                        }
                                     }
                                 }
                                 Err(e) => error!("failed to reload CRL: {}", e),
