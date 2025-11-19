@@ -122,6 +122,13 @@ pub static AUTHZ_POLICY_INFO_LOGGING: once_cell::sync::Lazy<bool> =
     once_cell::sync::Lazy::new(|| {
         env::var("AUTHZ_POLICY_INFO_LOGGING").unwrap_or_default() == "true"
     });
+const SPIRE_ENABLED: &str = "SPIRE_ENABLED";
+
+const SPIRE_TIMEOUT: &str = "SPIRE_TIMEOUT";
+
+const SPIRE_ADMIN_SOCKET: &str = "SPIRE_ADMIN_ENDPOINT_SOCKET";
+
+const CONTAINER_RUNTIME_SOCK_PATH: &str = "CONTAINER_RUNTIME_SOCK_PATH";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -324,6 +331,10 @@ pub struct Config {
     // path to CRL file; if set, enables CRL checking
     pub crl_path: Option<PathBuf>,
     pub enable_enhanced_baggage: bool,
+    pub spire_enabled: bool,
+    pub spire_timeout: Duration,
+    pub spire_admin_socket: String,
+    pub container_runtime_sock_path: String,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -882,6 +893,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from),
         enable_enhanced_baggage: parse_default(ENABLE_ENHANCED_BAGGAGE, true)?,
+        spire_enabled: parse_default(SPIRE_ENABLED, false)?,
+        container_runtime_sock_path: parse_default(
+            CONTAINER_RUNTIME_SOCK_PATH,
+            "/run/containerd/containerd.sock".to_string(),
+        )?,
+        spire_timeout: parse_duration_default(SPIRE_TIMEOUT, Duration::from_secs(10))?,
+        spire_admin_socket: parse_default(
+            SPIRE_ADMIN_SOCKET,
+            "unix:///run/spire/sockets/admin.sock".to_string(),
+        )?,
     })
 }
 

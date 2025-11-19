@@ -21,6 +21,7 @@ pub mod assertions;
 pub mod baggage;
 pub mod cert_fetcher;
 pub mod config;
+pub mod container_runtime;
 pub mod copy;
 pub mod dns;
 pub mod drain;
