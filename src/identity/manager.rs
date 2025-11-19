@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 use crate::config::ProxyMode;
 use async_trait::async_trait;
-
+use crate::identity::SpireClient;
+use spire_api::DelegatedIdentityClient;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
@@ -126,6 +127,18 @@ impl Identity {
     pub fn trust_domain(&self) -> Strng {
         match self {
             Identity::Spiffe { trust_domain, .. } => trust_domain.clone(),
+        }
+    }
+
+    pub fn ns(&self) -> Strng {
+        match self {
+            Identity::Spiffe { namespace, .. } => namespace.clone(),
+        }
+    }
+
+    pub fn sa(&self) -> Strng {
+        match self {
+            Identity::Spiffe { service_account, .. } => service_account.clone(),
         }
     }
 }
@@ -574,6 +587,14 @@ impl SecretManager {
             },
         )
         .0
+    }
+
+    pub async fn new_with_spire_client(cfg: Arc<crate::config::Config>) -> Result<Self, spiffe::error::GrpcClientError> {
+        let dc = DelegatedIdentityClient::default().await?;
+
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone());
+
+        Ok(Self::new_with_client(client))
     }
 
     fn new_internal(

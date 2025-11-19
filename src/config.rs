@@ -114,6 +114,8 @@ const PROXY_MODE_SHARED: &str = "shared";
 
 const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
 
+const SPIRE_ENABLED: &str = "SPIRE_ENABLED";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -311,6 +313,7 @@ pub struct Config {
     pub ztunnel_workload: Option<state::WorkloadInfo>,
 
     pub ipv6_enabled: bool,
+    pub spire_enabled: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -865,6 +868,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_identity,
         ztunnel_workload,
         ipv6_enabled,
+        spire_enabled: parse_default(SPIRE_ENABLED, false)?,
     })
 }
 
