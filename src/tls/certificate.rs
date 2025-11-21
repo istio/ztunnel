@@ -80,6 +80,21 @@ pub fn identity_from_connection(conn: &server::ServerConnection) -> Option<Ident
         })
 }
 
+/// Extract ALL certificate serial numbers from server TLS connection
+pub fn cert_serial_from_connection(conn: &server::ServerConnection) -> Option<Vec<Vec<u8>>> {
+    use x509_parser::prelude::*;
+
+    conn.peer_certificates().map(|certs| {
+        certs
+            .iter()
+            .filter_map(|cert| {
+                let (_, parsed) = X509Certificate::from_der(cert).ok()?;
+                Some(parsed.serial.to_bytes_be())
+            })
+            .collect()
+    })
+}
+
 pub fn identities(cert: X509Certificate) -> Result<Vec<Identity>, Error> {
     use x509_parser::prelude::*;
     let names = cert
@@ -298,7 +313,10 @@ impl WorkloadCertificate {
             .collect()
     }
 
-    pub fn server_config(&self) -> Result<ServerConfig, Error> {
+    pub fn server_config(
+        &self,
+        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+    ) -> Result<ServerConfig, Error> {
         let td = self.cert.identity().map(|i| match i {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
@@ -308,8 +326,11 @@ impl WorkloadCertificate {
         )
         .build()?;
 
-        let client_cert_verifier =
-            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
+        let client_cert_verifier = crate::tls::workload::TrustDomainVerifier::new(
+            raw_client_cert_verifier,
+            td,
+            crl_manager,
+        );
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("server config must be valid")
@@ -444,7 +465,7 @@ mod test {
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
 
         // Do a simple handshake between them; we should be able to accept the trusted root
-        let server = cert1.server_config().unwrap();
+        let server = cert1.server_config(None).unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

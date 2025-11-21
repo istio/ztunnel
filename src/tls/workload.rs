@@ -35,9 +35,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::strng::Strng;
 use crate::tls;
+use crate::tls::crl::CrlManager;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -54,11 +55,20 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
     trust_domain: Option<Strng>,
+    crl_manager: Option<Arc<CrlManager>>,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
-        Arc::new(Self { base, trust_domain })
+    pub fn new(
+        base: Arc<dyn ClientCertVerifier>,
+        trust_domain: Option<Strng>,
+        crl_manager: Option<Arc<CrlManager>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            base,
+            trust_domain,
+            crl_manager,
+        })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
@@ -108,10 +118,39 @@ impl ClientCertVerifier for TrustDomainVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
+        debug!(
+            "Verifying client certificate (chain length: {})",
+            1 + intermediates.len()
+        );
+
         let res = self
             .base
             .verify_client_cert(end_entity, intermediates, now)?;
         self.verify_trust_domain(end_entity)?;
+
+        // Check CRL if enabled
+        if let Some(crl_manager) = &self.crl_manager {
+            debug!("CRL checking enabled for client certificate");
+            // Fail-closed: reject connection if CRL check returns an error OR if cert is revoked
+            let is_revoked = crl_manager
+                .is_revoked_chain(end_entity, intermediates)
+                .map_err(|e| {
+                    error!("CRL validation failed for client certificate: {}", e);
+                    rustls::Error::General(format!("Certificate revocation check failed: {}", e))
+                })?;
+
+            if is_revoked {
+                error!("Client certificate is REVOKED - rejecting connection");
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::Revoked,
+                ));
+            }
+
+            debug!("Client certificate chain is valid (not revoked)");
+        } else {
+            debug!("CRL checking disabled for client certificate");
+        }
+
         Ok(res)
     }
 

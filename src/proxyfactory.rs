@@ -15,6 +15,7 @@
 use crate::config;
 use crate::identity::SecretManager;
 use crate::state::{DemandProxyState, WorkloadInfo};
+use crate::tls;
 use std::sync::Arc;
 use tracing::error;
 
@@ -34,6 +35,7 @@ pub struct ProxyFactory {
     proxy_metrics: Arc<Metrics>,
     dns_metrics: Option<Arc<dns::Metrics>>,
     drain: DrainWatcher,
+    crl_manager: Option<Arc<tls::crl::CrlManager>>,
 }
 
 impl ProxyFactory {
@@ -55,6 +57,27 @@ impl ProxyFactory {
             }
         };
 
+        // Initialize CRL manager ONCE if enabled
+        let crl_manager = if config.enable_crl {
+            match tls::crl::CrlManager::new(config.crl_path.clone(), config.allow_expired_crl) {
+                Ok(manager) => {
+                    let manager_arc = Arc::new(manager);
+
+                    if let Err(e) = manager_arc.start_file_watcher() {
+                        tracing::error!("failed to start CRL file watcher: {}", e);
+                    }
+
+                    Some(manager_arc)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize CRL manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(ProxyFactory {
             config,
             state,
@@ -62,6 +85,7 @@ impl ProxyFactory {
             proxy_metrics,
             dns_metrics,
             drain,
+            crl_manager,
         })
     }
 
@@ -122,7 +146,11 @@ impl ProxyFactory {
 
         // Optionally create the HBONE proxy.
         if self.config.proxy {
-            let cm = ConnectionManager::default();
+            let cm = if self.crl_manager.is_some() {
+                ConnectionManager::new_with_crl_support()
+            } else {
+                ConnectionManager::default()
+            };
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
                 cm.clone(),
@@ -132,6 +160,7 @@ impl ProxyFactory {
                 resolver,
                 local_workload_information,
                 false,
+                self.crl_manager.clone(),
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
@@ -166,7 +195,11 @@ impl ProxyFactory {
 
             let socket_factory = Arc::new(DefaultSocketFactory(self.config.socket_config));
 
-            let cm = ConnectionManager::default();
+            let cm = if self.crl_manager.is_some() {
+                ConnectionManager::new_with_crl_support()
+            } else {
+                ConnectionManager::default()
+            };
 
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
@@ -177,6 +210,7 @@ impl ProxyFactory {
                 None,
                 local_workload_information,
                 true,
+                self.crl_manager.clone(),
             );
 
             let inbound = Inbound::new(pi, self.drain.clone()).await?;
