@@ -672,7 +672,9 @@ impl Resolver for Store {
 
         // If the service was found by stripping off one of the search domains, create a
         // CNAME record to map to the appropriate canonical name.
-        if let Some(stripped) = service_match.alias.stripped && !service_match.name.is_wildcard(){
+        if let Some(stripped) = service_match.alias.stripped
+            && !service_match.name.is_wildcard()
+        {
             // Create a CNAME record to map from the requested name -> stripped name.
             records.push(cname_record(requested_name.clone(), stripped.clone()));
 
@@ -1294,12 +1296,10 @@ mod tests {
             Case {
                 name: "success: wild card with search domain returns A record correctly",
                 host: "foo.svc.mesh.company.net.ns1.svc.cluster.local.",
-                expect_records: vec![
-                    a(
-                        n("foo.svc.mesh.company.net.ns1.svc.cluster.local."),
-                        ipv4("10.1.2.3"),
-                    ),
-                ],
+                expect_records: vec![a(
+                    n("foo.svc.mesh.company.net.ns1.svc.cluster.local."),
+                    ipv4("10.1.2.3"),
+                )],
                 ..Default::default()
             },
             Case {
