@@ -22,11 +22,13 @@ use std::io::Error;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
+use futures_util::FutureExt;
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tracing::trace;
+use tokio::sync::oneshot::Receiver;
+use tracing::{info_span, trace, Instrument};
 
 // BufferedSplitter is a trait to expose splitting an IO object into a buffered reader and a writer
 pub trait BufferedSplitter: Unpin {
@@ -150,6 +152,9 @@ where
 {
     let (mut rd, mut wd) = downstream.split_into_buffered_reader();
     let (mut ru, mut wu) = upstream.split_into_buffered_reader();
+    let (tx1, rx1) = tokio::sync::oneshot::channel::<()>();
+
+    let (tx2, rx2) = tokio::sync::oneshot::channel::<()>();
     let downstream_to_upstream = async {
         let translate_error = |e: io::Error| {
             SendError(Box::new(match e.kind() {
@@ -159,12 +164,14 @@ where
                 _ => e.into(),
             }))
         };
-        let res = ignore_io_errors(copy_buf(&mut rd, &mut wu, stats, false).await)
+        let res = ignore_io_errors(dbg!(copy_buf(&mut rd, &mut wu, stats, false, rx2).instrument(info_span!("sendx")).await))
             .map_err(translate_error);
-        trace!(?res, "send");
+        trace!(?res, "sendx");
         ignore_shutdown_errors(shutdown(&mut wu).await)
             .map_err(translate_error)
             .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
+        dbg!(tx1.send(()));
+        trace!(?res, "send done");
         res
     };
 
@@ -176,12 +183,14 @@ where
                 _ => e.into(),
             }))
         };
-        let res = ignore_io_errors(copy_buf(&mut ru, &mut wd, stats, true).await)
+        let res = ignore_io_errors(dbg!(copy_buf(&mut ru, &mut wd, stats, true, rx1).instrument(info_span!("recvx")).await))
             .map_err(translate_error);
         trace!(?res, "receive");
         ignore_shutdown_errors(shutdown(&mut wd).await)
             .map_err(translate_error)
             .map_err(|e| proxy::Error::ShutdownError(Box::new(e)))?;
+        dbg!(tx2.send(()));
+        trace!(?res, "receive done");
         res
     };
 
@@ -240,6 +249,7 @@ struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     buf: Option<Bytes>,
     metrics: &'a ConnectionResult,
     amt: u64,
+    rx: Option<Receiver<()>>,
 }
 
 async fn copy_buf<'a, R, W>(
@@ -247,6 +257,7 @@ async fn copy_buf<'a, R, W>(
     writer: &'a mut W,
     metrics: &ConnectionResult,
     is_send: bool,
+    rx: Receiver<()>,
 ) -> std::io::Result<u64>
 where
     R: ResizeBufRead + Unpin + ?Sized,
@@ -259,6 +270,7 @@ where
         buf: None,
         metrics,
         amt: 0,
+        rx: Some(rx),
     }
     .await
 }
@@ -278,10 +290,22 @@ where
             let buffer = if let Some(buffer) = me.buf.take() {
                 buffer
             } else {
-                ready!(Pin::new(&mut *me.reader).poll_bytes(cx))?
+                tracing::error!("howardjohn: poll rx...");
+                if let Some(rx) = &mut me.rx && let Poll::Ready(_) = Pin::new(rx).poll(cx) {
+                    me.rx.take();
+                    tracing::error!("howardjohn: poll RX done, return ewmpty");
+                    Bytes::new()
+                } else {
+                    let r = Pin::new(&mut *me.reader).poll_bytes(cx);
+                    tracing::error!("howardjohn: finish read {r:?}");
+                    ready!(r)?
+                }
             };
             if buffer.is_empty() {
-                ready!(AsyncWriteBuf::poll_flush(Pin::new(&mut self.writer), cx))?;
+                tracing::error!("howardjohn: empty buffer, poll flush...");
+                let pf = AsyncWriteBuf::poll_flush(Pin::new(&mut self.writer), cx);
+                tracing::error!("howardjohn: pf done {pf:?}");
+                ready!(pf)?;
                 return Poll::Ready(Ok(self.amt));
             }
 
