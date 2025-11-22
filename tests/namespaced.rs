@@ -1026,7 +1026,7 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let cert = zt.cert_manager.fetch_certificate(&id.to_composite_id()).await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
@@ -1088,7 +1088,7 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let cert = zt.cert_manager.fetch_certificate(&id.to_composite_id()).await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
@@ -1170,7 +1170,7 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let cert = zt.cert_manager.fetch_certificate(&id.to_composite_id()).await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
@@ -1327,7 +1327,7 @@ mod namespaced {
         let ta = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let ztunnel_identity_obj = ta.ztunnel_identity.as_ref().unwrap().clone();
         ta.cert_manager
-            .fetch_certificate(&ztunnel_identity_obj)
+            .fetch_certificate(&ztunnel_identity_obj.to_composite_id())
             .await?;
         let ztunnel_identity_str = ztunnel_identity_obj.to_string();
 
@@ -1340,7 +1340,7 @@ mod namespaced {
                 let res = check_eventually(
                     Duration::from_secs(2),
                     || async {
-                        let mut certs = cm.collect_certs(|a, _b| a.to_string()).await;
+                        let mut certs = cm.collect_unique_identities().await;
                         certs.sort();
                         certs
                     },

@@ -42,6 +42,7 @@ pub mod time;
 pub mod tls;
 pub mod version;
 pub mod xds;
+pub mod container_runtime;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;

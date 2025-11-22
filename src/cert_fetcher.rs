@@ -15,7 +15,8 @@
 use crate::config;
 use crate::config::ProxyMode;
 use crate::identity::Priority::Warmup;
-use crate::identity::{Identity, Request, SecretManager};
+use crate::identity::{CompositeId, Request, RequestKeyEnum, SecretManager};
+use crate::inpod::WorkloadUid;
 use crate::state::workload::{InboundProtocol, Workload};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -24,7 +25,7 @@ use tracing::{debug, error, info};
 /// Responsible for pre-fetching certs for workloads.
 pub trait CertFetcher: Send + Sync {
     fn prefetch_cert(&self, w: &Workload);
-    fn clear_cert(&self, id: &Identity);
+    fn clear_cert(&self, id: &CompositeId<RequestKeyEnum>);
 }
 
 /// A no-op implementation of [CertFetcher].
@@ -32,7 +33,7 @@ pub struct NoCertFetcher();
 
 impl CertFetcher for NoCertFetcher {
     fn prefetch_cert(&self, _: &Workload) {}
-    fn clear_cert(&self, _: &Identity) {}
+    fn clear_cert(&self, _: &CompositeId<RequestKeyEnum>) {}
 }
 
 /// Constructs an appropriate [CertFetcher] for the proxy config.
@@ -102,14 +103,15 @@ impl CertFetcherImpl {
 
 impl CertFetcher for CertFetcherImpl {
     fn prefetch_cert(&self, w: &Workload) {
-        if self.should_prefetch_certificate(w)
-            && let Err(e) = self.tx.try_send(Request::Fetch(w.identity(), Warmup))
-        {
-            info!("couldn't prefetch: {:?}", e)
+        if self.should_prefetch_certificate(w) {
+            let comp_key = CompositeId::new(w.identity(), RequestKeyEnum::Workload(WorkloadUid::new(w.uid.to_string())));
+            if let Err(e) = self.tx.try_send(Request::Fetch(comp_key, Warmup)) {
+                info!("couldn't prefetch: {:?}", e)
+            }
         }
     }
 
-    fn clear_cert(&self, id: &Identity) {
+    fn clear_cert(&self, id: &CompositeId<RequestKeyEnum>) {
         if let Err(e) = self.tx.try_send(Request::Forget(id.clone())) {
             info!("couldn't clear identity: {:?}", e)
         }

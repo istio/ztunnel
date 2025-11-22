@@ -316,7 +316,11 @@ pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
         mock_secret_manager()
     } else {
-        Arc::new(SecretManager::new(config.clone()).await?)
+        if config.spire_enabled {
+            Arc::new(SecretManager::new_with_spire_client(config.clone()).await?)
+        } else {
+            Arc::new(SecretManager::new(config.clone()).await?)
+        }
     };
     build_with_cert(config, cert_manager).await
 }

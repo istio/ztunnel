@@ -22,6 +22,7 @@ use std::{fmt, io};
 
 use hickory_proto::ProtoError;
 
+use crate::inpod::WorkloadUid;
 use crate::strng::Strng;
 use rand::Rng;
 use socket2::TcpKeepalive;
@@ -32,7 +33,7 @@ use tracing::{Instrument, debug, trace, warn};
 use inbound::Inbound;
 pub use metrics::*;
 
-use crate::identity::{Identity, SecretManager};
+use crate::identity::{CompositeId, Identity, SecretManager};
 
 use crate::dns::resolver::Resolver;
 use crate::drain::DrainWatcher;
@@ -212,7 +213,9 @@ impl LocalWorkloadInformation {
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
-        self.full_cert_manager.fetch_certificate(id).await
+        let key = CompositeId::new(id.clone(), identity::RequestKeyEnum::Workload(WorkloadUid::new(wl.uid.to_string())));
+
+        self.full_cert_manager.fetch_certificate(&key).await
     }
 
     pub fn workload_info(&self) -> Arc<WorkloadInfo> {

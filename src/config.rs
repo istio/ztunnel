@@ -114,6 +114,12 @@ const PROXY_MODE_SHARED: &str = "shared";
 
 const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
 
+const SPIRE_ENABLED: &str = "SPIRE_ENABLED";
+
+const SPIRE_MODE: &str = "SPIRE_MODE";
+
+const CONTAINER_RUNTIME_SOCK_PATH: &str = "CONTAINER_RUNTIME_SOCK_PATH";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -145,6 +151,13 @@ pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
+}
+
+#[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpireMode {
+    ByPid,
+    #[default]
+    BySelectors,
 }
 
 #[derive(Clone, Debug)]
@@ -311,6 +324,9 @@ pub struct Config {
     pub ztunnel_workload: Option<state::WorkloadInfo>,
 
     pub ipv6_enabled: bool,
+    pub spire_enabled: bool,
+    pub spire_mode: SpireMode,
+    pub container_runtime_sock_path: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -865,6 +881,22 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_identity,
         ztunnel_workload,
         ipv6_enabled,
+        spire_enabled: parse_default(SPIRE_ENABLED, false)?,
+        spire_mode: match parse::<String>(SPIRE_MODE)? {
+            Some(mode) => match mode.as_str() {
+                "Pid" => SpireMode::ByPid,
+                "Selectors" => SpireMode::BySelectors,
+                _ => {
+                    return Err(Error::EnvVar(
+                        SPIRE_MODE.to_string(),
+                        mode,
+                        "SPIRE_MODE must be one of 'Pid' or 'Selectors'".to_string(),
+                    ));
+                }
+            },
+            None => SpireMode::BySelectors,
+        },
+        container_runtime_sock_path: Some(parse_default(CONTAINER_RUNTIME_SOCK_PATH, "/run/containerd/containerd.sock".to_string())?),
     })
 }
 
