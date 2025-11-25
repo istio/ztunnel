@@ -24,12 +24,10 @@ use crate::config::ProxyMode;
 use crate::container_runtime::ContainerRuntimeManager;
 use crate::inpod::WorkloadUid;
 use async_trait::async_trait;
-use crate::identity::SpireClient;
-use spire_api::DelegatedIdentityClient;
+use crate::identity::{DelegatedIdentityApi, SpireClient};
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
-
 use crate::{strng, tls};
 
 use super::CaClient;
@@ -217,6 +215,7 @@ pub trait CaClientTrait: Send + Sync {
     async fn fetch_certificate(&self, id: &CompositeId<RequestKeyEnum>) -> Result<tls::WorkloadCertificate, Error>;
 }
 
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait PidClientTrait: Send + Sync {
     async fn fetch_pid(&self, uid: &WorkloadUid) -> Result<WorkloadPid, std::io::Error>;
@@ -650,9 +649,7 @@ impl SecretManager {
         .0
     }
 
-    pub async fn new_with_spire_client(cfg: Arc<crate::config::Config>) -> Result<Self, spiffe::error::GrpcClientError> {
-        let dc = DelegatedIdentityClient::default().await?;
-
+    pub async fn new_with_spire_client<C: 'static + DelegatedIdentityApi>(cfg: Arc<crate::config::Config>, dc: C) -> Result<Self, spiffe::error::GrpcClientError> {
         let pid_client = match cfg.spire_mode {
             crate::config::SpireMode::ByPid => {
                 let pid_client = ContainerRuntimeManager::new(&cfg).await.expect("unable to connect to container runtime");
@@ -663,6 +660,12 @@ impl SecretManager {
         };
 
         let client = SpireClient::new(dc, cfg.cluster_domain.clone(), pid_client, cfg);
+
+        Ok(Self::new_with_client(client))
+    }
+
+    pub async fn new_with_spire_client_pid<C: 'static + DelegatedIdentityApi>(cfg: Arc<crate::config::Config>, dc: C, pid_client: Box<dyn PidClientTrait>) -> Result<Self, spiffe::error::GrpcClientError> {
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Some(pid_client), cfg);
 
         Ok(Self::new_with_client(client))
     }

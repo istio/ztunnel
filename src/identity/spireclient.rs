@@ -1,29 +1,55 @@
-use std::sync::Arc;
-use futures::StreamExt;
-use spiffe::{TrustDomain};
+use std::{str::FromStr, sync::Arc};
+use spiffe::{TrustDomain, X509Svid};
 use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient, selectors::{K8s, Selector}};
 use tonic::async_trait;
 use crate::{config::{Config, SpireMode}, identity::{CompositeId, Error, Identity, PidClientTrait, RequestKeyEnum}, inpod::WorkloadUid, tls};
+use tokio_stream::{Stream, StreamExt};
+
+/// Trait abstraction over the SPIRE DelegatedIdentityClient
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait DelegatedIdentityApi: Send + Sync {
+    async fn get_x509_bundles(&self) -> Result<spiffe::X509BundleSet, spiffe::error::GrpcClientError>;
+    async fn get_x509_svids(
+        &self,
+        attest_type: DelegateAttestationRequest,
+    ) -> Result<Box<dyn Stream<Item = Result<spiffe::X509Svid, spiffe::error::GrpcClientError>> + Send + Unpin>, spiffe::error::GrpcClientError>;
+}
+
+#[async_trait]
+impl DelegatedIdentityApi for DelegatedIdentityClient {
+    async fn get_x509_bundles(&self) -> Result<spiffe::X509BundleSet, spiffe::error::GrpcClientError> {
+        self.clone().fetch_x509_bundles().await
+    }
+
+    async fn get_x509_svids(
+        &self,
+        attest_type: DelegateAttestationRequest,
+    ) -> Result<Box<dyn Stream<Item = Result<spiffe::X509Svid, spiffe::error::GrpcClientError>> + Send + Unpin>, spiffe::error::GrpcClientError> {
+        let stream = self.clone().stream_x509_svids(attest_type).await?;
+        Ok(Box::new(stream))
+    }
+}
 
 /// SPIRE client that fetches X.509 certificates for workload identities using
 /// Kubernetes selectors (namespace + service account) rather than PIDs.
 /// This approach works in environments where PID-based attestation is not feasible.
-pub struct SpireClient {
+pub struct SpireClient<C: DelegatedIdentityApi> {
     /// gRPC client for communicating with the SPIRE Delegated Identity API
-    client: DelegatedIdentityClient,
+    client: C,
     /// SPIFFE trust domain (e.g., "cluster.local") used for certificate validation
     trust_domain: String,
     pid: Option<Box<dyn PidClientTrait>>,
     cfg: Arc<Config>
 }
 
-impl SpireClient {
+impl<C: DelegatedIdentityApi> SpireClient<C> {
     /// Creates a new SPIRE client with the provided gRPC client and trust domain.
     /// 
     /// # Arguments
     /// * `client` - Configured DelegatedIdentityClient for SPIRE communication
     /// * `trust_domain` - SPIFFE trust domain string for this cluster
-    pub fn new(client: DelegatedIdentityClient, trust_domain: String, pid: Option<Box<dyn PidClientTrait>>, cfg: Arc<Config>) -> Self {
+    pub fn new(client: C, trust_domain: String, pid: Option<Box<dyn PidClientTrait>>, cfg: Arc<Config>) -> Self {
         SpireClient { client, trust_domain, pid, cfg }
     }
 
@@ -108,19 +134,18 @@ impl SpireClient {
         }
     }
 
-    async fn get_cert_from_spire(&self, value: DelegateAttestationRequest) -> Result<tls::WorkloadCertificate, Error> {
-        // Initiate streaming request to SPIRE server using Kubernetes selectors
+    async fn subscribe_and_wait_for_workload_cert(&self, value: DelegateAttestationRequest) -> Result<X509Svid, Error> {
+       // Initiate streaming request to SPIRE server using Kubernetes selectors
         // clone() is cheap here as DelegatedIdentityClient uses Arc internally
-        let mut stream = self.client.clone()
-            .stream_x509_svids(value)
+        let stream = self.client.get_x509_svids(value)
             .await
             .map_err(|e| Error::FailedToFetchCertificate(format!("Failed to stream X.509 SVIDs: {e}")))?;
-
         // Set reasonable timeout to prevent indefinite blocking on unresponsive SPIRE servers
-        let time_out = std::time::Duration::from_secs(15);
+        let time_out = std::time::Duration::from_secs(30);
 
         // Process the stream with timeout protection
         // SPIRE may deliver multiple responses, but we only need the first successful one
+        tokio::pin!(stream);
         let sf = tokio::time::timeout(time_out, async {
             while let Some(svid_response) = stream.next().await {
                 match svid_response {
@@ -142,18 +167,30 @@ impl SpireClient {
         // Handle nested Result types from timeout + stream operations
         let svid_response = match sf {
             Ok(Ok(response)) => response,  // Successfully got certificate within timeout
-            Ok(Err(e)) => return Err(e),   // Stream completed but no valid certificates
+            Ok(Err(e)) => return Err(e),
             Err(_) => {
                 // Timeout expired before receiving any certificates
+                tracing::error!("Timeout while waiting for SVID stream");
                 return Err(Error::FailedToFetchCertificate("Timeout while waiting for SVID stream".to_string()));
             }
         };
+
+        Ok(svid_response)
+    }
+
+    async fn get_cert_from_spire(&self, value: DelegateAttestationRequest) -> Result<tls::WorkloadCertificate, Error> {
+        // Handle nested Result types from timeout + stream operations
+        let svid_response= self.subscribe_and_wait_for_workload_cert(value).await?;
 
         // Fetch the trust bundle containing CA certificates for validation
         let bundle = self.get_bundle().await?;
 
         // Construct the final WorkloadCertificate combining SVID and trust bundle
         let certs = tls::WorkloadCertificate::new_svid(&svid_response, &bundle)?;
+        
+        let id = format!("spiffe://{}{}", svid_response.spiffe_id().trust_domain(), svid_response.spiffe_id().path());
+
+        Identity::from_str(&id)?;
 
         Ok(certs)
     }
@@ -169,7 +206,7 @@ impl SpireClient {
     /// exists for the configured trust domain.
     async fn get_bundle(&self) -> Result<Vec<spiffe::cert::Certificate>, Error> {
         // Fetch all available trust bundles from SPIRE server
-        let bundle_req = self.client.clone().fetch_x509_bundles()
+        let bundle_req = self.client.get_x509_bundles()
         .await
         .map_err(|e| Error::FailedToFetchBundle(format!("Failed to fetch X.509 bundles: {}", e)))?;
 
@@ -196,7 +233,7 @@ impl SpireClient {
 /// certificate management system. This allows the SPIRE client to be used
 /// interchangeably with other certificate authority implementations.
 #[async_trait]
-impl crate::identity::CaClientTrait for SpireClient {
+impl<C: DelegatedIdentityApi> crate::identity::CaClientTrait for SpireClient<C> {
     /// Fetches a certificate for the given identity using SPIRE's selector-based approach.
     /// This is the main integration point with ztunnel's certificate manager.
     /// 
@@ -216,5 +253,605 @@ impl crate::identity::CaClientTrait for SpireClient {
         } else {
             self.get_cert_by_selector(&id.id()).await
         }
+    }
+}
+
+#[cfg(test)]
+pub mod spire_tests {
+    use crate::config;
+    use crate::identity::CaClientTrait;
+    use crate::identity::MockPidClientTrait;
+    use crate::identity::SecretManager;
+    use crate::identity::WorkloadPid;
+
+    use super::*;
+    use futures::SinkExt;
+    use futures::channel::mpsc;
+    use mockall::predicate::*;
+    use rcgen::BasicConstraints;
+    use rcgen::Certificate;
+    use rcgen::CertificateParams;
+    use rcgen::CertifiedIssuer;
+    use rcgen::DnType;
+    use rcgen::IsCa;
+    use rcgen::KeyPair;
+    use rcgen::KeyUsagePurpose;
+    use rcgen::SanType;
+    use rcgen::string::Ia5String;
+    use spiffe::error::GrpcClientError;
+    use spiffe::*;
+
+    use rcgen::{ExtendedKeyUsagePurpose as EKU};
+
+    #[tokio::test]
+    async fn test_get_cert_by_selector_stream_error() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .withf(|req| matches!(req, DelegateAttestationRequest::Selectors(_)))
+            .returning(|_req| Err(GrpcClientError::EmptyResponse));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::BySelectors;
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            None,
+            Arc::new(cfg),
+        );
+
+        let identity = Identity::from_parts("example.com".into(), "default".into(), "test-sa".into());
+        let result = spire_client.get_cert_by_selector(&identity).await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("Failed to stream X.509 SVIDs"));
+    }
+
+    #[tokio::test]
+    async fn test_get_bundle_success() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::BySelectors;
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            None,
+            Arc::new(cfg),
+        );
+
+        let result = spire_client.get_bundle().await;
+        assert!(result.is_ok());
+    }
+
+     #[tokio::test]
+    async fn test_get_bundle_trust_domain_not_found() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::BySelectors;
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "wrong.trust_domain".to_string(),
+            None,
+            Arc::new(cfg),
+        );
+
+        let result = spire_client.get_bundle().await;
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("No bundle found for trust domain"));
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_selector_success() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_response("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::BySelectors;
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            None,
+            Arc::new(cfg),
+        );
+
+        let identity = Identity::from_parts("example.org".into(), "default".into(), "test-sa".into());
+        let result = spire_client.get_cert_by_selector(&identity).await;
+
+        assert!(result.is_ok());
+
+        let workload_cert = result.unwrap();
+
+        let id = workload_cert.identity();
+
+         assert!(id.unwrap().to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+
+         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+
+         let fetch_result = spire_client.fetch_certificate(&identity.to_composite_id()).await;
+
+        assert!(fetch_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_pid_success() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_response("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client.expect_fetch_pid().returning(|_| Ok(WorkloadPid::new(10)));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::ByPid;
+
+       let cfg = Arc::new(cfg); 
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Some(Box::new(pid_client)),
+            Arc::clone(&cfg),
+        );
+
+        let identity = Identity::from_parts("example.org".into(), "default".into(), "test-sa".into());
+        let result = spire_client.get_cert_by_pid(10, &WorkloadUid::new("uid-123456".to_string())).await;
+
+        assert!(result.is_ok());
+
+        let workload_cert = result.unwrap();
+
+        let id = workload_cert.identity();
+
+         assert!(id.unwrap().to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+
+         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+
+         let composite_id = CompositeId::new(identity, RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())));
+
+        let fetch_result = spire_client.fetch_certificate(&composite_id).await;
+
+        assert!(fetch_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_pid_not_found() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_response("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client.expect_fetch_pid().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No PID found for pod")));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::ByPid;
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Some(Box::new(pid_client)),
+            Arc::new(cfg),
+        );
+
+        let result = spire_client.get_cert_by_pid(10, &WorkloadUid::new("uid-123456".to_string())).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_secret_manager_with_pid_success() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_response("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client.expect_fetch_pid().returning(|_| Ok(WorkloadPid::new(10)));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::ByPid;
+
+       let cfg = Arc::new(cfg); 
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Some(Box::new(pid_client)),
+            Arc::clone(&cfg),
+        );
+
+        let composite_id = CompositeId::new(
+            Identity::from_parts("example.org".into(), "default".into(), "test-sa".into()),
+            RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())),
+        );
+        let composite_id_diff_uid = CompositeId::new(
+            Identity::from_parts("example.org".into(), "default".into(), "test-sa".into()),
+            RequestKeyEnum::Workload(WorkloadUid::new("uid-654321".to_string())),
+        );
+        let sm = SecretManager::new_with_client(spire_client);
+        let certs = sm.fetch_certificate(&composite_id).await.unwrap();
+        assert!(certs.identity().unwrap().to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+        assert!(sm.cache_len().await == 1);
+        let certs = sm.fetch_certificate(&composite_id).await.unwrap();
+        assert!(certs.identity().unwrap().to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+        assert!(sm.cache_len().await == 1);
+        let certs = sm.fetch_certificate(&composite_id_diff_uid).await.unwrap();
+        assert!(certs.identity().unwrap().to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+        assert!(sm.cache_len().await == 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_secret_manager_with_pid_not_found() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_response("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client.expect_fetch_pid().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No PID found for pod")));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::ByPid;
+
+       let cfg = Arc::new(cfg); 
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Some(Box::new(pid_client)),
+            Arc::clone(&cfg),
+        );
+
+        let composite_id = CompositeId::new(
+            Identity::from_parts("example.org".into(), "default".into(), "test-sa".into()),
+            RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())),
+        );
+        let sm = SecretManager::new_with_client(spire_client);
+        let certs = sm.fetch_certificate(&composite_id).await;
+        assert!(certs.is_err());
+        assert!(sm.cache_len().await == 1);
+        let err = certs.err().unwrap().to_string();
+        assert!(err.contains("No PID found for pod"));
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_pid_success_delay_response() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_delay_response("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client.expect_fetch_pid().returning(|_| Ok(WorkloadPid::new(10)));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::ByPid;
+
+       let cfg = Arc::new(cfg); 
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Some(Box::new(pid_client)),
+            Arc::clone(&cfg),
+        );
+
+        let identity = Identity::from_parts("example.org".into(), "default".into(), "test-sa".into());
+        let result = spire_client.get_cert_by_pid(10, &WorkloadUid::new("uid-123456".to_string())).await;
+
+        assert!(result.is_ok());
+
+        let workload_cert = result.unwrap();
+
+        let id = workload_cert.identity();
+
+         assert!(id.unwrap().to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+
+         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
+
+         let composite_id = CompositeId::new(identity, RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())));
+
+        let fetch_result = spire_client.fetch_certificate(&composite_id).await;
+
+        assert!(fetch_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_pid_delay_response_timeout() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_delay_response_timeout("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client.expect_fetch_pid().returning(|_| Ok(WorkloadPid::new(10)));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::ByPid;
+
+       let cfg = Arc::new(cfg); 
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Some(Box::new(pid_client)),
+            Arc::clone(&cfg),
+        );
+
+        let result = spire_client.get_cert_by_pid(10, &WorkloadUid::new("uid-123456".to_string())).await;
+
+        assert!(result.is_err());
+
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("No SVIDs received in stream"));
+    }
+
+    #[tokio::test]
+    async fn test_get_cert_by_pid_delay_response_timeout_empty() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client
+            .expect_get_x509_svids()
+            .returning(|_req| {
+                let stream = mock_stream_svid_success_delay_response_timeout_empty("spiffe://example.org/ns/default/sa/test-sa".to_string());
+                Ok(stream)
+            });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client.expect_fetch_pid().returning(|_| Ok(WorkloadPid::new(10)));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+        cfg.spire_mode = SpireMode::ByPid;
+
+       let cfg = Arc::new(cfg); 
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Some(Box::new(pid_client)),
+            Arc::clone(&cfg),
+        );
+
+        let result = spire_client.get_cert_by_pid(10, &WorkloadUid::new("uid-123456".to_string())).await;
+
+        assert!(result.is_err());
+
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("Timeout while waiting for SVID stream"));
+    }
+
+    fn mock_bundle_response() -> spiffe::X509BundleSet {
+
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_params = ca_params("example.org").unwrap();
+
+        // CertifiedIssuer gives you both the issuer + its self-signed cert
+        let ca_issuer = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+
+        let td = TrustDomain::new("example.org").unwrap();
+        let mut bundle = X509Bundle::new(td.clone());
+
+        let ca_der_slice: &[u8] = ca_issuer.der();
+        bundle.add_authority(ca_der_slice).unwrap();
+
+        let mut set = spiffe::X509BundleSet::new();
+        set.add_bundle(bundle);
+
+        return set;
+    }
+
+    fn mock_stream_svid_success_response(spiffe_id: String) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
+        // build a stream that yields X509Svid responses
+        // can you provide a minimal example of building such a stream?
+        let (mut tx, rx) = mpsc::channel(10);
+        tokio::spawn(async move {
+            let svid = generate_svid(&spiffe_id, "example.org");
+            tx.send(Ok(svid)).await.unwrap();
+        });
+        Box::new(rx)
+    }
+
+     fn mock_stream_svid_success_delay_response(spiffe_id: String) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
+        // build a stream that yields X509Svid responses
+        // can you provide a minimal example of building such a stream?
+        let (mut tx, rx) = mpsc::channel(10);
+        tokio::spawn(async move {
+
+            tx.send(Err(GrpcClientError::EmptyResponse)).await.unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+            let svid = generate_svid(&spiffe_id, "example.org");
+            tx.send(Ok(svid)).await.unwrap();
+        });
+        Box::new(rx)
+    }
+
+    fn mock_stream_svid_success_delay_response_timeout(spiffe_id: String) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
+        // build a stream that yields X509Svid responses
+        // can you provide a minimal example of building such a stream?
+        let (mut tx, rx) = mpsc::channel(10);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+        });
+        Box::new(rx)
+    }
+
+    fn mock_stream_svid_success_delay_response_timeout_empty(spiffe_id: String) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
+        // build a stream that yields X509Svid responses
+        // can you provide a minimal example of building such a stream?
+        let (mut tx, rx) = mpsc::channel(10);
+        tokio::spawn(async move {
+            tx.send(Err(GrpcClientError::EmptyResponse)).await.unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+        });
+        Box::new(rx)
+    }
+
+    fn mock_stream_svid_error_empty_response() -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
+        // build a stream that yields an error response
+        let (mut tx, rx) = mpsc::channel(10);
+        tokio::spawn(async move {
+            tx.send(Err(GrpcClientError::EmptyResponse)).await.unwrap();
+        });
+        Box::new(rx)
+    }
+
+    fn ca_params(cn: &str) -> Result<CertificateParams, rcgen::Error> {
+        // Empty Vec<String> => no DNS SANs; we'll just use DN for the CA
+        let mut params = CertificateParams::new(Vec::<String>::new())?;
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+        ];
+        params.distinguished_name.push(DnType::CommonName, cn);
+        params.use_authority_key_identifier_extension = true;
+        Ok(params)
+    }
+
+    fn spiffe_leaf_params(spiffe_id: &str) -> Result<CertificateParams, rcgen::Error> {
+        // Again, no default DNS SANs
+        let mut params = CertificateParams::new(Vec::<String>::new())?;
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.use_authority_key_identifier_extension = true;
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+            KeyUsagePurpose::ContentCommitment,
+        ];
+        params.extended_key_usages = vec![EKU::ClientAuth, EKU::ServerAuth];
+
+        // Optional subject DN
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "spiffe-workload");
+
+        // SPIFFE ID as URI SAN: URI(Ia5String)
+        let uri = Ia5String::try_from(spiffe_id)?;
+        params.subject_alt_names.push(SanType::URI(uri));
+
+        Ok(params)
+    }
+
+    fn generate_svid(spiffe_id: &str, cn: &str) -> X509Svid {
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_params = ca_params(cn).unwrap();
+
+        // CertifiedIssuer gives you both the issuer + its self-signed cert
+        let ca_issuer = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+
+        // ----- Leaf cert with SPIFFE SAN -----
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf_params = spiffe_leaf_params(spiffe_id).unwrap();
+
+        // Sign leaf with CA
+        let leaf_cert: Certificate = leaf_params.signed_by(&leaf_key, &*ca_issuer).unwrap();
+
+        let leaf_cert_der: Vec<u8> = leaf_cert.der().to_vec();
+        let leaf_key_der: Vec<u8> = leaf_key.serialize_der();
+        let ca_cert_der: Vec<u8> = ca_issuer.der().to_vec();
+
+        // Combine leaf cert and CA cert chain
+        let mut cert_chain = leaf_cert_der.clone();
+        cert_chain.extend_from_slice(&ca_cert_der);
+
+        let svid = X509Svid::parse_from_der(&cert_chain, &leaf_key_der).map_err(|e| {
+            tracing::error!("Failed to parse SVID: {}", e);
+            e
+        }).unwrap();
+
+        svid
     }
 }
