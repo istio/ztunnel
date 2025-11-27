@@ -7,7 +7,7 @@ use tower::service_fn;
 use cri::runtime_service_client::RuntimeServiceClient;
 use tonic::transport::{Uri};
 
-use crate::{config::Config, identity::{PidClientTrait, WorkloadPid}, inpod::WorkloadUid};
+use crate::{config::Config, container_runtime::cri::{ContainerStatusRequest, ListContainersRequest}, identity::{PidClientTrait, WorkloadPid}, inpod::WorkloadUid};
 
 pub mod cri {
     tonic::include_proto!("runtime.v1"); // matches package name in proto
@@ -30,6 +30,10 @@ impl ContainerRuntimeManager {
         let client = RuntimeServiceClient::new(channel);
 
         Ok(ContainerRuntimeManager { runtime_client: client })
+    }
+
+    pub fn new_with_client(client: RuntimeServiceClient<Channel>) -> Self {
+        ContainerRuntimeManager { runtime_client: client }
     }
 
     async fn uds_channel(path: String) -> Result<Channel, tonic::transport::Error> {
@@ -82,7 +86,7 @@ impl ContainerRuntimeManager {
 
         // 2. List containers in that sandbox
         let containers = match client
-            .list_containers(cri::ListContainersRequest {
+            .list_containers(ListContainersRequest {
                 filter: Some(cri::ContainerFilter {
                     pod_sandbox_id: sandbox_id.clone(),
                     ..Default::default()
@@ -104,7 +108,7 @@ impl ContainerRuntimeManager {
         for c in containers {
             tracing::debug!("Processing container: {}", c.id);
             let status = match client
-                .container_status(cri::ContainerStatusRequest {
+                .container_status(ContainerStatusRequest {
                     container_id: c.id.clone(),
                     verbose: true,
                 })
@@ -154,5 +158,190 @@ impl PidClientTrait for ContainerRuntimeManager {
         })?;
 
         Ok(WorkloadPid::new(*pid))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use http::Uri;
+    use tokio::{net::{UnixListener, UnixStream}, sync::Mutex};
+    use tokio_stream::wrappers::UnixListenerStream;
+    use tonic::{Response, transport::{Endpoint, Server}};
+    use hyper_util::rt::TokioIo;
+    use tower::service_fn;
+
+    use crate::{container_runtime::{ContainerRuntimeManager, cri::{self, Container, ContainerStatusRequest, ContainerStatusResponse,
+         ListContainersRequest, ListContainersResponse, PodSandbox, PodSandboxStatusRequest, PodSandboxStatusResponse, VersionRequest,
+          VersionResponse, runtime_service_client::RuntimeServiceClient, runtime_service_server::{RuntimeService, RuntimeServiceServer}}}};
+
+    #[derive(Clone, Default)]
+    struct MockRuntimeService {
+        // You can put shared state here to control responses from your tests
+        containers: Arc<Mutex<Vec<Container>>>,
+        sandboxes: Arc<Mutex<Vec<PodSandbox>>>,
+        container_statuses: Arc<Mutex<HashMap<String, ContainerStatusResponse>>>,
+    }
+
+    #[tonic::async_trait]
+    impl RuntimeService for MockRuntimeService {
+        async fn version(
+            &self,
+            _request: tonic::Request<VersionRequest>,
+        ) -> std::result::Result<tonic::Response<VersionResponse>, tonic::Status> {
+            Ok(tonic::Response::new(VersionResponse::default()))
+        }
+
+        async fn pod_sandbox_status(
+            &self,
+            _request: tonic::Request<PodSandboxStatusRequest>,
+        ) -> std::result::Result<tonic::Response<PodSandboxStatusResponse>, tonic::Status> {
+            Ok(tonic::Response::new(PodSandboxStatusResponse::default()))
+        }
+
+        async fn list_pod_sandbox(
+            &self,
+            request: tonic::Request<cri::ListPodSandboxRequest>,
+        ) -> std::result::Result<tonic::Response<cri::ListPodSandboxResponse>, tonic::Status> {
+            let sandboxes = self.sandboxes.lock().await.clone();
+            let req = request.into_inner();
+            
+            let filtered = if let Some(filter) = req.filter {
+                sandboxes.into_iter()
+                    .filter(|sandbox| {
+                        filter.label_selector.iter().all(|(key, expected_value)| {
+                            sandbox.labels.get(key).map_or(false, |actual_value| actual_value == expected_value)
+                        })
+                    })
+                    .collect()
+            } else {
+                sandboxes
+            };
+
+            Ok(Response::new(cri::ListPodSandboxResponse { items: filtered }))
+        }
+
+        async fn list_containers(
+            &self,
+            _request: tonic::Request<ListContainersRequest>,
+        ) -> std::result::Result<tonic::Response<ListContainersResponse>, tonic::Status> {
+            let containers = self.containers.lock().await.clone();
+            Ok(Response::new(ListContainersResponse { containers }))
+        }
+
+        async fn container_status(
+            &self,
+            request: tonic::Request<ContainerStatusRequest>,
+        ) -> std::result::Result<tonic::Response<ContainerStatusResponse>, tonic::Status> {
+
+            let container_status = self.container_statuses.lock().await;
+
+            let container_id = request.into_inner().container_id.clone();
+
+            let resp = container_status.get(&container_id).unwrap();
+
+            Ok(tonic::Response::new(resp.clone()))
+        }
+
+        async fn status(
+            &self,
+            _request: tonic::Request<cri::StatusRequest>,
+        ) -> std::result::Result<tonic::Response<cri::StatusResponse>, tonic::Status> {
+            Ok(tonic::Response::new(cri::StatusResponse::default()))
+        }
+    }
+
+    
+    #[tokio::test]
+    async fn test_client_uses_mock_cri_over_uds() {
+        // 1. Prepare mock service and data
+        let mock = MockRuntimeService::default();
+        {
+            let mut lock = mock.containers.lock().await;
+            lock.push(Container {
+                id: "fake-id-123".into(),
+                pod_sandbox_id: "fake-sandbox-123".into(),
+                ..Default::default()
+            });
+
+            let mut lock = mock.sandboxes.lock().await;
+            lock.push(cri::PodSandbox {
+                id: "fake-sandbox-123".into(),
+                labels: {
+                    let mut m = HashMap::new();
+                    m.insert("io.kubernetes.pod.uid".into(), "fake-uid-456".into());
+                    m
+                },
+                ..Default::default()
+            });
+
+            let mut lock = mock.container_statuses.lock().await;
+            lock.insert("fake-id-123".into(), cri::ContainerStatusResponse {
+                info: {
+                    let mut m = HashMap::new();
+                    m.insert("info".into(), r#"{"pid": 4321}"#.into());
+                    m
+                },
+                ..Default::default()
+            });
+            lock.insert("fake-id-321".into(), cri::ContainerStatusResponse {
+                info: {
+                    let mut m = HashMap::new();
+                    m.insert("info".into(), r#"{"pid": 1234}"#.into());
+                    m
+                },
+                ..Default::default()
+            });
+        }
+
+        // 2. Create a temporary Unix socket path
+        let socket_path = "/tmp/test-cri-runtime.sock";
+        // Ensure old socket is gone if it exists
+        let _ = std::fs::remove_file(socket_path);
+
+        // 3. Bind UnixListener
+        let uds = UnixListener::bind(socket_path).expect("failed to bind UDS");
+        let incoming = UnixListenerStream::new(uds);
+
+        // 4. Start gRPC server over UDS
+        let svc = RuntimeServiceServer::new(mock.clone());
+        let server_handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(incoming)
+                .await
+                .expect("server failed");
+        });
+
+        // 5. Build a client Channel that dials the same UDS
+        let socket_path_str = socket_path.to_string();
+        let endpoint = Endpoint::try_from("http://[::]:50051").unwrap();
+        let channel = endpoint
+            .connect_with_connector(service_fn(move |_uri: Uri| {
+                let path = socket_path_str.clone();
+                async move {
+                    let stream = UnixStream::connect(path).await?;
+                    Ok::<_, std::io::Error>(TokioIo::new(stream))
+                }
+            }))
+            .await
+            .expect("failed to connect to mock UDS server");
+
+        let client = RuntimeServiceClient::new(channel);
+
+        // 6. Call the real client method against the mock server
+        let cri_manager = ContainerRuntimeManager::new_with_client(client);
+        let pids_result = cri_manager.get_pids_for_pod("non-existent-pod-uid".to_string()).await;
+        assert!(pids_result.is_err()); // Since our mock returns no sandboxes matching the UID, this should error
+
+        let pids_result = cri_manager.get_pids_for_pod("fake-uid-456".to_string()).await;
+        assert!(pids_result.is_ok());
+        assert_eq!(pids_result.unwrap(), vec![4321]);
+       
+
+        // 7. Clean up
+        server_handle.abort();
+        let _ = std::fs::remove_file(socket_path);
     }
 }
