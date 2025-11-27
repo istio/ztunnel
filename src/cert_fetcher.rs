@@ -49,6 +49,7 @@ struct CertFetcherImpl {
     proxy_mode: ProxyMode,
     local_node: Option<String>,
     tx: mpsc::Sender<Request>,
+    cfg: config::Config,
 }
 
 impl CertFetcherImpl {
@@ -85,6 +86,7 @@ impl CertFetcherImpl {
             proxy_mode: cfg.proxy_mode,
             local_node: cfg.local_node.clone(),
             tx,
+            cfg: cfg.clone(),
         }
     }
 
@@ -104,8 +106,19 @@ impl CertFetcherImpl {
 impl CertFetcher for CertFetcherImpl {
     fn prefetch_cert(&self, w: &Workload) {
         if self.should_prefetch_certificate(w) {
-            let comp_key = CompositeId::new(w.identity(), RequestKeyEnum::Workload(WorkloadUid::new(w.uid.to_string())));
-            if let Err(e) = self.tx.try_send(Request::Fetch(comp_key, Warmup)) {
+            let key = if self.cfg.spire_enabled {
+                CompositeId::new(
+                    w.identity(),
+                    RequestKeyEnum::Workload(WorkloadUid::new(w.uid.to_string())),
+                )
+            } else {
+                CompositeId::new(
+                    w.identity(),
+                    RequestKeyEnum::Identity(w.identity().clone()),
+                )
+            };
+
+            if let Err(e) = self.tx.try_send(Request::Fetch(key, Warmup)) {
                 info!("couldn't prefetch: {:?}", e)
             }
         }

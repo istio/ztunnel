@@ -33,7 +33,7 @@ use tracing::{Instrument, debug, trace, warn};
 use inbound::Inbound;
 pub use metrics::*;
 
-use crate::identity::{CompositeId, Identity, SecretManager};
+use crate::identity::{CompositeId, Identity, RequestKeyEnum, SecretManager};
 
 use crate::dns::resolver::Resolver;
 use crate::drain::DrainWatcher;
@@ -181,6 +181,7 @@ pub struct LocalWorkloadInformation {
     // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
     // access to the appropriate certificates
     full_cert_manager: Arc<SecretManager>,
+    cfg: Arc<config::Config>,
 }
 
 impl LocalWorkloadInformation {
@@ -188,11 +189,13 @@ impl LocalWorkloadInformation {
         wi: Arc<WorkloadInfo>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
+        cfg: Arc<config::Config>,
     ) -> LocalWorkloadInformation {
         LocalWorkloadInformation {
             wi,
             state,
             full_cert_manager: cert_manager,
+            cfg: cfg.clone(),
         }
     }
 
@@ -213,7 +216,18 @@ impl LocalWorkloadInformation {
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
-        let key = CompositeId::new(id.clone(), identity::RequestKeyEnum::Workload(WorkloadUid::new(wl.uid.to_string())));
+
+        let key = if self.cfg.spire_enabled {
+                CompositeId::new(
+                    id.clone(),
+                    RequestKeyEnum::Workload(WorkloadUid::new(wl.uid.to_string())),
+                )
+            } else {
+                CompositeId::new(
+                    id.clone(),
+                    RequestKeyEnum::Identity(wl.identity().clone()),
+                )
+            };
 
         self.full_cert_manager.fetch_certificate(&key).await
     }
