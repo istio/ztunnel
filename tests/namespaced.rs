@@ -1340,7 +1340,7 @@ mod namespaced {
                 let res = check_eventually(
                     Duration::from_secs(2),
                     || async {
-                        let mut certs = cm.collect_unique_identities().await;
+                        let mut certs = cm.collect_certs(|a, _b| a.to_string()).await;
                         certs.sort();
                         certs
                     },

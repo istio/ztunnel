@@ -782,15 +782,6 @@ impl SecretManager {
         }
         ret
     }
-
-    // Update collect_certs to handle deduplication
-    pub async fn collect_unique_identities(&self) -> Vec<String> {
-        let certs = self.collect_certs(|composite_id, _| composite_id.id().to_string()).await;
-        let unique: std::collections::HashSet<String> = certs.into_iter().collect();
-        let mut sorted: Vec<String> = unique.into_iter().collect();
-        sorted.sort();
-        sorted
-    }
 }
 
 // Matches CertState::Initializing(pri) from a Receiver, wrapped in a function to make borrow
