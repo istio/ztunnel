@@ -19,9 +19,7 @@ pub struct ContainerRuntimeManager {
 
 impl ContainerRuntimeManager {
     pub async fn new(cfg: &Config) -> Result<Self,std::io::Error> {
-        let path = cfg.container_runtime_sock_path.clone().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Container runtime socket path not configured")
-        })?;
+        let path = cfg.container_runtime_sock_path.clone();
 
         let channel = Self::uds_channel(path).await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create UDS channel: {}", e))
