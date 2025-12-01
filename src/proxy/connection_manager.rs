@@ -59,7 +59,6 @@ impl ConnectionDrain {
 pub struct ConnectionManager {
     drains: Arc<RwLock<HashMap<InboundConnection, ConnectionDrain>>>,
     outbound_connections: Arc<RwLock<HashSet<OutboundConnection>>>,
-    close_tx: Option<tokio::sync::mpsc::UnboundedSender<InboundConnection>>,
 }
 
 impl std::fmt::Debug for ConnectionManager {
@@ -73,7 +72,6 @@ impl Default for ConnectionManager {
         ConnectionManager {
             drains: Arc::new(RwLock::new(HashMap::new())),
             outbound_connections: Arc::new(RwLock::new(HashSet::new())),
-            close_tx: None,
         }
     }
 }
@@ -159,38 +157,6 @@ pub struct InboundConnection {
 }
 
 impl ConnectionManager {
-    // Initialize the connection manager with CRL support
-    // This spawns an async task that handles connection closes from the CRL watcher
-    pub fn new_with_crl_support() -> Self {
-        let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<InboundConnection>();
-
-        let cm = ConnectionManager {
-            drains: Arc::new(RwLock::new(HashMap::new())),
-            outbound_connections: Arc::new(RwLock::new(HashSet::new())),
-            close_tx: Some(close_tx),
-        };
-
-        // Spawn async task to handle close requests
-        let cm_clone = ConnectionManager {
-            drains: cm.drains.clone(),
-            outbound_connections: cm.outbound_connections.clone(),
-            close_tx: None,
-        };
-
-        tokio::spawn(async move {
-            while let Some(conn) = close_rx.recv().await {
-                tracing::debug!(
-                    "Processing close request for connection from {}",
-                    conn.ctx.conn.src
-                );
-                cm_clone.close(&conn).await;
-            }
-            tracing::debug!("Connection close handler terminated");
-        });
-
-        cm
-    }
-
     pub fn track_outbound(
         &self,
         src: SocketAddr,
@@ -306,7 +272,7 @@ impl ConnectionManager {
     }
 
     // signal all connections listening to this channel to take action (typically terminate traffic)
-    async fn close(&self, c: &InboundConnection) {
+    pub async fn close(&self, c: &InboundConnection) {
         let drain = { self.drains.write().expect("mutex").remove(c) };
         if let Some(cd) = drain {
             cd.drain().await;
@@ -320,120 +286,6 @@ impl ConnectionManager {
     pub fn connections(&self) -> Vec<InboundConnection> {
         // potentially large copy under read lock, could require optimization
         self.drains.read().expect("mutex").keys().cloned().collect()
-    }
-
-    /// Close only inbound connections whose client certificates have been revoked
-    /// This is called when CRL updates with new revocations
-    pub fn close_revoked_connections(&self, revoked_serials: &std::collections::HashSet<Vec<u8>>) {
-        let conns = self.connections();
-
-        tracing::debug!(
-            "checking {} active inbound connections against {} revoked serial(s)",
-            conns.len(),
-            revoked_serials.len()
-        );
-
-        // Log all revoked serials we're checking against
-        for (idx, serial) in revoked_serials.iter().enumerate() {
-            tracing::debug!(
-                "revoked serial {}: {} bytes (hex: {})",
-                idx + 1,
-                serial.len(),
-                serial
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>()
-            );
-        }
-
-        let mut closed_count = 0;
-        let mut no_serial_count = 0;
-
-        for (idx, conn) in conns.iter().enumerate() {
-            tracing::debug!(
-                "connection {}: src={}, has_serials={}",
-                idx + 1,
-                conn.ctx.conn.src,
-                conn.client_cert_serials.is_some()
-            );
-
-            if let Some(ref serials) = conn.client_cert_serials {
-                tracing::debug!(
-                    "  connection {} has {} certificate(s) in chain",
-                    idx + 1,
-                    serials.len()
-                );
-
-                // Check if ANY certificate in the chain is revoked
-                let mut is_revoked = false;
-                for (cert_idx, serial) in serials.iter().enumerate() {
-                    let serial_hex = serial
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<String>();
-                    tracing::debug!(
-                        "    cert {} serial: {} bytes (hex: {})",
-                        cert_idx,
-                        serial.len(),
-                        serial_hex
-                    );
-
-                    if revoked_serials.contains(serial) {
-                        is_revoked = true;
-                        tracing::warn!("    cert {} serial MATCHES revoked serial!", cert_idx);
-                        break;
-                    }
-                }
-
-                tracing::debug!(
-                    "  connection {} has revoked certificate: {}",
-                    idx + 1,
-                    is_revoked
-                );
-
-                if is_revoked {
-                    tracing::warn!(
-                        "closing inbound connection {} from {} due to revoked certificate in chain",
-                        idx + 1,
-                        conn.ctx.conn.src
-                    );
-
-                    // Send close request through channel (works from blocking context)
-                    if let Some(ref tx) = self.close_tx {
-                        if let Err(e) = tx.send(conn.clone()) {
-                            tracing::error!("failed to send close request: {}", e);
-                        } else {
-                            closed_count += 1;
-                        }
-                    } else {
-                        tracing::warn!("CRL support not initialized - cannot close connection");
-                    }
-                }
-            } else {
-                no_serial_count += 1;
-                tracing::debug!(
-                    "  connection {} has no client certificate serials (skipping)",
-                    idx + 1
-                );
-            }
-        }
-
-        tracing::info!(
-            "connection closure summary: {} total connections checked, {} with serials, {} without serials, {} closed",
-            conns.len(),
-            conns.len() - no_serial_count,
-            no_serial_count,
-            closed_count
-        );
-
-        if closed_count > 0 {
-            tracing::info!(
-                "closed {} inbound connection(s) with revoked certificates",
-                closed_count
-            );
-        } else {
-            tracing::debug!("no active connections with newly revoked certificates");
-        }
     }
 }
 

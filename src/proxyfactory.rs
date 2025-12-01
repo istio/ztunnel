@@ -146,11 +146,7 @@ impl ProxyFactory {
 
         // Optionally create the HBONE proxy.
         if self.config.proxy {
-            let cm = if self.crl_manager.is_some() {
-                ConnectionManager::new_with_crl_support()
-            } else {
-                ConnectionManager::default()
-            };
+            let cm = ConnectionManager::default();
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
                 cm.clone(),
@@ -195,11 +191,7 @@ impl ProxyFactory {
 
             let socket_factory = Arc::new(DefaultSocketFactory(self.config.socket_config));
 
-            let cm = if self.crl_manager.is_some() {
-                ConnectionManager::new_with_crl_support()
-            } else {
-                ConnectionManager::default()
-            };
+            let cm = ConnectionManager::default();
 
             let pi = crate::proxy::ProxyInputs::new(
                 self.config.clone(),
