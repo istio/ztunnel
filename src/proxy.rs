@@ -169,6 +169,7 @@ pub struct Proxy {
     outbound: Outbound,
     socks5: Option<Socks5>,
     policy_watcher: PolicyWatcher,
+    crl_watcher: Option<crate::tls::crl_watcher::CrlWatcher>,
 }
 
 pub struct LocalWorkloadInformation {
@@ -298,10 +299,6 @@ impl Proxy {
         // We setup all the listeners first so we can capture any errors that should block startup
         let inbound = Inbound::new(pi.clone(), drain.clone()).await?;
 
-        if let Some(ref crl_mgr) = pi.crl_manager {
-            crl_mgr.register_connection_manager(pi.connection_manager.clone());
-        }
-
         // This exists for `direct` integ tests, no other reason
         #[cfg(any(test, feature = "testing"))]
         if pi.cfg.fake_self_inbound {
@@ -322,8 +319,19 @@ impl Proxy {
         } else {
             None
         };
-        let policy_watcher =
-            PolicyWatcher::new(pi.state.clone(), drain, pi.connection_manager.clone());
+        let policy_watcher = PolicyWatcher::new(
+            pi.state.clone(),
+            drain.clone(),
+            pi.connection_manager.clone(),
+        );
+
+        let crl_watcher = pi.crl_manager.as_ref().map(|crl_mgr| {
+            crate::tls::crl_watcher::CrlWatcher::new(
+                crl_mgr.clone(),
+                drain,
+                pi.connection_manager.clone(),
+            )
+        });
 
         Ok(Proxy {
             inbound,
@@ -331,6 +339,7 @@ impl Proxy {
             outbound,
             socks5,
             policy_watcher,
+            crl_watcher,
         })
     }
 
@@ -344,6 +353,10 @@ impl Proxy {
 
         if let Some(socks5) = self.socks5 {
             tasks.push(tokio::spawn(socks5.run().in_current_span()));
+        };
+
+        if let Some(crl_watcher) = self.crl_watcher {
+            tasks.push(tokio::spawn(crl_watcher.run().in_current_span()));
         };
 
         futures::future::join_all(tasks).await;

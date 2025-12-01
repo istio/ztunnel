@@ -57,7 +57,9 @@ struct CrlManagerInner {
     last_load_time: Option<SystemTime>,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
     revoked_serials: HashSet<Vec<u8>>,
-    connection_manager: Option<crate::proxy::connection_manager::ConnectionManager>,
+    // watch channel for notifying about CRL changes
+    change_tx: tokio::sync::watch::Sender<u64>,
+    change_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 impl CrlManager {
@@ -68,6 +70,9 @@ impl CrlManager {
             crl_path, allow_expired
         );
 
+        // create watch channel for CRL change notifications
+        let (change_tx, change_rx) = tokio::sync::watch::channel(0u64);
+
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
                 crl_data: Vec::new(),
@@ -76,7 +81,8 @@ impl CrlManager {
                 last_load_time: None,
                 _debouncer: None,
                 revoked_serials: HashSet::new(),
-                connection_manager: None,
+                change_tx,
+                change_rx,
             })),
         };
 
@@ -176,6 +182,12 @@ impl CrlManager {
         inner.revoked_serials = new_revoked_serials;
         inner.last_load_time = Some(SystemTime::now());
 
+        // notify subscribers if there are new revocations
+        if has_new_revocations {
+            inner.change_tx.send_modify(|v| *v += 1);
+            debug!("notified CRL change subscribers about new revocations");
+        }
+
         debug!(
             "CRL loaded successfully ({} CRL(s), {} total revoked certificate(s))",
             inner.crl_data.len(),
@@ -265,20 +277,16 @@ impl CrlManager {
         inner.revoked_serials.contains(serial)
     }
 
-    /// Register connection manager for automatic connection closure on CRL updates
-    pub fn register_connection_manager(
-        &self,
-        conn_mgr: crate::proxy::connection_manager::ConnectionManager,
-    ) {
-        let mut inner = self.inner.write().unwrap();
-        inner.connection_manager = Some(conn_mgr);
-        debug!("connection manager registered with CRL manager for inbound connection termination");
-    }
-
-    /// Get the current set of all revoked certificate serials
+    /// get the current set of all revoked certificate serials
     pub fn get_revoked_serials(&self) -> HashSet<Vec<u8>> {
         let inner = self.inner.read().unwrap();
         inner.revoked_serials.clone()
+    }
+
+    /// subscribe to CRL change notifications
+    pub fn subscribe_to_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        let inner = self.inner.read().unwrap();
+        inner.change_rx.clone()
     }
 
     /// Check if any certificate in the chain is revoked
@@ -439,19 +447,7 @@ impl CrlManager {
                                 Ok(has_new_revocations) => {
                                     debug!("CRL reloaded successfully after file change");
                                     if has_new_revocations {
-                                        info!("NEW REVOCATIONS DETECTED - closing affected inbound connections");
-
-                                        // close connections with revoked certificates
-                                        let (conn_mgr_opt, revoked_serials) = {
-                                            let inner = manager.inner.read().unwrap();
-                                            (inner.connection_manager.clone(), inner.revoked_serials.clone())
-                                        };
-
-                                        if let Some(conn_mgr) = conn_mgr_opt {
-                                            conn_mgr.close_revoked_connections(&revoked_serials);
-                                        } else {
-                                            warn!("connection manager not registered - cannot close revoked connections");
-                                        }
+                                        info!("NEW REVOCATIONS DETECTED - CRL watcher will handle connection closures");
                                     }
                                 }
                                 Err(e) => error!("failed to reload CRL: {}", e),
