@@ -118,11 +118,6 @@ impl ClientCertVerifier for TrustDomainVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        debug!(
-            "Verifying client certificate (chain length: {})",
-            1 + intermediates.len()
-        );
-
         let res = self
             .base
             .verify_client_cert(end_entity, intermediates, now)?;
@@ -131,7 +126,6 @@ impl ClientCertVerifier for TrustDomainVerifier {
         // Check CRL if enabled
         if let Some(crl_manager) = &self.crl_manager {
             debug!("CRL checking enabled for client certificate");
-            // Fail-closed: reject connection if CRL check returns an error OR if cert is revoked
             let is_revoked = crl_manager
                 .is_revoked_chain(end_entity, intermediates)
                 .map_err(|e| {
