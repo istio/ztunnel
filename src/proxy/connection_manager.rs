@@ -212,28 +212,6 @@ impl ConnectionManager {
         })
     }
 
-    /// Register a TLS connection for tracking and potential termination on certificate revocation
-    pub fn register_tls_connection(
-        &self,
-        ctx: &ProxyRbacContext,
-        client_cert_serials: Option<Vec<Vec<u8>>>,
-    ) -> ConnectionGuard {
-        let conn = InboundConnection {
-            ctx: ctx.clone(),
-            dest_service: None,
-            client_cert_serials,
-        };
-        let watch = self.register(&conn);
-        if watch.is_none() {
-            warn!("failed to track TLS connection {conn:?}");
-        }
-        ConnectionGuard {
-            cm: self.clone(),
-            conn,
-            watch,
-        }
-    }
-
     // register a connection with the connection manager
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
@@ -272,7 +250,7 @@ impl ConnectionManager {
     }
 
     // signal all connections listening to this channel to take action (typically terminate traffic)
-    pub async fn close(&self, c: &InboundConnection) {
+    async fn close(&self, c: &InboundConnection) {
         let drain = { self.drains.write().expect("mutex").remove(c) };
         if let Some(cd) = drain {
             cd.drain().await;

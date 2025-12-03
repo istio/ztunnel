@@ -57,9 +57,6 @@ struct CrlManagerInner {
     last_load_time: Option<SystemTime>,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
     revoked_serials: HashSet<Vec<u8>>,
-    // watch channel for notifying about CRL changes
-    change_tx: tokio::sync::watch::Sender<u64>,
-    change_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 impl CrlManager {
@@ -70,9 +67,6 @@ impl CrlManager {
             crl_path, allow_expired
         );
 
-        // create watch channel for CRL change notifications
-        let (change_tx, change_rx) = tokio::sync::watch::channel(0u64);
-
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
                 crl_data: Vec::new(),
@@ -81,8 +75,6 @@ impl CrlManager {
                 last_load_time: None,
                 _debouncer: None,
                 revoked_serials: HashSet::new(),
-                change_tx,
-                change_rx,
             })),
         };
 
@@ -182,12 +174,6 @@ impl CrlManager {
         inner.revoked_serials = new_revoked_serials;
         inner.last_load_time = Some(SystemTime::now());
 
-        // notify subscribers if there are new revocations
-        if has_new_revocations {
-            inner.change_tx.send_modify(|v| *v += 1);
-            debug!("notified CRL change subscribers about new revocations");
-        }
-
         debug!(
             "CRL loaded successfully ({} CRL(s), {} total revoked certificate(s))",
             inner.crl_data.len(),
@@ -267,26 +253,6 @@ impl CrlManager {
         }
 
         Ok(())
-    }
-
-    /// Check if a certificate serial number is in the revoked set
-    /// This is used for revocation checking on pooled connections
-    /// when next request is received
-    pub fn is_serial_revoked(&self, serial: &[u8]) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner.revoked_serials.contains(serial)
-    }
-
-    /// get the current set of all revoked certificate serials
-    pub fn get_revoked_serials(&self) -> HashSet<Vec<u8>> {
-        let inner = self.inner.read().unwrap();
-        inner.revoked_serials.clone()
-    }
-
-    /// subscribe to CRL change notifications
-    pub fn subscribe_to_changes(&self) -> tokio::sync::watch::Receiver<u64> {
-        let inner = self.inner.read().unwrap();
-        inner.change_rx.clone()
     }
 
     /// Check if any certificate in the chain is revoked
@@ -447,7 +413,7 @@ impl CrlManager {
                                 Ok(has_new_revocations) => {
                                     debug!("CRL reloaded successfully after file change");
                                     if has_new_revocations {
-                                        info!("NEW REVOCATIONS DETECTED - CRL watcher will handle connection closures");
+                                        info!("New revocation detected");
                                     }
                                 }
                                 Err(e) => error!("failed to reload CRL: {}", e),
