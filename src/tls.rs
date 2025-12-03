@@ -15,7 +15,6 @@
 mod certificate;
 mod control;
 pub mod crl;
-pub mod crl_watcher;
 pub mod csr;
 mod lib;
 #[cfg(any(test, feature = "testing"))]

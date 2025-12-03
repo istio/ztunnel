@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
-use tracing::{Instrument, debug, info};
+use tracing::{Instrument, debug};
 
 pub struct H2Request {
     request: Parts,
@@ -99,7 +99,6 @@ pub async fn serve_connection<F, Fut>(
     s: tokio_rustls::server::TlsStream<TcpStream>,
     drain: DrainWatcher,
     mut force_shutdown: watch::Receiver<()>,
-    tls_drain: Option<DrainWatcher>,
     handler: F,
 ) -> Result<(), Error>
 where
@@ -167,16 +166,6 @@ where
             }
             _shutdown = drain.wait_for_drain() => {
                 debug!("starting graceful drain...");
-                conn.graceful_shutdown();
-                break;
-            }
-            _tls_shutdown = async {
-                match &tls_drain {
-                    Some(d) => d.clone().wait_for_drain().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                info!("starting graceful drain (TLS connection certificate revoked)");
                 conn.graceful_shutdown();
                 break;
             }

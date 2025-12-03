@@ -124,29 +124,6 @@ impl Inbound {
                     let client_cert_serials: Option<Vec<Vec<u8>>> =
                         tls::cert_serial_from_connection(ssl);
 
-                    // Debug log certificate serial extraction
-                    match &client_cert_serials {
-                        Some(serials) => {
-                            debug!(
-                                "extracted {} certificate serial(s) from chain",
-                                serials.len()
-                            );
-                            for (idx, serial) in serials.iter().enumerate() {
-                                debug!(
-                                    "  cert {} serial: {} bytes (hex: {:02x?})",
-                                    idx,
-                                    serial.len(),
-                                    serial
-                                );
-                            }
-                        }
-                        None => {
-                            debug!(
-                                "no client certificate serials extracted (TLS connection without client cert or extraction failed)"
-                            );
-                        }
-                    }
-
                     let conn = Connection {
                         src_identity,
                         src,
@@ -154,30 +131,6 @@ impl Inbound {
                         dst,
                     };
                     debug!(%conn, "accepted connection");
-
-                    // Register TLS connection for CRL monitoring
-                    let dest_workload = match pi.local_workload_information.get_workload().await {
-                        Ok(wl) => wl,
-                        Err(e) => {
-                            error!(
-                                "failed to fetch local workload for TLS connection tracking: {}",
-                                e
-                            );
-                            return Err(proxy::Error::SelfCall);
-                        }
-                    };
-
-                    let rbac_ctx = ProxyRbacContext {
-                        conn: conn.clone(),
-                        dest_workload,
-                    };
-
-                    let mut tls_guard = pi
-                        .connection_manager
-                        .register_tls_connection(&rbac_ctx, client_cert_serials.clone());
-                    let tls_drain = tls_guard.watcher();
-                    debug!("registered TLS connection for CRL monitoring");
-
                     let cfg = pi.cfg.clone();
                     let request_handler = move |req| {
                         let id = Self::extract_traceparent(&req);
@@ -200,20 +153,17 @@ impl Inbound {
                         tls,
                         drain,
                         force_shutdown,
-                        Some(tls_drain),
                         request_handler,
                     );
                     // This is per HBONE connection, so while would be nice to be small, at least it
                     // is pooled so typically fewer of these.
                     let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
                     let _ = serve.await;
-                    // Keep tls_guard alive for the entire connection
-                    drop(tls_guard);
                     Ok(())
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
-                assertions::size_between_ref(1000, 2200, &serve_client);
+                assertions::size_between_ref(1000, 1600, &serve_client);
                 tokio::task::spawn(serve_client.in_current_span());
             }
         };
