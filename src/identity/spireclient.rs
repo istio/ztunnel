@@ -39,7 +39,9 @@ pub struct SpireClient<C: DelegatedIdentityApi> {
     client: C,
     /// SPIFFE trust domain (e.g., "cluster.local") used for certificate validation
     trust_domain: String,
+    /// Optional PID client for workload PID verification
     pid: Option<Box<dyn PidClientTrait>>,
+    /// Shared configuration for SPIRE client behavior
     cfg: Arc<Config>
 }
 
@@ -49,6 +51,8 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
     /// # Arguments
     /// * `client` - Configured DelegatedIdentityClient for SPIRE communication
     /// * `trust_domain` - SPIFFE trust domain string for this cluster
+    /// * `pid` - Optional PID client for workload PID verification
+    /// * `cfg` - Shared configuration for SPIRE client behavior
     pub fn new(client: C, trust_domain: String, pid: Option<Box<dyn PidClientTrait>>, cfg: Arc<Config>) -> Self {
         SpireClient { client, trust_domain, pid, cfg }
     }
@@ -75,11 +79,12 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
         Ok(self.get_cert_from_spire(DelegateAttestationRequest::Selectors(selectors)).await?)
     }
 
-    /// Fetches a workload certificate using Kubernetes pid.
+    /// Fetches a workload certificate using container pid.
     /// This method implements a streaming approach to handle SPIRE's async certificate delivery.
     /// 
     /// # Arguments
     /// * `pid` - The container process ID for the workload
+    /// * `wl_uid` - The unique identifier for the workload
     /// 
     /// # Returns
     /// A WorkloadCertificate containing the X.509 certificate and private key
@@ -120,6 +125,17 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
         Ok(certs?)
     }
 
+    /// Fetches a workload certificate using workload UID to determine PID.
+    /// This method implements a streaming approach to handle SPIRE's async certificate delivery.
+    /// # Arguments
+    /// * `wl_uid` - The unique identifier for the workload
+    /// 
+    /// # Returns
+    /// A WorkloadCertificate containing the X.509 certificate and private key
+    /// 
+    /// # Errors
+    /// Returns error if PID client is not configured, stream setup fails,
+    /// no certificates are received within timeout, or certificate construction fails.
     async fn get_cert_by_workload_uid(&self, wl_uid: &WorkloadUid) -> Result<tls::WorkloadCertificate, Error> {
         match &self.pid {
             Some(pid_client) => {
@@ -134,6 +150,17 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
         }
     }
 
+    /// Subscribes to the SPIRE server for workload certificates using the provided attestation request.
+    /// 
+    /// # Arguments
+    /// * `value` - The attestation request specifying how to identify the workload
+    /// 
+    /// # Returns
+    /// The first X509Svid received from the SPIRE server
+    /// 
+    /// # Errors
+    /// Returns error if stream setup fails, no certificates are received within timeout,
+    /// or certificate construction fails.
     async fn subscribe_and_wait_for_workload_cert(&self, value: DelegateAttestationRequest) -> Result<X509Svid, Error> {
        // Initiate streaming request to SPIRE server using Kubernetes selectors
         // clone() is cheap here as DelegatedIdentityClient uses Arc internally
@@ -178,6 +205,17 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
         Ok(svid_response)
     }
 
+    /// Fetches a workload certificate from SPIRE using the provided attestation request.
+    /// 
+    /// # Arguments
+    /// * `value` - The attestation request specifying how to identify the workload
+    /// 
+    /// # Returns
+    /// A WorkloadCertificate containing the X.509 certificate and private key
+    /// 
+    /// # Errors
+    /// Returns error if stream setup fails, no certificates are received within timeout,
+    /// or certificate construction fails.
     async fn get_cert_from_spire(&self, value: DelegateAttestationRequest) -> Result<tls::WorkloadCertificate, Error> {
         // Handle nested Result types from timeout + stream operations
         let svid_response= self.subscribe_and_wait_for_workload_cert(value).await?;
@@ -190,6 +228,7 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
         
         let id = format!("spiffe://{}{}", svid_response.spiffe_id().trust_domain(), svid_response.spiffe_id().path());
 
+        // Validate that the returned identity matches the requested one
         Identity::from_str(&id)?;
 
         Ok(certs)
