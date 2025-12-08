@@ -80,21 +80,6 @@ pub fn identity_from_connection(conn: &server::ServerConnection) -> Option<Ident
         })
 }
 
-/// Extract ALL certificate serial numbers from server TLS connection
-pub fn cert_serial_from_connection(conn: &server::ServerConnection) -> Option<Vec<Vec<u8>>> {
-    use x509_parser::prelude::*;
-
-    conn.peer_certificates().map(|certs| {
-        certs
-            .iter()
-            .filter_map(|cert| {
-                let (_, parsed) = X509Certificate::from_der(cert).ok()?;
-                Some(parsed.serial.to_bytes_be())
-            })
-            .collect()
-    })
-}
-
 pub fn identities(cert: X509Certificate) -> Result<Vec<Identity>, Error> {
     use x509_parser::prelude::*;
     let names = cert
