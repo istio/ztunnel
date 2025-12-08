@@ -360,11 +360,6 @@ impl CrlManager {
         Ok(false)
     }
 
-    /// Refresh the CRL from disk if needed
-    pub fn refresh(&self) -> Result<(), CrlError> {
-        self.load_crl().map(|_| ())
-    }
-
     /// Start watching the CRL file for changes
     /// Uses debouncer to handle all file update patterns
     pub fn start_file_watcher(self: &Arc<Self>) -> Result<(), CrlError> {
