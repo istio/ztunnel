@@ -152,8 +152,6 @@ pub struct InboundConnection {
     #[serde(flatten)]
     pub ctx: ProxyRbacContext,
     pub dest_service: Option<String>,
-    #[serde(skip)]
-    pub client_cert_serials: Option<Vec<Vec<u8>>>, // ALL serials in chain (leaf + intermediates)
 }
 
 impl ConnectionManager {
@@ -187,14 +185,12 @@ impl ConnectionManager {
         state: &DemandProxyState,
         ctx: &ProxyRbacContext,
         dest_service: Option<String>,
-        client_cert_serials: Option<Vec<Vec<u8>>>,
     ) -> Result<ConnectionGuard, Error> {
         // Register before our initial assert. This prevents a race if policy changes between assert() and
         // track()
         let conn = InboundConnection {
             ctx: ctx.clone(),
             dest_service,
-            client_cert_serials,
         };
         let Some(watch) = self.register(&conn) else {
             warn!("failed to track {conn:?}");
@@ -211,7 +207,6 @@ impl ConnectionManager {
             watch: Some(watch),
         })
     }
-
     // register a connection with the connection manager
     // this must be done before a connection can be tracked
     // allows policy to be asserted against the connection
@@ -403,7 +398,6 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
-            client_cert_serials: None,
         };
 
         // ensure drains contains exactly 1 item
@@ -438,7 +432,6 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
-            client_cert_serials: None,
         };
 
         let mut close2 = register(&cm, &rbac_ctx2);
@@ -507,7 +500,6 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
-            client_cert_serials: None,
         };
 
         // create a second connection
@@ -528,7 +520,6 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
-            client_cert_serials: None,
         };
         let another_conn1 = conn1.clone();
 
@@ -625,7 +616,6 @@ mod tests {
                 dest_workload: Arc::new(test_default_workload()),
             },
             dest_service: None,
-            client_cert_serials: None,
         };
         // watch the connection
         let close1 = connection_manager

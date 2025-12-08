@@ -195,7 +195,7 @@ impl InboundPassthrough {
 
         let mut conn_guard = match pi
             .connection_manager
-            .assert_rbac(&pi.state, &rbac_ctx, None, None)
+            .assert_rbac(&pi.state, &rbac_ctx, None)
             .await
         {
             Ok(cg) => cg,

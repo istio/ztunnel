@@ -121,9 +121,6 @@ impl Inbound {
                     debug!(latency=?start.elapsed(), "accepted TLS connection");
                     let (_, ssl) = tls.get_ref();
                     let src_identity: Option<Identity> = tls::identity_from_connection(ssl);
-                    let client_cert_serials: Option<Vec<Vec<u8>>> =
-                        tls::cert_serial_from_connection(ssl);
-
                     let conn = Connection {
                         src_identity,
                         src,
@@ -140,7 +137,6 @@ impl Inbound {
                             conn.clone(),
                             self.enable_orig_src,
                             req,
-                            client_cert_serials.clone(),
                         )
                         .instrument(info_span!("inbound", %id, %peer));
                         // This is for each user connection, so most important to keep small
@@ -158,8 +154,7 @@ impl Inbound {
                     // This is per HBONE connection, so while would be nice to be small, at least it
                     // is pooled so typically fewer of these.
                     let serve = Box::pin(assertions::size_between(6000, 8000, serve_conn));
-                    let _ = serve.await;
-                    Ok(())
+                    serve.await
                 };
                 // This is small since it only handles the TLS layer -- the HTTP2 layer is boxed
                 // and measured above.
@@ -192,7 +187,6 @@ impl Inbound {
         conn: Connection,
         enable_original_source: bool,
         req: H2Request,
-        client_cert_serials: Option<Vec<Vec<u8>>>,
     ) {
         let src = conn.src;
         let dst = conn.dst;
@@ -222,7 +216,7 @@ impl Inbound {
             // Define a connection guard to ensure rbac conditions are maintained for the duration of the connection
             let conn_guard = pi
                 .connection_manager
-                .assert_rbac(&pi.state, &ri.rbac_ctx, ri.for_host, client_cert_serials)
+                .assert_rbac(&pi.state, &ri.rbac_ctx, ri.for_host)
                 .await
                 .map_err(InboundFlagError::build(
                     StatusCode::UNAUTHORIZED,
