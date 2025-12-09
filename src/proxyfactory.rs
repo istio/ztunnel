@@ -64,7 +64,12 @@ impl ProxyFactory {
                     let manager_arc = Arc::new(manager);
 
                     if let Err(e) = manager_arc.start_file_watcher() {
-                        tracing::error!("failed to start CRL file watcher: {}", e);
+                        tracing::warn!(
+                            "CRL file watcher could not be started: {}. \
+                            CRL validation will continue with current file, but \
+                            CRL updates will require restarting ztunnel.",
+                            e
+                        );
                     }
 
                     Some(manager_arc)
