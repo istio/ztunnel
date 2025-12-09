@@ -103,6 +103,7 @@ tracing = { version = "0.1"}
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "json"] }
 url = "2.5"
 x509-parser = { version = "0.17", default-features = false }
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
 tracing-log = "0.2"
 backoff = "0.4"
 pin-project-lite = "0.2"
