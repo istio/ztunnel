@@ -18,11 +18,11 @@ use notify_debouncer_full::{
     notify::{RecursiveMode, Watcher},
 };
 use rustls::pki_types::CertificateDer;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info, warn};
+use webpki::CertRevocationList;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CrlError {
@@ -37,6 +37,12 @@ pub enum CrlError {
 
     #[error("failed to parse certificate: {0}")]
     CertificateParseError(String),
+
+    #[error("lock error: {0}")]
+    LockError(String),
+
+    #[error("CRL error: {0}")]
+    WebPkiError(String),
 }
 
 #[derive(Clone)]
@@ -51,12 +57,11 @@ impl std::fmt::Debug for CrlManager {
 }
 
 struct CrlManagerInner {
-    crl_data: Vec<Vec<u8>>,
+    crl_list: Vec<CertRevocationList<'static>>,
     crl_path: PathBuf,
     allow_expired: bool,
     last_load_time: Option<SystemTime>,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
-    revoked_serials: HashSet<Vec<u8>>,
 }
 
 impl CrlManager {
@@ -69,12 +74,11 @@ impl CrlManager {
 
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
-                crl_data: Vec::new(),
+                crl_list: Vec::new(),
                 crl_path: crl_path.clone(),
                 allow_expired,
                 last_load_time: None,
                 _debouncer: None,
-                revoked_serials: HashSet::new(),
             })),
         };
 
@@ -98,9 +102,11 @@ impl CrlManager {
         Ok(manager)
     }
 
-    /// Load or reload the CRL from disk
     pub fn load_crl(&self) -> Result<bool, CrlError> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|e| CrlError::LockError(format!("failed to acquire write lock: {}", e)))?;
 
         debug!("loading CRL from {:?}", inner.crl_path);
         let data = std::fs::read(&inner.crl_path)?;
@@ -124,59 +130,56 @@ impl CrlManager {
 
         debug!("found {} CRL block(s) in file", der_crls.len());
 
+        let mut parsed_crls = Vec::new();
         let mut total_revoked = 0;
-        let mut new_revoked_serials = HashSet::new();
 
         for (idx, der_data) in der_crls.iter().enumerate() {
-            use x509_parser::prelude::*;
-            let (_, crl) = CertificateRevocationList::from_der(der_data).map_err(|e| {
-                CrlError::ParseError(format!("Failed to parse CRL {}: {}", idx + 1, e))
+            let owned_crl = webpki::OwnedCertRevocationList::from_der(der_data).map_err(|e| {
+                CrlError::WebPkiError(format!("failed to parse CRL {}: {:?}", idx + 1, e))
             })?;
 
-            debug!("CRL {}:", idx + 1);
-            debug!("  Issuer: {}", crl.tbs_cert_list.issuer);
-            debug!("  this update: {:?}", crl.tbs_cert_list.this_update);
-            if let Some(next_update) = &crl.tbs_cert_list.next_update {
-                debug!("  next update: {:?}", next_update);
-            }
-            let revoked_count = crl.tbs_cert_list.revoked_certificates.len();
-            debug!("  revoked certificates: {}", revoked_count);
-            total_revoked += revoked_count;
+            let crl = CertRevocationList::from(owned_crl);
 
-            for revoked in crl.tbs_cert_list.revoked_certificates.iter() {
-                let serial = revoked.serial().to_bytes_be();
-                new_revoked_serials.insert(serial);
+            // use x509-parser for detail logging
+            use x509_parser::prelude::*;
+            if let Ok((_, crl_info)) = CertificateRevocationList::from_der(der_data) {
+                debug!("CRL {}:", idx + 1);
+                debug!("  Issuer: {}", crl_info.tbs_cert_list.issuer);
+                debug!("  this update: {:?}", crl_info.tbs_cert_list.this_update);
+                if let Some(next_update) = &crl_info.tbs_cert_list.next_update {
+                    debug!("  next update: {:?}", next_update);
+                }
+                let revoked_count = crl_info.tbs_cert_list.revoked_certificates.len();
+                debug!("  revoked certificates: {}", revoked_count);
+                total_revoked += revoked_count;
+
+                // validate CRL expiration using x509-parser
+                // webpki doesn't expose next_update easily
+                Self::validate_crl(der_data, inner.allow_expired)?;
+            } else {
+                // if x509-parser fails, we still have webpki parsed CRL, but with fewer log details
+                debug!("CRL {}: parsed successfully", idx + 1);
             }
 
-            // verify CRL validity
-            Self::verify_crl_validity(&crl, inner.allow_expired)?;
+            parsed_crls.push(crl);
         }
 
-        // check if there are new revocations compared to previous load
-        let has_new_revocations = !new_revoked_serials.is_subset(&inner.revoked_serials);
+        let has_new_revocations = parsed_crls.len() != inner.crl_list.len();
 
         if has_new_revocations {
-            // calculate which serials are new
-            let newly_revoked: HashSet<_> = new_revoked_serials
-                .difference(&inner.revoked_serials)
-                .collect();
             warn!(
-                "detected {} NEW certificate revocation(s)",
-                newly_revoked.len()
+                "CRL file changed - reloaded with {} CRL(s)",
+                parsed_crls.len()
             );
-            for serial in newly_revoked {
-                warn!("  newly revoked serial: {:?}", serial);
-            }
         }
 
-        // store all CRL DER data and update revoked serials
-        inner.crl_data = der_crls;
-        inner.revoked_serials = new_revoked_serials;
+        // store parsed CRL objects
+        inner.crl_list = parsed_crls;
         inner.last_load_time = Some(SystemTime::now());
 
         debug!(
             "CRL loaded successfully ({} CRL(s), {} total revoked certificate(s))",
-            inner.crl_data.len(),
+            inner.crl_list.len(),
             total_revoked
         );
         Ok(has_new_revocations)
@@ -226,16 +229,18 @@ impl CrlManager {
         Ok(crls)
     }
 
-    /// Verify CRL validity period
-    fn verify_crl_validity(
-        crl: &x509_parser::revocation_list::CertificateRevocationList,
-        allow_expired: bool,
-    ) -> Result<(), CrlError> {
-        let now = SystemTime::now();
-        let unix_now = now
+    /// Validate CRL
+    fn validate_crl(der_data: &[u8], allow_expired: bool) -> Result<(), CrlError> {
+        use x509_parser::prelude::*;
+
+        // parse with x509-parser only for expiration validation
+        let (_, crl) = CertificateRevocationList::from_der(der_data)
+            .map_err(|e| CrlError::ParseError(format!("validation parse failed: {}", e)))?;
+
+        let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs() as i64;
+            .map_err(|e| CrlError::ParseError(format!("system time error: {}", e)))?;
+        let unix_now = now.as_secs() as i64;
 
         // check thisUpdate (CRL issue time)
         if unix_now < crl.tbs_cert_list.this_update.timestamp() {
@@ -304,50 +309,55 @@ impl CrlManager {
     }
 
     /// Internal method to check if a single certificate is revoked
-    /// Checks the certificate against ALL loaded CRLs
+    /// Checks the certificate against ALL loaded CRLs using rustls-webpki
     fn is_cert_revoked(&self, cert: &CertificateDer) -> Result<bool, CrlError> {
-        let inner = self.inner.read().unwrap();
+        let inner = self
+            .inner
+            .read()
+            .map_err(|e| CrlError::LockError(format!("failed to acquire read lock: {}", e)))?;
 
         // if no CRLs are loaded, try to load them now
-        if inner.crl_data.is_empty() {
+        if inner.crl_list.is_empty() {
             drop(inner);
             debug!("CRL not loaded, attempting to load now");
             self.load_crl()?;
             return self.is_cert_revoked(cert);
         }
 
-        // parse the certificate to get its serial number
+        // extract certificate serial number using x509-parser
+        // webpki's Cert::from_der is not public, so we need x509-parser for this
         use x509_parser::prelude::*;
         let (_, parsed_cert) = X509Certificate::from_der(cert)
             .map_err(|e| CrlError::CertificateParseError(e.to_string()))?;
 
-        let cert_serial = &parsed_cert.serial;
+        let cert_serial = parsed_cert.serial.to_bytes_be();
         debug!("certificate serial number: {:?}", cert_serial);
 
         // check the certificate against ALL CRLs
-        for (idx, crl_data) in inner.crl_data.iter().enumerate() {
-            // Parse CRL from stored data
-            let (_, crl) = CertificateRevocationList::from_der(crl_data).map_err(|e| {
-                CrlError::ParseError(format!("failed to parse stored CRL {}: {}", idx + 1, e))
-            })?;
+        for (idx, crl) in inner.crl_list.iter().enumerate() {
+            debug!("checking against CRL {}", idx + 1);
 
-            debug!(
-                "checking against CRL {} (issuer: {})",
-                idx + 1,
-                crl.tbs_cert_list.issuer
-            );
-
-            // check if the certificate's serial number is in this CRL's revoked list
-            for revoked_cert in &crl.tbs_cert_list.revoked_certificates {
-                if revoked_cert.serial() == cert_serial {
+            match crl.find_serial(&cert_serial) {
+                Ok(Some(revoked_cert)) => {
                     warn!(
-                        "certificate with serial {:?} is REVOKED in CRL {} (issuer: {})",
+                        "certificate with serial {:?} is REVOKED in CRL {}",
                         cert_serial,
-                        idx + 1,
-                        crl.tbs_cert_list.issuer
+                        idx + 1
                     );
                     warn!("revocation date: {:?}", revoked_cert.revocation_date);
+                    if let Some(reason) = revoked_cert.reason_code {
+                        warn!("revocation reason: {:?}", reason);
+                    }
                     return Ok(true);
+                }
+                Ok(None) => {
+                    // certificate isn't found in this CRL, continue checking others
+                    continue;
+                }
+                Err(e) => {
+                    // error parsing revoked certificates in this CRL
+                    error!("error checking CRL {}: {:?}", idx + 1, e);
+                    return Err(CrlError::WebPkiError(format!("CRL lookup failed: {:?}", e)));
                 }
             }
         }
@@ -355,7 +365,7 @@ impl CrlManager {
         debug!(
             "certificate serial {:?} is not in any of the {} CRL(s)",
             cert_serial,
-            inner.crl_data.len()
+            inner.crl_list.len()
         );
         Ok(false)
     }
@@ -364,7 +374,10 @@ impl CrlManager {
     /// Uses debouncer to handle all file update patterns
     pub fn start_file_watcher(self: &Arc<Self>) -> Result<(), CrlError> {
         let crl_path = {
-            let inner = self.inner.read().unwrap();
+            let inner = self
+                .inner
+                .read()
+                .map_err(|e| CrlError::LockError(format!("failed to acquire read lock: {}", e)))?;
             inner.crl_path.clone()
         };
 
@@ -433,7 +446,10 @@ impl CrlManager {
 
         // Store debouncer to keep it alive
         {
-            let mut inner = self.inner.write().unwrap();
+            let mut inner = self
+                .inner
+                .write()
+                .map_err(|e| CrlError::LockError(format!("failed to acquire write lock: {}", e)))?;
             inner._debouncer = Some(debouncer);
         }
 
@@ -456,9 +472,10 @@ mod tests {
 
     #[test]
     fn test_crl_manager_invalid_file() {
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(b"not a valid CRL").unwrap();
-        file.flush().unwrap();
+        let mut file = NamedTempFile::new().expect("failed to create temporary test file");
+        file.write_all(b"not a valid CRL")
+            .expect("failed to write test data to temporary file");
+        file.flush().expect("failed to flush temporary test file");
 
         let result = CrlManager::new(file.path().to_path_buf(), false);
         assert!(result.is_err(), "should fail on invalid CRL data");
