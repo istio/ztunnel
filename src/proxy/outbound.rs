@@ -51,7 +51,7 @@ pub struct Outbound {
 
 impl Outbound {
     pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Outbound, Error> {
-        let listener = pi
+        let mut listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
