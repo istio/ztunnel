@@ -21,6 +21,7 @@ pub mod assertions;
 pub mod baggage;
 pub mod cert_fetcher;
 pub mod config;
+pub mod container_runtime;
 pub mod copy;
 pub mod dns;
 pub mod drain;
@@ -42,7 +43,6 @@ pub mod time;
 pub mod tls;
 pub mod version;
 pub mod xds;
-pub mod container_runtime;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;

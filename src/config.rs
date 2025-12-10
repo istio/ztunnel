@@ -878,9 +878,15 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_workload,
         ipv6_enabled,
         spire_enabled: parse_default(SPIRE_ENABLED, false)?,
-        container_runtime_sock_path: parse_default(CONTAINER_RUNTIME_SOCK_PATH, "/run/containerd/containerd.sock".to_string())?,
+        container_runtime_sock_path: parse_default(
+            CONTAINER_RUNTIME_SOCK_PATH,
+            "/run/containerd/containerd.sock".to_string(),
+        )?,
         spire_timeout: parse_duration_default(SPIRE_TIMEOUT, Duration::from_secs(10))?,
-        spire_admin_socket: parse_default(SPIRE_ADMIN_SOCKET, "unix:///run/spire/sockets/admin.sock".to_string())?,
+        spire_admin_socket: parse_default(
+            SPIRE_ADMIN_SOCKET,
+            "unix:///run/spire/sockets/admin.sock".to_string(),
+        )?,
     })
 }
 

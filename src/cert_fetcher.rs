@@ -109,10 +109,7 @@ impl CertFetcherImpl {
                 RequestKeyEnum::Workload(WorkloadUid::new(w.uid.to_string())),
             )
         } else {
-            CompositeId::new(
-                w.identity(),
-                RequestKeyEnum::Identity(w.identity().clone()),
-            )
+            CompositeId::new(w.identity(), RequestKeyEnum::Identity(w.identity().clone()))
         }
     }
 }

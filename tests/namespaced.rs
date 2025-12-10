@@ -1026,7 +1026,10 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(&id.to_composite_id()).await?;
+                let cert = zt
+                    .cert_manager
+                    .fetch_certificate(&id.to_composite_id())
+                    .await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
@@ -1088,7 +1091,10 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(&id.to_composite_id()).await?;
+                let cert = zt
+                    .cert_manager
+                    .fetch_certificate(&id.to_composite_id())
+                    .await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
@@ -1170,7 +1176,10 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(&id.to_composite_id()).await?;
+                let cert = zt
+                    .cert_manager
+                    .fetch_certificate(&id.to_composite_id())
+                    .await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await

@@ -22,13 +22,13 @@ use std::sync::Arc;
 
 use crate::config::ProxyMode;
 use crate::container_runtime::ContainerRuntimeManager;
-use crate::inpod::WorkloadUid;
-use async_trait::async_trait;
 use crate::identity::{DelegatedIdentityApi, SpireClient};
+use crate::inpod::WorkloadUid;
+use crate::{strng, tls};
+use async_trait::async_trait;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
-use crate::{strng, tls};
 
 use super::CaClient;
 use super::Error::{self, Spiffe};
@@ -138,7 +138,9 @@ impl Identity {
 
     pub fn sa(&self) -> Strng {
         match self {
-            Identity::Spiffe { service_account, .. } => service_account.clone(),
+            Identity::Spiffe {
+                service_account, ..
+            } => service_account.clone(),
         }
     }
 
@@ -171,7 +173,9 @@ pub enum RequestKeyEnum {
     Identity(Identity),
     Workload(WorkloadUid),
 }
-#[derive(Eq, PartialEq, Hash, Debug, Clone, PartialOrd, Ord, serde::Serialize,serde::Deserialize, Copy)]
+#[derive(
+    Eq, PartialEq, Hash, Debug, Clone, PartialOrd, Ord, serde::Serialize, serde::Deserialize, Copy,
+)]
 pub struct WorkloadPid(i32);
 
 impl WorkloadPid {
@@ -212,7 +216,10 @@ impl fmt::Display for CompositeId<RequestKeyEnum> {
 
 #[async_trait]
 pub trait CaClientTrait: Send + Sync {
-    async fn fetch_certificate(&self, id: &CompositeId<RequestKeyEnum>) -> Result<tls::WorkloadCertificate, Error>;
+    async fn fetch_certificate(
+        &self,
+        id: &CompositeId<RequestKeyEnum>,
+    ) -> Result<tls::WorkloadCertificate, Error>;
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -346,12 +353,14 @@ impl Worker {
         // the future, for all other priorities Instant::now() is used as the scheduled time of the
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
-        let mut pending: KeyedPriorityQueue<CompositeId<RequestKeyEnum>, PendingPriority> = KeyedPriorityQueue::new();
+        let mut pending: KeyedPriorityQueue<CompositeId<RequestKeyEnum>, PendingPriority> =
+            KeyedPriorityQueue::new();
         // The set of pending Identity requests with backoffs (i.e. pending requests that have already failed at least once).
         // Basically, each cert fetch attempt gets its own backoff.
         // This avoids delays where a fetch of identity A for pod A needlessly stalls the refetch of
         // identity B for pod B. Kept separate from the `pending` KeyedPriorityKey for convenience.
-        let mut pending_backoffs_by_id: HashMap<CompositeId<RequestKeyEnum>, ExponentialBackoff> = HashMap::new();
+        let mut pending_backoffs_by_id: HashMap<CompositeId<RequestKeyEnum>, ExponentialBackoff> =
+            HashMap::new();
 
         'main: loop {
             let next = pending.peek().map(|(_, PendingPriority(_, ts))| *ts);
@@ -649,15 +658,24 @@ impl SecretManager {
         .0
     }
 
-    pub async fn new_with_spire_client<C: 'static + DelegatedIdentityApi>(cfg: Arc<crate::config::Config>, dc: C) -> Result<Self, spiffe::error::GrpcClientError> {
-        let pid_client = ContainerRuntimeManager::new(&cfg).await.expect("unable to connect to container runtime");
+    pub async fn new_with_spire_client<C: 'static + DelegatedIdentityApi>(
+        cfg: Arc<crate::config::Config>,
+        dc: C,
+    ) -> Result<Self, spiffe::error::GrpcClientError> {
+        let pid_client = ContainerRuntimeManager::new(&cfg)
+            .await
+            .expect("unable to connect to container runtime");
 
         let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Box::new(pid_client), cfg);
 
         Ok(Self::new_with_client(client))
     }
 
-    pub async fn new_with_spire_client_pid<C: 'static + DelegatedIdentityApi>(cfg: Arc<crate::config::Config>, dc: C, pid_client: Box<dyn PidClientTrait>) -> Result<Self, spiffe::error::GrpcClientError> {
+    pub async fn new_with_spire_client_pid<C: 'static + DelegatedIdentityApi>(
+        cfg: Arc<crate::config::Config>,
+        dc: C,
+        pid_client: Box<dyn PidClientTrait>,
+    ) -> Result<Self, spiffe::error::GrpcClientError> {
         let client = SpireClient::new(dc, cfg.cluster_domain.clone(), pid_client, cfg);
 
         Ok(Self::new_with_client(client))
@@ -768,7 +786,10 @@ impl SecretManager {
 
     // TODO(qfel): It would be much nicer to have something like map_certs returning an iterator,
     // but due to locking that would require a self-referential type.
-    pub async fn collect_certs<R>(&self, f: impl Fn(&CompositeId<RequestKeyEnum>, &CertState) -> R) -> Vec<R> {
+    pub async fn collect_certs<R>(
+        &self,
+        f: impl Fn(&CompositeId<RequestKeyEnum>, &CertState) -> R,
+    ) -> Vec<R> {
         let mut ret = Vec::new();
         for (id, chan) in self.worker.certs.lock().await.iter() {
             ret.push(f(id, &chan.rx.borrow()));
@@ -857,7 +878,8 @@ mod tests {
                 trust_domain: "cluster.local".into(),
                 namespace: "istio-system".into(),
                 service_account: strng::format!("ztunnel{i}"),
-            }.to_composite_id();
+            }
+            .to_composite_id();
             sm.fetch_certificate(&id)
                 .await
                 .expect("Didn't get a cert as expected.");
@@ -1092,9 +1114,12 @@ mod tests {
         for i in 1..5 {
             let sm = test.secret_manager.clone();
             tasks.push(tokio::spawn(async move {
-                sm.fetch_certificate_pri(&identity_n("warmup-", i).to_composite_id(), Priority::Warmup)
-                    .await
-                    .unwrap();
+                sm.fetch_certificate_pri(
+                    &identity_n("warmup-", i).to_composite_id(),
+                    Priority::Warmup,
+                )
+                .await
+                .unwrap();
             }));
         }
         // Ensure all requests are executing/queued in the background worker.
@@ -1105,7 +1130,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             collect_strings(test.caclient.fetches().await),
-            collect_strings(vec![identity("warmup-1").to_composite_id(), identity("realtime").to_composite_id()]),
+            collect_strings(vec![
+                identity("warmup-1").to_composite_id(),
+                identity("realtime").to_composite_id()
+            ]),
         );
 
         test.tear_down().await;
@@ -1119,8 +1147,11 @@ mod tests {
         for i in 1..5 {
             let sm = test.secret_manager.clone();
             fetches.push(tokio::spawn(async move {
-                sm.fetch_certificate_pri(&identity_n("warmup-", i).to_composite_id(), Priority::Warmup)
-                    .await
+                sm.fetch_certificate_pri(
+                    &identity_n("warmup-", i).to_composite_id(),
+                    Priority::Warmup,
+                )
+                .await
             }));
             // Make sure that fetch order is well-defined (each fetch has a different timestamp).
             // Also ensures that upon exit of the loop, the first fetch is already being processed
@@ -1204,7 +1235,10 @@ mod tests {
         let start = Instant::now();
         let sm = test.secret_manager.clone();
 
-        let fetch = tokio::spawn(async move { sm.fetch_certificate(&identity("test").to_composite_id()).await });
+        let fetch = tokio::spawn(async move {
+            sm.fetch_certificate(&identity("test").to_composite_id())
+                .await
+        });
         // Proceed the fetch till it blocks waiting for the worker.
         tokio::time::sleep_until(start + NANOSEC).await;
         test.secret_manager
@@ -1222,7 +1256,10 @@ mod tests {
         let _start = Instant::now();
         let sm = test.secret_manager.clone();
 
-        let fetch = tokio::spawn(async move { sm.fetch_certificate(&identity("test").to_composite_id()).await });
+        let fetch = tokio::spawn(async move {
+            sm.fetch_certificate(&identity("test").to_composite_id())
+                .await
+        });
         let _ = fetch.await.unwrap();
         assert_eq!(test.secret_manager.cache_len().await, 1);
         test.secret_manager
@@ -1250,7 +1287,11 @@ mod tests {
     async fn test_get_existing_cert_info_basic() {
         let test = setup(1);
         let id = identity("basic-test");
-        let info = test.secret_manager.worker.get_existing_cert_info(&id.to_composite_id()).await;
+        let info = test
+            .secret_manager
+            .worker
+            .get_existing_cert_info(&id.to_composite_id())
+            .await;
         assert!(info.is_none());
 
         // cleanup
@@ -1264,20 +1305,33 @@ mod tests {
         let start = Instant::now();
 
         // get initial certificate
-        let initial_cert = test.secret_manager.fetch_certificate(&id.to_composite_id()).await.unwrap();
+        let initial_cert = test
+            .secret_manager
+            .fetch_certificate(&id.to_composite_id())
+            .await
+            .unwrap();
         let initial_serial = initial_cert.cert.serial().clone();
         let initial_fetch_count = test.caclient.fetches().await.len();
 
         // simulate ca errors
         test.caclient.set_error(true).await;
-        assert!(test.caclient.fetch_certificate(&id.to_composite_id()).await.is_err());
+        assert!(
+            test.caclient
+                .fetch_certificate(&id.to_composite_id())
+                .await
+                .is_err()
+        );
 
         // wait for background refresh
         tokio::time::sleep_until(start + CERT_HALFLIFE + SEC).await;
 
         // verify background refresh was attempted and valid certs were retained
         let post_refresh_fetch_count = test.caclient.fetches().await.len();
-        let current_cert = test.secret_manager.fetch_certificate(&id.to_composite_id()).await.unwrap();
+        let current_cert = test
+            .secret_manager
+            .fetch_certificate(&id.to_composite_id())
+            .await
+            .unwrap();
         let current_serial = current_cert.cert.serial().clone();
 
         assert!(post_refresh_fetch_count > initial_fetch_count);

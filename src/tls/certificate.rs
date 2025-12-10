@@ -17,8 +17,8 @@ use crate::tls::{Error, IdentityVerifier, OutboundConnector};
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use itertools::Itertools;
-use x509_parser::asn1_rs::FromDer;
 use std::{cmp, iter};
+use x509_parser::asn1_rs::FromDer;
 
 use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -273,15 +273,22 @@ impl WorkloadCertificate {
         })
     }
 
-    pub fn new_svid(svid: &spiffe::X509Svid, bundle: &Vec<spiffe::cert::Certificate>) -> Result<WorkloadCertificate, Error> {
+    pub fn new_svid(
+        svid: &spiffe::X509Svid,
+        bundle: &[spiffe::cert::Certificate],
+    ) -> Result<WorkloadCertificate, Error> {
         let leaf = svid.leaf();
-        let chain = svid.cert_chain().iter().skip(0).map(|c| {
-            let (_, cert) = x509_parser::parse_x509_certificate(&c.content()).unwrap();
-            Certificate {
-                der: c.content().to_vec().into(),
-                expiry: expiration(cert),
-            }
-        }).collect::<Vec<_>>();
+        let chain = svid
+            .cert_chain()
+            .iter()
+            .map(|c| {
+                let (_, cert) = x509_parser::parse_x509_certificate(c.content()).unwrap();
+                Certificate {
+                    der: c.content().to_vec().into(),
+                    expiry: expiration(cert),
+                }
+            })
+            .collect::<Vec<_>>();
 
         let cert = X509Certificate::from_der(leaf.content()).unwrap();
         let cert = Certificate {
@@ -291,18 +298,21 @@ impl WorkloadCertificate {
 
         let private_key = PrivateKeyDer::Pkcs8(svid.private_key().content().to_vec().into());
 
-        let roots = bundle.iter().map(|c| {
-            let (_, cert) = x509_parser::parse_x509_certificate(&c.content()).unwrap();
-            Certificate {
-                der: c.content().to_vec().into(),
-                expiry: expiration(cert),
-            }
-        }).collect::<Vec<_>>();
+        let roots = bundle
+            .iter()
+            .map(|c| {
+                let (_, cert) = x509_parser::parse_x509_certificate(c.content()).unwrap();
+                Certificate {
+                    der: c.content().to_vec().into(),
+                    expiry: expiration(cert),
+                }
+            })
+            .collect::<Vec<_>>();
 
         let mut roots_store = RootCertStore::empty();
 
-        let (_valid, invalid) =
-            roots_store.add_parsable_certificates(bundle.iter().map(|c| c.content().to_vec().into()));
+        let (_valid, invalid) = roots_store
+            .add_parsable_certificates(bundle.iter().map(|c| c.content().to_vec().into()));
         if invalid > 0 {
             tracing::warn!("warning: found {invalid} invalid root certs");
         }
@@ -312,7 +322,7 @@ impl WorkloadCertificate {
             private_key,
             roots,
             root_store: Arc::new(roots_store),
-            chain: chain,
+            chain,
         })
     }
 

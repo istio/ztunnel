@@ -316,13 +316,11 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
 pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
         mock_secret_manager()
+    } else if config.spire_enabled {
+        let dc = DelegatedIdentityClient::default().await?;
+        Arc::new(SecretManager::new_with_spire_client(config.clone(), dc).await?)
     } else {
-        if config.spire_enabled {
-            let dc = DelegatedIdentityClient::default().await?;
-            Arc::new(SecretManager::new_with_spire_client(config.clone(), dc).await?)
-        } else {
-            Arc::new(SecretManager::new(config.clone()).await?)
-        }
+        Arc::new(SecretManager::new(config.clone()).await?)
     };
     build_with_cert(config, cert_manager).await
 }

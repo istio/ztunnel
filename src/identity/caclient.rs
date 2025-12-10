@@ -21,8 +21,8 @@ use tonic::IntoRequest;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tracing::{debug, error, instrument, warn};
 
-use crate::identity::{CompositeId, Error, RequestKeyEnum};
 use crate::identity::auth::AuthSource;
+use crate::identity::{CompositeId, Error, RequestKeyEnum};
 use crate::tls::{self, TlsGrpcChannel};
 use crate::xds::istio::ca::IstioCertificateRequest;
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
@@ -58,7 +58,10 @@ impl CaClient {
 
 impl CaClient {
     #[instrument(skip_all)]
-    async fn fetch_certificate(&self, id: &CompositeId<RequestKeyEnum>) -> Result<tls::WorkloadCertificate, Error> {
+    async fn fetch_certificate(
+        &self,
+        id: &CompositeId<RequestKeyEnum>,
+    ) -> Result<tls::WorkloadCertificate, Error> {
         let cs = tls::csr::CsrOptions {
             san: id.to_string(),
         }
@@ -123,7 +126,10 @@ impl CaClient {
 
 #[async_trait]
 impl crate::identity::CaClientTrait for CaClient {
-    async fn fetch_certificate(&self, id: &CompositeId<RequestKeyEnum>) -> Result<tls::WorkloadCertificate, Error> {
+    async fn fetch_certificate(
+        &self,
+        id: &CompositeId<RequestKeyEnum>,
+    ) -> Result<tls::WorkloadCertificate, Error> {
         self.fetch_certificate(id).await
     }
 }
@@ -270,7 +276,9 @@ mod tests {
     ) -> Result<tls::WorkloadCertificate, Error> {
         let (mock, ca_client) = test_helpers::ca::CaServer::spawn().await;
         mock.send(Ok(res)).unwrap();
-        ca_client.fetch_certificate(&Identity::default().to_composite_id()).await
+        ca_client
+            .fetch_certificate(&Identity::default().to_composite_id())
+            .await
     }
 
     #[tokio::test]
