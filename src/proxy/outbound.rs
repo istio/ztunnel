@@ -56,6 +56,7 @@ impl Outbound {
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
+        listener.set_socket_options(Some(pi.cfg.socket_config));
 
         info!(
             address=%listener.local_addr(),
