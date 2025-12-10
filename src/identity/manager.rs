@@ -650,22 +650,15 @@ impl SecretManager {
     }
 
     pub async fn new_with_spire_client<C: 'static + DelegatedIdentityApi>(cfg: Arc<crate::config::Config>, dc: C) -> Result<Self, spiffe::error::GrpcClientError> {
-        let pid_client = match cfg.spire_mode {
-            crate::config::SpireMode::ByPid => {
-                let pid_client = ContainerRuntimeManager::new(&cfg).await.expect("unable to connect to container runtime");
+        let pid_client = ContainerRuntimeManager::new(&cfg).await.expect("unable to connect to container runtime");
 
-                Some(Box::new(pid_client) as Box<dyn PidClientTrait>)
-            },
-            crate::config::SpireMode::BySelectors => None,
-        };
-
-        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), pid_client, cfg);
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Box::new(pid_client), cfg);
 
         Ok(Self::new_with_client(client))
     }
 
     pub async fn new_with_spire_client_pid<C: 'static + DelegatedIdentityApi>(cfg: Arc<crate::config::Config>, dc: C, pid_client: Box<dyn PidClientTrait>) -> Result<Self, spiffe::error::GrpcClientError> {
-        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), Some(pid_client), cfg);
+        let client = SpireClient::new(dc, cfg.cluster_domain.clone(), pid_client, cfg);
 
         Ok(Self::new_with_client(client))
     }

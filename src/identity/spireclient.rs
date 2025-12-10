@@ -1,8 +1,8 @@
 use std::{str::FromStr, sync::Arc};
 use spiffe::{TrustDomain, X509Svid};
-use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient, selectors::{K8s, Selector}};
+use spire_api::{DelegateAttestationRequest, DelegatedIdentityClient};
 use tonic::async_trait;
-use crate::{config::{Config, SpireMode}, identity::{CompositeId, Error, Identity, PidClientTrait, RequestKeyEnum}, inpod::WorkloadUid, tls};
+use crate::{config::{Config}, identity::{CompositeId, Error, Identity, PidClientTrait, RequestKeyEnum}, inpod::WorkloadUid, tls};
 use tokio_stream::{Stream, StreamExt};
 
 /// Trait abstraction over the SPIRE DelegatedIdentityClient
@@ -40,7 +40,7 @@ pub struct SpireClient<C: DelegatedIdentityApi> {
     /// SPIFFE trust domain (e.g., "cluster.local") used for certificate validation
     trust_domain: String,
     /// Optional PID client for workload PID verification
-    pid: Option<Box<dyn PidClientTrait>>,
+    pid: Box<dyn PidClientTrait>,
     /// Shared configuration for SPIRE client behavior
     cfg: Arc<Config>
 }
@@ -53,30 +53,8 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
     /// * `trust_domain` - SPIFFE trust domain string for this cluster
     /// * `pid` - Optional PID client for workload PID verification
     /// * `cfg` - Shared configuration for SPIRE client behavior
-    pub fn new(client: C, trust_domain: String, pid: Option<Box<dyn PidClientTrait>>, cfg: Arc<Config>) -> Self {
+    pub fn new(client: C, trust_domain: String, pid: Box<dyn PidClientTrait>, cfg: Arc<Config>) -> Self {
         SpireClient { client, trust_domain, pid, cfg }
-    }
-
-    /// Fetches a workload certificate using Kubernetes selectors (namespace + service account).
-    /// This method implements a streaming approach to handle SPIRE's async certificate delivery.
-    /// 
-    /// # Arguments
-    /// * `id` - The SPIFFE identity containing namespace and service account information
-    /// 
-    /// # Returns
-    /// A WorkloadCertificate containing the X.509 certificate and private key
-    /// 
-    /// # Errors
-    /// Returns error if stream setup fails, no certificates are received within timeout,
-    /// or certificate construction fails.
-    async fn get_cert_by_selector(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
-        // Pre-allocate vector with exact capacity to avoid dynamic resizing
-        // We always need exactly 2 selectors: namespace + service account
-        let mut selectors = Vec::<Selector>::with_capacity(2);
-        selectors.push(Selector::K8s(K8s::Namespace(id.ns().to_string())));
-        selectors.push(Selector::K8s(K8s::ServiceAccount(id.sa().to_string())));
-
-        Ok(self.get_cert_from_spire(DelegateAttestationRequest::Selectors(selectors)).await?)
     }
 
     /// Fetches a workload certificate using container pid.
@@ -95,34 +73,38 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
     async fn get_cert_by_pid(&self, pid: i32, wl_uid: &WorkloadUid) -> Result<tls::WorkloadCertificate, Error> {
         let certs = self.get_cert_from_spire(DelegateAttestationRequest::Pid(pid)).await;
 
-        match &self.pid {
-            Some(pid_client) => {
-               let pid_verify = pid_client.fetch_pid(wl_uid).await;
-
-               match pid_verify {
-                   Ok(fetched_pid) => {
-                       if fetched_pid.into_i32() != pid {
-                           return Err(Error::UnableToDeterminePidForWorkload(format!(
-                               "PID mismatch for workload UID {}: expected {}, got {}",
-                               wl_uid.clone().into_string(),
-                               pid,
-                               fetched_pid.into_i32()
-                           )));
-                       }
-                   },
-                   Err(e) => {
-                       return Err(Error::UnableToDeterminePidForWorkload(format!(
-                           "Failed to verify PID for workload UID {}: {}",
-                           wl_uid.clone().into_string(),
-                           e
-                       )));
-                   }
-               }
+        let certs = match certs {
+            Err(e) => {
+                return Err(Error::FailedToFetchCertificate(format!(
+                    "Failed to fetch certificate for PID {}: {}",
+                    pid, e
+                )));
             },
-            None => {}
-        }
+            Ok(certs) => certs,
+        };
 
-        Ok(certs?)
+        let pid_verify = self.pid.fetch_pid(wl_uid).await;
+
+        match pid_verify {
+            Ok(fetched_pid) => {
+                if fetched_pid.into_i32() != pid {
+                    return Err(Error::UnableToDeterminePidForWorkload(format!(
+                        "PID mismatch for workload UID {}: expected {}, got {}",
+                        wl_uid.clone().into_string(),
+                        pid,
+                        fetched_pid.into_i32()
+                    )));
+                }
+                Ok(certs) 
+            },
+            Err(e) => {
+                return Err(Error::UnableToDeterminePidForWorkload(format!(
+                    "Failed to verify PID for workload UID {}: {}",
+                    wl_uid.clone().into_string(),
+                    e
+                )));
+            }
+        }
     }
 
     /// Fetches a workload certificate using workload UID to determine PID.
@@ -137,16 +119,11 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
     /// Returns error if PID client is not configured, stream setup fails,
     /// no certificates are received within timeout, or certificate construction fails.
     async fn get_cert_by_workload_uid(&self, wl_uid: &WorkloadUid) -> Result<tls::WorkloadCertificate, Error> {
-        match &self.pid {
-            Some(pid_client) => {
-                tracing::info!("Fetching PID for workload UID: {}", wl_uid.clone().into_string());
-                let pid = pid_client.fetch_pid(wl_uid).await;
-                match pid {
-                    Ok(pid) => self.get_cert_by_pid(pid.into_i32(), wl_uid).await,
-                    Err(e) => Err(Error::UnableToDeterminePidForWorkload(format!("Failed to fetch PID for workload UID {}: {}", wl_uid.clone().into_string(), e))),
-                }
-            },
-            None => Err(Error::InvalidConfiguration("PID client not configured for workload UID attestation".to_string()))
+        tracing::info!("Fetching PID for workload UID: {}", wl_uid.clone().into_string());
+        let pid = self.pid.fetch_pid(wl_uid).await;
+        match pid {
+            Ok(pid) => self.get_cert_by_pid(pid.into_i32(), wl_uid).await,
+            Err(e) => Err(Error::UnableToDeterminePidForWorkload(format!("Failed to fetch PID for workload UID {}: {}", wl_uid.clone().into_string(), e))),
         }
     }
 
@@ -282,15 +259,11 @@ impl<C: DelegatedIdentityApi> crate::identity::CaClientTrait for SpireClient<C> 
     /// # Returns
     /// WorkloadCertificate that can be used for TLS operations
     async fn fetch_certificate(&self, id: &CompositeId<RequestKeyEnum>) -> Result<tls::WorkloadCertificate, Error> {
-        if self.cfg.spire_mode == SpireMode::ByPid {
-            match id.key() {
-                RequestKeyEnum::Workload(wl_uid) => {
-                    self.get_cert_by_workload_uid(&wl_uid).await
-                }
-                _ => Err(Error::InvalidConfiguration("PID mode requires workload UID for attestation".to_string()))
+        match id.key() {
+            RequestKeyEnum::Workload(wl_uid) => {
+                self.get_cert_by_workload_uid(&wl_uid).await
             }
-        } else {
-            self.get_cert_by_selector(&id.id()).await
+            _ => Err(Error::InvalidConfiguration("PID mode requires workload UID for attestation".to_string()))
         }
     }
 }
@@ -323,36 +296,9 @@ pub mod spire_tests {
     use rcgen::{ExtendedKeyUsagePurpose as EKU};
 
     #[tokio::test]
-    async fn test_get_cert_by_selector_stream_error() {
-        let mut mock_client = MockDelegatedIdentityApi::new();
-
-        mock_client
-            .expect_get_x509_svids()
-            .withf(|req| matches!(req, DelegateAttestationRequest::Selectors(_)))
-            .returning(|_req| Err(GrpcClientError::EmptyResponse));
-
-        let mut cfg = config::parse_config().unwrap();
-        cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::BySelectors;
-
-        let spire_client = SpireClient::new(
-            mock_client,
-            "example.org".to_string(),
-            None,
-            Arc::new(cfg),
-        );
-
-        let identity = Identity::from_parts("example.com".into(), "default".into(), "test-sa".into());
-        let result = spire_client.get_cert_by_selector(&identity).await;
-
-        assert!(result.is_err());
-        let err = result.err().unwrap().to_string();
-        assert!(err.contains("Failed to stream X.509 SVIDs"));
-    }
-
-    #[tokio::test]
     async fn test_get_bundle_success() {
         let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
 
         mock_client
             .expect_get_x509_bundles()
@@ -360,12 +306,11 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::BySelectors;
 
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            None,
+            Box::new(pid_client),
             Arc::new(cfg),
         );
 
@@ -376,6 +321,7 @@ pub mod spire_tests {
      #[tokio::test]
     async fn test_get_bundle_trust_domain_not_found() {
         let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
 
         mock_client
             .expect_get_x509_bundles()
@@ -383,12 +329,11 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::BySelectors;
 
         let spire_client = SpireClient::new(
             mock_client,
             "wrong.trust_domain".to_string(),
-            None,
+            Box::new(pid_client),
             Arc::new(cfg),
         );
 
@@ -396,50 +341,6 @@ pub mod spire_tests {
         assert!(result.is_err());
         let err = result.err().unwrap().to_string();
         assert!(err.contains("No bundle found for trust domain"));
-    }
-
-    #[tokio::test]
-    async fn test_get_cert_by_selector_success() {
-        let mut mock_client = MockDelegatedIdentityApi::new();
-
-        mock_client
-            .expect_get_x509_svids()
-            .returning(|_req| {
-                let stream = mock_stream_svid_success_response("spiffe://example.org/ns/default/sa/test-sa".to_string());
-                Ok(stream)
-            });
-
-        mock_client
-            .expect_get_x509_bundles()
-            .returning(|| Ok(mock_bundle_response()));
-
-        let mut cfg = config::parse_config().unwrap();
-        cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::BySelectors;
-
-        let spire_client = SpireClient::new(
-            mock_client,
-            "example.org".to_string(),
-            None,
-            Arc::new(cfg),
-        );
-
-        let identity = Identity::from_parts("example.org".into(), "default".into(), "test-sa".into());
-        let result = spire_client.get_cert_by_selector(&identity).await;
-
-        assert!(result.is_ok());
-
-        let workload_cert = result.unwrap();
-
-        let id = workload_cert.identity();
-
-         assert!(id.unwrap().to_string() == "spiffe://example.org/ns/default/sa/test-sa");
-
-         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
-
-         let fetch_result = spire_client.fetch_certificate(&identity.to_composite_id()).await;
-
-        assert!(fetch_result.is_ok());
     }
 
     #[tokio::test]
@@ -462,14 +363,13 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::ByPid;
 
        let cfg = Arc::new(cfg); 
 
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            Some(Box::new(pid_client)),
+           Box::new(pid_client),
             Arc::clone(&cfg),
         );
 
@@ -513,12 +413,11 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::ByPid;
 
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            Some(Box::new(pid_client)),
+            Box::new(pid_client),
             Arc::new(cfg),
         );
 
@@ -547,14 +446,13 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::ByPid;
 
        let cfg = Arc::new(cfg); 
 
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            Some(Box::new(pid_client)),
+           Box::new(pid_client),
             Arc::clone(&cfg),
         );
 
@@ -598,14 +496,13 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::ByPid;
 
        let cfg = Arc::new(cfg); 
 
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            Some(Box::new(pid_client)),
+            Box::new(pid_client),
             Arc::clone(&cfg),
         );
 
@@ -641,14 +538,13 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::ByPid;
 
        let cfg = Arc::new(cfg); 
 
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            Some(Box::new(pid_client)),
+            Box::new(pid_client),
             Arc::clone(&cfg),
         );
 
@@ -692,7 +588,6 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::ByPid;
         cfg.spire_timeout = std::time::Duration::from_secs(5);
 
        let cfg = Arc::new(cfg); 
@@ -700,7 +595,7 @@ pub mod spire_tests {
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            Some(Box::new(pid_client)),
+            Box::new(pid_client),
             Arc::clone(&cfg),
         );
 
@@ -732,14 +627,13 @@ pub mod spire_tests {
 
         let mut cfg = config::parse_config().unwrap();
         cfg.spire_enabled = true;
-        cfg.spire_mode = SpireMode::ByPid;
 
        let cfg = Arc::new(cfg); 
 
         let spire_client = SpireClient::new(
             mock_client,
             "example.org".to_string(),
-            Some(Box::new(pid_client)),
+            Box::new(pid_client),
             Arc::clone(&cfg),
         );
 

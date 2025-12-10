@@ -116,8 +116,6 @@ const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
 
 const SPIRE_ENABLED: &str = "SPIRE_ENABLED";
 
-const SPIRE_MODE: &str = "SPIRE_MODE";
-
 const SPIRE_TIMEOUT: &str = "SPIRE_TIMEOUT";
 
 const SPIRE_ADMIN_SOCKET: &str = "SPIRE_ADMIN_ENDPOINT_SOCKET";
@@ -155,13 +153,6 @@ pub enum ProxyMode {
     #[default]
     Shared,
     Dedicated,
-}
-
-#[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpireMode {
-    ByPid,
-    #[default]
-    BySelectors,
 }
 
 #[derive(Clone, Debug)]
@@ -329,7 +320,6 @@ pub struct Config {
 
     pub ipv6_enabled: bool,
     pub spire_enabled: bool,
-    pub spire_mode: SpireMode,
     pub spire_timeout: Duration,
     pub spire_admin_socket: String,
     pub container_runtime_sock_path: String,
@@ -888,20 +878,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_workload,
         ipv6_enabled,
         spire_enabled: parse_default(SPIRE_ENABLED, false)?,
-        spire_mode: match parse::<String>(SPIRE_MODE)? {
-            Some(mode) => match mode.as_str() {
-                "Pid" => SpireMode::ByPid,
-                "Selectors" => SpireMode::BySelectors,
-                _ => {
-                    return Err(Error::EnvVar(
-                        SPIRE_MODE.to_string(),
-                        mode,
-                        "SPIRE_MODE must be one of 'Pid' or 'Selectors'".to_string(),
-                    ));
-                }
-            },
-            None => SpireMode::BySelectors,
-        },
         container_runtime_sock_path: parse_default(CONTAINER_RUNTIME_SOCK_PATH, "/run/containerd/containerd.sock".to_string())?,
         spire_timeout: parse_duration_default(SPIRE_TIMEOUT, Duration::from_secs(10))?,
         spire_admin_socket: parse_default(SPIRE_ADMIN_SOCKET, "unix:///run/spire/sockets/admin.sock".to_string())?,
