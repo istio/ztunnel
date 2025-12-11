@@ -175,17 +175,13 @@ impl Listener {
                     .with_time(cfg.keepalive_time)
                     .with_retries(cfg.keepalive_retries)
                     .with_interval(cfg.keepalive_interval);
-                tracing::trace!(
-                    "set keepalive: {:?}",
-                    SockRef::from(&stream).set_tcp_keepalive(&ka)
-                );
+                let res = SockRef::from(&stream).set_tcp_keepalive(&ka);
+                tracing::trace!("set keepalive: {:?}", res);
             }
             if cfg.user_timeout_enabled {
                 let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
-                tracing::trace!(
-                    "set user timeout: {:?}",
-                    SockRef::from(&stream).set_tcp_user_timeout(Some(ut))
-                );
+                let res = SockRef::from(&stream).set_tcp_user_timeout(Some(ut));
+                tracing::trace!("set user timeout: {:?}", res);
             }
         }
         Ok((stream, remote))
