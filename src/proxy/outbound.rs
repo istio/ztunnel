@@ -90,6 +90,12 @@ impl Outbound {
                 let mut force_shutdown = force_shutdown.clone();
                 match socket {
                     Ok((stream, _remote)) => {
+                        let socket_labels = metrics::CommonTrafficLabels::for_socket(
+                            Reporter::source,
+                            metrics::Direction::outbound,
+                        );
+                        self.pi.metrics.record_socket_open(&socket_labels);
+                        
                         let mut oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
@@ -97,7 +103,13 @@ impl Outbound {
                             hbone_port: self.pi.cfg.inbound_addr.port(),
                         };
                         let span = info_span!("outbound", id=%oc.id);
+                        let metrics_for_socket_close = self.pi.metrics.clone();
                         let serve_outbound_connection = async move {
+                            let _socket_guard = metrics::SocketCloseGuard::new(
+                                metrics_for_socket_close,
+                                Reporter::source,
+                                metrics::Direction::outbound,
+                            );
                             debug!(component="outbound", "connection started");
                             // Since this task is spawned, make sure we are guaranteed to terminate
                             tokio::select! {
@@ -366,6 +378,7 @@ impl OutboundConnection {
             destination: req.actual_destination_workload.clone(),
             connection_security_policy: security_policy,
             destination_service: req.intended_destination_service.clone(),
+            direction: metrics::Direction::outbound,
         }
     }
 

@@ -415,6 +415,7 @@ pub fn metrics(c: &mut Criterion) {
                 destination: None,
                 destination_service: None,
                 connection_security_policy: Default::default(),
+                direction: proxy::metrics::Direction::default(),
             };
             let tl = proxy::CommonTrafficLabels::from(co);
             metrics.connection_opens.get_or_create(&tl).inc();

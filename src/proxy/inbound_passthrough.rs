@@ -24,7 +24,7 @@ use tracing::{Instrument, debug, error, info, trace};
 use crate::drain::DrainWatcher;
 use crate::drain::run_with_drain;
 use crate::proxy::Error;
-use crate::proxy::metrics::Reporter;
+use crate::proxy::metrics::{Reporter, Direction};
 use crate::proxy::{ProxyInputs, metrics, util};
 use crate::state::workload::NetworkAddress;
 use crate::{assertions, copy, handle_connection, rbac, strng};
@@ -76,7 +76,19 @@ impl InboundPassthrough {
                 let pi = self.pi.clone();
                 match socket {
                     Ok((stream, remote)) => {
+                        let socket_labels = metrics::CommonTrafficLabels::for_socket(
+                            Reporter::destination,
+                            metrics::Direction::inbound,
+                        );
+                        pi.metrics.record_socket_open(&socket_labels);
+                        
+                        let metrics_for_socket_close = pi.metrics.clone();
                         let serve_client = async move {
+                            let _socket_guard = metrics::SocketCloseGuard::new(
+                                metrics_for_socket_close,
+                                Reporter::destination,
+                                Direction::inbound,
+                            );
                             debug!(component="inbound passthrough", "connection started");
                                 // Since this task is spawned, make sure we are guaranteed to terminate
                             tokio::select! {
@@ -189,6 +201,7 @@ impl InboundPassthrough {
                 destination: Some(upstream_workload),
                 connection_security_policy: metrics::SecurityPolicy::unknown,
                 destination_service: ds,
+                direction: Direction::proxy,
             },
             pi.metrics.clone(),
         ));
