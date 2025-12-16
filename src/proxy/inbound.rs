@@ -108,7 +108,20 @@ impl Inbound {
                 let dst = to_canonical(raw_socket.local_addr().expect("local_addr available"));
                 let network = pi.cfg.network.clone();
                 let acceptor = crate::tls::InboundAcceptor::new(acceptor.clone());
+
+                let socket_labels = metrics::CommonTrafficLabels::for_socket(
+                    Reporter::destination,
+                    metrics::Direction::inbound,
+                );
+                pi.metrics.record_socket_open(&socket_labels);
+                let metrics_for_socket_close = pi.metrics.clone();
+
                 let serve_client = async move {
+                    let _socket_guard = metrics::SocketCloseGuard::new(
+                        metrics_for_socket_close,
+                        Reporter::destination,
+                        metrics::Direction::inbound,
+                    );
                     let tls = match acceptor.accept(raw_socket).await {
                         Ok(tls) => tls,
                         Err(e) => {
@@ -428,6 +441,7 @@ impl Inbound {
                 destination: Some(destination_workload),
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
+                direction: metrics::Direction::inbound,
             },
             pi.metrics.clone(),
         ));

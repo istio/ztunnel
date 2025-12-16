@@ -40,6 +40,9 @@ use crate::strng::{RichStrng, Strng};
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
+    pub connection_failures: Family<CommonTrafficLabels, Counter>,
+    pub socket_opens: Family<CommonTrafficLabels, Counter>,
+    pub socket_closes: Family<CommonTrafficLabels, Counter>,
     pub received_bytes: Family<CommonTrafficLabels, Counter>,
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
 
@@ -61,6 +64,15 @@ pub enum RequestProtocol {
     tcp,
     #[allow(dead_code)]
     http,
+}
+
+#[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum Direction {
+    #[default]
+    unknown,
+    outbound,
+    inbound,
+    proxy,
 }
 
 #[derive(Default, Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -110,6 +122,7 @@ pub struct ConnectionOpen {
     pub destination: Option<Arc<Workload>>,
     pub destination_service: Option<ServiceDescription>,
     pub connection_security_policy: SecurityPolicy,
+    pub direction: Direction,
 }
 
 impl CommonTrafficLabels {
@@ -192,6 +205,7 @@ impl From<ConnectionOpen> for CommonTrafficLabels {
             request_protocol: RequestProtocol::tcp,
             response_flags: ResponseFlags::None,
             connection_security_policy: c.connection_security_policy,
+            direction: c.direction,
             ..CommonTrafficLabels::new()
                 // Intentionally before with_source; source is more reliable
                 .with_derived_source(c.derived_source.as_ref())
@@ -231,6 +245,7 @@ pub struct CommonTrafficLabels {
     request_protocol: RequestProtocol,
     response_flags: ResponseFlags,
     connection_security_policy: SecurityPolicy,
+    direction: Direction,
 
     #[prometheus(flatten)]
     locality: OptionallyEncode<LocalityLabels>,
@@ -330,12 +345,84 @@ impl Metrics {
             on_demand_dns.clone(),
         );
 
+        let connection_failures = Family::default();
+        registry.register(
+            "tcp_connections_failed",
+            "The total number of TCP connections that failed to establish (unstable)",
+            connection_failures.clone(),
+        );
+
+        let socket_opens = Family::default();
+        registry.register(
+            "tcp_sockets_opened",
+            "The total number of TCP sockets opened (unstable)",
+            socket_opens.clone(),
+        );
+
+        let socket_closes = Family::default();
+        registry.register(
+            "tcp_sockets_closed",
+            "The total number of TCP sockets closed (unstable)",
+            socket_closes.clone(),
+        );
+
         Self {
             connection_opens,
             connection_close,
             received_bytes,
             sent_bytes,
             on_demand_dns,
+            connection_failures,
+            socket_opens,
+            socket_closes,
+        }
+    }
+
+    pub fn record_socket_open(&self, labels: &CommonTrafficLabels) {
+        self.socket_opens.get_or_create(labels).inc();
+    }
+
+    pub fn record_socket_close(&self, labels: &CommonTrafficLabels) {
+        self.socket_closes.get_or_create(labels).inc();
+    }
+}
+
+/// Guard to ensure socket close is recorded even if task is cancelled
+/// This should be created at the start of an async block that handles a socket
+/// Stores only the minimal information needed to reconstruct labels, avoiding
+/// cloning the large CommonTrafficLabels struct
+pub struct SocketCloseGuard {
+    metrics: Arc<Metrics>,
+    reporter: Reporter,
+    direction: Direction,
+}
+
+impl Drop for SocketCloseGuard {
+    fn drop(&mut self) {
+        let labels = CommonTrafficLabels::for_socket(self.reporter, self.direction);
+        self.metrics.record_socket_close(&labels);
+    }
+}
+
+impl SocketCloseGuard {
+    /// Create a new socket close guard
+    pub fn new(metrics: Arc<Metrics>, reporter: Reporter, direction: Direction) -> Self {
+        Self {
+            metrics,
+            reporter,
+            direction,
+        }
+    }
+}
+
+impl CommonTrafficLabels {
+    /// Create minimal labels for socket metrics at accept time
+    /// This is called when a socket is accepted, before we have full connection details
+    pub fn for_socket(reporter: Reporter, direction: Direction) -> Self {
+        CommonTrafficLabels {
+            reporter,
+            direction,
+            ..Default::default()
         }
     }
 }
@@ -533,6 +620,10 @@ impl ConnectionResult {
 
         // Unconditionally record the connection was closed
         self.metrics.connection_close.get_or_create(tl).inc();
+
+        if tl.response_flags == ResponseFlags::ConnectionFailure {
+            self.metrics.connection_failures.get_or_create(tl).inc();
+        }
 
         // Unconditionally write out an access log
         let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
