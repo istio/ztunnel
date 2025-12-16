@@ -96,7 +96,7 @@ impl Outbound {
                             metrics::Direction::outbound,
                         );
                         self.pi.metrics.record_socket_open(&socket_labels);
-                        
+
                         let mut oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),

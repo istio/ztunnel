@@ -91,7 +91,7 @@ impl Socks5 {
                             crate::proxy::metrics::Direction::outbound,
                         );
                         self.pi.metrics.record_socket_open(&socket_labels);
-                        
+
                         let oc = OutboundConnection {
                             pi: self.pi.clone(),
                             id: TraceParent::new(),
