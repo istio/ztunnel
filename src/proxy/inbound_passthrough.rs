@@ -24,7 +24,7 @@ use tracing::{Instrument, debug, error, info, trace};
 use crate::drain::DrainWatcher;
 use crate::drain::run_with_drain;
 use crate::proxy::Error;
-use crate::proxy::metrics::{Reporter, Direction};
+use crate::proxy::metrics::{Direction, Reporter};
 use crate::proxy::{ProxyInputs, metrics, util};
 use crate::state::workload::NetworkAddress;
 use crate::{assertions, copy, handle_connection, rbac, strng};
@@ -81,7 +81,7 @@ impl InboundPassthrough {
                             metrics::Direction::inbound,
                         );
                         pi.metrics.record_socket_open(&socket_labels);
-                        
+
                         let metrics_for_socket_close = pi.metrics.clone();
                         let serve_client = async move {
                             let _socket_guard = metrics::SocketCloseGuard::new(
