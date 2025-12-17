@@ -51,11 +51,12 @@ pub struct Outbound {
 
 impl Outbound {
     pub(super) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Outbound, Error> {
-        let listener = pi
+        let mut listener = pi
             .socket_factory
             .tcp_bind(pi.cfg.outbound_addr)
             .map_err(|e| Error::Bind(pi.cfg.outbound_addr, e))?;
         let transparent = super::maybe_set_transparent(&pi, &listener)?;
+        listener.set_socket_options(Some(pi.cfg.socket_config));
 
         info!(
             address=%listener.local_addr(),
