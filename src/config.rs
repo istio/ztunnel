@@ -114,6 +114,14 @@ const PROXY_MODE_SHARED: &str = "shared";
 
 const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
 
+const SPIRE_ENABLED: &str = "SPIRE_ENABLED";
+
+const SPIRE_TIMEOUT: &str = "SPIRE_TIMEOUT";
+
+const SPIRE_ADMIN_SOCKET: &str = "SPIRE_ADMIN_ENDPOINT_SOCKET";
+
+const CONTAINER_RUNTIME_SOCK_PATH: &str = "CONTAINER_RUNTIME_SOCK_PATH";
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),
@@ -311,6 +319,10 @@ pub struct Config {
     pub ztunnel_workload: Option<state::WorkloadInfo>,
 
     pub ipv6_enabled: bool,
+    pub spire_enabled: bool,
+    pub spire_timeout: Duration,
+    pub spire_admin_socket: String,
+    pub container_runtime_sock_path: String,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -865,6 +877,16 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_identity,
         ztunnel_workload,
         ipv6_enabled,
+        spire_enabled: parse_default(SPIRE_ENABLED, false)?,
+        container_runtime_sock_path: parse_default(
+            CONTAINER_RUNTIME_SOCK_PATH,
+            "/run/containerd/containerd.sock".to_string(),
+        )?,
+        spire_timeout: parse_duration_default(SPIRE_TIMEOUT, Duration::from_secs(10))?,
+        spire_admin_socket: parse_default(
+            SPIRE_ADMIN_SOCKET,
+            "unix:///run/spire/sockets/admin.sock".to_string(),
+        )?,
     })
 }
 
