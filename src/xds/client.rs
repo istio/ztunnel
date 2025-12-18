@@ -131,7 +131,7 @@ struct HandlerWrapper<T: prost::Message> {
     h: Box<dyn Handler<T>>,
 }
 
-impl<T: 'static + prost::Message + Default> RawHandler for HandlerWrapper<T> {
+impl<T: 'static + fmt::Debug + prost::Message + Default> RawHandler for HandlerWrapper<T> {
     fn handle(
         &self,
         state: &mut State,
@@ -270,7 +270,7 @@ impl Config {
 
     pub fn with_watched_handler<F>(self, type_url: Strng, f: impl Handler<F>) -> Config
     where
-        F: 'static + prost::Message + Default,
+        F: 'static + fmt::Debug + prost::Message + Default,
     {
         let no_on_demand = f.no_on_demand();
         self.with_handler(type_url.clone(), f)
@@ -279,7 +279,7 @@ impl Config {
 
     fn with_handler<F>(mut self, type_url: Strng, f: impl Handler<F>) -> Config
     where
-        F: 'static + prost::Message + Default,
+        F: 'static + fmt::Debug + prost::Message + Default,
     {
         let h = HandlerWrapper { h: Box::new(f) };
         self.handlers.insert(type_url, Box::new(h));

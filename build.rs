@@ -36,7 +36,7 @@ fn main() -> Result<(), anyhow::Error> {
         .map(|i| std::env::current_dir().unwrap().join(i))
         .collect::<Vec<_>>();
     let config = {
-        let mut c = prost_build::Config::new();
+        let mut c = tonic_prost_build::Config::new();
         c.disable_comments(Some("."));
         c.bytes([
             ".istio.workload.Workload",
@@ -47,9 +47,9 @@ fn main() -> Result<(), anyhow::Error> {
         ]);
         c
     };
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
-        .compile_protos_with_config(
+        .compile_with_config(
             config,
             &proto_files
                 .iter()
