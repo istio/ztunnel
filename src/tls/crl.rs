@@ -20,7 +20,7 @@ use notify_debouncer_full::{
 use rustls::pki_types::CertificateDer;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use webpki::CertRevocationList;
 
@@ -31,9 +31,6 @@ pub enum CrlError {
 
     #[error("failed to parse CRL: {0}")]
     ParseError(String),
-
-    #[error("CRL is expired")]
-    ExpiredCrl,
 
     #[error("failed to parse certificate: {0}")]
     CertificateParseError(String),
@@ -59,25 +56,18 @@ impl std::fmt::Debug for CrlManager {
 struct CrlManagerInner {
     crl_list: Vec<CertRevocationList<'static>>,
     crl_path: PathBuf,
-    allow_expired: bool,
-    last_load_time: Option<SystemTime>,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
 impl CrlManager {
     /// Create a new CRL manager
-    pub fn new(crl_path: PathBuf, allow_expired: bool) -> Result<Self, CrlError> {
-        debug!(
-            "initializing CRL Manager: path={:?}, allow_expired={}",
-            crl_path, allow_expired
-        );
+    pub fn new(crl_path: PathBuf) -> Result<Self, CrlError> {
+        debug!("initializing crl manager: path={:?}", crl_path);
 
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
                 crl_list: Vec::new(),
                 crl_path: crl_path.clone(),
-                allow_expired,
-                last_load_time: None,
                 _debouncer: None,
             })),
         };
@@ -131,7 +121,6 @@ impl CrlManager {
         debug!("found {} CRL block(s) in file", der_crls.len());
 
         let mut parsed_crls = Vec::new();
-        let mut total_revoked = 0;
 
         for (idx, der_data) in der_crls.iter().enumerate() {
             let owned_crl = webpki::OwnedCertRevocationList::from_der(der_data).map_err(|e| {
@@ -144,21 +133,13 @@ impl CrlManager {
             use x509_parser::prelude::*;
             if let Ok((_, crl_info)) = CertificateRevocationList::from_der(der_data) {
                 debug!("CRL {}:", idx + 1);
-                debug!("  Issuer: {}", crl_info.tbs_cert_list.issuer);
+                debug!("  issuer: {}", crl_info.tbs_cert_list.issuer);
                 debug!("  this update: {:?}", crl_info.tbs_cert_list.this_update);
                 if let Some(next_update) = &crl_info.tbs_cert_list.next_update {
                     debug!("  next update: {:?}", next_update);
                 }
                 let revoked_count = crl_info.tbs_cert_list.revoked_certificates.len();
                 debug!("  revoked certificates: {}", revoked_count);
-                total_revoked += revoked_count;
-
-                // validate CRL expiration using x509-parser
-                // webpki doesn't expose next_update easily
-                Self::validate_crl(der_data, inner.allow_expired)?;
-            } else {
-                // if x509-parser fails, we still have webpki parsed CRL, but with fewer log details
-                debug!("CRL {}: parsed successfully", idx + 1);
             }
 
             parsed_crls.push(crl);
@@ -175,13 +156,8 @@ impl CrlManager {
 
         // store parsed CRL objects
         inner.crl_list = parsed_crls;
-        inner.last_load_time = Some(SystemTime::now());
 
-        debug!(
-            "CRL loaded successfully ({} CRL(s), {} total revoked certificate(s))",
-            inner.crl_list.len(),
-            total_revoked
-        );
+        debug!("CRL loaded successfully ({} CRL(s))", inner.crl_list.len());
         Ok(has_new_revocations)
     }
 
@@ -229,88 +205,10 @@ impl CrlManager {
         Ok(crls)
     }
 
-    /// Validate CRL
-    fn validate_crl(der_data: &[u8], allow_expired: bool) -> Result<(), CrlError> {
+    /// Check if a certificate is revoked using webpki's native CRL API
+    pub fn is_cert_revoked(&self, cert: &CertificateDer) -> Result<bool, CrlError> {
         use x509_parser::prelude::*;
 
-        // parse with x509-parser only for expiration validation
-        let (_, crl) = CertificateRevocationList::from_der(der_data)
-            .map_err(|e| CrlError::ParseError(format!("validation parse failed: {}", e)))?;
-
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| CrlError::ParseError(format!("system time error: {}", e)))?;
-        let unix_now = now.as_secs() as i64;
-
-        // check thisUpdate (CRL issue time)
-        if unix_now < crl.tbs_cert_list.this_update.timestamp() {
-            warn!("CRL is not yet valid");
-        }
-
-        // check nextUpdate (CRL expiry)
-        if let Some(next_update) = &crl.tbs_cert_list.next_update
-            && unix_now > next_update.timestamp()
-        {
-            if !allow_expired {
-                return Err(CrlError::ExpiredCrl);
-            }
-            warn!("CRL is expired but allow_expired_crl is enabled");
-        }
-
-        Ok(())
-    }
-
-    /// Check if any certificate in the chain is revoked
-    pub fn is_revoked_chain(
-        &self,
-        end_entity: &CertificateDer,
-        intermediates: &[CertificateDer],
-    ) -> Result<bool, CrlError> {
-        use x509_parser::prelude::*;
-
-        debug!(
-            "checking certificate chain against CRL (chain length: {})",
-            1 + intermediates.len()
-        );
-
-        // Log end-entity certificate serial
-        if let Ok((_, parsed)) = X509Certificate::from_der(end_entity) {
-            debug!("  end-entity serial: {:?}", parsed.serial.to_bytes_be());
-        }
-
-        // Log intermediate certificate serials
-        for (idx, intermediate) in intermediates.iter().enumerate() {
-            if let Ok((_, parsed)) = X509Certificate::from_der(intermediate) {
-                debug!(
-                    "  intermediate {} serial: {:?}",
-                    idx,
-                    parsed.serial.to_bytes_be()
-                );
-            }
-        }
-
-        debug!("checking leaf certificate");
-        if self.is_cert_revoked(end_entity)? {
-            warn!("leaf certificate is REVOKED");
-            return Ok(true);
-        }
-
-        // check all intermediate certificates
-        for (idx, intermediate) in intermediates.iter().enumerate() {
-            debug!("checking intermediate certificate {} in chain", idx);
-            if self.is_cert_revoked(intermediate)? {
-                warn!("intermediate CA certificate at position {} is REVOKED", idx);
-                return Ok(true);
-            }
-        }
-
-        debug!("certificate chain validation passed - no revoked certificates found");
-        Ok(false)
-    }
-
-    /// Internal method to check if a single certificate is revoked
-    /// Checks the certificate against ALL loaded CRLs using rustls-webpki
-    fn is_cert_revoked(&self, cert: &CertificateDer) -> Result<bool, CrlError> {
         let inner = self
             .inner
             .read()
@@ -319,43 +217,43 @@ impl CrlManager {
         // if no CRLs are loaded, try to load them now
         if inner.crl_list.is_empty() {
             drop(inner);
-            debug!("CRL not loaded, attempting to load now");
+            debug!("crl not loaded, attempting to load now");
             self.load_crl()?;
             return self.is_cert_revoked(cert);
         }
 
         // extract certificate serial number using x509-parser
-        // webpki's Cert::from_der is not public, so we need x509-parser for this
-        use x509_parser::prelude::*;
+        // webpki doesn't expose cert parsing publicly, so we use x509-parser for this
         let (_, parsed_cert) = X509Certificate::from_der(cert)
             .map_err(|e| CrlError::CertificateParseError(e.to_string()))?;
 
         let cert_serial = parsed_cert.serial.to_bytes_be();
-        debug!("certificate serial number: {:?}", cert_serial);
+        debug!("checking certificate serial: {:?}", cert_serial);
 
-        // check the certificate against ALL CRLs
+        // check the certificate against ALL CRLs using webpki's native API
         for (idx, crl) in inner.crl_list.iter().enumerate() {
             debug!("checking against CRL {}", idx + 1);
 
             match crl.find_serial(&cert_serial) {
                 Ok(Some(revoked_cert)) => {
-                    warn!(
+                    error!(
                         "certificate with serial {:?} is REVOKED in CRL {}",
                         cert_serial,
                         idx + 1
                     );
-                    warn!("revocation date: {:?}", revoked_cert.revocation_date);
+                    error!("revocation date: {:?}", revoked_cert.revocation_date);
                     if let Some(reason) = revoked_cert.reason_code {
-                        warn!("revocation reason: {:?}", reason);
+                        error!("revocation reason: {:?}", reason);
                     }
                     return Ok(true);
                 }
                 Ok(None) => {
                     // certificate isn't found in this CRL, continue checking others
+                    debug!("certificate not found in CRL {}", idx + 1);
                     continue;
                 }
                 Err(e) => {
-                    // error parsing revoked certificates in this CRL
+                    // error during CRL lookup
                     error!("error checking CRL {}: {:?}", idx + 1, e);
                     return Err(CrlError::WebPkiError(format!("CRL lookup failed: {:?}", e)));
                 }
@@ -363,10 +261,41 @@ impl CrlManager {
         }
 
         debug!(
-            "certificate serial {:?} is not in any of the {} CRL(s)",
+            "certificate serial {:?} is not revoked in any of the {} CRL(s)",
             cert_serial,
             inner.crl_list.len()
         );
+        Ok(false)
+    }
+
+    /// Check if any certificate in the chain is revoked using webpki's native CRL API
+    pub fn is_revoked_chain(
+        &self,
+        end_entity: &CertificateDer,
+        intermediates: &[CertificateDer],
+    ) -> Result<bool, CrlError> {
+        debug!(
+            "checking certificate chain against CRL (chain length: {})",
+            1 + intermediates.len()
+        );
+
+        // check leaf certificate
+        debug!("checking leaf certificate");
+        if self.is_cert_revoked(end_entity)? {
+            error!("leaf certificate is REVOKED");
+            return Ok(true);
+        }
+
+        // check all intermediate certificates
+        for (idx, intermediate) in intermediates.iter().enumerate() {
+            debug!("checking intermediate certificate {} in chain", idx);
+            if self.is_cert_revoked(intermediate)? {
+                error!("intermediate CA certificate at position {} is REVOKED", idx);
+                return Ok(true);
+            }
+        }
+
+        debug!("certificate chain validation passed - no revoked certificates found");
         Ok(false)
     }
 
@@ -466,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_crl_manager_missing_file() {
-        let result = CrlManager::new(PathBuf::from("/nonexistent/path/crl.pem"), false);
+        let result = CrlManager::new(PathBuf::from("/nonexistent/path/crl.pem"));
         assert!(result.is_ok(), "should handle missing CRL file gracefully");
     }
 
@@ -477,7 +406,7 @@ mod tests {
             .expect("failed to write test data to temporary file");
         file.flush().expect("failed to flush temporary test file");
 
-        let result = CrlManager::new(file.path().to_path_buf(), false);
+        let result = CrlManager::new(file.path().to_path_buf());
         assert!(result.is_err(), "should fail on invalid CRL data");
     }
 }
