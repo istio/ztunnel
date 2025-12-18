@@ -80,7 +80,6 @@ const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
 const ENABLE_CRL: &str = "ENABLE_CRL";
 const CRL_PATH: &str = "CRL_PATH";
-const ALLOW_EXPIRED_CRL: &str = "ALLOW_EXPIRED_CRL";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
@@ -322,9 +321,6 @@ pub struct Config {
 
     // Path to CRL file
     pub crl_path: PathBuf,
-
-    // Allow expired CRL (for testing/rollout scenarios)
-    pub allow_expired_crl: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -882,7 +878,6 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
         enable_crl: parse_default(ENABLE_CRL, false)?,
         crl_path: parse_default(CRL_PATH, PathBuf::from(DEFAULT_CRL_PATH))?,
-        allow_expired_crl: parse_default(ALLOW_EXPIRED_CRL, false)?,
     })
 }
 
