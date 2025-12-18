@@ -390,24 +390,38 @@ impl Store {
                     .cloned()
                     .collect();
 
-                // TODO: ideally we'd sort these by creation time so that the oldest would be used if there are no namespace matches
-                // presently service doesn't have creation time in WDS, but we could add it
-                // TODO: if the local namespace doesn't define a service, kube service should be prioritized over se
-                let service = match services
+                // // TODO: ideally we'd sort these by creation time so that the oldest would be used if there are no namespace matches
+                // // presently service doesn't have creation time in WDS, but we could add it
+                // // TODO: if the local namespace doesn't define a service, kube service should be prioritized over se
+                // let service = match services
+                //     .iter()
+                //     .find(|service| service.namespace == client.namespace)
+                // {
+                //     Some(service) => Some(service),
+                //     None => match self.prefered_service_namespace.as_ref() {
+                //         Some(prefered_namespace) => services.iter().find_or_first(|service| {
+                //             service.namespace == prefered_namespace.as_str()
+                //         }),
+                //         None => services.first(),
+                //     },
+                // };
+
+                let (namespace, canonical, first) = services
                     .iter()
-                    .find(|service| service.namespace == client.namespace)
-                {
-                    Some(service) => Some(service),
-                    None => match self.prefered_service_namespace.as_ref() {
-                        Some(prefered_namespace) => services.iter().find_or_first(|service| {
-                            service.namespace == prefered_namespace.as_str()
-                        }),
-                        None => services.first(),
-                    },
-                };
+                    .fold_while((None, None, None), |(n, c, f), s| {
+                        let f = f.or(Some(s));
+                        if s.namespace == client.namespace {
+                            return itertools::FoldWhile::Done((Some(s), c, f));
+                        } else if s.canonical {
+                            return itertools::FoldWhile::Continue((n, Some(s), f));
+                        } else {
+                            return itertools::FoldWhile::Continue((n, c, f));
+                        }
+                    })
+                    .into_inner();
 
                 // First, lookup the host as a service.
-                if let Some(service) = service {
+                if let Some(service) = namespace.or(canonical).or(first) {
                     return Some(ServerMatch {
                         server: Address::Service(service.clone()),
                         name: search_name,

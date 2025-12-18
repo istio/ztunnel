@@ -89,6 +89,8 @@ message Service {
 
   // Extension provides a mechanism to attach arbitrary additional configuration to an object.
   repeated Extension extensions = 10;
+
+  bool canonical = 11;
 }
 
 enum IPFamilies {

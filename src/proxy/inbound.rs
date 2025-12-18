@@ -962,6 +962,7 @@ mod tests {
             waypoint: waypoint.service_attached(),
             load_balancer: None,
             ip_families: None,
+            canonical: true,
         });
 
         let workloads = vec![

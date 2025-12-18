@@ -55,6 +55,8 @@ pub struct Service {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub ip_families: Option<IpFamily>,
+
+    pub canonical: bool,
 }
 
 /// EndpointSet is an abstraction over a set of endpoints.
@@ -328,6 +330,7 @@ impl TryFrom<&XdsService> for Service {
             waypoint,
             load_balancer: lb,
             ip_families,
+            canonical: s.canonical,
         };
         Ok(svc)
     }
