@@ -59,7 +59,7 @@ impl ProxyFactory {
 
         // Initialize CRL manager ONCE if enabled
         let crl_manager = if config.enable_crl {
-            match tls::crl::CrlManager::new(config.crl_path.clone(), config.allow_expired_crl) {
+            match tls::crl::CrlManager::new(config.crl_path.clone()) {
                 Ok(manager) => {
                     let manager_arc = Arc::new(manager);
 

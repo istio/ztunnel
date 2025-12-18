@@ -123,26 +123,26 @@ impl ClientCertVerifier for TrustDomainVerifier {
             .verify_client_cert(end_entity, intermediates, now)?;
         self.verify_trust_domain(end_entity)?;
 
-        // Check CRL if enabled
+        // check CRL if enabled
         if let Some(crl_manager) = &self.crl_manager {
-            debug!("CRL checking enabled for client certificate");
+            debug!("crl checking enabled for client certificate");
             let is_revoked = crl_manager
                 .is_revoked_chain(end_entity, intermediates)
                 .map_err(|e| {
-                    error!("CRL validation failed for client certificate: {}", e);
-                    rustls::Error::General(format!("Certificate revocation check failed: {}", e))
+                    error!("crl validation failed for client certificate: {}", e);
+                    rustls::Error::General(format!("certificate revocation check failed: {}", e))
                 })?;
 
             if is_revoked {
-                error!("Client certificate is REVOKED - rejecting connection");
+                error!("client certificate is REVOKED - rejecting connection");
                 return Err(rustls::Error::InvalidCertificate(
                     rustls::CertificateError::Revoked,
                 ));
             }
 
-            debug!("Client certificate chain is valid (not revoked)");
+            debug!("client certificate chain is valid (not revoked)");
         } else {
-            debug!("CRL checking disabled for client certificate");
+            debug!("crl checking disabled for client certificate");
         }
 
         Ok(res)
