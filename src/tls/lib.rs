@@ -28,8 +28,6 @@ use rustls::crypto::CryptoProvider;
 use rustls::ClientConfig;
 use rustls::ServerConfig;
 
-use tracing::error;
-
 #[async_trait::async_trait]
 pub trait ControlPlaneClientCertProvider: Send + Sync {
     async fn fetch_cert(&self, alt_hostname: Option<String>) -> Result<ClientConfig, Error>;
