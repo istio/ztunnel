@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::{fmt, net};
 use thiserror::Error;
 use tokio::sync::watch::{Receiver, Sender};
-use tracing::{error, trace};
+use tracing::trace;
 use xds::istio::workload::ApplicationTunnel as XdsApplicationTunnel;
 use xds::istio::workload::GatewayAddress as XdsGatewayAddress;
 use xds::istio::workload::Workload as XdsWorkload;

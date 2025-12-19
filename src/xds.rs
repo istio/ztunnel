@@ -21,7 +21,9 @@ use std::sync::{Arc, RwLock};
 use tracing::Level;
 
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument, trace, warn};
+#[cfg(any(test, feature = "testing"))]
+use tracing::error;
+use tracing::{debug, info, instrument, trace, warn};
 
 pub use client::*;
 pub use metrics::*;
