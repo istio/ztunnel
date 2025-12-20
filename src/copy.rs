@@ -430,6 +430,7 @@ mod tests {
                     destination: None,
                     connection_security_policy: crate::proxy::metrics::SecurityPolicy::unknown,
                     destination_service: None,
+                    direction: crate::proxy::metrics::Direction::default(),
                 },
                 metrics.clone(),
             );
@@ -475,6 +476,7 @@ mod tests {
                     destination: None,
                     connection_security_policy: crate::proxy::metrics::SecurityPolicy::unknown,
                     destination_service: None,
+                    direction: crate::proxy::metrics::Direction::default(),
                 },
                 metrics.clone(),
             );
