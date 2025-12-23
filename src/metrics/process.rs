@@ -122,7 +122,7 @@ impl ProcessMetrics {
             let gauge = metrics::gauge::ConstGauge::new(stat.vsize);
             let metric_encoder = encoder.encode_descriptor(
                 "process_virtual_memory",
-                "Virtual memory size in bytes.",
+                "unstable: Virtual memory size in bytes.",
                 Some(&Unit::Bytes),
                 gauge.metric_type(),
             )?;
@@ -133,7 +133,7 @@ impl ProcessMetrics {
             let gauge = metrics::gauge::ConstGauge::new(stat.rss * page_size);
             let metric_encoder = encoder.encode_descriptor(
                 "process_resident_memory",
-                "Resident memory size in bytes.",
+                "unstable: Resident memory size in bytes.",
                 Some(&Unit::Bytes),
                 gauge.metric_type(),
             )?;
@@ -148,7 +148,7 @@ impl ProcessMetrics {
             );
             let metric_encoder = encoder.encode_descriptor(
                 "process_start_time",
-                "Start time of the process since unix epoch in seconds.",
+                "unstable: Start time of the process since unix epoch in seconds.",
                 Some(&Unit::Seconds),
                 gauge.metric_type(),
             )?;
@@ -277,7 +277,7 @@ impl ProcessMetrics {
         let gauge = metrics::gauge::ConstGauge::new(max_vmem);
         let metric_encoder = encoder.encode_descriptor(
             "process_virtual_memory_max",
-            "Maximum amount of virtual memory available in bytes.",
+            "unstable: Maximum amount of virtual memory available in bytes.",
             Some(&Unit::Bytes),
             gauge.metric_type(),
         )?;
