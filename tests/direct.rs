@@ -200,7 +200,7 @@ async fn test_quit_lifecycle() {
 
 fn process_metrics_assertions(metrics: &ParsedMetrics) {
     fn get_gauge(metrics: &ParsedMetrics, metric: &str) -> f64 {
-        let m = metrics.query(&(metric), &Default::default());
+        let m = metrics.query(metric, &Default::default());
         assert!(m.is_some(), "expected metric {metric}");
         assert!(
             m.to_owned().unwrap().len() == 1,
