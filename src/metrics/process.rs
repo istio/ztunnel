@@ -84,10 +84,7 @@ pub struct ProcessMetrics {
 }
 
 impl ProcessMetrics {
-    fn encode_proc_stat(
-        &self,
-        encoder: &mut DescriptorEncoder,
-    ) -> Result<(), std::fmt::Error> {
+    fn encode_proc_stat(&self, encoder: &mut DescriptorEncoder) -> Result<(), std::fmt::Error> {
         let mut fd = match &self.process_stat {
             Some(fd) => fd,
             None => return Ok(()),

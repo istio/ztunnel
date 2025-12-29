@@ -219,10 +219,16 @@ fn process_metrics_assertions(metrics: &ParsedMetrics) {
     }
 
     let vmem = get_gauge(metrics, "process_virtual_memory_bytes");
-    assert!(vmem > 0.0, "expected virtual memory to be positive, was {vmem}");
+    assert!(
+        vmem > 0.0,
+        "expected virtual memory to be positive, was {vmem}"
+    );
 
     let rss = get_gauge(metrics, "process_resident_memory_bytes");
-    assert!(rss > 0.0, "expected resident memory to be positive, was {rss}");
+    assert!(
+        rss > 0.0,
+        "expected resident memory to be positive, was {rss}"
+    );
     assert!(
         rss <= vmem,
         "expected resident memory <= virtual memory, got rss={rss} vmem={vmem}"
