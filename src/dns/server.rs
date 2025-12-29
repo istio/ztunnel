@@ -187,6 +187,24 @@ impl Server {
     }
 }
 
+enum MatchReason<'a> {
+    First(&'a Arc<Service>),
+    Canonical(&'a Arc<Service>),
+    Namespace(&'a Arc<Service>),
+    None,
+}
+
+impl<'a> From<MatchReason<'a>> for Option<&'a Arc<Service>> {
+    fn from(value: MatchReason<'a>) -> Option<&'a Arc<Service>> {
+        match value {
+            MatchReason::First(s) | MatchReason::Canonical(s) | MatchReason::Namespace(s) => {
+                Some(s)
+            }
+            MatchReason::None => None,
+        }
+    }
+}
+
 /// A DNS [Resolver] backed by the ztunnel [DemandProxyState].
 struct Store {
     state: DemandProxyState,
@@ -406,22 +424,28 @@ impl Store {
                 //     },
                 // };
 
-                let (namespace, canonical, first) = services
+                info!("IAN worked on this");
+                let service: Option<&Arc<Service>> = services
                     .iter()
-                    .fold_while((None, None, None), |(n, c, f), s| {
-                        let f = f.or(Some(s));
+                    .fold_while(MatchReason::None, |r, s| {
                         if s.namespace == client.namespace {
-                            return itertools::FoldWhile::Done((Some(s), c, f));
+                            return itertools::FoldWhile::Done(MatchReason::Namespace(s));
                         } else if s.canonical {
-                            return itertools::FoldWhile::Continue((n, Some(s), f));
+                            return itertools::FoldWhile::Continue(MatchReason::Canonical(s));
                         } else {
-                            return itertools::FoldWhile::Continue((n, c, f));
+                            return match r {
+                                MatchReason::None => {
+                                    itertools::FoldWhile::Continue(MatchReason::First(s))
+                                }
+                                _ => itertools::FoldWhile::Continue(r),
+                            };
                         }
                     })
-                    .into_inner();
+                    .into_inner()
+                    .into();
 
                 // First, lookup the host as a service.
-                if let Some(service) = namespace.or(canonical).or(first) {
+                if let Some(service) = service {
                     return Some(ServerMatch {
                         server: Address::Service(service.clone()),
                         name: search_name,
