@@ -41,8 +41,8 @@ pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
     pub connection_failures: Family<CommonTrafficLabels, Counter>,
-    pub socket_opens: Family<CommonTrafficLabels, Counter>,
-    pub socket_closes: Family<CommonTrafficLabels, Counter>,
+    pub socket_opens: Family<SocketLabels, Counter>,
+    pub socket_closes: Family<SocketLabels, Counter>,
     pub received_bytes: Family<CommonTrafficLabels, Counter>,
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
 
@@ -72,7 +72,6 @@ pub enum Direction {
     unknown,
     outbound,
     inbound,
-    proxy,
 }
 
 #[derive(Default, Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -214,6 +213,12 @@ impl From<ConnectionOpen> for CommonTrafficLabels {
                 .with_destination_service(c.destination_service.as_ref())
         }
     }
+}
+
+/// Minimal labels for socket metrics (without direction)
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
+pub struct SocketLabels {
+    pub reporter: Reporter,
 }
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
@@ -378,11 +383,11 @@ impl Metrics {
         }
     }
 
-    pub fn record_socket_open(&self, labels: &CommonTrafficLabels) {
+    pub fn record_socket_open(&self, labels: &SocketLabels) {
         self.socket_opens.get_or_create(labels).inc();
     }
 
-    pub fn record_socket_close(&self, labels: &CommonTrafficLabels) {
+    pub fn record_socket_close(&self, labels: &SocketLabels) {
         self.socket_closes.get_or_create(labels).inc();
     }
 }
@@ -394,38 +399,27 @@ impl Metrics {
 pub struct SocketCloseGuard {
     metrics: Arc<Metrics>,
     reporter: Reporter,
-    direction: Direction,
 }
 
 impl Drop for SocketCloseGuard {
     fn drop(&mut self) {
-        let labels = CommonTrafficLabels::for_socket(self.reporter, self.direction);
+        let labels = SocketLabels {
+            reporter: self.reporter,
+        };
         self.metrics.record_socket_close(&labels);
     }
 }
 
 impl SocketCloseGuard {
     /// Create a new socket close guard
-    pub fn new(metrics: Arc<Metrics>, reporter: Reporter, direction: Direction) -> Self {
+    pub fn new(metrics: Arc<Metrics>, reporter: Reporter) -> Self {
         Self {
             metrics,
             reporter,
-            direction,
         }
     }
 }
 
-impl CommonTrafficLabels {
-    /// Create minimal labels for socket metrics at accept time
-    /// This is called when a socket is accepted, before we have full connection details
-    pub fn for_socket(reporter: Reporter, direction: Direction) -> Self {
-        CommonTrafficLabels {
-            reporter,
-            direction,
-            ..Default::default()
-        }
-    }
-}
 
 #[derive(Debug)]
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion

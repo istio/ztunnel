@@ -86,10 +86,9 @@ impl Socks5 {
                 let mut force_shutdown = force_shutdown.clone();
                 match socket {
                     Ok((stream, _remote)) => {
-                        let socket_labels = crate::proxy::metrics::CommonTrafficLabels::for_socket(
-                            crate::proxy::metrics::Reporter::source,
-                            crate::proxy::metrics::Direction::outbound,
-                        );
+                        let socket_labels = crate::proxy::metrics::SocketLabels {
+                            reporter: crate::proxy::metrics::Reporter::source,
+                        };
                         self.pi.metrics.record_socket_open(&socket_labels);
 
                         let oc = OutboundConnection {
@@ -104,7 +103,6 @@ impl Socks5 {
                             let _socket_guard = crate::proxy::metrics::SocketCloseGuard::new(
                                 metrics_for_socket_close,
                                 crate::proxy::metrics::Reporter::source,
-                                crate::proxy::metrics::Direction::outbound,
                             );
                             debug!(component="socks5", "connection started");
                             // Since this task is spawned, make sure we are guaranteed to terminate

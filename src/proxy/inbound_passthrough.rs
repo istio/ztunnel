@@ -76,10 +76,9 @@ impl InboundPassthrough {
                 let pi = self.pi.clone();
                 match socket {
                     Ok((stream, remote)) => {
-                        let socket_labels = metrics::CommonTrafficLabels::for_socket(
-                            Reporter::destination,
-                            metrics::Direction::inbound,
-                        );
+                        let socket_labels = metrics::SocketLabels {
+                            reporter: Reporter::destination,
+                        };
                         pi.metrics.record_socket_open(&socket_labels);
 
                         let metrics_for_socket_close = pi.metrics.clone();
@@ -87,7 +86,6 @@ impl InboundPassthrough {
                             let _socket_guard = metrics::SocketCloseGuard::new(
                                 metrics_for_socket_close,
                                 Reporter::destination,
-                                Direction::inbound,
                             );
                             debug!(component="inbound passthrough", "connection started");
                                 // Since this task is spawned, make sure we are guaranteed to terminate
@@ -201,7 +199,7 @@ impl InboundPassthrough {
                 destination: Some(upstream_workload),
                 connection_security_policy: metrics::SecurityPolicy::unknown,
                 destination_service: ds,
-                direction: Direction::proxy,
+                direction: Direction::inbound,
             },
             pi.metrics.clone(),
         ));

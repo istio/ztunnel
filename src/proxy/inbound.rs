@@ -109,10 +109,9 @@ impl Inbound {
                 let network = pi.cfg.network.clone();
                 let acceptor = crate::tls::InboundAcceptor::new(acceptor.clone());
 
-                let socket_labels = metrics::CommonTrafficLabels::for_socket(
-                    Reporter::destination,
-                    metrics::Direction::inbound,
-                );
+                let socket_labels = metrics::SocketLabels {
+                    reporter: Reporter::destination,
+                };
                 pi.metrics.record_socket_open(&socket_labels);
                 let metrics_for_socket_close = pi.metrics.clone();
 
@@ -120,7 +119,6 @@ impl Inbound {
                     let _socket_guard = metrics::SocketCloseGuard::new(
                         metrics_for_socket_close,
                         Reporter::destination,
-                        metrics::Direction::inbound,
                     );
                     let tls = match acceptor.accept(raw_socket).await {
                         Ok(tls) => tls,
