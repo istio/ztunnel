@@ -24,7 +24,7 @@ use tracing::{Instrument, debug, error, info, trace};
 use crate::drain::DrainWatcher;
 use crate::drain::run_with_drain;
 use crate::proxy::Error;
-use crate::proxy::metrics::{Direction, Reporter};
+use crate::proxy::metrics::Reporter;
 use crate::proxy::{ProxyInputs, metrics, util};
 use crate::state::workload::NetworkAddress;
 use crate::{assertions, copy, handle_connection, rbac, strng};
@@ -199,7 +199,6 @@ impl InboundPassthrough {
                 destination: Some(upstream_workload),
                 connection_security_policy: metrics::SecurityPolicy::unknown,
                 destination_service: ds,
-                direction: Direction::inbound,
             },
             pi.metrics.clone(),
         ));

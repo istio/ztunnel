@@ -133,7 +133,6 @@ pub struct ConnectionOpen {
     pub destination: Option<Arc<Workload>>,
     pub destination_service: Option<ServiceDescription>,
     pub connection_security_policy: SecurityPolicy,
-    pub direction: Direction,
 }
 
 impl CommonTrafficLabels {
@@ -216,7 +215,6 @@ impl From<ConnectionOpen> for CommonTrafficLabels {
             request_protocol: RequestProtocol::tcp,
             response_flags: ResponseFlags::None,
             connection_security_policy: c.connection_security_policy,
-            direction: c.direction,
             ..CommonTrafficLabels::new()
                 // Intentionally before with_source; source is more reliable
                 .with_derived_source(c.derived_source.as_ref())
@@ -262,7 +260,6 @@ pub struct CommonTrafficLabels {
     request_protocol: RequestProtocol,
     response_flags: ResponseFlags,
     connection_security_policy: SecurityPolicy,
-    direction: Direction,
 
     #[prometheus(flatten)]
     locality: OptionallyEncode<LocalityLabels>,
