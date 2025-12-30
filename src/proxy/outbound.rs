@@ -377,7 +377,6 @@ impl OutboundConnection {
             destination: req.actual_destination_workload.clone(),
             connection_security_policy: security_policy,
             destination_service: req.intended_destination_service.clone(),
-            direction: metrics::Direction::outbound,
         }
     }
 

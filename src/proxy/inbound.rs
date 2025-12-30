@@ -439,7 +439,6 @@ impl Inbound {
                 destination: Some(destination_workload),
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
-                direction: metrics::Direction::inbound,
             },
             pi.metrics.clone(),
         ));
