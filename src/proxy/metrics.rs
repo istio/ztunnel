@@ -82,6 +82,14 @@ pub enum ResponseFlags {
     AuthorizationPolicyDenied,
     // connection denied because we could not establish an upstream connection
     ConnectionFailure,
+    // TLS handshake failure
+    TlsFailure,
+    // HTTP/2 handshake failure
+    Http2HandshakeFailure,
+    // Network policy blocking connection
+    NetworkPolicyError,
+    // Identity/certificate error
+    IdentityError,
 }
 
 impl EncodeLabelValue for ResponseFlags {
@@ -90,6 +98,10 @@ impl EncodeLabelValue for ResponseFlags {
             ResponseFlags::None => writer.write_str("-"),
             ResponseFlags::AuthorizationPolicyDenied => writer.write_str("DENY"),
             ResponseFlags::ConnectionFailure => writer.write_str("CONNECT"),
+            ResponseFlags::TlsFailure => writer.write_str("TLS_FAILURE"),
+            ResponseFlags::Http2HandshakeFailure => writer.write_str("H2_HANDSHAKE_FAILURE"),
+            ResponseFlags::NetworkPolicyError => writer.write_str("NETWORK_POLICY"),
+            ResponseFlags::IdentityError => writer.write_str("IDENTITY_ERROR"),
         }
     }
 }
@@ -405,13 +417,9 @@ impl Drop for SocketCloseGuard {
 impl SocketCloseGuard {
     /// Create a new socket close guard
     pub fn new(metrics: Arc<Metrics>, reporter: Reporter) -> Self {
-        Self {
-            metrics,
-            reporter,
-        }
+        Self { metrics, reporter }
     }
 }
-
 
 #[derive(Debug)]
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
@@ -592,7 +600,39 @@ impl ConnectionResult {
 
     // Record our final result.
     pub fn record<E: std::error::Error>(mut self, res: Result<(), E>) {
+        // If no specific flag was set and we have an error, try to infer the failure reason
+        if self.tl.response_flags == ResponseFlags::None {
+            if let Err(ref err) = res {
+                self.tl.response_flags = Self::extract_failure_reason(err);
+            }
+        }
         self.record_internal(res)
+    }
+
+    // Extract failure reason from error type
+    fn extract_failure_reason(err: &dyn std::error::Error) -> ResponseFlags {
+        let err_str = format!("{err}");
+        // Check error message for specific failure types
+        if err_str.contains("tls error") || err_str.contains("TLS") || err_str.contains("Tls") {
+            return ResponseFlags::TlsFailure;
+        }
+        if err_str.contains("http2 handshake")
+            || err_str.contains("h2 failed")
+            || err_str.contains("Http2Handshake")
+        {
+            return ResponseFlags::Http2HandshakeFailure;
+        }
+        if err_str.contains("NetworkPolicy") || err_str.contains("network policy") {
+            return ResponseFlags::NetworkPolicyError;
+        }
+        if err_str.contains("identity error") || err_str.contains("Identity") {
+            return ResponseFlags::IdentityError;
+        }
+        if err_str.contains("policy rejection") || err_str.contains("AuthorizationPolicy") {
+            return ResponseFlags::AuthorizationPolicyDenied;
+        }
+        // Default to generic connection failure
+        ResponseFlags::ConnectionFailure
     }
 
     // Internal-only function that takes `&mut` to facilitate Drop. Public consumers must use consuming functions.
@@ -607,7 +647,15 @@ impl ConnectionResult {
         // Unconditionally record the connection was closed
         self.metrics.connection_close.get_or_create(tl).inc();
 
-        if tl.response_flags == ResponseFlags::ConnectionFailure {
+        if matches!(
+            tl.response_flags,
+            ResponseFlags::ConnectionFailure
+                | ResponseFlags::AuthorizationPolicyDenied
+                | ResponseFlags::TlsFailure
+                | ResponseFlags::Http2HandshakeFailure
+                | ResponseFlags::NetworkPolicyError
+                | ResponseFlags::IdentityError
+        ) {
             self.metrics.connection_failures.get_or_create(tl).inc();
         }
 
