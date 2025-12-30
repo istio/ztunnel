@@ -23,6 +23,7 @@ use prometheus_client::encoding::{
 };
 use prometheus_client::metrics::counter::{Atomic, Counter};
 use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 use tracing::event;
@@ -41,8 +42,7 @@ pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
     pub connection_failures: Family<CommonTrafficLabels, Counter>,
-    pub socket_opens: Family<SocketLabels, Counter>,
-    pub socket_closes: Family<SocketLabels, Counter>,
+    pub open_sockets: Family<SocketLabels, Gauge>,
     pub received_bytes: Family<CommonTrafficLabels, Counter>,
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
 
@@ -357,18 +357,11 @@ impl Metrics {
             connection_failures.clone(),
         );
 
-        let socket_opens = Family::default();
+        let open_sockets = Family::default();
         registry.register(
-            "tcp_sockets_opened",
-            "The total number of TCP sockets opened (unstable)",
-            socket_opens.clone(),
-        );
-
-        let socket_closes = Family::default();
-        registry.register(
-            "tcp_sockets_closed",
-            "The total number of TCP sockets closed (unstable)",
-            socket_closes.clone(),
+            "tcp_sockets_open",
+            "The current number of open TCP sockets (unstable)",
+            open_sockets.clone(),
         );
 
         Self {
@@ -378,17 +371,16 @@ impl Metrics {
             sent_bytes,
             on_demand_dns,
             connection_failures,
-            socket_opens,
-            socket_closes,
+            open_sockets,
         }
     }
 
     pub fn record_socket_open(&self, labels: &SocketLabels) {
-        self.socket_opens.get_or_create(labels).inc();
+        self.open_sockets.get_or_create(labels).inc();
     }
 
     pub fn record_socket_close(&self, labels: &SocketLabels) {
-        self.socket_closes.get_or_create(labels).inc();
+        self.open_sockets.get_or_create(labels).dec();
     }
 }
 
