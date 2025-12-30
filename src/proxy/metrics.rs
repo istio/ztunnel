@@ -601,10 +601,8 @@ impl ConnectionResult {
     // Record our final result.
     pub fn record<E: std::error::Error>(mut self, res: Result<(), E>) {
         // If no specific flag was set and we have an error, try to infer the failure reason
-        if self.tl.response_flags == ResponseFlags::None {
-            if let Err(ref err) = res {
-                self.tl.response_flags = Self::extract_failure_reason(err);
-            }
+        if self.tl.response_flags == ResponseFlags::None && let Err(ref err) = res {
+            self.tl.response_flags = Self::extract_failure_reason(err);
         }
         self.record_internal(res)
     }
