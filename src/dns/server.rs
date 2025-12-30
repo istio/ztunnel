@@ -430,9 +430,9 @@ impl Store {
                     .iter()
                     .fold_while(MatchReason::None, |r, s| {
                         if s.namespace == client.namespace {
-                            return itertools::FoldWhile::Done(MatchReason::Namespace(s));
+                            itertools::FoldWhile::Done(MatchReason::Namespace(s))
                         } else if s.canonical {
-                            return itertools::FoldWhile::Continue(MatchReason::Canonical(s));
+                            itertools::FoldWhile::Continue(MatchReason::Canonical(s))
                         } else {
                             // TODO: I vote we deprecate prefered_service_namespace
                             if let Some(preferred_namespace) =
@@ -444,12 +444,12 @@ impl Store {
                                     MatchReason::PreferredNamespace(s),
                                 );
                             }
-                            return match r {
+                            match r {
                                 MatchReason::None => {
                                     itertools::FoldWhile::Continue(MatchReason::First(s))
                                 }
                                 _ => itertools::FoldWhile::Continue(r),
-                            };
+                            }
                         }
                     })
                     .into_inner()
