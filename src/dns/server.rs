@@ -1012,6 +1012,7 @@ mod tests {
 
     const NS1: &str = "ns1";
     const NS2: &str = "ns2";
+    const NS3: &str = "ns3";
     const PREFERRED: &str = "preferred-ns";
     const NW1: Strng = strng::literal!("nw1");
     const NW2: Strng = strng::literal!("nw2");
@@ -1443,6 +1444,12 @@ mod tests {
                 expect_records: vec![a(n("everywhere.io."), ipv4("10.10.10.112"))],
                 ..Default::default()
             },
+            Case {
+                name: "success: canonical services are preferred when no ns-local hostname is present",
+                host: "canonical.svc",
+                expect_records: vec![a(n("canonical.svc."), ipv4("10.10.10.141"))],
+                ..Default::default()
+            },
         ];
 
         // Create and start the proxy.
@@ -1762,6 +1769,13 @@ mod tests {
             // Service with the same name in the same namespace
             // Client in NS1 should use this service
             xds_namespaced_external_service("everywhere.io", NS1, &[na(NW1, "10.10.10.112")]),
+            // Service that is canonical should be preferrred when no ns-local definition
+            xds_namespaced_external_service("canonical.svc", NS2, &[na(NW1, "10.10.10.140")]),
+            xds_namespaced_external_canonical_service(
+                "canonical.svc",
+                NS3,
+                &[na(NW1, "10.10.10.141")],
+            ),
             with_fqdn(
                 "details.ns2.svc.cluster.remote",
                 xds_service(
@@ -1887,6 +1901,11 @@ mod tests {
         svc
     }
 
+    fn with_canonical(canonical: bool, mut svc: XdsService) -> XdsService {
+        svc.canonical = canonical;
+        svc
+    }
+
     fn xds_service<S1: AsRef<str>, S2: AsRef<str>>(
         name: S1,
         ns: S2,
@@ -1924,6 +1943,14 @@ mod tests {
             hostname.as_ref(),
             xds_service(hostname.as_ref(), ns.as_ref(), vips),
         )
+    }
+
+    fn xds_namespaced_external_canonical_service<S1: AsRef<str>, S2: AsRef<str>>(
+        hostname: S1,
+        ns: S2,
+        vips: &[NetworkAddress],
+    ) -> XdsService {
+        with_canonical(true, xds_namespaced_external_service(hostname, ns, vips))
     }
 
     fn xds_workload(
