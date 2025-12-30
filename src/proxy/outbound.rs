@@ -90,10 +90,9 @@ impl Outbound {
                 let mut force_shutdown = force_shutdown.clone();
                 match socket {
                     Ok((stream, _remote)) => {
-                        let socket_labels = metrics::CommonTrafficLabels::for_socket(
-                            Reporter::source,
-                            metrics::Direction::outbound,
-                        );
+                        let socket_labels = metrics::SocketLabels {
+                            reporter: Reporter::source,
+                        };
                         self.pi.metrics.record_socket_open(&socket_labels);
 
                         let mut oc = OutboundConnection {
@@ -108,7 +107,6 @@ impl Outbound {
                             let _socket_guard = metrics::SocketCloseGuard::new(
                                 metrics_for_socket_close,
                                 Reporter::source,
-                                metrics::Direction::outbound,
                             );
                             debug!(component="outbound", "connection started");
                             // Since this task is spawned, make sure we are guaranteed to terminate
