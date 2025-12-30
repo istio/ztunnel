@@ -56,6 +56,7 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "is_default")]
     pub ip_families: Option<IpFamily>,
 
+    #[serde(default)]
     pub canonical: bool,
 }
 

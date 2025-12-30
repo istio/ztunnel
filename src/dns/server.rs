@@ -188,18 +188,20 @@ impl Server {
 }
 
 enum MatchReason<'a> {
-    First(&'a Arc<Service>),
     Canonical(&'a Arc<Service>),
+    First(&'a Arc<Service>),
     Namespace(&'a Arc<Service>),
+    PreferredNamespace(&'a Arc<Service>),
     None,
 }
 
 impl<'a> From<MatchReason<'a>> for Option<&'a Arc<Service>> {
     fn from(value: MatchReason<'a>) -> Option<&'a Arc<Service>> {
         match value {
-            MatchReason::First(s) | MatchReason::Canonical(s) | MatchReason::Namespace(s) => {
-                Some(s)
-            }
+            MatchReason::Canonical(s)
+            | MatchReason::First(s)
+            | MatchReason::Namespace(s)
+            | MatchReason::PreferredNamespace(s) => Some(s),
             MatchReason::None => None,
         }
     }
@@ -424,7 +426,6 @@ impl Store {
                 //     },
                 // };
 
-                info!("IAN worked on this");
                 let service: Option<&Arc<Service>> = services
                     .iter()
                     .fold_while(MatchReason::None, |r, s| {
@@ -433,6 +434,16 @@ impl Store {
                         } else if s.canonical {
                             return itertools::FoldWhile::Continue(MatchReason::Canonical(s));
                         } else {
+                            // TODO: I vote we deprecate prefered_service_namespace
+                            if let Some(preferred_namespace) =
+                                self.prefered_service_namespace.as_ref()
+                                && preferred_namespace.as_str() == s.namespace
+                                && !matches!(r, MatchReason::Canonical(_))
+                            {
+                                return itertools::FoldWhile::Continue(
+                                    MatchReason::PreferredNamespace(s),
+                                );
+                            }
                             return match r {
                                 MatchReason::None => {
                                     itertools::FoldWhile::Continue(MatchReason::First(s))
