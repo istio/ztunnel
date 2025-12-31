@@ -66,14 +66,6 @@ pub enum RequestProtocol {
     http,
 }
 
-#[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Direction {
-    #[default]
-    unknown,
-    outbound,
-    inbound,
-}
-
 #[derive(Default, Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ResponseFlags {
     #[default]
