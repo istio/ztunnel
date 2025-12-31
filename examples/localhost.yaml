@@ -46,6 +46,7 @@ services:
     80: 8080
   subjectAltNames:
    - spiffe://cluster.local/ns/default/sa/local
+  canonical: true
 - name: remote
   namespace: default
   hostname: example2.com
@@ -53,3 +54,4 @@ services:
     - remote/127.10.0.2
   ports:
     80: 8080
+  canonical: true

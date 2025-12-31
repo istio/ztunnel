@@ -406,6 +406,7 @@ impl<'a> TestServiceBuilder<'a> {
                 waypoint: None,
                 load_balancer: None,
                 ip_families: None,
+                canonical: true,
             },
             manager,
         }
