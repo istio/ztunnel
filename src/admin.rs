@@ -748,6 +748,7 @@ mod tests {
                     }],
                 }],
             }],
+            dry_run: false,
             // ..Default::default() // intentionally don't default. we want all fields populated
         };
 
