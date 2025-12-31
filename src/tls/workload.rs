@@ -35,9 +35,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::strng::Strng;
 use crate::tls;
+use crate::tls::crl::CrlManager;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -54,11 +55,20 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 pub(super) struct TrustDomainVerifier {
     base: Arc<dyn ClientCertVerifier>,
     trust_domain: Option<Strng>,
+    crl_manager: Option<Arc<CrlManager>>,
 }
 
 impl TrustDomainVerifier {
-    pub fn new(base: Arc<dyn ClientCertVerifier>, trust_domain: Option<Strng>) -> Arc<Self> {
-        Arc::new(Self { base, trust_domain })
+    pub fn new(
+        base: Arc<dyn ClientCertVerifier>,
+        trust_domain: Option<Strng>,
+        crl_manager: Option<Arc<CrlManager>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            base,
+            trust_domain,
+            crl_manager,
+        })
     }
 
     fn verify_trust_domain(&self, client_cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
@@ -112,6 +122,29 @@ impl ClientCertVerifier for TrustDomainVerifier {
             .base
             .verify_client_cert(end_entity, intermediates, now)?;
         self.verify_trust_domain(end_entity)?;
+
+        // check CRL if enabled
+        if let Some(crl_manager) = &self.crl_manager {
+            debug!("crl checking enabled for client certificate");
+            let is_revoked = crl_manager
+                .is_revoked_chain(end_entity, intermediates)
+                .map_err(|e| {
+                    error!("crl validation failed for client certificate: {}", e);
+                    rustls::Error::General(format!("certificate revocation check failed: {}", e))
+                })?;
+
+            if is_revoked {
+                error!("client certificate is REVOKED - rejecting connection");
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::Revoked,
+                ));
+            }
+
+            debug!("client certificate chain is valid (not revoked)");
+        } else {
+            debug!("crl checking disabled for client certificate");
+        }
+
         Ok(res)
     }
 
