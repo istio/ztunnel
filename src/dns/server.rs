@@ -410,22 +410,6 @@ impl Store {
                     .cloned()
                     .collect();
 
-                // // TODO: ideally we'd sort these by creation time so that the oldest would be used if there are no namespace matches
-                // // presently service doesn't have creation time in WDS, but we could add it
-                // // TODO: if the local namespace doesn't define a service, kube service should be prioritized over se
-                // let service = match services
-                //     .iter()
-                //     .find(|service| service.namespace == client.namespace)
-                // {
-                //     Some(service) => Some(service),
-                //     None => match self.prefered_service_namespace.as_ref() {
-                //         Some(prefered_namespace) => services.iter().find_or_first(|service| {
-                //             service.namespace == prefered_namespace.as_str()
-                //         }),
-                //         None => services.first(),
-                //     },
-                // };
-
                 let service: Option<&Arc<Service>> = services
                     .iter()
                     .fold_while(MatchReason::None, |r, s| {
