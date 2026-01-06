@@ -204,3 +204,41 @@ impl Listener {
         ))
     }
 }
+
+#[cfg(test)]
+pub mod socket_tests {
+    use tokio::net::TcpStream;
+
+    use crate::{config::SocketConfig, socket::Listener};
+
+    #[tokio::test]
+    async fn test_keep_alive_options() {
+        let cfg = SocketConfig {
+            keepalive_enabled: true,
+            keepalive_time: std::time::Duration::from_secs(10),
+            keepalive_retries: 5,
+            keepalive_interval: std::time::Duration::from_secs(2),
+            user_timeout_enabled: true,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let mut socklistener = Listener::new(listener);
+        socklistener.set_socket_options(Some(cfg));
+
+        let (stream, _) = socklistener.accept().await.unwrap();
+        // Verify keepalive options
+        let sock = socket2::SockRef::from(&stream);
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), cfg.keepalive_time);
+        assert_eq!(sock.tcp_keepalive_retries().unwrap(), cfg.keepalive_retries);
+        assert_eq!(
+            sock.tcp_keepalive_interval().unwrap(),
+            cfg.keepalive_interval
+        );
+        let ut = cfg.keepalive_time + cfg.keepalive_retries * cfg.keepalive_interval;
+        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(ut));
+    }
+}
