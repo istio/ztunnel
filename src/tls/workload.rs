@@ -38,7 +38,7 @@ use crate::tls;
 use crate::tls::crl::CrlManager;
 use tokio::net::TcpStream;
 use tokio_rustls::client;
-use tracing::{debug, error, trace};
+use tracing::{debug, trace};
 
 #[derive(Clone, Debug)]
 pub struct InboundAcceptor<F: ServerCertProvider> {
@@ -125,16 +125,8 @@ impl ClientCertVerifier for TrustDomainVerifier {
 
         // check CRL if enabled
         if let Some(crl_manager) = &self.crl_manager {
-            debug!("crl checking enabled for client certificate");
-            let is_revoked = crl_manager
-                .is_revoked_chain(end_entity, intermediates)
-                .map_err(|e| {
-                    error!("crl validation failed for client certificate: {}", e);
-                    rustls::Error::General(format!("certificate revocation check failed: {}", e))
-                })?;
-
-            if is_revoked {
-                error!("client certificate is REVOKED - rejecting connection");
+            if crl_manager.is_revoked_chain(end_entity, intermediates) {
+                debug!("client certificate is revoked, rejecting connection");
                 return Err(rustls::Error::InvalidCertificate(
                     rustls::CertificateError::Revoked,
                 ));
