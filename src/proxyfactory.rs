@@ -57,17 +57,17 @@ impl ProxyFactory {
             }
         };
 
-        // Initialize CRL manager ONCE if enabled
-        let crl_manager = if config.enable_crl {
-            match tls::crl::CrlManager::new(config.crl_path.clone()) {
+        // Initialize CRL manager if crl_path is set
+        let crl_manager = if let Some(crl_path) = &config.crl_path {
+            match tls::crl::CrlManager::new(crl_path.clone()) {
                 Ok(manager) => {
                     let manager_arc = Arc::new(manager);
 
                     if let Err(e) = manager_arc.start_file_watcher() {
                         tracing::warn!(
-                            "CRL file watcher could not be started: {}. \
-                            CRL validation will continue with current file, but \
-                            CRL updates will require restarting ztunnel.",
+                            "crl file watcher could not be started: {}. \
+                            crl validation will continue with current file, but \
+                            crl updates will require restarting ztunnel.",
                             e
                         );
                     }
@@ -75,7 +75,7 @@ impl ProxyFactory {
                     Some(manager_arc)
                 }
                 Err(e) => {
-                    tracing::error!("Failed to initialize CRL manager: {}", e);
+                    tracing::debug!("failed to initialize crl manager: {}", e);
                     None
                 }
             }

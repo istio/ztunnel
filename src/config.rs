@@ -78,7 +78,6 @@ const HTTP2_FRAME_SIZE: &str = "HTTP2_FRAME_SIZE";
 
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
-const ENABLE_CRL: &str = "ENABLE_CRL";
 const CRL_PATH: &str = "CRL_PATH";
 
 const DEFAULT_WORKER_THREADS: u16 = 2;
@@ -111,7 +110,6 @@ const DEFAULT_ROOT_CERT_PROVIDER: &str = "./var/run/secrets/istio/root-cert.pem"
 const TOKEN_PROVIDER_ENV: &str = "AUTH_TOKEN";
 const DEFAULT_TOKEN_PROVIDER: &str = "./var/run/secrets/tokens/istio-token";
 const CERT_SYSTEM: &str = "SYSTEM";
-const DEFAULT_CRL_PATH: &str = "./var/run/secrets/istio/crl/ca-crl.pem";
 
 const PROXY_MODE_DEDICATED: &str = "dedicated";
 const PROXY_MODE_SHARED: &str = "shared";
@@ -316,11 +314,8 @@ pub struct Config {
 
     pub ipv6_enabled: bool,
 
-    // Enable CRL (Certificate Revocation List) checking
-    pub enable_crl: bool,
-
-    // Path to CRL file
-    pub crl_path: PathBuf,
+    // path to CRL file; if set, enables CRL checking
+    pub crl_path: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -876,8 +871,10 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_workload,
         ipv6_enabled,
 
-        enable_crl: parse_default(ENABLE_CRL, false)?,
-        crl_path: parse_default(CRL_PATH, PathBuf::from(DEFAULT_CRL_PATH))?,
+        crl_path: env::var(CRL_PATH)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
     })
 }
 
