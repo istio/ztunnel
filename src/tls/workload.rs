@@ -22,7 +22,6 @@ use futures_util::TryFutureExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::server::ParsedCertificate;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{
     ClientConfig, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
@@ -32,6 +31,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use webpki::{ExpirationPolicy, KeyUsage, OwnedCertRevocationList, RevocationOptionsBuilder};
 
 use crate::strng::Strng;
 use crate::tls;
@@ -53,21 +53,21 @@ impl<F: ServerCertProvider> InboundAcceptor<F> {
 
 #[derive(Debug)]
 pub(super) struct TrustDomainVerifier {
-    base: Arc<dyn ClientCertVerifier>,
     trust_domain: Option<Strng>,
     crl_manager: Option<Arc<CrlManager>>,
+    root_store: Arc<RootCertStore>,
 }
 
 impl TrustDomainVerifier {
     pub fn new(
-        base: Arc<dyn ClientCertVerifier>,
         trust_domain: Option<Strng>,
         crl_manager: Option<Arc<CrlManager>>,
+        root_store: Arc<RootCertStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            base,
             trust_domain,
             crl_manager,
+            root_store,
         })
     }
 
@@ -103,13 +103,131 @@ impl TrustDomainVerifier {
             })
             .map(|_| ())
     }
+
+    /// verifies the certificate chain using webpki's verify_for_usage.
+    fn verify_cert_chain(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        crls: Option<Vec<OwnedCertRevocationList>>,
+        now: UnixTime,
+    ) -> Result<(), rustls::Error> {
+        use rustls::pki_types::TrustAnchor;
+        use webpki::EndEntityCert;
+
+        let cert = EndEntityCert::try_from(end_entity).map_err(|e| {
+            debug!(error = ?e, "failed to parse end entity certificate");
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+
+        // convert root store to trust anchors
+        let trust_anchors: Vec<TrustAnchor<'_>> = self
+            .root_store
+            .roots
+            .iter()
+            .map(|ta| TrustAnchor {
+                subject: ta.subject.clone(),
+                subject_public_key_info: ta.subject_public_key_info.clone(),
+                name_constraints: ta.name_constraints.clone(),
+            })
+            .collect();
+
+        if trust_anchors.is_empty() {
+            debug!("no trust anchors available for certificate verification");
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ));
+        }
+
+        let sig_algs = provider().signature_verification_algorithms.all;
+
+        // convert CRLs if provided - keep in scope for lifetime
+        let crl_refs: Vec<webpki::CertRevocationList<'_>> = crls
+            .map(|c| {
+                c.into_iter()
+                    .map(webpki::CertRevocationList::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let crl_ref_refs: Vec<&webpki::CertRevocationList<'_>> = crl_refs.iter().collect();
+
+        // build revocation options if CRLs are available
+        let revocation = if crl_ref_refs.is_empty() {
+            None
+        } else {
+            Some(
+                RevocationOptionsBuilder::new(&crl_ref_refs)
+                    .map_err(|_| {
+                        debug!("failed to build revocation options");
+                        rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+                    })?
+                    .with_expiration_policy(ExpirationPolicy::Enforce)
+                    .build(),
+            )
+        };
+
+        // verify_for_usage performs:
+        // - certificate chain validation
+        // - signature verification for certs (and CRLs if provided)
+        // - time bounds validation for certs (and CRLs if provided)
+        // - revocation status checking (if CRLs provided)
+        // - KeyUsage validation (cRLSign for CRL issuers if CRLs provided)
+        cert.verify_for_usage(
+            sig_algs,
+            &trust_anchors,
+            intermediates,
+            now,
+            KeyUsage::client_auth(),
+            revocation,
+            None,
+        )
+        .map_err(|e| {
+            debug!(error = ?e, "certificate verification failed");
+            match e {
+                webpki::Error::CertRevoked => {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked)
+                }
+                webpki::Error::UnknownRevocationStatus => {
+                    debug!("no authoritative crl found for certificate - issuer dn mismatch");
+                    rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::ApplicationVerificationFailure,
+                    )
+                }
+                webpki::Error::CrlExpired { .. } => {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Expired)
+                }
+                webpki::Error::InvalidCrlSignatureForPublicKey => {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+                }
+                webpki::Error::UnknownIssuer => {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
+                }
+                webpki::Error::CertExpired { .. } => {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Expired)
+                }
+                webpki::Error::CertNotValidYet { .. } => {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidYet)
+                }
+                webpki::Error::InvalidSignatureForPublicKey => {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+                }
+                _ => rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ),
+            }
+        })?;
+
+        Ok(())
+    }
 }
 
 // Implement our custom ClientCertVerifier logic. We only want to add an extra check, but
 // need a decent amount of boilerplate to do so.
 impl ClientCertVerifier for TrustDomainVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        self.base.root_hint_subjects()
+        // return distinguished names from root store for client cert hints
+        static EMPTY: &[DistinguishedName] = &[];
+        EMPTY
     }
 
     fn verify_client_cert(
@@ -118,26 +236,45 @@ impl ClientCertVerifier for TrustDomainVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let res = self
-            .base
-            .verify_client_cert(end_entity, intermediates, now)?;
-        self.verify_trust_domain(end_entity)?;
+        // get CRLs if CRL manager is enabled
+        let crls = self.crl_manager.as_ref().map(|m| m.get_crls());
 
-        // check CRL if enabled
-        if let Some(crl_manager) = &self.crl_manager {
-            if crl_manager.is_revoked_chain(end_entity, intermediates) {
-                debug!("client certificate is revoked, rejecting connection");
-                return Err(rustls::Error::InvalidCertificate(
-                    rustls::CertificateError::Revoked,
-                ));
+        // use verify_for_usage for all certificate verification
+        // this validates certificate chain, signatures, time bounds, and CRL (if provided)
+        match self.verify_cert_chain(end_entity, intermediates, crls, now) {
+            Ok(()) => {
+                if self.crl_manager.is_some() {
+                    debug!("client certificate chain is valid via verify_for_usage");
+                } else {
+                    debug!("client certificate chain is valid (crl checking disabled)");
+                }
             }
-
-            debug!("client certificate chain is valid (not revoked)");
-        } else {
-            debug!("crl checking disabled for client certificate");
+            Err(e) => {
+                // fail-open for CRL-related errors only, fail-closed for cert errors
+                match &e {
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked) => {
+                        debug!("client certificate is revoked, rejecting connection");
+                        return Err(e);
+                    }
+                    // fail-open for CRL expiration - CRL might be stale but cert could be valid
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Expired)
+                        if self.crl_manager.is_some() =>
+                    {
+                        debug!(error = ?e, "crl expired, allowing connection (fail-open)");
+                    }
+                    // all other errors should be propagated (unknown issuer, bad signature, etc.)
+                    _ => {
+                        debug!(error = ?e, "certificate verification failed");
+                        return Err(e);
+                    }
+                }
+            }
         }
 
-        Ok(res)
+        // trust domain verification
+        self.verify_trust_domain(end_entity)?;
+
+        Ok(ClientCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -146,7 +283,12 @@ impl ClientCertVerifier for TrustDomainVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.base.verify_tls12_signature(message, cert, dss)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -155,11 +297,18 @@ impl ClientCertVerifier for TrustDomainVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.base.verify_tls13_signature(message, cert, dss)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.base.supported_verify_schemes()
+        provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -273,16 +422,51 @@ impl ServerCertVerifier for IdentityVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let cert = ParsedCertificate::try_from(end_entity)?;
+        use rustls::pki_types::TrustAnchor;
+        use webpki::EndEntityCert;
 
-        let algs = provider().signature_verification_algorithms;
-        rustls::client::verify_server_cert_signed_by_trust_anchor(
-            &cert,
-            &self.roots,
+        let cert = EndEntityCert::try_from(end_entity).map_err(|e| {
+            debug!(error = ?e, "failed to parse end entity certificate");
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+
+        // convert root store to trust anchors
+        let trust_anchors: Vec<TrustAnchor<'_>> = self
+            .roots
+            .roots
+            .iter()
+            .map(|ta| TrustAnchor {
+                subject: ta.subject.clone(),
+                subject_public_key_info: ta.subject_public_key_info.clone(),
+                name_constraints: ta.name_constraints.clone(),
+            })
+            .collect();
+
+        if trust_anchors.is_empty() {
+            debug!("no trust anchors available for server cert verification");
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ));
+        }
+
+        let sig_algs = provider().signature_verification_algorithms.all;
+
+        // verify_for_usage performs certificate chain validation and signature verification
+        cert.verify_for_usage(
+            sig_algs,
+            &trust_anchors,
             intermediates,
             now,
-            algs.all,
-        )?;
+            KeyUsage::server_auth(),
+            None,
+            None,
+        )
+        .map_err(|e| {
+            debug!(error = ?e, "server certificate verification failed");
+            rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            )
+        })?;
 
         if !ocsp_response.is_empty() {
             trace!("Unvalidated OCSP response: {ocsp_response:?}");

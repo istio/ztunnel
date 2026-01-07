@@ -22,7 +22,6 @@ use std::{cmp, iter};
 use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig, server};
 use rustls_pemfile::Item;
 use std::io::Cursor;
@@ -305,16 +304,11 @@ impl WorkloadCertificate {
         let td = self.cert.identity().map(|i| match i {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
-        let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
-            self.root_store.clone(),
-            crate::tls::lib::provider(),
-        )
-        .build()?;
 
         let client_cert_verifier = crate::tls::workload::TrustDomainVerifier::new(
-            raw_client_cert_verifier,
             td,
             crl_manager,
+            self.root_store.clone(),
         );
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
