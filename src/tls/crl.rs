@@ -23,17 +23,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-// CrlManager handles certificate revocation list (CRL) loading.
-//
-// validation notes:
-// - webpki's from_der() validates ASN.1 structure, CRL version (v2), and rejects
-//   delta CRLs and indirect CRLs with unknown critical extensions
-// - CRL signature verification is performed by rustls's WebPkiClientVerifier
-// - time bounds (thisUpdate/nextUpdate) handling depends on whether
-//   enforce_revocation_expiration() is called on the verifier builder
-// - per RFC 5280 section 3.3, entries may be removed from CRLs after the
-//   certificate's validity period expires
-
 #[derive(Debug, thiserror::Error)]
 pub enum CrlError {
     #[error("failed to read CRL file: {0}")]
