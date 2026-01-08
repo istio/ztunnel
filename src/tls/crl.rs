@@ -17,22 +17,20 @@ use notify_debouncer_full::{
     DebounceEventResult, Debouncer, FileIdMap, new_debouncer,
     notify::{RecursiveMode, Watcher},
 };
+use rustls::pki_types::CertificateRevocationListDer;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, info, warn};
-use webpki::OwnedCertRevocationList;
 
 // CrlManager handles certificate revocation list (CRL) loading.
 //
 // validation notes:
 // - webpki's from_der() validates ASN.1 structure, CRL version (v2), and rejects
 //   delta CRLs and indirect CRLs with unknown critical extensions
-// - CRL signature verification is performed during verify_for_usage() against
-//   the issuing certificate's public key in the chain
-// - time bounds (thisUpdate/nextUpdate) are enforced via ExpirationPolicy::Enforce
-//   in verify_for_usage()
-// - webpki validates that the CRL issuer has the cRLSign KeyUsage bit
+// - CRL signature verification is performed by rustls's WebPkiClientVerifier
+// - time bounds (thisUpdate/nextUpdate) handling depends on whether
+//   enforce_revocation_expiration() is called on the verifier builder
 // - per RFC 5280 section 3.3, entries may be removed from CRLs after the
 //   certificate's validity period expires
 
@@ -59,13 +57,8 @@ impl std::fmt::Debug for CrlManager {
     }
 }
 
-// stores the webpki CRL for use with verify_for_usage
-struct CrlEntry {
-    crl: OwnedCertRevocationList,
-}
-
 struct CrlManagerInner {
-    crl_list: Vec<CrlEntry>,
+    crl_ders: Vec<Vec<u8>>,
     crl_path: PathBuf,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
@@ -77,7 +70,7 @@ impl CrlManager {
 
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
-                crl_list: Vec::new(),
+                crl_ders: Vec::new(),
                 crl_path: crl_path.clone(),
                 _debouncer: None,
             })),
@@ -112,8 +105,8 @@ impl CrlManager {
         // empty file means no revocations - this is valid
         if data.is_empty() {
             debug!(path = ?inner.crl_path, "crl file is empty, treating as no revocations");
-            let crl_count_changed = !inner.crl_list.is_empty();
-            inner.crl_list.clear();
+            let crl_count_changed = !inner.crl_ders.is_empty();
+            inner.crl_ders.clear();
             return Ok(crl_count_changed);
         }
 
@@ -132,48 +125,33 @@ impl CrlManager {
         // empty PEM file (no CRL blocks) means no revocations
         if der_crls.is_empty() {
             debug!("no crl blocks found, treating as no revocations");
-            let crl_count_changed = !inner.crl_list.is_empty();
-            inner.crl_list.clear();
+            let crl_count_changed = !inner.crl_ders.is_empty();
+            inner.crl_ders.clear();
             return Ok(crl_count_changed);
         }
 
         debug!(count = der_crls.len(), "found crl block(s) in file");
 
-        let mut parsed_crls = Vec::new();
+        let mut validated_ders = Vec::new();
 
-        for (idx, der_data) in der_crls.iter().enumerate() {
-            // parse with x509-parser for logging metadata
-            use x509_parser::prelude::*;
-            let (_, crl_info) = CertificateRevocationList::from_der(der_data).map_err(|e| {
-                CrlError::ParseError(format!("failed to parse crl {}: {}", idx + 1, e))
-            })?;
-
-            let tbs = &crl_info.tbs_cert_list;
-
-            // parse with webpki for revocation checking via verify_for_usage
-            // note: time bounds and signature validation are handled by verify_for_usage
-            let owned_crl = webpki::OwnedCertRevocationList::from_der(der_data).map_err(|e| {
+        for (idx, der_data) in der_crls.into_iter().enumerate() {
+            // validate with webpki to catch parse errors early
+            // rustls will use the raw DER bytes directly
+            webpki::OwnedCertRevocationList::from_der(&der_data).map_err(|e| {
                 CrlError::WebPkiError(format!("failed to parse crl {}: {:?}", idx + 1, e))
             })?;
 
-            debug!(
-                crl = idx + 1,
-                issuer = %tbs.issuer,
-                this_update = %tbs.this_update,
-                next_update = ?tbs.next_update,
-                revoked = tbs.revoked_certificates.len(),
-                "loaded crl"
-            );
+            debug!(crl = idx + 1, "loaded crl");
 
-            parsed_crls.push(CrlEntry { crl: owned_crl });
+            validated_ders.push(der_data);
         }
 
-        let crl_count_changed = parsed_crls.len() != inner.crl_list.len();
+        let crl_count_changed = validated_ders.len() != inner.crl_ders.len();
 
-        // store parsed CRL objects
-        inner.crl_list = parsed_crls;
+        // store validated DER bytes
+        inner.crl_ders = validated_ders;
 
-        debug!(count = inner.crl_list.len(), "crl loaded successfully");
+        debug!(count = inner.crl_ders.len(), "crl loaded successfully");
         Ok(crl_count_changed)
     }
 
@@ -215,13 +193,13 @@ impl CrlManager {
         Ok(crls)
     }
 
-    /// returns the loaded CRLs for use with verify_for_usage.
+    /// returns CRLs as DER bytes for rustls's with_crls().
     /// if no CRLs are loaded, attempts to load them first.
-    pub fn get_crls(&self) -> Vec<OwnedCertRevocationList> {
+    pub fn get_crl_ders(&self) -> Vec<CertificateRevocationListDer<'static>> {
         // try to load if not already loaded
         {
             let inner = self.inner.read().unwrap();
-            if inner.crl_list.is_empty() {
+            if inner.crl_ders.is_empty() {
                 drop(inner);
                 debug!("crl not loaded, attempting to load now");
                 if let Err(e) = self.load_crl() {
@@ -232,7 +210,11 @@ impl CrlManager {
         }
 
         let inner = self.inner.read().unwrap();
-        inner.crl_list.iter().map(|e| e.crl.clone()).collect()
+        inner
+            .crl_ders
+            .iter()
+            .map(|der| CertificateRevocationListDer::from(der.clone()))
+            .collect()
     }
 
     /// starts watching the CRL file for changes.

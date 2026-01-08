@@ -22,6 +22,7 @@ use std::{cmp, iter};
 use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig, server};
 use rustls_pemfile::Item;
 use std::io::Cursor;
@@ -305,11 +306,24 @@ impl WorkloadCertificate {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
 
-        let client_cert_verifier = crate::tls::workload::TrustDomainVerifier::new(
-            td,
-            crl_manager,
+        // build the base client cert verifier with optional CRL support
+        let mut builder = WebPkiClientVerifier::builder_with_provider(
             self.root_store.clone(),
+            crate::tls::lib::provider(),
         );
+
+        // add CRLs if available
+        if let Some(ref mgr) = crl_manager {
+            let crls = mgr.get_crl_ders();
+            if !crls.is_empty() {
+                builder = builder.with_crls(crls).allow_unknown_revocation_status(); // fail-open for unknown status
+            }
+        }
+
+        let raw_client_cert_verifier = builder.build()?;
+
+        let client_cert_verifier =
+            crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("server config must be valid")
