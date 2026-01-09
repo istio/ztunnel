@@ -187,6 +187,26 @@ impl Server {
     }
 }
 
+enum MatchReason<'a> {
+    Canonical(&'a Arc<Service>),
+    First(&'a Arc<Service>),
+    Namespace(&'a Arc<Service>),
+    PreferredNamespace(&'a Arc<Service>),
+    None,
+}
+
+impl<'a> From<MatchReason<'a>> for Option<&'a Arc<Service>> {
+    fn from(value: MatchReason<'a>) -> Option<&'a Arc<Service>> {
+        match value {
+            MatchReason::Canonical(s)
+            | MatchReason::First(s)
+            | MatchReason::Namespace(s)
+            | MatchReason::PreferredNamespace(s) => Some(s),
+            MatchReason::None => None,
+        }
+    }
+}
+
 /// A DNS [Resolver] backed by the ztunnel [DemandProxyState].
 struct Store {
     state: DemandProxyState,
@@ -390,21 +410,35 @@ impl Store {
                     .cloned()
                     .collect();
 
-                // TODO: ideally we'd sort these by creation time so that the oldest would be used if there are no namespace matches
-                // presently service doesn't have creation time in WDS, but we could add it
-                // TODO: if the local namespace doesn't define a service, kube service should be prioritized over se
-                let service = match services
+                let service: Option<&Arc<Service>> = services
                     .iter()
-                    .find(|service| service.namespace == client.namespace)
-                {
-                    Some(service) => Some(service),
-                    None => match self.prefered_service_namespace.as_ref() {
-                        Some(prefered_namespace) => services.iter().find_or_first(|service| {
-                            service.namespace == prefered_namespace.as_str()
-                        }),
-                        None => services.first(),
-                    },
-                };
+                    .fold_while(MatchReason::None, |r, s| {
+                        if s.namespace == client.namespace {
+                            itertools::FoldWhile::Done(MatchReason::Namespace(s))
+                        } else if s.canonical {
+                            itertools::FoldWhile::Continue(MatchReason::Canonical(s))
+                        } else {
+                            // TODO: deprecate preferred_service_namespace
+                            // https://github.com/istio/ztunnel/issues/1709
+                            if let Some(preferred_namespace) =
+                                self.prefered_service_namespace.as_ref()
+                                && preferred_namespace.as_str() == s.namespace
+                                && !matches!(r, MatchReason::Canonical(_))
+                            {
+                                return itertools::FoldWhile::Continue(
+                                    MatchReason::PreferredNamespace(s),
+                                );
+                            }
+                            match r {
+                                MatchReason::None => {
+                                    itertools::FoldWhile::Continue(MatchReason::First(s))
+                                }
+                                _ => itertools::FoldWhile::Continue(r),
+                            }
+                        }
+                    })
+                    .into_inner()
+                    .into();
 
                 // First, lookup the host as a service.
                 if let Some(service) = service {
@@ -963,6 +997,7 @@ mod tests {
 
     const NS1: &str = "ns1";
     const NS2: &str = "ns2";
+    const NS3: &str = "ns3";
     const PREFERRED: &str = "preferred-ns";
     const NW1: Strng = strng::literal!("nw1");
     const NW2: Strng = strng::literal!("nw2");
@@ -1394,6 +1429,18 @@ mod tests {
                 expect_records: vec![a(n("everywhere.io."), ipv4("10.10.10.112"))],
                 ..Default::default()
             },
+            Case {
+                name: "success: canonical services are preferred when no ns-local hostname is present",
+                host: "canonical.svc",
+                expect_records: vec![a(n("canonical.svc."), ipv4("10.10.10.141"))],
+                ..Default::default()
+            },
+            Case {
+                name: "success: namespace-local service should be preferred over canonical",
+                host: "canonical.with.local",
+                expect_records: vec![a(n("canonical.with.local."), ipv4("10.10.10.150"))],
+                ..Default::default()
+            },
         ];
 
         // Create and start the proxy.
@@ -1713,6 +1760,24 @@ mod tests {
             // Service with the same name in the same namespace
             // Client in NS1 should use this service
             xds_namespaced_external_service("everywhere.io", NS1, &[na(NW1, "10.10.10.112")]),
+            // Service that is canonical should be preferrred when no ns-local definition
+            xds_namespaced_external_service("canonical.svc", NS2, &[na(NW1, "10.10.10.140")]),
+            xds_namespaced_external_canonical_service(
+                "canonical.svc",
+                NS3,
+                &[na(NW1, "10.10.10.141")],
+            ),
+            // Client in NS1 should prefer local over canonical
+            xds_namespaced_external_service(
+                "canonical.with.local",
+                NS1,
+                &[na(NW1, "10.10.10.150")],
+            ),
+            xds_namespaced_external_canonical_service(
+                "canonical.with.local",
+                NS2,
+                &[na(NW1, "10.10.10.151")],
+            ),
             with_fqdn(
                 "details.ns2.svc.cluster.remote",
                 xds_service(
@@ -1838,6 +1903,11 @@ mod tests {
         svc
     }
 
+    fn with_canonical(canonical: bool, mut svc: XdsService) -> XdsService {
+        svc.canonical = canonical;
+        svc
+    }
+
     fn xds_service<S1: AsRef<str>, S2: AsRef<str>>(
         name: S1,
         ns: S2,
@@ -1875,6 +1945,14 @@ mod tests {
             hostname.as_ref(),
             xds_service(hostname.as_ref(), ns.as_ref(), vips),
         )
+    }
+
+    fn xds_namespaced_external_canonical_service<S1: AsRef<str>, S2: AsRef<str>>(
+        hostname: S1,
+        ns: S2,
+        vips: &[NetworkAddress],
+    ) -> XdsService {
+        with_canonical(true, xds_namespaced_external_service(hostname, ns, vips))
     }
 
     fn xds_workload(
