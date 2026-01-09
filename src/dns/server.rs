@@ -1435,6 +1435,12 @@ mod tests {
                 expect_records: vec![a(n("canonical.svc."), ipv4("10.10.10.141"))],
                 ..Default::default()
             },
+            Case {
+                name: "success: namespace-local service should be preferred over canonical",
+                host: "canonical.with.local",
+                expect_records: vec![a(n("canonical.with.local."), ipv4("10.10.10.150"))],
+                ..Default::default()
+            },
         ];
 
         // Create and start the proxy.
@@ -1760,6 +1766,17 @@ mod tests {
                 "canonical.svc",
                 NS3,
                 &[na(NW1, "10.10.10.141")],
+            ),
+            // Client in NS1 should prefer local over canonical
+            xds_namespaced_external_service(
+                "canonical.with.local",
+                NS1,
+                &[na(NW1, "10.10.10.150")],
+            ),
+            xds_namespaced_external_canonical_service(
+                "canonical.with.local",
+                NS2,
+                &[na(NW1, "10.10.10.151")],
             ),
             with_fqdn(
                 "details.ns2.svc.cluster.remote",
