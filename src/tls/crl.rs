@@ -18,6 +18,9 @@ use notify_debouncer_full::{
     notify::{RecursiveMode, Watcher},
 };
 use rustls::pki_types::CertificateRevocationListDer;
+use rustls_pemfile::Item;
+use std::hash::{Hash, Hasher};
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -36,6 +39,10 @@ pub enum CrlError {
 }
 
 #[derive(Clone)]
+/// NOTE: CRL updates take effect when new ServerConfigs are created, which happens
+/// on certificate refresh (~12hrs). For immediate CRL enforcement, a custom
+/// ClientCertVerifier wrapper would be needed, but rustls doesn't provide a
+/// built-in mechanism like `with_cert_resolver` for dynamic CRL updates.
 pub struct CrlManager {
     inner: Arc<RwLock<CrlManagerInner>>,
 }
@@ -49,6 +56,7 @@ impl std::fmt::Debug for CrlManager {
 struct CrlManagerInner {
     crl_ders: Vec<Vec<u8>>,
     crl_path: PathBuf,
+    loaded: bool,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
@@ -61,6 +69,7 @@ impl CrlManager {
             inner: Arc::new(RwLock::new(CrlManagerInner {
                 crl_ders: Vec::new(),
                 crl_path: crl_path.clone(),
+                loaded: false,
                 _debouncer: None,
             })),
         };
@@ -94,9 +103,10 @@ impl CrlManager {
         // empty file means no revocations - this is valid
         if data.is_empty() {
             debug!(path = ?inner.crl_path, "crl file is empty, treating as no revocations");
-            let crl_count_changed = !inner.crl_ders.is_empty();
+            let crl_changed = !inner.crl_ders.is_empty();
             inner.crl_ders.clear();
-            return Ok(crl_count_changed);
+            inner.loaded = true;
+            return Ok(crl_changed);
         }
 
         debug!(bytes = data.len(), "read crl file");
@@ -114,9 +124,10 @@ impl CrlManager {
         // empty PEM file (no CRL blocks) means no revocations
         if der_crls.is_empty() {
             debug!("no crl blocks found, treating as no revocations");
-            let crl_count_changed = !inner.crl_ders.is_empty();
+            let crl_changed = !inner.crl_ders.is_empty();
             inner.crl_ders.clear();
-            return Ok(crl_count_changed);
+            inner.loaded = true;
+            return Ok(crl_changed);
         }
 
         debug!(count = der_crls.len(), "found crl block(s) in file");
@@ -135,51 +146,40 @@ impl CrlManager {
             validated_ders.push(der_data);
         }
 
-        let crl_count_changed = validated_ders.len() != inner.crl_ders.len();
+        // use hash comparison to detect actual content changes, not just count changes
+        let crl_changed =
+            Self::compute_crl_hash(&validated_ders) != Self::compute_crl_hash(&inner.crl_ders);
 
         // store validated DER bytes
         inner.crl_ders = validated_ders;
+        inner.loaded = true;
 
         debug!(count = inner.crl_ders.len(), "crl loaded successfully");
-        Ok(crl_count_changed)
+        Ok(crl_changed)
+    }
+
+    /// computes a hash of CRL DER bytes for change detection
+    fn compute_crl_hash(ders: &[Vec<u8>]) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        ders.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// parses PEM-encoded CRL data that may contain multiple CRL blocks
     /// returns a Vec of DER-encoded CRLs (empty vec if no blocks found)
     fn parse_pem_crls(pem_data: &[u8]) -> Result<Vec<Vec<u8>>, CrlError> {
-        let data_str = std::str::from_utf8(pem_data)
-            .map_err(|e| CrlError::ParseError(format!("invalid UTF-8: {}", e)))?;
+        let mut reader = std::io::BufReader::new(Cursor::new(pem_data));
 
-        let mut crls = Vec::new();
-        let mut in_pem = false;
-        let mut base64_data = String::new();
-
-        for line in data_str.lines() {
-            if line.starts_with("-----BEGIN") {
-                in_pem = true;
-                base64_data.clear(); // start new CRL block
-                continue;
-            }
-            if line.starts_with("-----END") {
-                if in_pem && !base64_data.is_empty() {
-                    use base64::Engine;
-                    let der = base64::engine::general_purpose::STANDARD
-                        .decode(&base64_data)
-                        .map_err(|e| {
-                            CrlError::ParseError(format!("failed to decode base64: {}", e))
-                        })?;
-                    crls.push(der);
-                    base64_data.clear();
-                }
-                in_pem = false;
-                continue;
-            }
-            if in_pem {
-                base64_data.push_str(line.trim());
-            }
-        }
-
-        Ok(crls)
+        rustls_pemfile::read_all(&mut reader)
+            .filter_map(|result| match result {
+                Ok(Item::Crl(crl)) => Some(Ok(crl.to_vec())),
+                Ok(_) => None, // skip non-CRL items
+                Err(e) => Some(Err(CrlError::ParseError(format!(
+                    "failed to parse PEM: {}",
+                    e
+                )))),
+            })
+            .collect()
     }
 
     /// returns CRLs as DER bytes for rustls's with_crls().
@@ -188,7 +188,7 @@ impl CrlManager {
         // try to load if not already loaded
         {
             let inner = self.inner.read().unwrap();
-            if inner.crl_ders.is_empty() {
+            if !inner.loaded {
                 drop(inner);
                 debug!("crl not loaded, attempting to load now");
                 if let Err(e) = self.load_crl() {

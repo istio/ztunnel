@@ -320,6 +320,7 @@ impl WorkloadCertificate {
             }
         }
 
+        // TODO: check if our own certificate is revoked in the CRL and log warning
         let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =
@@ -336,6 +337,8 @@ impl WorkloadCertificate {
         Ok(sc)
     }
 
+    // TODO: add CRL support for outbound connections (client verifying server certs)
+    // this requires a separate design due to complexity - deferred for follow-up
     pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
         let roots = self.root_store.clone();
         let verifier = IdentityVerifier { roots, identity };
