@@ -418,7 +418,8 @@ impl Store {
                         } else if s.canonical {
                             itertools::FoldWhile::Continue(MatchReason::Canonical(s))
                         } else {
-                            // TODO: I vote we deprecate prefered_service_namespace
+                            // TODO: deprecate preferred_service_namespace
+                            // https://github.com/istio/ztunnel/issues/1709
                             if let Some(preferred_namespace) =
                                 self.prefered_service_namespace.as_ref()
                                 && preferred_namespace.as_str() == s.namespace
