@@ -185,25 +185,30 @@ impl CrlManager {
     /// returns CRLs as DER bytes for rustls's with_crls().
     /// if no CRLs are loaded, attempts to load them first.
     pub fn get_crl_ders(&self) -> Vec<CertificateRevocationListDer<'static>> {
-        // try to load if not already loaded
-        {
-            let inner = self.inner.read().unwrap();
-            if !inner.loaded {
-                drop(inner);
-                debug!("crl not loaded, attempting to load now");
-                if let Err(e) = self.load_crl() {
-                    debug!(error = %e, "failed to load crl");
-                    return Vec::new();
-                }
-            }
-        }
-
         let inner = self.inner.read().unwrap();
-        inner
-            .crl_ders
-            .iter()
-            .map(|der| CertificateRevocationListDer::from(der.clone()))
-            .collect()
+        if inner.loaded {
+            // already loaded, use existing lock directly
+            inner
+                .crl_ders
+                .iter()
+                .map(|der| CertificateRevocationListDer::from(der.clone()))
+                .collect()
+        } else {
+            // not loaded yet, drop lock to call load_crl()
+            drop(inner);
+            debug!("crl not loaded, attempting to load now");
+            if let Err(e) = self.load_crl() {
+                debug!(error = %e, "failed to load crl");
+                return Vec::new();
+            }
+            // re-acquire after loading
+            let inner = self.inner.read().unwrap();
+            inner
+                .crl_ders
+                .iter()
+                .map(|der| CertificateRevocationListDer::from(der.clone()))
+                .collect()
+        }
     }
 
     /// starts watching the CRL file for changes.
