@@ -22,7 +22,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::tls::TLS_VERSIONS;
+use crate::tls::tls_versions;
 use rustls::ServerConfig;
 
 use super::{ServerCertProvider, TlsError, WorkloadCertificate};
@@ -184,7 +184,7 @@ impl MockServerCertProvider {
 impl ServerCertProvider for MockServerCertProvider {
     async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError> {
         let mut sc = ServerConfig::builder_with_provider(crate::tls::lib::provider())
-            .with_protocol_versions(TLS_VERSIONS)
+            .with_protocol_versions(tls_versions())
             .expect("server config must be valid")
             .with_no_client_auth()
             .with_single_cert(
