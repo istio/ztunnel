@@ -19,12 +19,11 @@ use notify_debouncer_full::{
 };
 use rustls::pki_types::CertificateRevocationListDer;
 use rustls_pemfile::Item;
-use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CrlError {
@@ -54,9 +53,8 @@ impl std::fmt::Debug for CrlManager {
 }
 
 struct CrlManagerInner {
-    crl_ders: Vec<Vec<u8>>,
+    crl_ders: Option<Vec<Vec<u8>>>, // None = not loaded, Some = loaded (may be empty)
     crl_path: PathBuf,
-    loaded: bool,
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
@@ -67,9 +65,8 @@ impl CrlManager {
 
         let manager = Self {
             inner: Arc::new(RwLock::new(CrlManagerInner {
-                crl_ders: Vec::new(),
+                crl_ders: None,
                 crl_path: crl_path.clone(),
-                loaded: false,
                 _debouncer: None,
             })),
         };
@@ -94,7 +91,7 @@ impl CrlManager {
         Ok(manager)
     }
 
-    pub fn load_crl(&self) -> Result<bool, CrlError> {
+    pub fn load_crl(&self) -> Result<(), CrlError> {
         let mut inner = self.inner.write().unwrap();
 
         debug!(path = ?inner.crl_path, "loading crl");
@@ -103,10 +100,8 @@ impl CrlManager {
         // empty file means no revocations - this is valid
         if data.is_empty() {
             debug!(path = ?inner.crl_path, "crl file is empty, treating as no revocations");
-            let crl_changed = !inner.crl_ders.is_empty();
-            inner.crl_ders.clear();
-            inner.loaded = true;
-            return Ok(crl_changed);
+            inner.crl_ders = Some(Vec::new());
+            return Ok(());
         }
 
         debug!(bytes = data.len(), "read crl file");
@@ -124,10 +119,8 @@ impl CrlManager {
         // empty PEM file (no CRL blocks) means no revocations
         if der_crls.is_empty() {
             debug!("no crl blocks found, treating as no revocations");
-            let crl_changed = !inner.crl_ders.is_empty();
-            inner.crl_ders.clear();
-            inner.loaded = true;
-            return Ok(crl_changed);
+            inner.crl_ders = Some(Vec::new());
+            return Ok(());
         }
 
         debug!(count = der_crls.len(), "found crl block(s) in file");
@@ -146,23 +139,14 @@ impl CrlManager {
             validated_ders.push(der_data);
         }
 
-        // use hash comparison to detect actual content changes, not just count changes
-        let crl_changed =
-            Self::compute_crl_hash(&validated_ders) != Self::compute_crl_hash(&inner.crl_ders);
-
         // store validated DER bytes
-        inner.crl_ders = validated_ders;
-        inner.loaded = true;
+        inner.crl_ders = Some(validated_ders);
 
-        debug!(count = inner.crl_ders.len(), "crl loaded successfully");
-        Ok(crl_changed)
-    }
-
-    /// computes a hash of CRL DER bytes for change detection
-    fn compute_crl_hash(ders: &[Vec<u8>]) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        ders.hash(&mut hasher);
-        hasher.finish()
+        debug!(
+            count = inner.crl_ders.as_ref().map(|v| v.len()).unwrap_or(0),
+            "crl loaded successfully"
+        );
+        Ok(())
     }
 
     /// parses PEM-encoded CRL data that may contain multiple CRL blocks
@@ -186,10 +170,9 @@ impl CrlManager {
     /// if no CRLs are loaded, attempts to load them first.
     pub fn get_crl_ders(&self) -> Vec<CertificateRevocationListDer<'static>> {
         let inner = self.inner.read().unwrap();
-        if inner.loaded {
+        if let Some(ref crl_ders) = inner.crl_ders {
             // already loaded, use existing lock directly
-            inner
-                .crl_ders
+            crl_ders
                 .iter()
                 .map(|der| CertificateRevocationListDer::from(der.clone()))
                 .collect()
@@ -205,9 +188,13 @@ impl CrlManager {
             let inner = self.inner.read().unwrap();
             inner
                 .crl_ders
-                .iter()
-                .map(|der| CertificateRevocationListDer::from(der.clone()))
-                .collect()
+                .as_ref()
+                .map(|ders| {
+                    ders.iter()
+                        .map(|der| CertificateRevocationListDer::from(der.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
         }
     }
 
@@ -248,11 +235,8 @@ impl CrlManager {
                             // as well as direct file writes and text editor saves
                             debug!("crl directory changed, reloading");
                             match manager.load_crl() {
-                                Ok(crl_count_changed) => {
+                                Ok(()) => {
                                     debug!("crl reloaded successfully after file change");
-                                    if crl_count_changed {
-                                        info!("crl content changed");
-                                    }
                                 }
                                 Err(e) => debug!(error = %e, "failed to reload crl"),
                             }
