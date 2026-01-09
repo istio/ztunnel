@@ -87,8 +87,41 @@ message Service {
   // IP families provides configuration about the IP families this service supports.
   IPFamilies ip_families = 9;
 
+  // Constraints what endpoints can be discovered for this service.
+  // We need this information only when the service has a waypoint. For services with waypoint, ztunnel picks a waypoint
+  // endpoint instead of the actual service endpoint. In multi-cluster environments, it could happen that the scope of
+  // the waypoint itself does not match the scope of the service (e.g., the service is local to the cluster, while waypoint
+  // is global). And when that happens, in an unlikely event when local waypoint is unhealthy we could route a request to
+  // a remote cluster waypoint violating the original scope of the service.
+  //
+  // To deal with the above issue we could record the scope of the service in this field. ztunnel when it picks a waypoint
+  // endpoint can look at the service locality constraint and discard remote waypoint endpoints if the service is local.
+  LocalityConstraint locality_constraint = 11;
+
   // Extension provides a mechanism to attach arbitrary additional configuration to an object.
   repeated Extension extensions = 10;
+}
+
+enum ServiceScope {
+  LOCAL = 0;
+  GLOBAL = 1;
+}
+
+// NOTE: We currently support only uniform service discovery setup, so the service is either globally discoverable everywhere
+// or it's local everywhere. However, it's not inconsivable that in the future we will support more elaborate service
+// discoverability configurations. To make introducing additional types of locality constraints easier in the future, we've
+// extracted service scope into its own proto message.
+message LocalityConstraint {
+  oneof constraint {
+    // When the setup is uniform, e.g., when the service is either local or global in all the clusters of multi-cluster
+    // setup, we only need to tell ztunnel what the service scope:
+    // - when the service scope is GLOBAL it would indicate that instances of the service in all clusters are discoverable
+    //   by all other clusters, so we can use waypoint endpoints in any cluster without constraints; It's also equivalent
+    //   to not setting locality constraints at all.
+    // - when the service scope is LOCAL it means that only the instance of the service in the same cluster as the client
+    //   workload is discoverable, so we should not pick waypoint endpoints outside of the client cluster.
+    ServiceScope scope = 1;
+  }
 }
 
 enum IPFamilies {
