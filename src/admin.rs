@@ -692,6 +692,7 @@ mod tests {
                 health_policy: 1,
             }), // ..Default::default() // intentionally don't default. we want all fields populated
             ip_families: 0,
+            locality_constraint: Default::default(),
             extensions: Default::default(),
         };
 
