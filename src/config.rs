@@ -78,6 +78,8 @@ const HTTP2_FRAME_SIZE: &str = "HTTP2_FRAME_SIZE";
 
 const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
+const CRL_PATH: &str = "CRL_PATH";
+
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
@@ -311,6 +313,9 @@ pub struct Config {
     pub ztunnel_workload: Option<state::WorkloadInfo>,
 
     pub ipv6_enabled: bool,
+
+    // path to CRL file; if set, enables CRL checking
+    pub crl_path: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -865,6 +870,11 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
         ztunnel_identity,
         ztunnel_workload,
         ipv6_enabled,
+
+        crl_path: env::var(CRL_PATH)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
     })
 }
 
