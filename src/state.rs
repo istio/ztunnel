@@ -547,7 +547,7 @@ impl DemandProxyState {
         let workload = wl.authorization_policies.iter();
 
         // Aggregate all of them based on type
-        let (allow, deny): (Vec<_>, Vec<_>) = ns
+        let (all_allow, all_deny): (Vec<_>, Vec<_>) = ns
             .iter()
             .chain(global.iter())
             .chain(workload)
@@ -562,6 +562,11 @@ impl DemandProxyState {
             })
             .partition(|p| p.action == rbac::RbacAction::Allow);
 
+        let (deny, deny_dry_run): (Vec<&Authorization>, Vec<&Authorization>) =
+            all_deny.iter().partition(|p| !p.dry_run);
+        let (allow, allow_dry_run): (Vec<&Authorization>, Vec<&Authorization>) =
+            all_allow.iter().partition(|p| !p.dry_run);
+
         trace!(
             allow = allow.len(),
             deny = deny.len(),
@@ -570,6 +575,11 @@ impl DemandProxyState {
 
         // Allow and deny logic follows https://istio.io/latest/docs/reference/config/security/authorization-policy/
 
+        for pol in deny_dry_run.iter() {
+            if pol.matches(conn) {
+                debug!(policy = pol.to_key().as_str(), "dry-run deny policy match");
+            }
+        }
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
@@ -580,6 +590,11 @@ impl DemandProxyState {
                 ));
             } else {
                 trace!(policy = pol.to_key().as_str(), "deny policy does not match");
+            }
+        }
+        for pol in allow_dry_run.iter() {
+            if pol.matches(conn) {
+                debug!(policy = pol.to_key().as_str(), "dry-run allow policy match");
             }
         }
         // "If there are no ALLOW policies for the workload, allow the request."
@@ -1454,6 +1469,17 @@ mod tests {
         )
     }
 
+    fn create_dry_run_wildcard_rbac_policy(action: rbac::RbacAction) -> rbac::Authorization {
+        rbac::Authorization {
+            action,
+            namespace: "ns1".into(),
+            name: "wildcard".into(),
+            rules: vec![vec![]],
+            scope: rbac::RbacScope::Namespace,
+            dry_run: true,
+        }
+    }
+
     // test that we confirm with https://istio.io/latest/docs/reference/config/security/authorization-policy/.
     // We don't test #1 as ztunnel doesn't support custom policies.
     // 1. If there are any CUSTOM policies that match the request, evaluate and deny the request if the evaluation result is deny.
@@ -1466,6 +1492,15 @@ mod tests {
         let mut state = ProxyState::new(None);
         state.workloads.insert(Arc::new(create_workload(1)));
         state.workloads.insert(Arc::new(create_workload(2)));
+        // Dry run policies should have no effect.
+        state.policies.insert(
+            "wildcard-allow".into(),
+            create_dry_run_wildcard_rbac_policy(rbac::RbacAction::Allow),
+        );
+        state.policies.insert(
+            "wildcard-deny".into(),
+            create_dry_run_wildcard_rbac_policy(rbac::RbacAction::Deny),
+        );
         state.policies.insert(
             "allow".into(),
             rbac::Authorization {
@@ -1485,6 +1520,7 @@ mod tests {
                     ],
                 ],
                 scope: rbac::RbacScope::Namespace,
+                dry_run: false,
             },
         );
         state.policies.insert(
@@ -1506,6 +1542,7 @@ mod tests {
                     ],
                 ],
                 scope: rbac::RbacScope::Namespace,
+                dry_run: false,
             },
         );
 
@@ -1565,6 +1602,109 @@ mod tests {
 
         let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
         assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn assert_rbac_dry_run_with_real_policies() {
+        initialize_telemetry();
+        crate::telemetry::set_level(true, "debug").ok();
+
+        let mut state = ProxyState::new(None);
+        state.workloads.insert(Arc::new(create_workload(1)));
+
+        // Real deny policy that matches denyacct
+        state.policies.insert(
+            "real-deny".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Deny,
+                namespace: "ns1".into(),
+                name: "real-deny".into(),
+                rules: vec![vec![vec![rbac::RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "cluster.local/ns/default/sa/denyacct".into(),
+                    )],
+                    ..Default::default()
+                }]]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: false,
+            },
+        );
+
+        // Dry-run deny policy that matches both defaultacct and denyacct
+        state.policies.insert(
+            "dry-run-deny".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Deny,
+                namespace: "ns1".into(),
+                name: "dry-run-deny".into(),
+                rules: vec![
+                    vec![vec![rbac::RbacMatch {
+                        principals: vec![StringMatch::Exact(
+                            "cluster.local/ns/default/sa/defaultacct".into(),
+                        )],
+                        ..Default::default()
+                    }]],
+                    vec![vec![rbac::RbacMatch {
+                        principals: vec![StringMatch::Exact(
+                            "cluster.local/ns/default/sa/denyacct".into(),
+                        )],
+                        ..Default::default()
+                    }]],
+                ],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: true,
+            },
+        );
+
+        // Real allow policy that matches defaultacct
+        state.policies.insert(
+            "real-allow".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Allow,
+                namespace: "ns1".into(),
+                name: "real-allow".into(),
+                rules: vec![vec![vec![rbac::RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "cluster.local/ns/default/sa/defaultacct".into(),
+                    )],
+                    ..Default::default()
+                }]]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: false,
+            },
+        );
+
+        // Dry-run allow policy that matches defaultacct
+        state.policies.insert(
+            "dry-run-allow".into(),
+            rbac::Authorization {
+                action: rbac::RbacAction::Allow,
+                namespace: "ns1".into(),
+                name: "dry-run-allow".into(),
+                rules: vec![vec![vec![rbac::RbacMatch {
+                    principals: vec![StringMatch::Exact(
+                        "cluster.local/ns/default/sa/defaultacct".into(),
+                    )],
+                    ..Default::default()
+                }]]],
+                scope: rbac::RbacScope::Namespace,
+                dry_run: true,
+            },
+        );
+
+        let mock_proxy_state = create_state(state);
+
+        let ctx = get_rbac_context(&mock_proxy_state, 1, "defaultacct");
+        assert!(mock_proxy_state.assert_rbac(&ctx).await.is_ok());
+
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("policy", "ns1/dry-run-deny"),
+            ("message", "dry-run deny policy match"),
+        ]));
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("policy", "ns1/dry-run-allow"),
+            ("message", "dry-run allow policy match"),
+        ]));
     }
 
     #[tokio::test]

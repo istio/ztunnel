@@ -127,6 +127,7 @@ mod tests {
                 namespaces: vec![StringMatch::Exact("whatever".into())],
                 ..Default::default()
             }]]],
+            dry_run: false,
         };
         let policy_key = policy.to_key();
         // insert this namespace-scoped policy into policystore then assert it is

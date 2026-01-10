@@ -39,6 +39,7 @@ pub struct Authorization {
     pub scope: RbacScope,
     pub action: RbacAction,
     pub rules: Vec<Vec<Vec<RbacMatch>>>,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
@@ -360,6 +361,7 @@ impl TryFrom<XdsRbac> for Authorization {
             scope: RbacScope::from(xds::istio::security::Scope::try_from(resource.scope)?),
             action: RbacAction::from(xds::istio::security::Action::try_from(resource.action)?),
             rules,
+            dry_run: resource.dry_run,
         })
     }
 }
@@ -483,6 +485,7 @@ mod tests {
             scope: RbacScope::Global,
             action: RbacAction::Allow,
             rules,
+            dry_run: false,
         }
     }
 
