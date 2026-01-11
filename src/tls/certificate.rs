@@ -322,7 +322,7 @@ impl WorkloadCertificate {
         Ok(sc)
     }
 
-    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
+    pub fn client_config(&self, identity: Vec<Identity>) -> Result<ClientConfig, rustls::Error> {
         let roots = self.root_store.clone();
         let verifier = IdentityVerifier { roots, identity };
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
@@ -337,6 +337,11 @@ impl WorkloadCertificate {
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;
+        Ok(cc)
+    }
+
+    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
+        let cc = self.client_config(identity)?;
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })
