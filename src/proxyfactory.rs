@@ -75,7 +75,11 @@ impl ProxyFactory {
                     Some(manager_arc)
                 }
                 Err(e) => {
-                    tracing::debug!("failed to initialize crl manager: {}", e);
+                    tracing::warn!(
+                        path = ?crl_path,
+                        error = %e,
+                        "failed to initialize crl manager"
+                    );
                     None
                 }
             }

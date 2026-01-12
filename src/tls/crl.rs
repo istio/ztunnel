@@ -94,7 +94,6 @@ impl CrlManager {
     pub fn load_crl(&self) -> Result<(), CrlError> {
         let mut inner = self.inner.write().unwrap();
 
-        debug!(path = ?inner.crl_path, "loading crl");
         let data = std::fs::read(&inner.crl_path)?;
 
         // empty file means no revocations - this is valid
@@ -104,26 +103,20 @@ impl CrlManager {
             return Ok(());
         }
 
-        debug!(bytes = data.len(), "read crl file");
-
         // parse all CRL blocks (handles concatenated CRLs)
-        let der_crls = if data.starts_with(b"-----BEGIN") {
-            debug!("crl is in PEM format, extracting all crl blocks");
+        let is_pem = data.starts_with(b"-----BEGIN");
+        let der_crls = if is_pem {
             Self::parse_pem_crls(&data)?
         } else {
-            debug!("crl is in DER format");
-            // single DER-encoded CRL
             vec![data]
         };
 
         // empty PEM file (no CRL blocks) means no revocations
         if der_crls.is_empty() {
-            debug!("no crl blocks found, treating as no revocations");
+            debug!(path = ?inner.crl_path, "no crl blocks found, treating as no revocations");
             inner.crl_ders = Some(Vec::new());
             return Ok(());
         }
-
-        debug!(count = der_crls.len(), "found crl block(s) in file");
 
         let mut validated_ders = Vec::new();
 
@@ -134,8 +127,6 @@ impl CrlManager {
                 CrlError::WebPkiError(format!("failed to parse crl {}: {:?}", idx + 1, e))
             })?;
 
-            debug!(crl = idx + 1, "loaded crl");
-
             validated_ders.push(der_data);
         }
 
@@ -143,6 +134,8 @@ impl CrlManager {
         inner.crl_ders = Some(validated_ders);
 
         debug!(
+            path = ?inner.crl_path,
+            format = if is_pem { "PEM" } else { "DER" },
             count = inner.crl_ders.as_ref().map(|v| v.len()).unwrap_or(0),
             "crl loaded successfully"
         );
@@ -299,5 +292,59 @@ mod tests {
 
         let result = CrlManager::new(file.path().to_path_buf());
         assert!(result.is_ok(), "should handle empty CRL file gracefully");
+    }
+
+    #[test]
+    fn test_crl_manager_valid_crl() {
+        use rcgen::{
+            CertificateParams, CertificateRevocationListParams, Issuer, KeyIdMethod, KeyPair,
+            RevocationReason, RevokedCertParams, SerialNumber,
+        };
+
+        // generate a CA key pair
+        let ca_key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+            .expect("failed to generate CA key pair");
+
+        // create CA certificate params
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+
+        // create issuer from CA params and key
+        let issuer = Issuer::from_params(&ca_params, &ca_key_pair);
+
+        // create CRL with one revoked certificate
+        let crl_params = CertificateRevocationListParams {
+            this_update: time::OffsetDateTime::now_utc(),
+            next_update: time::OffsetDateTime::now_utc() + time::Duration::days(30),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![RevokedCertParams {
+                serial_number: SerialNumber::from(12345u64),
+                revocation_time: time::OffsetDateTime::now_utc(),
+                reason_code: Some(RevocationReason::KeyCompromise),
+                invalidity_date: None,
+            }],
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+
+        let crl = crl_params.signed_by(&issuer).expect("failed to sign CRL");
+        let crl_pem = crl.pem().expect("failed to encode CRL as PEM");
+
+        // write CRL to temp file
+        let mut file = NamedTempFile::new().expect("failed to create temporary test file");
+        file.write_all(crl_pem.as_bytes())
+            .expect("failed to write CRL to temporary file");
+        file.flush().expect("failed to flush temporary test file");
+
+        // test that CrlManager can load it
+        let manager = CrlManager::new(file.path().to_path_buf())
+            .expect("should successfully parse valid CRL");
+
+        let ders = manager.get_crl_ders();
+        assert_eq!(ders.len(), 1, "should have loaded one CRL");
     }
 }

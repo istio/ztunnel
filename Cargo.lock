@@ -4616,6 +4616,7 @@ dependencies = [
  "textnonce",
  "thiserror 2.0.17",
  "tikv-jemallocator",
+ "time",
  "tls-listener",
  "tokio",
  "tokio-rustls",
