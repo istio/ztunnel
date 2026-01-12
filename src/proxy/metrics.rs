@@ -578,7 +578,7 @@ impl ConnectionResult {
     }
 
     // Record our final result, with more details as a response flag.
-    pub fn record_with_flag<E: std::error::Error>(
+    pub fn record_with_flag<E: std::error::Error + 'static>(
         mut self,
         res: Result<(), E>,
         flag: ResponseFlags,
@@ -588,7 +588,7 @@ impl ConnectionResult {
     }
 
     // Record our final result.
-    pub fn record<E: std::error::Error>(mut self, res: Result<(), E>) {
+    pub fn record<E: std::error::Error + 'static>(mut self, res: Result<(), E>) {
         // If no specific flag was set and we have an error, try to infer the failure reason
         if self.tl.response_flags == ResponseFlags::None
             && let Err(ref err) = res
@@ -598,34 +598,34 @@ impl ConnectionResult {
         self.record_internal(res)
     }
 
-    // Extract failure reason from error type
-    fn extract_failure_reason(err: &dyn std::error::Error) -> ResponseFlags {
-        let err_str = format!("{err}");
-        // Check error message for specific failure types
-        if err_str.contains("tls error") || err_str.contains("TLS") || err_str.contains("Tls") {
-            return ResponseFlags::TlsFailure;
+    // Extract failure reason from error type using downcasting
+    fn extract_failure_reason<E: std::error::Error + 'static>(err: &E) -> ResponseFlags {
+        use std::any::Any;
+
+        // Try to downcast the error itself to proxy::Error
+        if let Some(proxy_err) = (err as &dyn Any).downcast_ref::<proxy::Error>() {
+            return match proxy_err {
+                proxy::Error::Tls(_) => ResponseFlags::TlsFailure,
+                proxy::Error::Http2Handshake(_) | proxy::Error::H2(_) => {
+                    ResponseFlags::Http2HandshakeFailure
+                }
+                proxy::Error::MaybeHBONENetworkPolicyError(_) => ResponseFlags::NetworkPolicyError,
+                proxy::Error::Identity(_) => ResponseFlags::IdentityError,
+                proxy::Error::AuthorizationPolicyRejection(_)
+                | proxy::Error::AuthorizationPolicyLateRejection => {
+                    ResponseFlags::AuthorizationPolicyDenied
+                }
+                proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
+                _ => ResponseFlags::ConnectionFailure,
+            };
         }
-        if err_str.contains("http2 handshake")
-            || err_str.contains("h2 failed")
-            || err_str.contains("Http2Handshake")
-        {
-            return ResponseFlags::Http2HandshakeFailure;
-        }
-        if err_str.contains("NetworkPolicy") || err_str.contains("network policy") {
-            return ResponseFlags::NetworkPolicyError;
-        }
-        if err_str.contains("identity error") || err_str.contains("Identity") {
-            return ResponseFlags::IdentityError;
-        }
-        if err_str.contains("policy rejection") || err_str.contains("AuthorizationPolicy") {
-            return ResponseFlags::AuthorizationPolicyDenied;
-        }
-        // Default to generic connection failure
+
+        // Default to generic connection failure if we can't identify the error type
         ResponseFlags::ConnectionFailure
     }
 
     // Internal-only function that takes `&mut` to facilitate Drop. Public consumers must use consuming functions.
-    fn record_internal<E: std::error::Error>(&mut self, res: Result<(), E>) {
+    fn record_internal<E: std::error::Error + 'static>(&mut self, res: Result<(), E>) {
         debug_assert!(!self.recorded, "record called multiple times");
         if self.recorded {
             return;
