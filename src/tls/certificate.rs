@@ -298,15 +298,30 @@ impl WorkloadCertificate {
             .collect()
     }
 
-    pub fn server_config(&self) -> Result<ServerConfig, Error> {
+    pub fn server_config(
+        &self,
+        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
+    ) -> Result<ServerConfig, Error> {
         let td = self.cert.identity().map(|i| match i {
             Identity::Spiffe { trust_domain, .. } => trust_domain,
         });
-        let raw_client_cert_verifier = WebPkiClientVerifier::builder_with_provider(
+
+        // build the base client cert verifier with optional CRL support
+        let mut builder = WebPkiClientVerifier::builder_with_provider(
             self.root_store.clone(),
             crate::tls::lib::provider(),
-        )
-        .build()?;
+        );
+
+        // add CRLs if available
+        if let Some(ref mgr) = crl_manager {
+            let crls = mgr.get_crl_ders();
+            if !crls.is_empty() {
+                builder = builder.with_crls(crls).allow_unknown_revocation_status(); // fail-open for unknown status
+            }
+        }
+
+        // TODO: check if our own certificate is revoked in the CRL and log warning
+        let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =
             crate::tls::workload::TrustDomainVerifier::new(raw_client_cert_verifier, td);
@@ -322,6 +337,8 @@ impl WorkloadCertificate {
         Ok(sc)
     }
 
+    // TODO: add CRL support for outbound connections (client verifying server certs)
+    // this requires a separate design due to complexity - deferred for follow-up
     pub fn client_config(&self, identity: Vec<Identity>) -> Result<ClientConfig, rustls::Error> {
         let roots = self.root_store.clone();
         let verifier = IdentityVerifier { roots, identity };
@@ -449,7 +466,7 @@ mod test {
             WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![&joined]).unwrap();
 
         // Do a simple handshake between them; we should be able to accept the trusted root
-        let server = cert1.server_config().unwrap();
+        let server = cert1.server_config(None).unwrap();
         let tls = TlsAcceptor::from(Arc::new(server));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
