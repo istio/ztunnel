@@ -320,6 +320,7 @@ impl WorkloadCertificate {
             }
         }
 
+        // TODO: check if our own certificate is revoked in the CRL and log warning
         let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =
@@ -336,17 +337,11 @@ impl WorkloadCertificate {
         Ok(sc)
     }
 
-    pub fn client_config(
-        &self,
-        identity: Vec<Identity>,
-        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
-    ) -> Result<ClientConfig, rustls::Error> {
+    // TODO: add CRL support for outbound connections (client verifying server certs)
+    // this requires a separate design due to complexity - deferred for follow-up
+    pub fn client_config(&self, identity: Vec<Identity>) -> Result<ClientConfig, rustls::Error> {
         let roots = self.root_store.clone();
-        let verifier = IdentityVerifier {
-            roots,
-            identity,
-            crl_manager,
-        };
+        let verifier = IdentityVerifier { roots, identity };
         let mut cc = ClientConfig::builder_with_provider(crate::tls::lib::provider())
             .with_protocol_versions(tls::TLS_VERSIONS)
             .expect("client config must be valid")
@@ -362,12 +357,8 @@ impl WorkloadCertificate {
         Ok(cc)
     }
 
-    pub fn outbound_connector(
-        &self,
-        identity: Vec<Identity>,
-        crl_manager: Option<Arc<crate::tls::crl::CrlManager>>,
-    ) -> Result<OutboundConnector, Error> {
-        let cc = self.client_config(identity, crl_manager)?;
+    pub fn outbound_connector(&self, identity: Vec<Identity>) -> Result<OutboundConnector, Error> {
+        let cc = self.client_config(identity)?;
         Ok(OutboundConnector {
             client_config: Arc::new(cc),
         })
@@ -486,7 +477,7 @@ mod test {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        let client = cert2.outbound_connector(vec![id], None).unwrap();
+        let client = cert2.outbound_connector(vec![id]).unwrap();
         let mut tls = client.connect(stream).await.unwrap();
 
         let _ = tls.write(b"hi").await.unwrap();
