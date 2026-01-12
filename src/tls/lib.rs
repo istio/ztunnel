@@ -16,6 +16,7 @@ use super::Error;
 
 #[allow(unused_imports)]
 use crate::PQC_ENABLED;
+use crate::TLS12_ENABLED;
 use crate::identity::{self, Identity};
 
 use std::fmt::Debug;
@@ -38,7 +39,17 @@ pub trait ServerCertProvider: Send + Sync + Clone {
     async fn fetch_cert(&mut self) -> Result<Arc<ServerConfig>, TlsError>;
 }
 
-pub(super) static TLS_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
+static TLS_VERSIONS_13_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
+static TLS_VERSIONS_12_AND_13: &[&rustls::SupportedProtocolVersion] =
+    &[&rustls::version::TLS13, &rustls::version::TLS12];
+
+pub fn tls_versions() -> &'static [&'static rustls::SupportedProtocolVersion] {
+    if *TLS12_ENABLED {
+        TLS_VERSIONS_12_AND_13
+    } else {
+        TLS_VERSIONS_13_ONLY
+    }
+}
 
 #[cfg(feature = "tls-aws-lc")]
 pub static CRYPTO_PROVIDER: &str = "tls-aws-lc";
@@ -59,30 +70,43 @@ pub static CRYPTO_PROVIDER: &str = "tls-openssl";
 pub(super) fn provider() -> Arc<CryptoProvider> {
     // Due to 'fips-only' feature on the boring provider, this will use only AES_256_GCM_SHA384
     // and AES_128_GCM_SHA256
-    // In later code we select to only use TLS 1.3
     Arc::new(boring_rustls_provider::provider())
 }
 
 #[cfg(feature = "tls-ring")]
 pub(super) fn provider() -> Arc<CryptoProvider> {
+    let mut cipher_suites = vec![
+        rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    ];
+    if *TLS12_ENABLED {
+        // Add TLS 1.2 FIPS-compatible cipher suites
+        cipher_suites.extend([
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        ]);
+    }
     Arc::new(CryptoProvider {
-        // Limit to only the subset of ciphers that are FIPS compatible
-        cipher_suites: vec![
-            rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
-            rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
-        ],
+        cipher_suites,
         ..rustls::crypto::ring::default_provider()
     })
 }
 
 #[cfg(feature = "tls-aws-lc")]
 pub(super) fn provider() -> Arc<CryptoProvider> {
+    let mut cipher_suites = vec![
+        rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    ];
+    if *TLS12_ENABLED {
+        // Add TLS 1.2 FIPS-compatible cipher suites
+        cipher_suites.extend([
+            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        ]);
+    }
     let mut provider = CryptoProvider {
-        // Limit to only the subset of ciphers that are FIPS compatible
-        cipher_suites: vec![
-            rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
-            rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256,
-        ],
+        cipher_suites,
         ..rustls::crypto::aws_lc_rs::default_provider()
     };
 
@@ -95,12 +119,27 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
 
 #[cfg(feature = "tls-openssl")]
 pub(super) fn provider() -> Arc<CryptoProvider> {
+    let mut cipher_suites = vec![
+        rustls_openssl::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        rustls_openssl::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    ];
+    if *TLS12_ENABLED {
+        // Add TLS 1.2 FIPS-compatible cipher suites
+        cipher_suites.extend([
+            rustls_openssl::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            rustls_openssl::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        ]);
+    }
+
+    // Use only FIPS-compliant key exchange groups
+    let kx_groups: Vec<&'static dyn rustls::crypto::SupportedKxGroup> = vec![
+        rustls_openssl::kx_group::SECP256R1,
+        rustls_openssl::kx_group::SECP384R1,
+    ];
+
     Arc::new(CryptoProvider {
-        // Limit to only the subset of ciphers that are FIPS compatible
-        cipher_suites: vec![
-            rustls_openssl::cipher_suite::TLS13_AES_256_GCM_SHA384,
-            rustls_openssl::cipher_suite::TLS13_AES_128_GCM_SHA256,
-        ],
+        cipher_suites,
+        kx_groups,
         ..rustls_openssl::default_provider()
     })
 }

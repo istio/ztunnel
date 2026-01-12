@@ -182,7 +182,7 @@ async fn control_plane_client_config(
 ) -> Result<ClientConfig, Error> {
     let roots = root_to_store(root_cert).await?;
     let c = ClientConfig::builder_with_provider(provider())
-        .with_protocol_versions(crate::tls::TLS_VERSIONS)?;
+        .with_protocol_versions(crate::tls::tls_versions())?;
     if let Some(alt_hostname) = alt_hostname {
         debug!("using alternate hostname {alt_hostname} for TLS verification");
         Ok(c.dangerous()
