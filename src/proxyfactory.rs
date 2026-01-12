@@ -15,6 +15,7 @@
 use crate::config;
 use crate::identity::SecretManager;
 use crate::state::{DemandProxyState, WorkloadInfo};
+use crate::tls;
 use std::sync::Arc;
 use tracing::error;
 
@@ -34,6 +35,7 @@ pub struct ProxyFactory {
     proxy_metrics: Arc<Metrics>,
     dns_metrics: Option<Arc<dns::Metrics>>,
     drain: DrainWatcher,
+    crl_manager: Option<Arc<tls::crl::CrlManager>>,
 }
 
 impl ProxyFactory {
@@ -55,6 +57,36 @@ impl ProxyFactory {
             }
         };
 
+        // Initialize CRL manager if crl_path is set
+        let crl_manager = if let Some(crl_path) = &config.crl_path {
+            match tls::crl::CrlManager::new(crl_path.clone()) {
+                Ok(manager) => {
+                    let manager_arc = Arc::new(manager);
+
+                    if let Err(e) = manager_arc.start_file_watcher() {
+                        tracing::warn!(
+                            "crl file watcher could not be started: {}. \
+                            crl validation will continue with current file, but \
+                            crl updates will require restarting ztunnel.",
+                            e
+                        );
+                    }
+
+                    Some(manager_arc)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = ?crl_path,
+                        error = %e,
+                        "failed to initialize crl manager"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(ProxyFactory {
             config,
             state,
@@ -62,6 +94,7 @@ impl ProxyFactory {
             proxy_metrics,
             dns_metrics,
             drain,
+            crl_manager,
         })
     }
 
@@ -132,6 +165,7 @@ impl ProxyFactory {
                 resolver,
                 local_workload_information,
                 false,
+                self.crl_manager.clone(),
             );
             result.connection_manager = Some(cm);
             result.proxy = Some(Proxy::from_inputs(pi, drain).await?);
@@ -177,6 +211,7 @@ impl ProxyFactory {
                 None,
                 local_workload_information,
                 true,
+                self.crl_manager.clone(),
             );
 
             let inbound = Inbound::new(pi, self.drain.clone()).await?;
