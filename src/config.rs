@@ -1082,11 +1082,14 @@ pub mod tests {
 
     #[test]
     fn config_from_proxyconfig() {
+        use crate::test_helpers::{MESH_CONFIG_YAML, temp_file_with_content};
+
         let default_config = construct_config(ProxyConfig::default())
             .expect("could not build Config without ProxyConfig");
 
         // mesh config only
-        let mesh_config_path = "./src/test_helpers/mesh_config.yaml";
+        let mesh_config_file = temp_file_with_content(MESH_CONFIG_YAML).unwrap();
+        let mesh_config_path = mesh_config_file.path().to_str().unwrap();
         let pc = construct_proxy_config(mesh_config_path, None).unwrap();
         let cfg = construct_config(pc).unwrap();
         assert_eq!(cfg.stats_addr.port(), 15888);

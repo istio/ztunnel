@@ -907,6 +907,7 @@ mod tests {
     use crate::config::ConfigSource;
     use crate::state::{DemandProxyState, ProxyState, ServiceResolutionMode, UpstreamDestination};
     use crate::test_helpers::helpers::initialize_telemetry;
+    use crate::test_helpers::{LOCALHOST_YAML, temp_file_with_content};
     use crate::xds::istio::workload::PortList as XdsPortList;
     use crate::xds::istio::workload::Service as XdsService;
     use crate::xds::istio::workload::WorkloadStatus as XdsStatus;
@@ -1857,11 +1858,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_client() {
-        let cfg = ConfigSource::File(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("examples")
-                .join("localhost.yaml"),
-        );
+        let config_file = temp_file_with_content(LOCALHOST_YAML).unwrap();
+        let cfg = ConfigSource::File(config_file.path().to_path_buf());
         let (state, demand, _) = setup_test();
         let local_client = LocalClient {
             cfg,
