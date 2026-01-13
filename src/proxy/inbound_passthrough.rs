@@ -76,7 +76,17 @@ impl InboundPassthrough {
                 let pi = self.pi.clone();
                 match socket {
                     Ok((stream, remote)) => {
+                        let socket_labels = metrics::SocketLabels {
+                            reporter: Reporter::destination,
+                        };
+                        pi.metrics.record_socket_open(&socket_labels);
+
+                        let metrics_for_socket_close = pi.metrics.clone();
                         let serve_client = async move {
+                            let _socket_guard = metrics::SocketCloseGuard::new(
+                                metrics_for_socket_close,
+                                Reporter::destination,
+                            );
                             debug!(component="inbound passthrough", "connection started");
                                 // Since this task is spawned, make sure we are guaranteed to terminate
                             tokio::select! {
