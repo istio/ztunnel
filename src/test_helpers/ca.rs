@@ -26,8 +26,8 @@ use tracing::error;
 use crate::config::RootCert;
 
 use crate::identity::{AuthSource, CaClient};
-use crate::test_helpers::hyper_tower;
 use crate::test_helpers::FAKE_JWT;
+use crate::test_helpers::hyper_tower;
 use crate::xds::istio::ca::istio_certificate_service_server::{
     IstioCertificateService, IstioCertificateServiceServer,
 };
