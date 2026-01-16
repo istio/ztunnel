@@ -25,10 +25,12 @@ use tokio::sync::watch;
 use tracing::{Instrument, debug, error, info, info_span, trace_span};
 
 use crate::identity::Identity;
+use crate::strng::Strng;
 
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util,
+    X_ORIGIN_SOURCE_HEADER,
 };
 use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics};
 
@@ -266,7 +268,8 @@ impl OutboundConnection {
         let mut sender =
             super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, wl_key)
                 .await?;
-        let http_request = self.create_hbone_request(remote_addr, req);
+        let origin_network = &self.pi.cfg.network;
+        let http_request = self.create_hbone_request(remote_addr, req, Some(origin_network));
         let inner_upgraded = sender.send_request(http_request).await?;
 
         // Proxy
@@ -294,11 +297,12 @@ impl OutboundConnection {
     }
 
     fn create_hbone_request(
-        &mut self,
+        &self,
         remote_addr: SocketAddr,
         req: &Request,
+        origin_network: Option<&Strng>,
     ) -> http::Request<()> {
-        http::Request::builder()
+        let mut builder = http::Request::builder()
             .uri(
                 req.hbone_target_destination
                     .as_ref()
@@ -312,7 +316,14 @@ impl OutboundConnection {
                 FORWARDED,
                 build_forwarded(remote_addr, &req.intended_destination_service),
             )
-            .header(TRACEPARENT_HEADER, self.id.header())
+            .header(TRACEPARENT_HEADER, self.id.header());
+        
+        // Add x-origin-source header for inner CONNECT requests in double HBONE
+        if let Some(network) = origin_network {
+            builder = builder.header(X_ORIGIN_SOURCE_HEADER, network.as_str());
+        }
+        
+        builder
             .body(())
             .expect("builder with known status code should not fail")
     }
@@ -322,7 +333,7 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         req: &Request,
     ) -> Result<H2Stream, Error> {
-        let request = self.create_hbone_request(remote_addr, req);
+        let request = self.create_hbone_request(remote_addr, req, None);
         let pool_key = Box::new(WorkloadKey {
             src_id: req.source.identity(),
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
