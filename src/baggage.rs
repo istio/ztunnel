@@ -29,6 +29,21 @@ pub struct Baggage {
     pub zone: Option<Strng>,
 }
 
+pub fn baggage_header_val(
+    cluster: &str,
+    namespace: &str,
+    workload_type: &str,
+    workload_name: &str,
+    name: &str,
+    version: &str,
+    region: &str,
+    zone: &str,
+) -> String {
+    format!(
+        "k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version},cloud.region={region},cloud.availability_zone={zone}",
+    )
+}
+
 pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToStrError> {
     let mut baggage = Baggage {
         ..Default::default()

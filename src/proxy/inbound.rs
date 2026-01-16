@@ -23,7 +23,7 @@ use tokio::sync::watch;
 use tracing::{Instrument, debug, error, info, info_span, trace_span};
 
 use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, ResponseFlags, util};
-use crate::baggage::parse_baggage_header;
+use crate::baggage::{baggage_header_val, parse_baggage_header};
 use crate::identity::Identity;
 
 use crate::config::Config;
@@ -53,6 +53,25 @@ pub struct Inbound {
 }
 
 impl Inbound {
+    fn build_response(&self, status: StatusCode) -> Response<()> {
+        let local_wl = self.pi.local_workload_information.get_workload().unwrap();
+        let baggage = baggage::baggage_header_val(
+            &cluster,
+            &local_wl.namespace,
+            &local_wl.workload_type,
+            &local_wl.workload_name,
+            &local_wl.canonical_name,
+            &local_wl.canonical_revision,
+            &local_wl.locality.region,
+            &local_wl.locality.zone,
+        );
+        Response::builder()
+            .status(status)
+            .header(BAGGAGE_HEADER, baggage)
+            .body(())
+            .expect("builder with known status code should not fail")
+    }
+
     pub(crate) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
@@ -214,7 +233,7 @@ impl Inbound {
                 // At this point in processing, we never built up full context to log a complete access log.
                 // Instead, just log a minimal error line.
                 metrics::log_early_deny(src, dst, Reporter::destination, e);
-                if let Err(err) = req.send_error(build_response(code)) {
+                if let Err(err) = req.send_error(self.build_response(code)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -288,7 +307,7 @@ impl Inbound {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
                 ri.result_tracker.record_with_flag(Err(err), flag);
-                if let Err(err) = req.send_error(build_response(code)) {
+                if let Err(err) = req.send_error(self.build_response(code)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -305,7 +324,7 @@ impl Inbound {
         // See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt for more information about the
         // proxy protocol.
         let send = req
-            .send_response(build_response(StatusCode::OK))
+            .send_response(self.build_response(StatusCode::OK))
             .and_then(|h2_stream| async {
                 if let Some(TunnelRequest {
                     protocol: Protocol::PROXY,
@@ -715,13 +734,6 @@ pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
         .get(http::header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
         .and_then(proxy::parse_forwarded_host)
-}
-
-fn build_response(status: StatusCode) -> Response<()> {
-    Response::builder()
-        .status(status)
-        .body(())
-        .expect("builder with known status code should not fail")
 }
 
 #[cfg(test)]
