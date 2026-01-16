@@ -318,7 +318,7 @@ impl OutboundConnection {
             )
             .header(TRACEPARENT_HEADER, self.id.header());
         
-        // Add x-origin-source header for inner CONNECT requests in double HBONE
+        // Add x-istio-origin-source header for inner CONNECT requests in double HBONE
         if let Some(network) = origin_network {
             builder = builder.header(X_ORIGIN_SOURCE_HEADER, network.as_str());
         }
@@ -334,7 +334,7 @@ impl OutboundConnection {
         req: &Request,
     ) -> Result<H2Stream, Error> {
         // This is the single cluster/single-HBONE codepath (and also the outer tunnel
-        // for double HBONE). We don't need the x-origin-source header here because:
+        // for double HBONE). We don't need the x-istio-origin-source header here because:
         // - For single HBONE: both source and destination are in the same network
         // - For double HBONE outer: the gateway doesn't need origin network info
         let request = self.create_hbone_request(remote_addr, req, None);
@@ -1972,7 +1972,7 @@ mod tests {
         // Test with None (no header should be added) - this is the single HBONE case
         let http_request_no_header = outbound.create_hbone_request(remote_addr, &req, None);
         assert!(http_request_no_header.headers().get(X_ORIGIN_SOURCE_HEADER).is_none(),
-            "x-origin-source header should not be present for single HBONE");
+            "x-istio-origin-source header should not be present for single HBONE");
         
         // Test with Some network (header should be added) - this is the double HBONE inner request
         let network = crate::strng::Strng::from("test-network");
@@ -1980,7 +1980,7 @@ mod tests {
         assert_eq!(
             http_request_with_header.headers().get(X_ORIGIN_SOURCE_HEADER).unwrap(),
             "test-network",
-            "x-origin-source header should contain the network name for double HBONE inner request"
+            "x-istio-origin-source header should contain the network name for double HBONE inner request"
         );
     }
 
