@@ -333,6 +333,10 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         req: &Request,
     ) -> Result<H2Stream, Error> {
+        // This is the single cluster/single-HBONE codepath (and also the outer tunnel
+        // for double HBONE). We don't need the x-origin-source header here because:
+        // - For single HBONE: both source and destination are in the same network
+        // - For double HBONE outer: the gateway doesn't need origin network info
         let request = self.create_hbone_request(remote_addr, req, None);
         let pool_key = Box::new(WorkloadKey {
             src_id: req.source.identity(),
@@ -1884,6 +1888,99 @@ mod tests {
                 }),
             ),
             r#"for="127.0.0.1:80";host=example.com"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_x_origin_source_header() {
+        initialize_telemetry();
+        
+        // Create a test config with a specific network
+        let cfg = Arc::new(Config {
+            network: "test-network".into(),
+            local_node: Some("local-node".to_string()),
+            ..crate::config::parse_config().unwrap()
+        });
+        
+        // Create a source workload and add it to state
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        
+        let state = new_proxy_state(&[source], &[], &[]);
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
+        
+        let wi = WorkloadInfo {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "default".to_string(),
+        };
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi.clone()),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+        ));
+        
+        let outbound = OutboundConnection {
+            pi: Arc::new(ProxyInputs {
+                state: state.clone(),
+                cfg: cfg.clone(),
+                metrics: test_proxy_metrics(),
+                socket_factory: sock_fact.clone(),
+                local_workload_information: local_workload_information.clone(),
+                connection_manager: ConnectionManager::default(),
+                resolver: None,
+                disable_inbound_freebind: false,
+                crl_manager: None,
+            }),
+            id: TraceParent::new(),
+            pool: WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information.clone(),
+            ),
+            hbone_port: cfg.inbound_addr.port(),
+        };
+        
+        // Get the source workload from state
+        let source_workload = outbound
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
+        
+        // Create a minimal test request with required fields
+        let req = Request {
+            protocol: OutboundProtocol::HBONE,
+            source: source_workload,
+            hbone_target_destination: Some(HboneAddress::SocketAddr("10.0.0.1:8080".parse().unwrap())),
+            actual_destination_workload: None,
+            intended_destination_service: None,
+            actual_destination: "10.0.0.1:8080".parse().unwrap(),
+            upstream_sans: vec![],
+            final_sans: vec![],
+        };
+        
+        let remote_addr = "127.0.0.1:12345".parse().unwrap();
+        
+        // Test with None (no header should be added) - this is the single HBONE case
+        let http_request_no_header = outbound.create_hbone_request(remote_addr, &req, None);
+        assert!(http_request_no_header.headers().get(X_ORIGIN_SOURCE_HEADER).is_none(),
+            "x-origin-source header should not be present for single HBONE");
+        
+        // Test with Some network (header should be added) - this is the double HBONE inner request
+        let network = crate::strng::Strng::from("test-network");
+        let http_request_with_header = outbound.create_hbone_request(remote_addr, &req, Some(&network));
+        assert_eq!(
+            http_request_with_header.headers().get(X_ORIGIN_SOURCE_HEADER).unwrap(),
+            "test-network",
+            "x-origin-source header should contain the network name for double HBONE inner request"
         );
     }
 
