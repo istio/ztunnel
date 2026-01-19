@@ -23,6 +23,7 @@ use prometheus_client::encoding::{
 };
 use prometheus_client::metrics::counter::{Atomic, Counter};
 use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 use tracing::event;
@@ -40,6 +41,8 @@ use crate::strng::{RichStrng, Strng};
 pub struct Metrics {
     pub connection_opens: Family<CommonTrafficLabels, Counter>,
     pub connection_close: Family<CommonTrafficLabels, Counter>,
+    pub connection_failures: Family<CommonTrafficLabels, Counter>,
+    pub open_sockets: Family<SocketLabels, Gauge>,
     pub received_bytes: Family<CommonTrafficLabels, Counter>,
     pub sent_bytes: Family<CommonTrafficLabels, Counter>,
 
@@ -71,6 +74,14 @@ pub enum ResponseFlags {
     AuthorizationPolicyDenied,
     // connection denied because we could not establish an upstream connection
     ConnectionFailure,
+    // TLS handshake failure
+    TlsFailure,
+    // HTTP/2 handshake failure
+    Http2HandshakeFailure,
+    // Network policy blocking connection
+    NetworkPolicyError,
+    // Identity/certificate error
+    IdentityError,
 }
 
 impl EncodeLabelValue for ResponseFlags {
@@ -79,6 +90,10 @@ impl EncodeLabelValue for ResponseFlags {
             ResponseFlags::None => writer.write_str("-"),
             ResponseFlags::AuthorizationPolicyDenied => writer.write_str("DENY"),
             ResponseFlags::ConnectionFailure => writer.write_str("CONNECT"),
+            ResponseFlags::TlsFailure => writer.write_str("TLS_FAILURE"),
+            ResponseFlags::Http2HandshakeFailure => writer.write_str("H2_HANDSHAKE_FAILURE"),
+            ResponseFlags::NetworkPolicyError => writer.write_str("NETWORK_POLICY"),
+            ResponseFlags::IdentityError => writer.write_str("IDENTITY_ERROR"),
         }
     }
 }
@@ -200,6 +215,12 @@ impl From<ConnectionOpen> for CommonTrafficLabels {
                 .with_destination_service(c.destination_service.as_ref())
         }
     }
+}
+
+/// Minimal labels for socket metrics (without direction)
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
+pub struct SocketLabels {
+    pub reporter: Reporter,
 }
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
@@ -330,13 +351,62 @@ impl Metrics {
             on_demand_dns.clone(),
         );
 
+        let connection_failures = Family::default();
+        registry.register(
+            "tcp_connections_failed",
+            "The total number of TCP connections that failed to establish (unstable)",
+            connection_failures.clone(),
+        );
+
+        let open_sockets = Family::default();
+        registry.register(
+            "tcp_sockets_open",
+            "The current number of open TCP sockets (unstable)",
+            open_sockets.clone(),
+        );
+
         Self {
             connection_opens,
             connection_close,
             received_bytes,
             sent_bytes,
             on_demand_dns,
+            connection_failures,
+            open_sockets,
         }
+    }
+
+    pub fn record_socket_open(&self, labels: &SocketLabels) {
+        self.open_sockets.get_or_create(labels).inc();
+    }
+
+    pub fn record_socket_close(&self, labels: &SocketLabels) {
+        self.open_sockets.get_or_create(labels).dec();
+    }
+}
+
+/// Guard to ensure socket close is recorded even if task is cancelled
+/// This should be created at the start of an async block that handles a socket
+/// Stores only the minimal information needed to reconstruct labels, avoiding
+/// cloning the large CommonTrafficLabels struct
+pub struct SocketCloseGuard {
+    metrics: Arc<Metrics>,
+    reporter: Reporter,
+}
+
+impl Drop for SocketCloseGuard {
+    fn drop(&mut self) {
+        let labels = SocketLabels {
+            reporter: self.reporter,
+        };
+        self.metrics.record_socket_close(&labels);
+    }
+}
+
+impl SocketCloseGuard {
+    /// Create a new socket close guard
+    pub fn new(metrics: Arc<Metrics>, reporter: Reporter) -> Self {
+        Self { metrics, reporter }
     }
 }
 
@@ -508,7 +578,7 @@ impl ConnectionResult {
     }
 
     // Record our final result, with more details as a response flag.
-    pub fn record_with_flag<E: std::error::Error>(
+    pub fn record_with_flag<E: std::error::Error + 'static>(
         mut self,
         res: Result<(), E>,
         flag: ResponseFlags,
@@ -518,12 +588,44 @@ impl ConnectionResult {
     }
 
     // Record our final result.
-    pub fn record<E: std::error::Error>(mut self, res: Result<(), E>) {
+    pub fn record<E: std::error::Error + 'static>(mut self, res: Result<(), E>) {
+        // If no specific flag was set and we have an error, try to infer the failure reason
+        if self.tl.response_flags == ResponseFlags::None
+            && let Err(ref err) = res
+        {
+            self.tl.response_flags = Self::extract_failure_reason(err);
+        }
         self.record_internal(res)
     }
 
+    // Extract failure reason from error type using downcasting
+    fn extract_failure_reason<E: std::error::Error + 'static>(err: &E) -> ResponseFlags {
+        use std::any::Any;
+
+        // Try to downcast the error itself to proxy::Error
+        if let Some(proxy_err) = (err as &dyn Any).downcast_ref::<proxy::Error>() {
+            return match proxy_err {
+                proxy::Error::Tls(_) => ResponseFlags::TlsFailure,
+                proxy::Error::Http2Handshake(_) | proxy::Error::H2(_) => {
+                    ResponseFlags::Http2HandshakeFailure
+                }
+                proxy::Error::MaybeHBONENetworkPolicyError(_) => ResponseFlags::NetworkPolicyError,
+                proxy::Error::Identity(_) => ResponseFlags::IdentityError,
+                proxy::Error::AuthorizationPolicyRejection(_)
+                | proxy::Error::AuthorizationPolicyLateRejection => {
+                    ResponseFlags::AuthorizationPolicyDenied
+                }
+                proxy::Error::ConnectionFailed(_) => ResponseFlags::ConnectionFailure,
+                _ => ResponseFlags::ConnectionFailure,
+            };
+        }
+
+        // Default to generic connection failure if we can't identify the error type
+        ResponseFlags::ConnectionFailure
+    }
+
     // Internal-only function that takes `&mut` to facilitate Drop. Public consumers must use consuming functions.
-    fn record_internal<E: std::error::Error>(&mut self, res: Result<(), E>) {
+    fn record_internal<E: std::error::Error + 'static>(&mut self, res: Result<(), E>) {
         debug_assert!(!self.recorded, "record called multiple times");
         if self.recorded {
             return;
@@ -533,6 +635,18 @@ impl ConnectionResult {
 
         // Unconditionally record the connection was closed
         self.metrics.connection_close.get_or_create(tl).inc();
+
+        if matches!(
+            tl.response_flags,
+            ResponseFlags::ConnectionFailure
+                | ResponseFlags::AuthorizationPolicyDenied
+                | ResponseFlags::TlsFailure
+                | ResponseFlags::Http2HandshakeFailure
+                | ResponseFlags::NetworkPolicyError
+                | ResponseFlags::IdentityError
+        ) {
+            self.metrics.connection_failures.get_or_create(tl).inc();
+        }
 
         // Unconditionally write out an access log
         let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
