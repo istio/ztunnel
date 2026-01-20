@@ -152,7 +152,7 @@ impl CommonTrafficLabels {
         self
     }
 
-    fn with_derived_source(mut self, w: Option<&DerivedWorkload>) -> Self {
+    pub fn with_derived_source(mut self, w: Option<&DerivedWorkload>) -> Self {
         let Some(w) = w else { return self };
         self.source_workload = w.workload_name.clone().into();
         self.source_canonical_service = w.app.clone().into();
@@ -196,6 +196,26 @@ impl CommonTrafficLabels {
         self.destination_service = w.hostname.clone().into();
         self.destination_service_name = w.name.clone().into();
         self.destination_service_namespace = w.namespace.clone().into();
+        self
+    }
+
+    pub fn with_derived_destination(mut self, w: Option<&DerivedWorkload>) -> Self {
+        let Some(w) = w else { return self };
+        self.destination_workload = w.workload_name.clone().into();
+        self.destination_canonical_service = w.app.clone().into();
+        self.destination_canonical_revision = w.revision.clone().into();
+        self.destination_workload_namespace = w.namespace.clone().into();
+        self.destination_app = w.workload_name.clone().into();
+        self.destination_version = w.revision.clone().into();
+        self.destination_cluster = w.cluster_id.clone().into();
+        // This is the identity from the TLS handshake; this is the most trustworthy source so use it
+        self.destination_principal = w.identity.clone().into();
+
+        let mut local = self.locality.0.unwrap_or_default();
+        local.destination_region = w.region.clone().into();
+        local.destination_zone = w.zone.clone().into();
+        self.locality = OptionallyEncode(Some(local));
+
         self
     }
 }
@@ -493,12 +513,20 @@ macro_rules! access_log {
         }
     };
 }
-impl ConnectionResult {
+
+pub struct ConnectionResultBuilder {
+    src: (SocketAddr, Option<RichStrng>),
+    dst: (SocketAddr, Option<RichStrng>),
+    hbone_target: Option<HboneAddress>,
+    start: Instant,
+    tl: CommonTrafficLabels,
+    metrics: Arc<Metrics>,
+}
+
+impl ConnectionResultBuilder {
     pub fn new(
         src: SocketAddr,
         dst: SocketAddr,
-        // If using hbone, the inner HBONE address
-        // That is, dst is the L4 address, while is the :authority.
         hbone_target: Option<HboneAddress>,
         start: Instant,
         conn: ConnectionOpen,
@@ -511,46 +539,9 @@ impl ConnectionResult {
             conn.destination.as_ref().map(|wl| wl.name.clone().into()),
         );
         let tl = CommonTrafficLabels::from(conn);
-        metrics.connection_opens.get_or_create(&tl).inc();
-
-        let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
 
         src.1 = src.1.or(tl.source_canonical_service.clone().inner());
         dst.1 = dst.1.or(tl.destination_canonical_service.clone().inner());
-        event!(
-            target: "access",
-            parent: None,
-            tracing::Level::DEBUG,
-
-            src.addr = %src.0,
-            src.workload = src.1.as_deref().map(to_value),
-            src.namespace = tl.source_workload_namespace.to_value(),
-            src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
-
-            dst.addr = %dst.0,
-            dst.hbone_addr = hbone_target.as_ref().map(display),
-            dst.service = tl.destination_service.to_value(),
-            dst.workload = dst.1.as_deref().map(to_value),
-            dst.namespace = tl.destination_workload_namespace.to_value(),
-            dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
-
-            direction = if tl.reporter == Reporter::source {
-                "outbound"
-            } else {
-                "inbound"
-            },
-
-            "connection opened"
-        );
-        // Grab the metrics with our labels now, so we don't need to fetch them each time.
-        // The inner metric is an Arc so clone is fine/cheap.
-        // With the raw Counter, we increment is a simple atomic add operation (~1ns).
-        // Fetching the metric itself is ~300ns; fast, but we call it on each read/write so it would
-        // add up.
-        let sent_metric = metrics.sent_bytes.get_or_create(&tl).clone();
-        let recv_metric = metrics.received_bytes.get_or_create(&tl).clone();
-        let sent = atomic::AtomicU64::new(0);
-        let recv = atomic::AtomicU64::new(0);
         Self {
             src,
             dst,
@@ -558,13 +549,132 @@ impl ConnectionResult {
             start,
             tl,
             metrics,
+        }
+    }
 
+    pub fn with_derived_source(mut self, w: &DerivedWorkload) -> Self {
+        self.tl = self.tl.with_derived_source(Some(w));
+        self.src.1 = w.workload_name.clone().map(RichStrng::from);
+        self
+    }
+
+    pub fn with_derived_destination(mut self, w: &DerivedWorkload) -> Self {
+        self.tl = self.tl.with_derived_destination(Some(w));
+        self.dst.1 = w.workload_name.clone().map(RichStrng::from);
+        self
+    }
+
+    pub fn build(self) -> ConnectionResult {
+        let sent_metric = self.metrics.sent_bytes.get_or_create(&self.tl).clone();
+        let recv_metric = self.metrics.received_bytes.get_or_create(&self.tl).clone();
+        let sent = atomic::AtomicU64::new(0);
+        let recv = atomic::AtomicU64::new(0);
+
+        ConnectionResult::new(
+            self.src,
+            self.dst,
+            self.hbone_target,
+            self.start,
+            self.tl,
+            self.metrics,
+            sent,
+            sent_metric,
+            recv,
+            recv_metric,
+        )
+    }
+}
+
+impl ConnectionResult {
+    fn new(
+        src: (SocketAddr, Option<RichStrng>),
+        dst: (SocketAddr, Option<RichStrng>),
+        hbone_target: Option<HboneAddress>,
+        start: Instant,
+        tl: CommonTrafficLabels,
+        metrics: Arc<Metrics>,
+        sent: AtomicU64,
+        sent_metric: Counter,
+        recv: AtomicU64,
+        recv_metric: Counter,
+    ) -> Self {
+        metrics.connection_opens.get_or_create(&tl).inc();
+
+        Self {
+            src,
+            dst,
+            hbone_target,
+            start,
+            tl,
+            metrics,
             sent,
             sent_metric,
             recv,
             recv_metric,
             recorded: false,
         }
+
+        // // for src and dest, try to get pod name but fall back to "canonical service"
+        // let mut src = (src, conn.source.as_ref().map(|wl| wl.name.clone().into()));
+        // let mut dst = (
+        //     dst,
+        //     conn.destination.as_ref().map(|wl| wl.name.clone().into()),
+        // );
+        // let tl = CommonTrafficLabels::from(conn);
+        // metrics.connection_opens.get_or_create(&tl).inc();
+        //
+        // let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
+        //
+        // src.1 = src.1.or(tl.source_canonical_service.clone().inner());
+        // dst.1 = dst.1.or(tl.destination_canonical_service.clone().inner());
+        // event!(
+        //     target: "access",
+        //     parent: None,
+        //     tracing::Level::DEBUG,
+        //
+        //     src.addr = %src.0,
+        //     src.workload = src.1.as_deref().map(to_value),
+        //     src.namespace = tl.source_workload_namespace.to_value(),
+        //     src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+        //
+        //     dst.addr = %dst.0,
+        //     dst.hbone_addr = hbone_target.as_ref().map(display),
+        //     dst.service = tl.destination_service.to_value(),
+        //     dst.workload = dst.1.as_deref().map(to_value),
+        //     dst.namespace = tl.destination_workload_namespace.to_value(),
+        //     dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+        //
+        //     direction = if tl.reporter == Reporter::source {
+        //         "outbound"
+        //     } else {
+        //         "inbound"
+        //     },
+        //
+        //     "connection opened"
+        // );
+        // // Grab the metrics with our labels now, so we don't need to fetch them each time.
+        // // The inner metric is an Arc so clone is fine/cheap.
+        // // With the raw Counter, we increment is a simple atomic add operation (~1ns).
+        // // Fetching the metric itself is ~300ns; fast, but we call it on each read/write so it would
+        // // add up.
+        // let sent_metric = metrics.sent_bytes.get_or_create(&tl).clone();
+        // let recv_metric = metrics.received_bytes.get_or_create(&tl).clone();
+        // let sent = atomic::AtomicU64::new(0);
+        // let recv = atomic::AtomicU64::new(0);
+        // Self {
+        //     src,
+        //     dst,
+        //     hbone_target,
+        //     start,
+        //     tl,
+        //     metrics,
+        //
+        //     sent,
+        //     sent_metric,
+        //     recv,
+        //     recv_metric,
+        //     recorded: false,
+        // }
     }
 
     pub fn increment_send(&self, res: u64) {

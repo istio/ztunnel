@@ -23,7 +23,7 @@ use rustls::client::Resumption;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, RootCertStore, ServerConfig, server};
+use rustls::{ClientConfig, CommonState, RootCertStore, ServerConfig};
 use rustls_pemfile::Item;
 use std::io::Cursor;
 use std::str::FromStr;
@@ -60,7 +60,7 @@ pub struct WorkloadCertificate {
     pub roots: Vec<Certificate>,
 }
 
-pub fn identity_from_connection(conn: &server::ServerConnection) -> Option<Identity> {
+pub fn identity_from_connection(conn: &CommonState) -> Option<Identity> {
     use x509_parser::prelude::*;
     conn.peer_certificates()
         .and_then(|certs| certs.first())

@@ -29,7 +29,9 @@ use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tracing::{Instrument, debug, trace};
 
+use crate::baggage::Baggage;
 use crate::config;
+use crate::tls::identity_from_connection;
 
 use flurry;
 
@@ -91,11 +93,15 @@ impl ConnSpawner {
 
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
+        let (_, ssl) = tls_stream.get_ref();
+        let peer_identity = identity_from_connection(ssl);
+
         let sender = h2::client::spawn_connection(
             self.cfg.clone(),
             tls_stream,
             self.timeout_rx.clone(),
             key,
+            peer_identity,
         )
         .await?;
         Ok(sender)
@@ -370,7 +376,7 @@ impl WorkloadHBONEPool {
         &mut self,
         workload_key: &WorkloadKey,
         request: http::Request<()>,
-    ) -> Result<H2Stream, Error> {
+    ) -> Result<(H2Stream, Option<Baggage>), Error> {
         let mut connection = self.connect(workload_key).await?;
 
         connection.send_request(request).await

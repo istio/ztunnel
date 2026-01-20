@@ -22,7 +22,10 @@ use tokio::sync::watch;
 
 use tracing::{Instrument, debug, error, info, info_span, trace_span};
 
-use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, ResponseFlags, util};
+use super::{
+    ConnectionResult, ConnectionResultBuilder, Error, HboneAddress, LocalWorkloadInformation,
+    ResponseFlags, util,
+};
 use crate::baggage::{baggage_header_val, parse_baggage_header};
 use crate::identity::Identity;
 
@@ -53,25 +56,6 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    fn build_response(&self, status: StatusCode) -> Response<()> {
-        let local_wl = self.pi.local_workload_information.get_workload().unwrap();
-        let baggage = baggage::baggage_header_val(
-            &cluster,
-            &local_wl.namespace,
-            &local_wl.workload_type,
-            &local_wl.workload_name,
-            &local_wl.canonical_name,
-            &local_wl.canonical_revision,
-            &local_wl.locality.region,
-            &local_wl.locality.zone,
-        );
-        Response::builder()
-            .status(status)
-            .header(BAGGAGE_HEADER, baggage)
-            .body(())
-            .expect("builder with known status code should not fail")
-    }
-
     pub(crate) async fn new(pi: Arc<ProxyInputs>, drain: DrainWatcher) -> Result<Inbound, Error> {
         let listener = pi
             .socket_factory
@@ -233,7 +217,7 @@ impl Inbound {
                 // At this point in processing, we never built up full context to log a complete access log.
                 // Instead, just log a minimal error line.
                 metrics::log_early_deny(src, dst, Reporter::destination, e);
-                if let Err(err) = req.send_error(self.build_response(code)) {
+                if let Err(err) = req.send_error(build_response(code, None)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -307,7 +291,7 @@ impl Inbound {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
                 ri.result_tracker.record_with_flag(Err(err), flag);
-                if let Err(err) = req.send_error(self.build_response(code)) {
+                if let Err(err) = req.send_error(build_response(code, None)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -324,7 +308,10 @@ impl Inbound {
         // See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt for more information about the
         // proxy protocol.
         let send = req
-            .send_response(self.build_response(StatusCode::OK))
+            .send_response(build_response(
+                StatusCode::OK,
+                Some((ri.destination_workload.as_ref(), pi.cfg.cluster_id.as_str())),
+            ))
             .and_then(|h2_stream| async {
                 if let Some(TunnelRequest {
                     protocol: Protocol::PROXY,
@@ -445,29 +432,35 @@ impl Inbound {
             upstream_service,
             &destination_workload,
         );
-        let result_tracker = Box::new(metrics::ConnectionResult::new(
-            rbac_ctx.conn.src,
-            // For consistency with outbound logs, report the original destination (with 15008 port)
-            // as dst.addr, and the target address as dst.hbone_addr
-            original_dst,
-            Some(hbone_addr.clone()),
-            start,
-            ConnectionOpen {
-                reporter: Reporter::destination,
-                source,
-                derived_source: Some(derived_source),
-                destination: Some(destination_workload),
-                connection_security_policy: metrics::SecurityPolicy::mutual_tls,
-                destination_service: ds,
-            },
-            pi.metrics.clone(),
-        ));
+        let mut connection_result_builder = ConnectionResultBuilder::new(
+                rbac_ctx.conn.src,
+                // For consistency with outbound logs, report the original destination (with 15008 port)
+                // as dst.addr, and the target address as dst.hbone_addr
+                original_dst,
+                Some(hbone_addr.clone()),
+                start,
+                ConnectionOpen {
+                    reporter: Reporter::destination,
+                    source,
+                    derived_source: Some(derived_source.clone()),
+                    destination: Some(destination_workload.clone()),
+                    connection_security_policy: metrics::SecurityPolicy::mutual_tls,
+                    destination_service: ds,
+                },
+                pi.metrics.clone(),
+            );
+        // FIXME
+        if from_gateway {
+            connection_result_builder = connection_result_builder.with_derived_source(&derived_source);
+        }
+        let result_tracker = Box::new(connection_result_builder.build());
         Ok(InboundRequest {
             for_host,
             rbac_ctx,
             result_tracker,
             upstream_addr,
             tunnel_request,
+            destination_workload,
         })
     }
 
@@ -693,6 +686,7 @@ struct InboundRequest {
     result_tracker: Box<ConnectionResult>,
     upstream_addr: SocketAddr,
     tunnel_request: Option<TunnelRequest>,
+    destination_workload: Arc<Workload>,
 }
 
 /// InboundError represents an error with an associated status code.
@@ -734,6 +728,31 @@ pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
         .get(http::header::FORWARDED)
         .and_then(|rh| rh.to_str().ok())
         .and_then(proxy::parse_forwarded_host)
+}
+
+// Second argument is local workload and cluster name
+fn build_response(status: StatusCode, local_wl: Option<(&Workload, &str)>) -> Response<()> {
+    let mut builder = Response::builder().status(status);
+
+    if let Some((local_wl, cluster)) = local_wl {
+        builder = builder.header(
+            BAGGAGE_HEADER,
+            baggage_header_val(
+                cluster,
+                &local_wl.namespace,
+                &local_wl.workload_type,
+                &local_wl.workload_name,
+                &local_wl.canonical_name,
+                &local_wl.canonical_revision,
+                &local_wl.locality.region,
+                &local_wl.locality.zone,
+            ),
+        )
+    }
+
+    builder
+        .body(())
+        .expect("builder with known status code should not fail")
 }
 
 #[cfg(test)]

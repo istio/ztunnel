@@ -30,15 +30,17 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util,
 };
-use crate::proxy::{ConnectionOpen, ConnectionResult, DerivedWorkload, metrics};
+use crate::proxy::{
+    ConnectionOpen, ConnectionResultBuilder, DerivedWorkload, metrics,
+};
 
+use crate::baggage::{self, Baggage};
 use crate::drain::DrainWatcher;
 use crate::drain::run_with_drain;
 use crate::proxy::h2::{H2Stream, client::WorkloadKey};
 use crate::state::service::{LoadBalancerMode, Service, ServiceDescription};
 use crate::state::workload::OutboundProtocol;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
-use crate::baggage;
 use crate::state::{ServiceResolutionMode, Upstream};
 use crate::{assertions, copy, proxy, socket};
 
@@ -199,36 +201,35 @@ impl OutboundConnection {
 
         let metrics = self.pi.metrics.clone();
         let hbone_target = req.hbone_target_destination.clone();
-        let result_tracker = Box::new(ConnectionResult::new(
+        let connection_result_builder = ConnectionResultBuilder::new(
             source_addr,
             req.actual_destination,
             hbone_target,
             start,
             Self::conn_metrics_from_request(&req),
             metrics,
-        ));
+        );
 
-        let res = match req.protocol {
+        match req.protocol {
             OutboundProtocol::DOUBLEHBONE => {
                 // We box this since its not a common path and it would make the future really big.
                 Box::pin(self.proxy_to_double_hbone(
                     source_stream,
                     source_addr,
                     &req,
-                    &result_tracker,
+                    connection_result_builder,
                 ))
                 .await
             }
             OutboundProtocol::HBONE => {
-                self.proxy_to_hbone(source_stream, source_addr, &req, &result_tracker)
+                self.proxy_to_hbone(source_stream, source_addr, &req, connection_result_builder)
                     .await
             }
             OutboundProtocol::TCP => {
-                self.proxy_to_tcp(source_stream, &req, &result_tracker)
+                self.proxy_to_tcp(source_stream, &req, connection_result_builder)
                     .await
             }
         };
-        result_tracker.record(res)
     }
 
     async fn proxy_to_double_hbone(
@@ -236,51 +237,85 @@ impl OutboundConnection {
         stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        connection_stats: &ConnectionResult,
-    ) -> Result<(), Error> {
-        // Create the outer HBONE stream
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        // Wrap upgraded to implement tokio's Async{Write,Read}
-        let upgraded = TokioH2Stream::new(upgraded);
+        mut connection_stats_builder: ConnectionResultBuilder,
+    ) {
+        let res = (async move {
+            // Create the outer HBONE stream
+            let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+            // Wrap upgraded to implement tokio's Async{Write,Read}
+            let upgraded = TokioH2Stream::new(upgraded);
 
-        // For the inner one, we do it manually to avoid connection pooling.
-        // Otherwise, we would only ever reach one workload in the remote cluster.
-        // We also need to abort tasks the right way to get graceful terminations.
-        let wl_key = WorkloadKey {
-            src_id: req.source.identity(),
-            dst_id: req.final_sans.clone(),
-            src: remote_addr.ip(),
-            dst: req.actual_destination,
-        };
+            // For the inner one, we do it manually to avoid connection pooling.
+            // Otherwise, we would only ever reach one workload in the remote cluster.
+            // We also need to abort tasks the right way to get graceful terminations.
+            let wl_key = WorkloadKey {
+                src_id: req.source.identity(),
+                dst_id: req.final_sans.clone(),
+                src: remote_addr.ip(),
+                dst: req.actual_destination,
+            };
 
-        // Fetch certs and establish inner TLS connection.
-        let cert = self
-            .pi
-            .local_workload_information
-            .fetch_certificate()
-            .await?;
-        let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
-        let tls_stream = connector.connect(upgraded).await?;
-
-        // Spawn inner CONNECT tunnel
-        let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-        let mut sender =
-            super::h2::client::spawn_connection(self.pi.cfg.clone(), tls_stream, drain_rx, wl_key)
+            // Fetch certs and establish inner TLS connection.
+            let cert = self
+                .pi
+                .local_workload_information
+                .fetch_certificate()
                 .await?;
-        let http_request = self.create_hbone_request(remote_addr, req);
-        let inner_upgraded = sender.send_request(http_request).await?;
+            let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
+            let tls_stream = connector.connect(upgraded).await?;
 
-        // Proxy
-        let res = copy::copy_bidirectional(
-            copy::TcpStreamSplitter(stream),
-            inner_upgraded,
-            connection_stats,
-        )
+            // Spawn inner CONNECT tunnel
+            let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+            let mut sender = super::h2::client::spawn_connection(
+                self.pi.cfg.clone(),
+                tls_stream,
+                drain_rx,
+                wl_key,
+                None,
+            )
+            .await?;
+            let http_request = self.create_hbone_request(remote_addr, req);
+            let (inner_upgraded, baggage) = sender.send_request(http_request).await?;
+
+            // Proxy
+            let derived_workload = baggage.map(|baggage| DerivedWorkload {
+                workload_name: baggage.workload_name,
+                app: baggage.service_name,
+                namespace: baggage.namespace,
+                identity: sender.peer_identity().cloned(),
+                cluster_id: baggage.cluster_id,
+                region: baggage.region,
+                zone: baggage.zone,
+                revision: baggage.revision,
+            });
+            Result::<_, Error>::Ok((derived_workload, drain_tx, inner_upgraded))
+        })
         .await;
 
-        let _ = drain_tx.send(true);
+        match res {
+            Err(e) => {
+                let connection_stats = connection_stats_builder.build();
+                connection_stats.record(Err(e));
+                return;
+            }
+            Ok((derived_workload, drain_tx, inner_upgraded)) => {
+                if let Some(derived_workload) = derived_workload {
+                    connection_stats_builder =
+                        connection_stats_builder.with_derived_destination(&derived_workload);
+                }
 
-        res
+                let connection_stats = connection_stats_builder.build();
+                let res = copy::copy_bidirectional(
+                    copy::TcpStreamSplitter(stream),
+                    inner_upgraded,
+                    &connection_stats,
+                )
+                .await;
+                let _ = drain_tx.send(true);
+
+                connection_stats.record(res);
+            }
+        }
     }
 
     async fn proxy_to_hbone(
@@ -288,10 +323,16 @@ impl OutboundConnection {
         stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        connection_stats: &ConnectionResult,
-    ) -> Result<(), Error> {
-        let upgraded = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
-        copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, connection_stats).await
+        connection_stats_builder: ConnectionResultBuilder,
+    ) {
+        let connection_stats = connection_stats_builder.build();
+        let res = (async {
+            let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
+            copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, &connection_stats)
+                .await
+        })
+        .await;
+        connection_stats.record(res);
     }
 
     fn create_hbone_request(
@@ -322,7 +363,7 @@ impl OutboundConnection {
         &mut self,
         remote_addr: SocketAddr,
         req: &Request,
-    ) -> Result<H2Stream, Error> {
+    ) -> Result<(H2Stream, Option<Baggage>), Error> {
         let request = self.create_hbone_request(remote_addr, req);
         let pool_key = Box::new(WorkloadKey {
             src_id: req.source.identity(),
@@ -331,32 +372,39 @@ impl OutboundConnection {
             src: remote_addr.ip(),
             dst: req.actual_destination,
         });
-        let upgraded = Box::pin(self.pool.send_request_pooled(&pool_key, request))
+        // FIXME
+        let (upgraded, baggage) = Box::pin(self.pool.send_request_pooled(&pool_key, request))
             .instrument(trace_span!("outbound connect"))
             .await?;
-        Ok(upgraded)
+        Ok((upgraded, baggage))
     }
 
     async fn proxy_to_tcp(
         &mut self,
         stream: TcpStream,
         req: &Request,
-        connection_stats: &ConnectionResult,
-    ) -> Result<(), Error> {
-        let outbound = super::freebind_connect(
-            None, // No need to spoof source IP on outbound
-            req.actual_destination,
-            self.pi.socket_factory.as_ref(),
-        )
-        .await?;
+        connection_stats_builder: ConnectionResultBuilder,
+    ) {
+        let connection_stats = connection_stats_builder.build();
 
-        // Proxying data between downstream and upstream
-        copy::copy_bidirectional(
-            copy::TcpStreamSplitter(stream),
-            copy::TcpStreamSplitter(outbound),
-            connection_stats,
-        )
-        .await
+        let res = (async {
+            let outbound = super::freebind_connect(
+                None, // No need to spoof source IP on outbound
+                req.actual_destination,
+                self.pi.socket_factory.as_ref(),
+            )
+            .await?;
+
+            // Proxying data between downstream and upstream
+            copy::copy_bidirectional(
+                copy::TcpStreamSplitter(stream),
+                copy::TcpStreamSplitter(outbound),
+                &connection_stats,
+            )
+            .await
+        })
+        .await;
+        connection_stats.record(res);
     }
 
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
