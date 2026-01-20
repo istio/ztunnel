@@ -50,6 +50,7 @@ pub struct TestApp {
     pub udp_dns_proxy_address: Option<SocketAddr>,
     pub cert_manager: Arc<SecretManager>,
 
+    #[cfg(target_os = "linux")]
     pub namespace: Option<super::netns::Namespace>,
     pub shutdown: ShutdownTrigger,
     pub ztunnel_identity: Option<identity::Identity>,
@@ -65,6 +66,7 @@ impl From<(&Bound, Arc<SecretManager>)> for TestApp {
             tcp_dns_proxy_address: app.tcp_dns_proxy_address,
             udp_dns_proxy_address: app.udp_dns_proxy_address,
             cert_manager,
+            #[cfg(target_os = "linux")]
             namespace: None,
             shutdown: app.shutdown.trigger(),
             ztunnel_identity: None,
@@ -113,6 +115,7 @@ impl TestApp {
             Ok(client.request(req).await?)
         };
 
+        #[cfg(target_os = "linux")]
         match self.namespace {
             Some(ref _ns) => {
                 // TODO: if this is needed, do something like admin_request_body.
@@ -122,6 +125,8 @@ impl TestApp {
             }
             None => get_resp().await,
         }
+        #[cfg(not(target_os = "linux"))]
+        get_resp().await
     }
     pub async fn admin_request_body(&self, path: &str) -> anyhow::Result<Bytes> {
         let port = self.admin_address.port();
@@ -139,10 +144,13 @@ impl TestApp {
             Ok::<_, anyhow::Error>(res.collect().await?.to_bytes())
         };
 
+        #[cfg(target_os = "linux")]
         match self.namespace {
             Some(ref ns) => ns.clone().run(get_resp)?.join().unwrap(),
             None => get_resp().await,
         }
+        #[cfg(not(target_os = "linux"))]
+        get_resp().await
     }
 
     pub async fn metrics(&self) -> anyhow::Result<ParsedMetrics> {

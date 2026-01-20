@@ -814,6 +814,7 @@ mod tests {
                 connection_manager: ConnectionManager::default(),
                 resolver: None,
                 disable_inbound_freebind: false,
+                crl_manager: None,
             }),
             id: TraceParent::new(),
             pool: WorkloadHBONEPool::new(
