@@ -30,9 +30,7 @@ use crate::proxy::metrics::Reporter;
 use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent, util,
 };
-use crate::proxy::{
-    ConnectionOpen, ConnectionResultBuilder, DerivedWorkload, metrics,
-};
+use crate::proxy::{ConnectionOpen, ConnectionResultBuilder, DerivedWorkload, metrics};
 
 use crate::baggage::{self, Baggage};
 use crate::drain::DrainWatcher;
@@ -42,6 +40,7 @@ use crate::state::service::{LoadBalancerMode, Service, ServiceDescription};
 use crate::state::workload::OutboundProtocol;
 use crate::state::workload::{InboundProtocol, NetworkAddress, Workload, address::Address};
 use crate::state::{ServiceResolutionMode, Upstream};
+use crate::tls::identity_from_connection;
 use crate::{assertions, copy, proxy, socket};
 
 use super::h2::TokioH2Stream;
@@ -201,14 +200,14 @@ impl OutboundConnection {
 
         let metrics = self.pi.metrics.clone();
         let hbone_target = req.hbone_target_destination.clone();
-        let connection_result_builder = ConnectionResultBuilder::new(
+        let connection_result_builder = Box::new(ConnectionResultBuilder::new(
             source_addr,
             req.actual_destination,
             hbone_target,
             start,
             Self::conn_metrics_from_request(&req),
             metrics,
-        );
+        ));
 
         match req.protocol {
             OutboundProtocol::DOUBLEHBONE => {
@@ -237,7 +236,7 @@ impl OutboundConnection {
         stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        mut connection_stats_builder: ConnectionResultBuilder,
+        mut connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
         let res = (async move {
             // Create the outer HBONE stream
@@ -263,6 +262,8 @@ impl OutboundConnection {
                 .await?;
             let connector = cert.outbound_connector(wl_key.dst_id.clone())?;
             let tls_stream = connector.connect(upgraded).await?;
+            let (_, ssl) = tls_stream.get_ref();
+            let peer_identity = identity_from_connection(ssl);
 
             // Spawn inner CONNECT tunnel
             let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
@@ -271,7 +272,6 @@ impl OutboundConnection {
                 tls_stream,
                 drain_rx,
                 wl_key,
-                None,
             )
             .await?;
             let http_request = self.create_hbone_request(remote_addr, req);
@@ -282,7 +282,7 @@ impl OutboundConnection {
                 workload_name: baggage.workload_name,
                 app: baggage.service_name,
                 namespace: baggage.namespace,
-                identity: sender.peer_identity().cloned(),
+                identity: peer_identity,
                 cluster_id: baggage.cluster_id,
                 region: baggage.region,
                 zone: baggage.zone,
@@ -294,14 +294,14 @@ impl OutboundConnection {
 
         match res {
             Err(e) => {
-                let connection_stats = connection_stats_builder.build();
+                let connection_stats = Box::new(connection_stats_builder.build());
                 connection_stats.record(Err(e));
-                return;
             }
             Ok((derived_workload, drain_tx, inner_upgraded)) => {
                 if let Some(derived_workload) = derived_workload {
-                    connection_stats_builder =
-                        connection_stats_builder.with_derived_destination(&derived_workload);
+                    connection_stats_builder = Box::new(
+                        connection_stats_builder.with_derived_destination(&derived_workload),
+                    );
                 }
 
                 let connection_stats = connection_stats_builder.build();
@@ -323,9 +323,9 @@ impl OutboundConnection {
         stream: TcpStream,
         remote_addr: SocketAddr,
         req: &Request,
-        connection_stats_builder: ConnectionResultBuilder,
+        connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
-        let connection_stats = connection_stats_builder.build();
+        let connection_stats = Box::new(connection_stats_builder.build());
         let res = (async {
             let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
             copy::copy_bidirectional(copy::TcpStreamSplitter(stream), upgraded, &connection_stats)
@@ -383,9 +383,9 @@ impl OutboundConnection {
         &mut self,
         stream: TcpStream,
         req: &Request,
-        connection_stats_builder: ConnectionResultBuilder,
+        connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
-        let connection_stats = connection_stats_builder.build();
+        let connection_stats = Box::new(connection_stats_builder.build());
 
         let res = (async {
             let outbound = super::freebind_connect(

@@ -40,7 +40,6 @@ pub struct H2ConnectClient {
     stream_count: Arc<AtomicU16>,
     wl_key: WorkloadKey,
     // wl_key contains all accepted peer identities. `peer_identity` is the one actually used.
-    peer_identity: Option<Identity>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -129,10 +128,6 @@ impl H2ConnectClient {
         Ok((h2, baggage))
     }
 
-    pub fn peer_identity(&self) -> Option<&Identity> {
-        self.peer_identity.as_ref()
-    }
-
     // helper to allow us to handle errors once
     async fn internal_send(
         &mut self,
@@ -169,7 +164,6 @@ pub async fn spawn_connection(
     s: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     driver_drain: Receiver<bool>,
     wl_key: WorkloadKey,
-    peer_identity: Option<Identity>,
 ) -> Result<H2ConnectClient, Error> {
     let mut builder = h2::client::Builder::new();
     builder
@@ -210,7 +204,6 @@ pub async fn spawn_connection(
         stream_count: Arc::new(AtomicU16::new(0)),
         max_allowed_streams,
         wl_key,
-        peer_identity,
     };
     Ok(c)
 }

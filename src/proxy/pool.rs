@@ -31,7 +31,6 @@ use tracing::{Instrument, debug, trace};
 
 use crate::baggage::Baggage;
 use crate::config;
-use crate::tls::identity_from_connection;
 
 use flurry;
 
@@ -93,15 +92,12 @@ impl ConnSpawner {
 
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
-        let (_, ssl) = tls_stream.get_ref();
-        let peer_identity = identity_from_connection(ssl);
 
         let sender = h2::client::spawn_connection(
             self.cfg.clone(),
             tls_stream,
             self.timeout_rx.clone(),
             key,
-            peer_identity,
         )
         .await?;
         Ok(sender)

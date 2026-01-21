@@ -29,6 +29,7 @@ pub struct Baggage {
     pub zone: Option<Strng>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn baggage_header_val(
     cluster: &str,
     namespace: &str,

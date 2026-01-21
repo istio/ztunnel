@@ -434,29 +434,29 @@ impl SocketCloseGuard {
 /// ConnectionResult abstracts recording a metric and emitting an access log upon a connection completion
 pub struct ConnectionResult {
     // Src address and name
-    src: (SocketAddr, Option<RichStrng>),
+    pub(crate) src: (SocketAddr, Option<RichStrng>),
     // Dst address and name
-    dst: (SocketAddr, Option<RichStrng>),
-    hbone_target: Option<HboneAddress>,
-    start: Instant,
+    pub(crate) dst: (SocketAddr, Option<RichStrng>),
+    pub(crate) hbone_target: Option<HboneAddress>,
+    pub(crate) start: Instant,
 
     // TODO: storing CommonTrafficLabels adds ~600 bytes retained throughout a connection life time.
     // We can pre-fetch the metrics we need at initialization instead of storing this, then keep a more
     // efficient representation for the fields we need to log. Ideally, this would even be optional
     // in case logs were disabled.
-    tl: CommonTrafficLabels,
-    metrics: Arc<Metrics>,
+    pub(crate) tl: CommonTrafficLabels,
+    pub(crate) metrics: Arc<Metrics>,
 
     // sent records the number of bytes sent on this connection
-    sent: AtomicU64,
+    pub(crate) sent: AtomicU64,
     // sent_metric records the number of bytes sent on this connection to the aggregated metric counter
-    sent_metric: Counter,
+    pub(crate) sent_metric: Counter,
     // recv records the number of bytes received on this connection
-    recv: AtomicU64,
+    pub(crate) recv: AtomicU64,
     // recv_metric records the number of bytes received on this connection to the aggregated metric counter
-    recv_metric: Counter,
+    pub(crate) recv_metric: Counter,
     // Have we recorded yet?
-    recorded: bool,
+    pub(crate) recorded: bool,
 }
 
 // log_early_deny allows logging a connection is denied before we have enough information to emit proper
@@ -570,113 +570,24 @@ impl ConnectionResultBuilder {
         let sent = atomic::AtomicU64::new(0);
         let recv = atomic::AtomicU64::new(0);
 
-        ConnectionResult::new(
-            self.src,
-            self.dst,
-            self.hbone_target,
-            self.start,
-            self.tl,
-            self.metrics,
-            sent,
-            sent_metric,
-            recv,
-            recv_metric,
-        )
-    }
-}
-
-impl ConnectionResult {
-    fn new(
-        src: (SocketAddr, Option<RichStrng>),
-        dst: (SocketAddr, Option<RichStrng>),
-        hbone_target: Option<HboneAddress>,
-        start: Instant,
-        tl: CommonTrafficLabels,
-        metrics: Arc<Metrics>,
-        sent: AtomicU64,
-        sent_metric: Counter,
-        recv: AtomicU64,
-        recv_metric: Counter,
-    ) -> Self {
-        metrics.connection_opens.get_or_create(&tl).inc();
-
-        Self {
-            src,
-            dst,
-            hbone_target,
-            start,
-            tl,
-            metrics,
+        self.metrics.connection_opens.get_or_create(&self.tl).inc();
+        ConnectionResult {
+            src: self.src,
+            dst: self.dst,
+            hbone_target: self.hbone_target,
+            start: self.start,
+            tl: self.tl,
+            metrics: self.metrics,
             sent,
             sent_metric,
             recv,
             recv_metric,
             recorded: false,
         }
-
-        // // for src and dest, try to get pod name but fall back to "canonical service"
-        // let mut src = (src, conn.source.as_ref().map(|wl| wl.name.clone().into()));
-        // let mut dst = (
-        //     dst,
-        //     conn.destination.as_ref().map(|wl| wl.name.clone().into()),
-        // );
-        // let tl = CommonTrafficLabels::from(conn);
-        // metrics.connection_opens.get_or_create(&tl).inc();
-        //
-        // let mtls = tl.connection_security_policy == SecurityPolicy::mutual_tls;
-        //
-        // src.1 = src.1.or(tl.source_canonical_service.clone().inner());
-        // dst.1 = dst.1.or(tl.destination_canonical_service.clone().inner());
-        // event!(
-        //     target: "access",
-        //     parent: None,
-        //     tracing::Level::DEBUG,
-        //
-        //     src.addr = %src.0,
-        //     src.workload = src.1.as_deref().map(to_value),
-        //     src.namespace = tl.source_workload_namespace.to_value(),
-        //     src.identity = tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
-        //
-        //     dst.addr = %dst.0,
-        //     dst.hbone_addr = hbone_target.as_ref().map(display),
-        //     dst.service = tl.destination_service.to_value(),
-        //     dst.workload = dst.1.as_deref().map(to_value),
-        //     dst.namespace = tl.destination_workload_namespace.to_value(),
-        //     dst.identity = tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
-        //
-        //     direction = if tl.reporter == Reporter::source {
-        //         "outbound"
-        //     } else {
-        //         "inbound"
-        //     },
-        //
-        //     "connection opened"
-        // );
-        // // Grab the metrics with our labels now, so we don't need to fetch them each time.
-        // // The inner metric is an Arc so clone is fine/cheap.
-        // // With the raw Counter, we increment is a simple atomic add operation (~1ns).
-        // // Fetching the metric itself is ~300ns; fast, but we call it on each read/write so it would
-        // // add up.
-        // let sent_metric = metrics.sent_bytes.get_or_create(&tl).clone();
-        // let recv_metric = metrics.received_bytes.get_or_create(&tl).clone();
-        // let sent = atomic::AtomicU64::new(0);
-        // let recv = atomic::AtomicU64::new(0);
-        // Self {
-        //     src,
-        //     dst,
-        //     hbone_target,
-        //     start,
-        //     tl,
-        //     metrics,
-        //
-        //     sent,
-        //     sent_metric,
-        //     recv,
-        //     recv_metric,
-        //     recorded: false,
-        // }
     }
+}
 
+impl ConnectionResult {
     pub fn increment_send(&self, res: u64) {
         self.sent.inc_by(res);
         self.sent_metric.inc_by(res);
