@@ -395,7 +395,9 @@ impl Inbound {
         // We may need a more explicit indicator in the future.
         // Note: previously this attempted to check that the src identity was equal to the Gateway;
         // this check is broken as the gateway only forwards an HBONE request, it doesn't initiate it itself.
-        let from_gateway = req.headers().get(X_ORIGIN_SOURCE_HEADER)
+        let from_gateway = req
+            .headers()
+            .get(X_ORIGIN_SOURCE_HEADER)
             .and_then(|h| h.to_str().ok())
             .map(|s| s.eq_ignore_ascii_case(&pi.cfg.network))
             .unwrap_or(false);
