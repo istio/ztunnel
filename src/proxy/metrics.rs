@@ -152,7 +152,7 @@ impl CommonTrafficLabels {
         self
     }
 
-    pub fn with_derived_source(mut self, w: Option<&DerivedWorkload>) -> Self {
+    fn with_derived_source(mut self, w: Option<&DerivedWorkload>) -> Self {
         let Some(w) = w else { return self };
         self.source_workload = w.workload_name.clone().into();
         self.source_canonical_service = w.app.clone().into();
@@ -199,7 +199,7 @@ impl CommonTrafficLabels {
         self
     }
 
-    pub fn with_derived_destination(mut self, w: Option<&DerivedWorkload>) -> Self {
+    fn with_derived_destination(mut self, w: Option<&DerivedWorkload>) -> Self {
         let Some(w) = w else { return self };
         self.destination_workload = w.workload_name.clone().into();
         self.destination_canonical_service = w.app.clone().into();

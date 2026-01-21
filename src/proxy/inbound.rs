@@ -436,26 +436,24 @@ impl Inbound {
             upstream_service,
             &destination_workload,
         );
-        let mut connection_result_builder = ConnectionResultBuilder::new(
-                rbac_ctx.conn.src,
-                // For consistency with outbound logs, report the original destination (with 15008 port)
-                // as dst.addr, and the target address as dst.hbone_addr
-                original_dst,
-                Some(hbone_addr.clone()),
-                start,
-                ConnectionOpen {
-                    reporter: Reporter::destination,
-                    source,
-                    derived_source: Some(derived_source.clone()),
-                    destination: Some(destination_workload.clone()),
-                    connection_security_policy: metrics::SecurityPolicy::mutual_tls,
-                    destination_service: ds,
-                },
-                pi.metrics.clone(),
-            );
-        if from_gateway {
-            connection_result_builder = connection_result_builder.with_derived_source(&derived_source);
-        }
+        let connection_result_builder = ConnectionResultBuilder::new(
+            rbac_ctx.conn.src,
+            // For consistency with outbound logs, report the original destination (with 15008 port)
+            // as dst.addr, and the target address as dst.hbone_addr
+            original_dst,
+            Some(hbone_addr.clone()),
+            start,
+            ConnectionOpen {
+                reporter: Reporter::destination,
+                source,
+                derived_source: Some(derived_source.clone()),
+                destination: Some(destination_workload.clone()),
+                connection_security_policy: metrics::SecurityPolicy::mutual_tls,
+                destination_service: ds,
+            },
+            pi.metrics.clone(),
+        );
+
         let result_tracker = Box::new(connection_result_builder.build());
         Ok(InboundRequest {
             for_host,

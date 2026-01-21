@@ -303,9 +303,8 @@ impl OutboundConnection {
             }
             Ok((derived_workload, drain_tx, inner_upgraded)) => {
                 if let Some(derived_workload) = derived_workload {
-                    connection_stats_builder = Box::new(
-                        connection_stats_builder.with_derived_destination(&derived_workload),
-                    );
+                    *connection_stats_builder =
+                        connection_stats_builder.with_derived_destination(&derived_workload);
                 }
 
                 let connection_stats = connection_stats_builder.build();
