@@ -39,7 +39,6 @@ pub struct H2ConnectClient {
     pub max_allowed_streams: u16,
     stream_count: Arc<AtomicU16>,
     wl_key: WorkloadKey,
-    // wl_key contains all accepted peer identities. `peer_identity` is the one actually used.
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -141,20 +140,7 @@ impl H2ConnectClient {
         if response.status() != 200 {
             return Err(Error::HttpStatus(response.status()));
         }
-        for header in response.headers().keys() {
-            let header_string = header.as_str();
-            debug!("response header: {}", header_string);
-            for value in response.headers().get_all(header) {
-                debug!("  value: {:?}", value);
-            }
-        }
-
         let baggage = parse_baggage_header(response.headers().get_all(BAGGAGE_HEADER)).ok();
-        if let Some(bag) = &baggage {
-            debug!("parsed baggage: {:?}", bag.workload_name);
-        } else {
-            debug!("no baggage found in response");
-        }
         Ok((stream, response.into_body(), baggage))
     }
 }

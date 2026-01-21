@@ -92,7 +92,6 @@ impl ConnSpawner {
 
         let tls_stream = connector.connect(tcp_stream).await?;
         trace!("connector connected, handshaking");
-
         let sender = h2::client::spawn_connection(
             self.cfg.clone(),
             tls_stream,

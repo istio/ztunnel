@@ -238,6 +238,7 @@ impl OutboundConnection {
         req: &Request,
         mut connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
+        // async move block allows use of ? operator
         let res = (async move {
             // Create the outer HBONE stream
             let (upgraded, _) = Box::pin(self.send_hbone_request(remote_addr, req)).await?;
@@ -359,6 +360,7 @@ impl OutboundConnection {
             .expect("builder with known status code should not fail")
     }
 
+    /// returns upgraded stream and peer's baggage
     async fn send_hbone_request(
         &mut self,
         remote_addr: SocketAddr,
@@ -372,7 +374,6 @@ impl OutboundConnection {
             src: remote_addr.ip(),
             dst: req.actual_destination,
         });
-        // FIXME
         let (upgraded, baggage) = Box::pin(self.pool.send_request_pooled(&pool_key, request))
             .instrument(trace_span!("outbound connect"))
             .await?;

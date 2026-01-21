@@ -333,8 +333,6 @@ impl WorkloadCertificate {
                 self.cert_and_intermediates_der(),
                 self.private_key.clone_key(),
             )?;
-        // TODO: DELETE ME
-        sc.key_log = Arc::new(rustls::KeyLogFile::new());
         sc.alpn_protocols = vec![b"h2".into()];
         Ok(sc)
     }
@@ -356,8 +354,6 @@ impl WorkloadCertificate {
         cc.alpn_protocols = vec![b"h2".into()];
         cc.resumption = Resumption::disabled();
         cc.enable_sni = false;
-        // TODO: DELETE ME
-        cc.key_log = Arc::new(rustls::KeyLogFile::new());
         Ok(cc)
     }
 

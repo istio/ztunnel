@@ -527,6 +527,8 @@ impl ConnectionResultBuilder {
     pub fn new(
         src: SocketAddr,
         dst: SocketAddr,
+        // If using hbone, the inner HBONE address
+        // That is, dst is the L4 address, while is the :authority.
         hbone_target: Option<HboneAddress>,
         start: Instant,
         conn: ConnectionOpen,
@@ -565,10 +567,42 @@ impl ConnectionResultBuilder {
     }
 
     pub fn build(self) -> ConnectionResult {
+        // Grab the metrics with our labels now, so we don't need to fetch them each time.
+        // The inner metric is an Arc so clone is fine/cheap.
+        // With the raw Counter, we increment is a simple atomic add operation (~1ns).
+        // Fetching the metric itself is ~300ns; fast, but we call it on each read/write so it would
+        // add up.
         let sent_metric = self.metrics.sent_bytes.get_or_create(&self.tl).clone();
         let recv_metric = self.metrics.received_bytes.get_or_create(&self.tl).clone();
         let sent = atomic::AtomicU64::new(0);
         let recv = atomic::AtomicU64::new(0);
+
+        let mtls = self.tl.connection_security_policy == SecurityPolicy::mutual_tls;
+        event!(
+            target: "access",
+            parent: None,
+            tracing::Level::DEBUG,
+
+            src.addr = %self.src.0,
+            src.workload = self.src.1.as_deref().map(to_value),
+            src.namespace = self.tl.source_workload_namespace.to_value(),
+            src.identity = self.tl.source_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+
+            dst.addr = %self.dst.0,
+            dst.hbone_addr = self.hbone_target.as_ref().map(display),
+            dst.service = self.tl.destination_service.to_value(),
+            dst.workload = self.dst.1.as_deref().map(to_value),
+            dst.namespace = self.tl.destination_workload_namespace.to_value(),
+            dst.identity = self.tl.destination_principal.as_ref().filter(|_| mtls).map(to_value_owned),
+
+            direction = if self.tl.reporter == Reporter::source {
+                "outbound"
+            } else {
+                "inbound"
+            },
+
+            "connection opened"
+        );
 
         self.metrics.connection_opens.get_or_create(&self.tl).inc();
         ConnectionResult {

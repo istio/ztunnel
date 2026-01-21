@@ -449,7 +449,6 @@ impl Inbound {
                 },
                 pi.metrics.clone(),
             );
-        // FIXME
         if from_gateway {
             connection_result_builder = connection_result_builder.with_derived_source(&derived_source);
         }
