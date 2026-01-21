@@ -616,7 +616,7 @@ mod test {
                 .unwrap()
         };
 
-        let c = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let (c, _baggage) = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
         let mut c = TokioH2Stream::new(c);
         c.write_all(b"abcde").await.unwrap();
         let mut b = [0u8; 100];
