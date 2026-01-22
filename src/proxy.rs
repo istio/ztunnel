@@ -558,7 +558,7 @@ pub struct TraceParent {
 
 pub const BAGGAGE_HEADER: &str = "baggage";
 pub const TRACEPARENT_HEADER: &str = "traceparent";
-pub const X_ORIGIN_SOURCE_HEADER: &str = "x-istio-origin-network";
+pub const X_ORIGIN_NETWORK_HEADER: &str = "x-istio-origin-network";
 
 impl TraceParent {
     pub fn header(&self) -> hyper::header::HeaderValue {
