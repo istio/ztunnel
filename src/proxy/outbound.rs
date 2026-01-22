@@ -1892,7 +1892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_X_ORIGIN_NETWORK_HEADER() {
+    async fn test_x_origin_network_header() {
         initialize_telemetry();
 
         // Create a test config with a specific network
