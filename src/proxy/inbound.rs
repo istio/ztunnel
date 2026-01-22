@@ -33,7 +33,9 @@ use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
-use crate::proxy::{BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
+use crate::proxy::{
+    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_ORIGIN_SOURCE_HEADER, metrics,
+};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
@@ -399,11 +401,13 @@ impl Inbound {
         // We may need a more explicit indicator in the future.
         // Note: previously this attempted to check that the src identity was equal to the Gateway;
         // this check is broken as the gateway only forwards an HBONE request, it doesn't initiate it itself.
-        let from_gateway = matches!(hbone_addr, HboneAddress::SvcHostname(_, _));
+        let from_gateway = req.headers().get(X_ORIGIN_SOURCE_HEADER).is_some();
+
         if from_gateway {
             debug!("request from gateway");
         }
         let source = match from_gateway {
+            // TODO: use baggage instead of looking up by IP
             true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
             false => {
                 let src_network_addr = NetworkAddress {
