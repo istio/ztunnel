@@ -406,7 +406,6 @@ impl Inbound {
             debug!("request from gateway");
         }
         let source = match from_gateway {
-            // TODO: use baggage instead of looking up by IP
             true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
             false => {
                 let src_network_addr = NetworkAddress {
