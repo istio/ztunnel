@@ -31,7 +31,7 @@ use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
 use crate::proxy::{
-    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_ORIGIN_SOURCE_HEADER, metrics,
+    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_ORIGIN_NETWORK_HEADER, metrics,
 };
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
@@ -397,7 +397,7 @@ impl Inbound {
         // this check is broken as the gateway only forwards an HBONE request, it doesn't initiate it itself.
         let from_gateway = req
             .headers()
-            .get(X_ORIGIN_SOURCE_HEADER)
+            .get(X_ORIGIN_NETWORK_HEADER)
             .and_then(|h| h.to_str().ok())
             .map(|s| s.eq_ignore_ascii_case(&pi.cfg.network))
             .unwrap_or(false);
