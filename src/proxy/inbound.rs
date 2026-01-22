@@ -403,12 +403,10 @@ impl Inbound {
         // this check is broken as the gateway only forwards an HBONE request, it doesn't initiate it itself.
         let from_gateway = req.headers().get(X_ORIGIN_SOURCE_HEADER).is_some();
 
-        if from_gateway {
-            debug!("request from gateway");
-        }
         let source = match from_gateway {
-            // TODO: use baggage instead of looking up by IP
-            true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
+            // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515.
+            // Instead, we will use baggage
+            true => None,
             false => {
                 let src_network_addr = NetworkAddress {
                     // we can assume source network is our network because we did not traverse a gateway
