@@ -296,7 +296,7 @@ mod namespaced {
         let want = HashMap::from([
             ("scope", "access"),
             ("src.workload", "client"),
-            ("dst.workload", "actual-ew-gtw"),
+            ("dst.workload", "echo"),
             ("dst.hbone_addr", "remote.default.svc.cluster.local:8080"),
             ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),
@@ -309,7 +309,7 @@ mod namespaced {
             ),
             (
                 "dst.identity",
-                "spiffe://cluster.local/ns/default/sa/actual-ew-gtw",
+                "spiffe://cluster.local/ns/default/sa/echo",
             ),
         ]);
         telemetry::testing::assert_contains(want);

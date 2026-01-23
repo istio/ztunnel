@@ -22,15 +22,20 @@ use tokio::sync::watch;
 
 use tracing::{Instrument, debug, error, info, info_span, trace_span};
 
-use super::{ConnectionResult, Error, HboneAddress, LocalWorkloadInformation, ResponseFlags, util};
-use crate::baggage::parse_baggage_header;
+use super::{
+    ConnectionResult, ConnectionResultBuilder, Error, HboneAddress, LocalWorkloadInformation,
+    ResponseFlags, util,
+};
+use crate::baggage::{baggage_header_val, parse_baggage_header};
 use crate::identity::Identity;
 
 use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
-use crate::proxy::{BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
+use crate::proxy::{
+    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_ORIGIN_SOURCE_HEADER, metrics,
+};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
@@ -214,7 +219,7 @@ impl Inbound {
                 // At this point in processing, we never built up full context to log a complete access log.
                 // Instead, just log a minimal error line.
                 metrics::log_early_deny(src, dst, Reporter::destination, e);
-                if let Err(err) = req.send_error(build_response(code)) {
+                if let Err(err) = req.send_error(build_response(code, None)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -288,7 +293,7 @@ impl Inbound {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
                 ri.result_tracker.record_with_flag(Err(err), flag);
-                if let Err(err) = req.send_error(build_response(code)) {
+                if let Err(err) = req.send_error(build_response(code, None)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -305,7 +310,10 @@ impl Inbound {
         // See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt for more information about the
         // proxy protocol.
         let send = req
-            .send_response(build_response(StatusCode::OK))
+            .send_response(build_response(
+                StatusCode::OK,
+                Some((ri.destination_workload.as_ref(), pi.cfg.cluster_id.as_str())),
+            ))
             .and_then(|h2_stream| async {
                 if let Some(TunnelRequest {
                     protocol: Protocol::PROXY,
@@ -393,12 +401,12 @@ impl Inbound {
         // We may need a more explicit indicator in the future.
         // Note: previously this attempted to check that the src identity was equal to the Gateway;
         // this check is broken as the gateway only forwards an HBONE request, it doesn't initiate it itself.
-        let from_gateway = matches!(hbone_addr, HboneAddress::SvcHostname(_, _));
-        if from_gateway {
-            debug!("request from gateway");
-        }
+        let from_gateway = req.headers().get(X_ORIGIN_SOURCE_HEADER).is_some();
+
         let source = match from_gateway {
-            true => None, // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515
+            // we cannot lookup source workload since we don't know the network, see https://github.com/istio/ztunnel/issues/515.
+            // Instead, we will use baggage
+            true => None,
             false => {
                 let src_network_addr = NetworkAddress {
                     // we can assume source network is our network because we did not traverse a gateway
@@ -426,7 +434,7 @@ impl Inbound {
             upstream_service,
             &destination_workload,
         );
-        let result_tracker = Box::new(metrics::ConnectionResult::new(
+        let connection_result_builder = ConnectionResultBuilder::new(
             rbac_ctx.conn.src,
             // For consistency with outbound logs, report the original destination (with 15008 port)
             // as dst.addr, and the target address as dst.hbone_addr
@@ -436,19 +444,22 @@ impl Inbound {
             ConnectionOpen {
                 reporter: Reporter::destination,
                 source,
-                derived_source: Some(derived_source),
-                destination: Some(destination_workload),
+                derived_source: Some(derived_source.clone()),
+                destination: Some(destination_workload.clone()),
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
             },
             pi.metrics.clone(),
-        ));
+        );
+
+        let result_tracker = Box::new(connection_result_builder.build());
         Ok(InboundRequest {
             for_host,
             rbac_ctx,
             result_tracker,
             upstream_addr,
             tunnel_request,
+            destination_workload,
         })
     }
 
@@ -674,6 +685,7 @@ struct InboundRequest {
     result_tracker: Box<ConnectionResult>,
     upstream_addr: SocketAddr,
     tunnel_request: Option<TunnelRequest>,
+    destination_workload: Arc<Workload>,
 }
 
 /// InboundError represents an error with an associated status code.
@@ -717,9 +729,27 @@ pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
         .and_then(proxy::parse_forwarded_host)
 }
 
-fn build_response(status: StatusCode) -> Response<()> {
-    Response::builder()
-        .status(status)
+// Second argument is local workload and cluster name
+fn build_response(status: StatusCode, local_wl: Option<(&Workload, &str)>) -> Response<()> {
+    let mut builder = Response::builder().status(status);
+
+    if let Some((local_wl, cluster)) = local_wl {
+        builder = builder.header(
+            BAGGAGE_HEADER,
+            baggage_header_val(
+                cluster,
+                &local_wl.namespace,
+                &local_wl.workload_type,
+                &local_wl.workload_name,
+                &local_wl.canonical_name,
+                &local_wl.canonical_revision,
+                &local_wl.locality.region,
+                &local_wl.locality.zone,
+            ),
+        )
+    }
+
+    builder
         .body(())
         .expect("builder with known status code should not fail")
 }
