@@ -31,7 +31,8 @@ use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
 use crate::proxy::{
-    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_FORWARDED_NETWORK_HEADER, metrics,
+    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_FORWARDED_NETWORK_HEADER,
+    metrics,
 };
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
