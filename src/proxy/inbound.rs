@@ -30,7 +30,10 @@ use crate::config::Config;
 use crate::drain::DrainWatcher;
 use crate::proxy::h2::server::{H2Request, RequestParts};
 use crate::proxy::metrics::{ConnectionOpen, Reporter};
-use crate::proxy::{BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, metrics};
+use crate::proxy::{
+    BAGGAGE_HEADER, ProxyInputs, TRACEPARENT_HEADER, TraceParent, X_FORWARDED_NETWORK_HEADER,
+    metrics,
+};
 use crate::rbac::Connection;
 use crate::socket::to_canonical;
 use crate::state::service::Service;
@@ -393,7 +396,13 @@ impl Inbound {
         // We may need a more explicit indicator in the future.
         // Note: previously this attempted to check that the src identity was equal to the Gateway;
         // this check is broken as the gateway only forwards an HBONE request, it doesn't initiate it itself.
-        let from_gateway = matches!(hbone_addr, HboneAddress::SvcHostname(_, _));
+        let from_gateway = req
+            .headers()
+            .get(X_FORWARDED_NETWORK_HEADER)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| !s.eq_ignore_ascii_case(&pi.cfg.network)) // If the network is different, it's from a gateway
+            .unwrap_or(false);
+
         if from_gateway {
             debug!("request from gateway");
         }
