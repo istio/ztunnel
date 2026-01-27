@@ -30,7 +30,7 @@ use crate::strng::Strng;
 use crate::proxy::metrics::Reporter;
 use crate::proxy::{
     BAGGAGE_HEADER, Error, HboneAddress, ProxyInputs, TRACEPARENT_HEADER, TraceParent,
-    X_ORIGIN_SOURCE_HEADER, util,
+    X_FORWARDED_NETWORK_HEADER, util,
 };
 use crate::proxy::{ConnectionOpen, ConnectionResultBuilder, DerivedWorkload, metrics};
 
@@ -362,7 +362,7 @@ impl OutboundConnection {
 
         // Add x-istio-origin-network header for inner CONNECT requests in double HBONE
         if let Some(network) = origin_network {
-            builder = builder.header(X_ORIGIN_SOURCE_HEADER, network.as_str());
+            builder = builder.header(X_FORWARDED_NETWORK_HEADER, network.as_str());
         }
 
         builder
@@ -1941,7 +1941,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_x_origin_source_header() {
+    async fn test_x_forwarded_network_header() {
         initialize_telemetry();
 
         // Create a test config with a specific network
@@ -2025,7 +2025,7 @@ mod tests {
         assert!(
             http_request_no_header
                 .headers()
-                .get(X_ORIGIN_SOURCE_HEADER)
+                .get(X_FORWARDED_NETWORK_HEADER)
                 .is_none(),
             "x-istio-origin-network header should not be present when origin_network is None (single HBONE)"
         );
@@ -2037,7 +2037,7 @@ mod tests {
         assert_eq!(
             http_request_with_header
                 .headers()
-                .get(X_ORIGIN_SOURCE_HEADER)
+                .get(X_FORWARDED_NETWORK_HEADER)
                 .unwrap(),
             "test-network",
             "x-istio-origin-network header should contain the network name for double HBONE inner request"
