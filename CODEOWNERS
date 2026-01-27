@@ -1,4 +1,4 @@
-*                @istio/wg-networking-maintainers-ztunnel @Stevenjin8 @keithmattix @grnmeira @krinkinmu
+*                @istio/wg-networking-maintainers-ztunnel
 /Makefile*       @istio/wg-test-and-release-maintainers
 /*.md            @istio/wg-test-and-release-maintainers
 /common/         @istio/wg-test-and-release-maintainers
