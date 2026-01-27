@@ -307,10 +307,7 @@ mod namespaced {
                 "src.identity",
                 "spiffe://cluster.local/ns/default/sa/client",
             ),
-            (
-                "dst.identity",
-                "spiffe://cluster.local/ns/default/sa/echo",
-            ),
+            ("dst.identity", "spiffe://cluster.local/ns/default/sa/echo"),
         ]);
         telemetry::testing::assert_contains(want);
         Ok(())
