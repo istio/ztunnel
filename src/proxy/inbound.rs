@@ -220,7 +220,9 @@ impl Inbound {
                 // At this point in processing, we never built up full context to log a complete access log.
                 // Instead, just log a minimal error line.
                 metrics::log_early_deny(src, dst, Reporter::destination, e);
-                if let Err(err) = req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage)) {
+                if let Err(err) =
+                    req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage))
+                {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -294,7 +296,9 @@ impl Inbound {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
                 ri.result_tracker.record_with_flag(Err(err), flag);
-                if let Err(err) = req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage)) {
+                if let Err(err) =
+                    req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage))
+                {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -750,16 +754,21 @@ pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
 }
 
 // Second argument is local workload and cluster name
-fn build_response(status: StatusCode, local_wl: Option<&Workload>, enable_response_baggage: bool) -> Response<()> {
+fn build_response(
+    status: StatusCode,
+    local_wl: Option<&Workload>,
+    enable_response_baggage: bool,
+) -> Response<()> {
     let mut builder = Response::builder().status(status);
 
     if let Some(local_wl) = local_wl
-        && enable_response_baggage {
-            builder = builder.header(
-                BAGGAGE_HEADER,
-                baggage_header_val(&local_wl.baggage(), &local_wl.workload_type),
-            )
-        }
+        && enable_response_baggage
+    {
+        builder = builder.header(
+            BAGGAGE_HEADER,
+            baggage_header_val(&local_wl.baggage(), &local_wl.workload_type),
+        )
+    }
 
     builder
         .body(())
@@ -1108,10 +1117,10 @@ mod tests {
 
     #[test]
     fn test_build_response_baggage_feature_gate() {
-        use http::StatusCode;
+        use super::build_response;
         use crate::proxy::BAGGAGE_HEADER;
         use crate::test_helpers;
-        use super::build_response;
+        use http::StatusCode;
 
         // Create a test workload
         let workload = test_helpers::test_default_workload();
@@ -1120,7 +1129,11 @@ mod tests {
         let mut config_enabled = test_helpers::test_config();
         config_enabled.enable_enhanced_baggage = true;
 
-        let response_enabled = build_response(StatusCode::OK, Some(&workload), config_enabled.enable_enhanced_baggage);
+        let response_enabled = build_response(
+            StatusCode::OK,
+            Some(&workload),
+            config_enabled.enable_enhanced_baggage,
+        );
         assert!(response_enabled.headers().contains_key(BAGGAGE_HEADER));
 
         let baggage_header = response_enabled.headers().get(BAGGAGE_HEADER).unwrap();
@@ -1132,20 +1145,25 @@ mod tests {
         let mut config_disabled = test_helpers::test_config();
         config_disabled.enable_enhanced_baggage = false;
 
-        let response_disabled = build_response(StatusCode::OK, Some(&workload), config_disabled.enable_enhanced_baggage);
+        let response_disabled = build_response(
+            StatusCode::OK,
+            Some(&workload),
+            config_disabled.enable_enhanced_baggage,
+        );
         assert!(!response_disabled.headers().contains_key(BAGGAGE_HEADER));
 
         // Test with None workload (should not have baggage regardless of config)
-        let response_no_workload = build_response(StatusCode::OK, None, config_enabled.enable_enhanced_baggage);
+        let response_no_workload =
+            build_response(StatusCode::OK, None, config_enabled.enable_enhanced_baggage);
         assert!(!response_no_workload.headers().contains_key(BAGGAGE_HEADER));
     }
 
     #[test]
     fn test_incoming_baggage_parsing_feature_gate() {
-        use http::{HeaderMap, HeaderValue};
+        use crate::baggage::{Baggage, parse_baggage_header};
         use crate::proxy::BAGGAGE_HEADER;
-        use crate::baggage::{parse_baggage_header, Baggage};
         use crate::test_helpers;
+        use http::{HeaderMap, HeaderValue};
 
         // Create mock baggage header
         let mut headers = HeaderMap::new();

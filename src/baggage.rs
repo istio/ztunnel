@@ -31,13 +31,34 @@ pub struct Baggage {
 
 pub fn baggage_header_val(baggage: &Baggage, workload_type: &str) -> String {
     [
-        baggage.cluster_id.as_ref().map(|cluster| format!("k8s.cluster.name={cluster}")),
-        baggage.namespace.as_ref().map(|namespace| format!("k8s.namespace.name={namespace}")),
-        baggage.workload_name.as_ref().map(|workload| format!("k8s.{workload_type}.name={workload}")),
-        baggage.service_name.as_ref().map(|service| format!("service.name={service}")),
-        baggage.revision.as_ref().map(|revision| format!("service.version={revision}")),
-        baggage.region.as_ref().map(|region| format!("cloud.region={region}")),
-        baggage.zone.as_ref().map(|zone| format!("cloud.availability_zone={zone}")),
+        baggage
+            .cluster_id
+            .as_ref()
+            .map(|cluster| format!("k8s.cluster.name={cluster}")),
+        baggage
+            .namespace
+            .as_ref()
+            .map(|namespace| format!("k8s.namespace.name={namespace}")),
+        baggage
+            .workload_name
+            .as_ref()
+            .map(|workload| format!("k8s.{workload_type}.name={workload}")),
+        baggage
+            .service_name
+            .as_ref()
+            .map(|service| format!("service.name={service}")),
+        baggage
+            .revision
+            .as_ref()
+            .map(|revision| format!("service.version={revision}")),
+        baggage
+            .region
+            .as_ref()
+            .map(|region| format!("cloud.region={region}")),
+        baggage
+            .zone
+            .as_ref()
+            .map(|zone| format!("cloud.availability_zone={zone}")),
     ]
     .into_iter()
     .flatten()
