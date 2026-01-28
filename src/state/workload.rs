@@ -14,6 +14,7 @@
 
 use crate::identity::Identity;
 
+use crate::baggage::Baggage;
 use crate::state::WorkloadInfo;
 use crate::strng::Strng;
 use crate::xds::istio::workload::{Port, PortList};
@@ -299,6 +300,19 @@ impl Workload {
             trust_domain: self.trust_domain.clone(),
             namespace: self.namespace.clone(),
             service_account: self.service_account.clone(),
+        }
+    }
+
+    pub fn baggage(&self) -> Baggage {
+        Baggage {
+            cluster_id: (!self.cluster_id.is_empty()).then_some(self.cluster_id.clone()),
+            namespace: (!self.namespace.is_empty()).then_some(self.namespace.clone()),
+            workload_name: (!self.workload_name.is_empty()).then_some(self.workload_name.clone()),
+            service_name: (!self.canonical_name.is_empty()).then_some(self.canonical_name.clone()),
+            revision: (!self.canonical_revision.is_empty())
+                .then_some(self.canonical_revision.clone()),
+            region: (!self.locality.region.is_empty()).then_some(self.locality.region.clone()),
+            zone: (!self.locality.zone.is_empty()).then_some(self.locality.zone.clone()),
         }
     }
 }

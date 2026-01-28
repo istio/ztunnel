@@ -187,21 +187,24 @@ impl InboundPassthrough {
             upstream_services,
             &upstream_workload,
         );
-        let result_tracker = Box::new(metrics::ConnectionResult::new(
-            source_addr,
-            dest_addr,
-            None,
-            start,
-            metrics::ConnectionOpen {
-                reporter: Reporter::destination,
-                source: source_workload,
-                derived_source: Some(derived_source),
-                destination: Some(upstream_workload),
-                connection_security_policy: metrics::SecurityPolicy::unknown,
-                destination_service: ds,
-            },
-            pi.metrics.clone(),
-        ));
+        let result_tracker = Box::new(
+            metrics::ConnectionResultBuilder::new(
+                source_addr,
+                dest_addr,
+                None,
+                start,
+                metrics::ConnectionOpen {
+                    reporter: Reporter::destination,
+                    source: source_workload,
+                    derived_source: Some(derived_source),
+                    destination: Some(upstream_workload),
+                    connection_security_policy: metrics::SecurityPolicy::unknown,
+                    destination_service: ds,
+                },
+                pi.metrics.clone(),
+            )
+            .build(),
+        );
 
         let mut conn_guard = match pi
             .connection_manager
