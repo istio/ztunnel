@@ -313,7 +313,7 @@ impl Inbound {
         let send = req
             .send_response(build_response(
                 StatusCode::OK,
-                Some((ri.destination_workload.as_ref(), pi.cfg.cluster_id.as_str())),
+                Some(ri.destination_workload.as_ref()),
             ))
             .and_then(|h2_stream| async {
                 if let Some(TunnelRequest {
@@ -453,7 +453,7 @@ impl Inbound {
             ConnectionOpen {
                 reporter: Reporter::destination,
                 source,
-                derived_source: Some(derived_source.clone()),
+                derived_source: Some(derived_source),
                 destination: Some(destination_workload.clone()),
                 connection_security_policy: metrics::SecurityPolicy::mutual_tls,
                 destination_service: ds,
@@ -739,22 +739,13 @@ pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
 }
 
 // Second argument is local workload and cluster name
-fn build_response(status: StatusCode, local_wl: Option<(&Workload, &str)>) -> Response<()> {
+fn build_response(status: StatusCode, local_wl: Option<&Workload>) -> Response<()> {
     let mut builder = Response::builder().status(status);
 
-    if let Some((local_wl, cluster)) = local_wl {
+    if let Some(local_wl) = local_wl {
         builder = builder.header(
             BAGGAGE_HEADER,
-            baggage_header_val(
-                cluster,
-                &local_wl.namespace,
-                &local_wl.workload_type,
-                &local_wl.workload_name,
-                &local_wl.canonical_name,
-                &local_wl.canonical_revision,
-                &local_wl.locality.region,
-                &local_wl.locality.zone,
-            ),
+            baggage_header_val(&local_wl.baggage(), &local_wl.workload_type),
         )
     }
 

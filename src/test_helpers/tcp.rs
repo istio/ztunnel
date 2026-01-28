@@ -31,9 +31,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 use tracing::{debug, error, info, trace};
 
-use crate::baggage::baggage_header_val;
+use crate::baggage::{Baggage, baggage_header_val};
 use crate::hyper_util::TokioExecutor;
 use crate::proxy::BAGGAGE_HEADER;
+use crate::strng::Strng;
 use crate::{identity, tls};
 
 #[derive(Copy, Clone, Debug)]
@@ -283,20 +284,20 @@ impl HboneTestServer {
                                 }
                             });
                             let mut resp = Response::new(Full::<Bytes>::from("streaming..."));
+                            let baggage = Baggage {
+                                cluster_id: Some(Strng::from("Kubernetes")),
+                                namespace: Some(Strng::from("default")),
+                                workload_name: Some(Strng::from(&name)),
+                                service_name: Some(Strng::from(&name)),
+                                revision: Some(Strng::from("v1")),
+                                region: Some(Strng::from("r1")),
+                                zone: Some(Strng::from("z1")),
+                            };
                             resp.headers_mut().insert(
                                 BAGGAGE_HEADER,
-                                baggage_header_val(
-                                    "Kubernetes",
-                                    "default",
-                                    "deployment",
-                                    &name,
-                                    &name,
-                                    "v1",
-                                    "r1",
-                                    "z1",
-                                )
-                                .parse()
-                                .expect("valid baggage header"),
+                                baggage_header_val(&baggage, "deployment")
+                                    .parse()
+                                    .expect("valid baggage header"),
                             );
                             Ok::<_, Infallible>(resp)
                         }
