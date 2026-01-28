@@ -298,7 +298,7 @@ impl OutboundConnection {
 
         match res {
             Err(e) => {
-                let connection_stats = Box::new(connection_stats_builder.build());
+                let connection_stats = connection_stats_builder.build();
                 connection_stats.record(Err(e));
             }
             Ok((derived_workload, drain_tx, inner_upgraded)) => {

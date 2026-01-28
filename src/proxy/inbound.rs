@@ -220,7 +220,7 @@ impl Inbound {
                 // At this point in processing, we never built up full context to log a complete access log.
                 // Instead, just log a minimal error line.
                 metrics::log_early_deny(src, dst, Reporter::destination, e);
-                if let Err(err) = req.send_error(build_response(code, None)) {
+                if let Err(err) = req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -294,7 +294,7 @@ impl Inbound {
             Ok(res) => res,
             Err(InboundFlagError(err, flag, code)) => {
                 ri.result_tracker.record_with_flag(Err(err), flag);
-                if let Err(err) = req.send_error(build_response(code, None)) {
+                if let Err(err) = req.send_error(build_response(code, None, pi.cfg.enable_enhanced_baggage)) {
                     tracing::warn!("failed to send HTTP response: {err}");
                 }
                 return;
@@ -314,6 +314,7 @@ impl Inbound {
             .send_response(build_response(
                 StatusCode::OK,
                 Some(ri.destination_workload.as_ref()),
+                pi.cfg.enable_enhanced_baggage,
             ))
             .and_then(|h2_stream| async {
                 if let Some(TunnelRequest {
@@ -395,8 +396,11 @@ impl Inbound {
         };
 
         let for_host = parse_forwarded_host(req);
-        let baggage =
-            parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default();
+        let baggage = if pi.cfg.enable_enhanced_baggage {
+            parse_baggage_header(req.headers().get_all(BAGGAGE_HEADER)).unwrap_or_default()
+        } else {
+            Default::default()
+        };
 
         // We assume it is from gateway if it's a hostname request.
         // We may need a more explicit indicator in the future.
@@ -427,15 +431,22 @@ impl Inbound {
             }
         };
 
-        let derived_source = metrics::DerivedWorkload {
-            identity: rbac_ctx.conn.src_identity.clone(),
-            cluster_id: baggage.cluster_id,
-            region: baggage.region,
-            zone: baggage.zone,
-            namespace: baggage.namespace,
-            app: baggage.service_name,
-            workload_name: baggage.workload_name,
-            revision: baggage.revision,
+        let derived_source = if pi.cfg.enable_enhanced_baggage {
+            metrics::DerivedWorkload {
+                identity: rbac_ctx.conn.src_identity.clone(),
+                cluster_id: baggage.cluster_id,
+                region: baggage.region,
+                zone: baggage.zone,
+                namespace: baggage.namespace,
+                app: baggage.service_name,
+                workload_name: baggage.workload_name,
+                revision: baggage.revision,
+            }
+        } else {
+            metrics::DerivedWorkload {
+                identity: rbac_ctx.conn.src_identity.clone(),
+                ..Default::default()
+            }
         };
         let ds = proxy::guess_inbound_service(
             &rbac_ctx.conn,
@@ -739,15 +750,16 @@ pub fn parse_forwarded_host<T: RequestParts>(req: &T) -> Option<String> {
 }
 
 // Second argument is local workload and cluster name
-fn build_response(status: StatusCode, local_wl: Option<&Workload>) -> Response<()> {
+fn build_response(status: StatusCode, local_wl: Option<&Workload>, enable_response_baggage: bool) -> Response<()> {
     let mut builder = Response::builder().status(status);
 
-    if let Some(local_wl) = local_wl {
-        builder = builder.header(
-            BAGGAGE_HEADER,
-            baggage_header_val(&local_wl.baggage(), &local_wl.workload_type),
-        )
-    }
+    if let Some(local_wl) = local_wl
+        && enable_response_baggage {
+            builder = builder.header(
+                BAGGAGE_HEADER,
+                baggage_header_val(&local_wl.baggage(), &local_wl.workload_type),
+            )
+        }
 
     builder
         .body(())
@@ -1092,5 +1104,79 @@ mod tests {
                 hbone_mtls_port: 15008,
             })
         }
+    }
+
+    #[test]
+    fn test_build_response_baggage_feature_gate() {
+        use http::StatusCode;
+        use crate::proxy::BAGGAGE_HEADER;
+        use crate::test_helpers;
+        use super::build_response;
+
+        // Create a test workload
+        let workload = test_helpers::test_default_workload();
+
+        // Test with baggage enabled
+        let mut config_enabled = test_helpers::test_config();
+        config_enabled.enable_enhanced_baggage = true;
+
+        let response_enabled = build_response(StatusCode::OK, Some(&workload), config_enabled.enable_enhanced_baggage);
+        assert!(response_enabled.headers().contains_key(BAGGAGE_HEADER));
+
+        let baggage_header = response_enabled.headers().get(BAGGAGE_HEADER).unwrap();
+        let baggage_value = baggage_header.to_str().unwrap();
+        // Check that baggage header contains cluster_id from the test workload
+        assert!(baggage_value.contains("k8s.cluster.name=Kubernetes"));
+
+        // Test with baggage disabled
+        let mut config_disabled = test_helpers::test_config();
+        config_disabled.enable_enhanced_baggage = false;
+
+        let response_disabled = build_response(StatusCode::OK, Some(&workload), config_disabled.enable_enhanced_baggage);
+        assert!(!response_disabled.headers().contains_key(BAGGAGE_HEADER));
+
+        // Test with None workload (should not have baggage regardless of config)
+        let response_no_workload = build_response(StatusCode::OK, None, config_enabled.enable_enhanced_baggage);
+        assert!(!response_no_workload.headers().contains_key(BAGGAGE_HEADER));
+    }
+
+    #[test]
+    fn test_incoming_baggage_parsing_feature_gate() {
+        use http::{HeaderMap, HeaderValue};
+        use crate::proxy::BAGGAGE_HEADER;
+        use crate::baggage::{parse_baggage_header, Baggage};
+        use crate::test_helpers;
+
+        // Create mock baggage header
+        let mut headers = HeaderMap::new();
+        headers.insert(BAGGAGE_HEADER, HeaderValue::from_str("k8s.cluster.name=test-cluster,k8s.namespace.name=test-ns,k8s.deployment.name=test-app").unwrap());
+
+        // Test with baggage enabled
+        let config_enabled = test_helpers::test_config();
+        assert!(config_enabled.enable_enhanced_baggage); // Default should be true
+
+        let baggage_enabled = if config_enabled.enable_enhanced_baggage {
+            parse_baggage_header(headers.get_all(BAGGAGE_HEADER)).unwrap_or_default()
+        } else {
+            Baggage::default()
+        };
+
+        assert_eq!(baggage_enabled.cluster_id, Some("test-cluster".into()));
+        assert_eq!(baggage_enabled.namespace, Some("test-ns".into()));
+        assert_eq!(baggage_enabled.workload_name, Some("test-app".into()));
+
+        // Test with baggage disabled
+        let mut config_disabled = test_helpers::test_config();
+        config_disabled.enable_enhanced_baggage = false;
+
+        let baggage_disabled = if config_disabled.enable_enhanced_baggage {
+            parse_baggage_header(headers.get_all(BAGGAGE_HEADER)).unwrap_or_default()
+        } else {
+            Baggage::default()
+        };
+
+        assert_eq!(baggage_disabled.cluster_id, None);
+        assert_eq!(baggage_disabled.namespace, None);
+        assert_eq!(baggage_disabled.workload_name, None);
     }
 }

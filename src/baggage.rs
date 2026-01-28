@@ -30,36 +30,19 @@ pub struct Baggage {
 }
 
 pub fn baggage_header_val(baggage: &Baggage, workload_type: &str) -> String {
-    let mut items = Vec::new();
-    baggage
-        .cluster_id
-        .as_ref()
-        .inspect(|cluster| items.push(format!("k8s.cluster.name={cluster}")));
-    baggage
-        .namespace
-        .as_ref()
-        .inspect(|namespace| items.push(format!("k8s.namespace.name={namespace}")));
-    baggage
-        .workload_name
-        .as_ref()
-        .inspect(|workload_name| items.push(format!("k8s.{workload_type}.name={workload_name}")));
-    baggage
-        .service_name
-        .as_ref()
-        .inspect(|service_name| items.push(format!("service.name={service_name}")));
-    baggage
-        .revision
-        .as_ref()
-        .inspect(|revision| items.push(format!("service.version={revision}")));
-    baggage
-        .region
-        .as_ref()
-        .inspect(|region| items.push(format!("cloud.region={region}")));
-    baggage
-        .zone
-        .as_ref()
-        .inspect(|zone| items.push(format!("cloud.availability_zone={zone}")));
-    items.join(",")
+    [
+        baggage.cluster_id.as_ref().map(|cluster| format!("k8s.cluster.name={cluster}")),
+        baggage.namespace.as_ref().map(|namespace| format!("k8s.namespace.name={namespace}")),
+        baggage.workload_name.as_ref().map(|workload| format!("k8s.{workload_type}.name={workload}")),
+        baggage.service_name.as_ref().map(|service| format!("service.name={service}")),
+        baggage.revision.as_ref().map(|revision| format!("service.version={revision}")),
+        baggage.region.as_ref().map(|region| format!("cloud.region={region}")),
+        baggage.zone.as_ref().map(|zone| format!("cloud.availability_zone={zone}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(",")
 }
 
 pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToStrError> {

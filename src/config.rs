@@ -115,6 +115,7 @@ const PROXY_MODE_DEDICATED: &str = "dedicated";
 const PROXY_MODE_SHARED: &str = "shared";
 
 const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
+const ENABLE_ENHANCED_BAGGAGE: &str = "ENABLE_RESPONSE_BAGGAGE";
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
@@ -316,6 +317,7 @@ pub struct Config {
 
     // path to CRL file; if set, enables CRL checking
     pub crl_path: Option<PathBuf>,
+    pub enable_enhanced_baggage: bool,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -875,6 +877,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from),
+        enable_enhanced_baggage: parse_default(ENABLE_ENHANCED_BAGGAGE, true)?,
     })
 }
 
