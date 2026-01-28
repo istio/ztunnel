@@ -29,6 +29,7 @@ use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tracing::{Instrument, debug, trace};
 
+use crate::baggage::Baggage;
 use crate::config;
 
 use flurry;
@@ -370,7 +371,7 @@ impl WorkloadHBONEPool {
         &mut self,
         workload_key: &WorkloadKey,
         request: http::Request<()>,
-    ) -> Result<H2Stream, Error> {
+    ) -> Result<(H2Stream, Option<Baggage>), Error> {
         let mut connection = self.connect(workload_key).await?;
 
         connection.send_request(request).await
@@ -610,7 +611,7 @@ mod test {
                 .unwrap()
         };
 
-        let c = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
+        let (c, _baggage) = pool.send_request_pooled(&key.clone(), req()).await.unwrap();
         let mut c = TokioH2Stream::new(c);
         c.write_all(b"abcde").await.unwrap();
         let mut b = [0u8; 100];

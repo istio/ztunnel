@@ -31,7 +31,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 use tracing::{debug, error, info, trace};
 
+use crate::baggage::{Baggage, baggage_header_val};
 use crate::hyper_util::TokioExecutor;
+use crate::proxy::BAGGAGE_HEADER;
+use crate::strng::Strng;
 use crate::{identity, tls};
 
 #[derive(Copy, Clone, Debug)]
@@ -247,7 +250,7 @@ impl HboneTestServer {
             &identity::Identity::Spiffe {
                 trust_domain: "cluster.local".into(),
                 namespace: "default".into(),
-                service_account: self.name.into(),
+                service_account: self.name.clone().into(),
             }
             .into(),
             Duration::from_secs(0),
@@ -256,13 +259,16 @@ impl HboneTestServer {
         let acceptor = tls::mock::MockServerCertProvider::new(certs);
         let mut tls_stream = crate::hyper_util::tls_server(acceptor, self.listener);
         let mode = self.mode;
+        let name = self.name.clone();
         while let Some(socket) = tls_stream.next().await {
             let waypoint_message = self.waypoint_message.clone();
+            let name = name.clone();
             if let Err(err) = http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(socket),
                     service_fn(move |req| {
                         let waypoint_message = waypoint_message.clone();
+                        let name = name.clone();
                         async move {
                             info!("waypoint: received request");
                             tokio::task::spawn(async move {
@@ -277,7 +283,23 @@ impl HboneTestServer {
                                     Err(e) => error!("No upgrade {e}"),
                                 }
                             });
-                            Ok::<_, Infallible>(Response::new(Full::<Bytes>::from("streaming...")))
+                            let mut resp = Response::new(Full::<Bytes>::from("streaming..."));
+                            let baggage = Baggage {
+                                cluster_id: Some(Strng::from("Kubernetes")),
+                                namespace: Some(Strng::from("default")),
+                                workload_name: Some(Strng::from(&name)),
+                                service_name: Some(Strng::from(&name)),
+                                revision: Some(Strng::from("v1")),
+                                region: Some(Strng::from("r1")),
+                                zone: Some(Strng::from("z1")),
+                            };
+                            resp.headers_mut().insert(
+                                BAGGAGE_HEADER,
+                                baggage_header_val(&baggage, "deployment")
+                                    .parse()
+                                    .expect("valid baggage header"),
+                            );
+                            Ok::<_, Infallible>(resp)
                         }
                     }),
                 )
