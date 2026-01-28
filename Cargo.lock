@@ -4589,6 +4589,7 @@ dependencies = [
  "oid-registry",
  "once_cell",
  "openssl",
+ "openssl-sys",
  "pin-project-lite",
  "pingora-pool",
  "ppp",
