@@ -353,7 +353,7 @@ impl OutboundConnection {
             )
             .method(hyper::Method::CONNECT)
             .version(hyper::Version::HTTP_2)
-            .header(BAGGAGE_HEADER, baggage(req, self.pi.cfg.cluster_id.clone()))
+            .header(BAGGAGE_HEADER, baggage(req))
             .header(
                 FORWARDED,
                 build_forwarded(remote_addr, &req.intended_destination_service),
@@ -728,17 +728,8 @@ fn build_forwarded(remote_addr: SocketAddr, server: &Option<ServiceDescription>)
     }
 }
 
-fn baggage(r: &Request, cluster: String) -> String {
-    baggage::baggage_header_val(
-        &cluster,
-        &r.source.namespace,
-        &r.source.workload_type,
-        &r.source.workload_name,
-        &r.source.canonical_name,
-        &r.source.canonical_revision,
-        &r.source.locality.region,
-        &r.source.locality.zone,
-    )
+fn baggage(r: &Request) -> String {
+    baggage::baggage_header_val(&r.source.baggage(), &r.source.workload_type)
 }
 
 #[derive(Debug)]

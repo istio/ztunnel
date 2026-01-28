@@ -18,7 +18,7 @@ use hyper::{
     http::HeaderValue,
 };
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Baggage {
     pub cluster_id: Option<Strng>,
     pub namespace: Option<Strng>,
@@ -29,20 +29,37 @@ pub struct Baggage {
     pub zone: Option<Strng>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn baggage_header_val(
-    cluster: &str,
-    namespace: &str,
-    workload_type: &str,
-    workload_name: &str,
-    name: &str,
-    version: &str,
-    region: &str,
-    zone: &str,
-) -> String {
-    format!(
-        "k8s.cluster.name={cluster},k8s.namespace.name={namespace},k8s.{workload_type}.name={workload_name},service.name={name},service.version={version},cloud.region={region},cloud.availability_zone={zone}",
-    )
+pub fn baggage_header_val(baggage: &Baggage, workload_type: &str) -> String {
+    let mut items = Vec::new();
+    baggage
+        .cluster_id
+        .as_ref()
+        .inspect(|cluster| items.push(format!("k8s.cluster.name={cluster}")));
+    baggage
+        .namespace
+        .as_ref()
+        .inspect(|namespace| items.push(format!("k8s.namespace.name={namespace}")));
+    baggage
+        .workload_name
+        .as_ref()
+        .inspect(|workload_name| items.push(format!("k8s.{workload_type}.name={workload_name}")));
+    baggage
+        .service_name
+        .as_ref()
+        .inspect(|service_name| items.push(format!("service.name={service_name}")));
+    baggage
+        .revision
+        .as_ref()
+        .inspect(|revision| items.push(format!("service.version={revision}")));
+    baggage
+        .region
+        .as_ref()
+        .inspect(|region| items.push(format!("cloud.region={region}")));
+    baggage
+        .zone
+        .as_ref()
+        .inspect(|zone| items.push(format!("cloud.availability_zone={zone}")));
+    items.join(",")
 }
 
 pub fn parse_baggage_header(headers: GetAll<HeaderValue>) -> Result<Baggage, ToStrError> {
@@ -83,8 +100,9 @@ pub mod tests {
     use hyper::{HeaderMap, http::HeaderValue};
 
     use crate::proxy::BAGGAGE_HEADER;
+    use crate::strng::Strng;
 
-    use super::parse_baggage_header;
+    use super::{Baggage, baggage_header_val, parse_baggage_header};
 
     #[test]
     fn baggage_parser() -> anyhow::Result<()> {
@@ -106,8 +124,8 @@ pub mod tests {
         let mut hm = HeaderMap::new();
         let baggage_str = "k8s.cluster.name=,k8s.namespace.name=,k8s.deployment.name=,service.name=,service.version=";
         let header_value = HeaderValue::from_str(baggage_str)?;
-        let baggage = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
         hm.append(BAGGAGE_HEADER, header_value);
+        let baggage = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
         assert_eq!(baggage.cluster_id, None);
         assert_eq!(baggage.namespace, None);
         assert_eq!(baggage.workload_name, None);
@@ -150,6 +168,39 @@ pub mod tests {
         assert_eq!(baggage.workload_name, None);
         assert_eq!(baggage.service_name, None);
         assert_eq!(baggage.revision, None);
+        Ok(())
+    }
+
+    #[test]
+    fn baggage_header_val_can_be_parsed() -> anyhow::Result<()> {
+        {
+            let baggage = Baggage {
+                ..Default::default()
+            };
+            let mut hm = HeaderMap::new();
+            hm.append(
+                BAGGAGE_HEADER,
+                HeaderValue::from_str(&baggage_header_val(&baggage, "deployment"))?,
+            );
+            let parsed = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
+            assert_eq!(baggage, parsed);
+        }
+        {
+            let baggage = Baggage {
+                cluster_id: Some(Strng::from("cluster")),
+                namespace: Some(Strng::from("default")),
+                workload_name: Some(Strng::from("workload")),
+                service_name: Some(Strng::from("service")),
+                ..Default::default()
+            };
+            let mut hm = HeaderMap::new();
+            hm.append(
+                BAGGAGE_HEADER,
+                HeaderValue::from_str(&baggage_header_val(&baggage, "deployment"))?,
+            );
+            let parsed = parse_baggage_header(hm.get_all(BAGGAGE_HEADER))?;
+            assert_eq!(baggage, parsed);
+        }
         Ok(())
     }
 }
