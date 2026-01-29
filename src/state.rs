@@ -592,10 +592,17 @@ impl DemandProxyState {
                 trace!(policy = pol.to_key().as_str(), "deny policy does not match");
             }
         }
+        let mut dry_run_allow_matched = false;
         for pol in allow_dry_run.iter() {
             if pol.matches(conn) {
+               dry_run_allow_matched = true; 
                 debug!(policy = pol.to_key().as_str(), "dry-run allow policy match");
             }
+        }
+        if allow.is_empty() && !allow_dry_run.is_empty() && !dry_run_allow_matched {
+            // this is going to be an allow, but the conn would be denied if dry-run policies
+            // became enforced because none matched
+            debug!("dry-run no allow policies match");
         }
         // "If there are no ALLOW policies for the workload, allow the request."
         if allow.is_empty() {
