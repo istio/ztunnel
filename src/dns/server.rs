@@ -187,26 +187,6 @@ impl Server {
     }
 }
 
-enum MatchReason<'a> {
-    Canonical(&'a Arc<Service>),
-    First(&'a Arc<Service>),
-    Namespace(&'a Arc<Service>),
-    PreferredNamespace(&'a Arc<Service>),
-    None,
-}
-
-impl<'a> From<MatchReason<'a>> for Option<&'a Arc<Service>> {
-    fn from(value: MatchReason<'a>) -> Option<&'a Arc<Service>> {
-        match value {
-            MatchReason::Canonical(s)
-            | MatchReason::First(s)
-            | MatchReason::Namespace(s)
-            | MatchReason::PreferredNamespace(s) => Some(s),
-            MatchReason::None => None,
-        }
-    }
-}
-
 /// A DNS [Resolver] backed by the ztunnel [DemandProxyState].
 struct Store {
     state: DemandProxyState,
