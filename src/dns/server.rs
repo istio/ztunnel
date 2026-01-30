@@ -1844,7 +1844,7 @@ mod tests {
             .unwrap()
             .iter()
             .map(|(_, addr)| *addr)
-            .collect_vec()
+            .collect()
     }
 
     fn kube_fqdn<S1: AsRef<str>, S2: AsRef<str>>(name: S1, ns: S2) -> String {
