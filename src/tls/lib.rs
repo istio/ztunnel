@@ -275,7 +275,10 @@ pub mod tests {
     fn test_openssl_provider_created_successfully() {
         // Test that provider can be created without panicking
         let provider = super::provider();
-        assert!(!provider.kx_groups.is_empty(), "kx_groups should not be empty");
+        assert!(
+            !provider.kx_groups.is_empty(),
+            "kx_groups should not be empty"
+        );
     }
 
     #[test]
@@ -284,8 +287,13 @@ pub mod tests {
         // Provider must have valid key exchange groups regardless of PQC state
         let provider = super::provider();
         let expected_len = if *crate::PQC_ENABLED { 1 } else { 2 };
-        assert_eq!(provider.kx_groups.len(), expected_len,
-            "PQC={} should have {} kx groups", *crate::PQC_ENABLED, expected_len);
+        assert_eq!(
+            provider.kx_groups.len(),
+            expected_len,
+            "PQC={} should have {} kx groups",
+            *crate::PQC_ENABLED,
+            expected_len
+        );
     }
 
     #[test]
