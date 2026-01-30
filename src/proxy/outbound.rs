@@ -686,12 +686,17 @@ impl OutboundConnection {
             .selected_workload_ip
             .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?;
 
+        let original_destination = us.workload_socket_addr()
+            .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?;
+
         // only change the port if we're sending HBONE
         let actual_destination = match us.workload.protocol {
-            InboundProtocol::HBONE => SocketAddr::from((selected_workload_ip, self.hbone_port)),
-            InboundProtocol::TCP => us
-                .workload_socket_addr()
-                .ok_or(Error::NoValidDestination(Box::new((*us.workload).clone())))?,
+            InboundProtocol::HBONE => if self.pi.cfg.transparent_network_policies {
+                original_destination
+            } else {
+                SocketAddr::from((selected_workload_ip, self.hbone_port))
+            },
+            InboundProtocol::TCP => original_destination,
         };
         let hbone_target_destination = match us.workload.protocol {
             InboundProtocol::HBONE => Some(HboneAddress::SocketAddr(
