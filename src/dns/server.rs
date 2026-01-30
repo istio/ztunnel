@@ -364,7 +364,7 @@ impl Store {
                 search_name.set_fqdn(true);
 
                 let Some(services) = state.services.get_by_host(&search_name_str) else {
-                    return None;
+                    continue;
                 };
                 let services: Vec<Arc<Service>> = services
                     .into_iter()
