@@ -371,6 +371,11 @@ impl ServiceStore {
         self.by_host.get(hostname).map(|v| v.to_vec())
     }
 
+    pub fn get_best_by_host(&self, hostname: &Strng, ns: Option<&Strng>) -> Option<Arc<Service>> {
+        let services = self.get_by_host(hostname)?;
+        Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())
+    }
+
     pub fn get_by_workload(&self, workload: &Workload) -> Vec<Arc<Service>> {
         workload
             .services
@@ -582,5 +587,66 @@ impl ServiceStore {
     #[cfg(test)]
     pub fn num_staged_services(&self) -> usize {
         self.staged_services.len()
+    }
+}
+
+/// Represents the reason a service was matched during lookup.
+/// Used with fold_while to implement priority-based service selection
+/// with short-circuit on best match (namespace + primary hostname).
+///
+/// Priority order (lower is better): Namespace > Canonical > First
+pub enum ServiceMatch<'a> {
+    Canonical(&'a Arc<Service>),
+    Namespace(&'a Arc<Service>),
+    PreferredNamespace(&'a Arc<Service>),
+    First(&'a Arc<Service>),
+    None,
+}
+
+impl<'a> From<ServiceMatch<'a>> for Option<&'a Arc<Service>> {
+    fn from(value: ServiceMatch<'a>) -> Option<&'a Arc<Service>> {
+        match value {
+            ServiceMatch::Canonical(s)
+            | ServiceMatch::First(s)
+            | ServiceMatch::Namespace(s)
+            | ServiceMatch::PreferredNamespace(s) => Some(s),
+            ServiceMatch::None => None,
+        }
+    }
+}
+
+impl<'a> ServiceMatch<'a> {
+    /// Finds the best matching service from an iterator using fold_while.
+    /// Short-circuits on Namespace match - the best possible result.
+    pub fn find_best_match(
+        mut services: impl Iterator<Item = &'a Arc<Service>>,
+        client_ns: Option<&Strng>,
+        preferred_namespace: Option<&Strng>,
+    ) -> Option<&'a Arc<Service>> {
+        services
+            .fold_while(ServiceMatch::None, |r, s| {
+                if Some(&s.namespace) == client_ns {
+                    itertools::FoldWhile::Done(ServiceMatch::Namespace(s))
+                } else if s.canonical {
+                    itertools::FoldWhile::Continue(ServiceMatch::Canonical(s))
+                } else {
+                    // TODO: deprecate preferred_service_namespace
+                    // https://github.com/istio/ztunnel/issues/1709
+                    if let Some(preferred_namespace) = preferred_namespace
+                        && preferred_namespace == &s.namespace
+                        && !matches!(r, ServiceMatch::Canonical(_))
+                    {
+                        return itertools::FoldWhile::Continue(ServiceMatch::PreferredNamespace(s));
+                    }
+                    match r {
+                        ServiceMatch::None => {
+                            itertools::FoldWhile::Continue(ServiceMatch::First(s))
+                        }
+                        _ => itertools::FoldWhile::Continue(r),
+                    }
+                }
+            })
+            .into_inner()
+            .into()
     }
 }

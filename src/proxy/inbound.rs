@@ -494,19 +494,10 @@ impl Inbound {
         local_workload: &Workload,
         hbone_host: &Strng,
     ) -> Result<Arc<Service>, Error> {
-        // Validate a service exists for the hostname
-        let services = state.read().find_service_by_hostname(hbone_host)?;
-
-        services
-            .iter()
-            .max_by_key(|s| {
-                let is_local_namespace = s.namespace == local_workload.namespace;
-                match is_local_namespace {
-                    true => 1,
-                    false => 0,
-                }
-            })
-            .cloned()
+        state
+            .read()
+            .services
+            .get_best_by_host(hbone_host, Some(&local_workload.namespace))
             .ok_or_else(|| Error::NoHostname(hbone_host.to_string()))
     }
 
