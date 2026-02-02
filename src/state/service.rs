@@ -23,10 +23,10 @@ use tracing::trace;
 use xds::istio::workload::Service as XdsService;
 
 use crate::state::workload::{
-    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, WorkloadError, byte_to_ip,
-    network_addr,
+    byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
+    WorkloadError,
 };
-use crate::state::workload::{HealthStatus, is_default};
+use crate::state::workload::{is_default, HealthStatus};
 use crate::strng::Strng;
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::{IpFamilies, PortList};
@@ -371,6 +371,9 @@ impl ServiceStore {
         self.by_host.get(hostname).map(|v| v.to_vec())
     }
 
+    // Returns the "best" [Srevice] matching the given hostname.
+    // If a namespace is provided, a Service from that namespace is preferred.
+    // Next, a Service marked `canonical` is prerferred.
     pub fn get_best_by_host(&self, hostname: &Strng, ns: Option<&Strng>) -> Option<Arc<Service>> {
         let services = self.get_by_host(hostname)?;
         Some(ServiceMatch::find_best_match(services.iter(), ns, None)?.clone())

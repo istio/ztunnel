@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hickory_proto::ProtoErrorKind;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::ProtoErrorKind;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::system_conf::read_system_conf;
-use hickory_server::ServerFuture;
 use hickory_server::authority::LookupError;
 use hickory_server::server::Request;
+use hickory_server::ServerFuture;
 use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
@@ -45,10 +45,10 @@ use crate::dns::resolver::{Answer, Resolver};
 use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
-use crate::state::DemandProxyState;
 use crate::state::service::{IpFamily, Service, ServiceMatch};
-use crate::state::workload::Workload;
 use crate::state::workload::address::Address;
+use crate::state::workload::Workload;
+use crate::state::DemandProxyState;
 use crate::strng::Strng;
 use crate::{config, dns};
 
@@ -363,11 +363,11 @@ impl Store {
                 let search_name_str = search_name.to_string().into();
                 search_name.set_fqdn(true);
 
-                let Some(services) = state.services.get_by_host(&search_name_str) else {
-                    continue;
-                };
-                let services: Vec<Arc<Service>> = services
+                let services: Vec<Arc<Service>> = state
+                    .services
+                    .get_by_host(&search_name_str)
                     .into_iter()
+                    .flatten()
                     // Remove things without a VIP, unless they are Kubernetes headless services.
                     // This will trigger us to forward upstream.
                     // TODO: we should have a reliable way to distinguish these. In sidecars, we use
