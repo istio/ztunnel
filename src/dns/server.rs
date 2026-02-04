@@ -390,8 +390,7 @@ impl Store {
 
                 let preferred_namespace: Strng = self
                     .prefered_service_namespace
-                    .as_ref()
-                    .map(|s| s.as_str())
+                    .as_deref()
                     .unwrap_or("")
                     .into();
                 let service: Option<&Arc<Service>> = ServiceMatch::find_best_match(
