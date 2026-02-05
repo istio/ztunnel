@@ -1027,6 +1027,7 @@ mod test {
             }),
             mock_proxy_state,
             identity::mock::new_secret_manager(Duration::from_secs(10)),
+            Arc::new(cfg.clone()),
         ));
         let pool = WorkloadHBONEPool::new(Arc::new(cfg), sock_fact, local_workload);
         let server = TestServer {
