@@ -281,10 +281,14 @@ impl ProxyState {
     }
 
     /// Find services by hostname.
-    pub fn find_service_by_hostname(&self, hostname: &Strng) -> Result<Vec<Arc<Service>>, Error> {
+    pub fn find_service_by_hostname(
+        &self,
+        hostname: &Strng,
+        namespace: &Strng,
+    ) -> Result<Arc<Service>, Error> {
         // Hostnames for services are more common, so lookup service first and fallback to workload.
         self.services
-            .get_by_host(hostname)
+            .get_best_by_host(hostname, Some(namespace))
             .ok_or_else(|| Error::NoHostname(hostname.to_string()))
     }
 
