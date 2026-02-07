@@ -50,17 +50,24 @@ pub fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
         .buffered_lines_limit(1000) // Buffer up to 1000 lines to avoid blocking on logs
         .finish(std::io::stdout());
 
-    let layers = fmt_layer(non_blocking)
+    let (layers, handle) = logging_layers(non_blocking);
+    set_log_handle(handle);
+
+    tracing_subscriber::registry().with(layers).init();
+    _guard
+}
+
+fn logging_layers(writer: NonBlocking) -> (reload::Layer<FilteredLayers, Registry>, LogHandle) {
+    let layers = fmt_layer(writer)
         .and_then(otlp_layer())
         .with_filter(default_filter());
+    reload::Layer::new(layers)
+}
 
-    let (layer, reload) = reload::Layer::new(layers);
+fn set_log_handle(handle: LogHandle) {
     LOG_HANDLE
-        .set(reload)
-        .map_or_else(|_| warn!("setup log handler failed"), |_| {});
-
-    tracing_subscriber::registry().with(layer).init();
-    _guard
+        .set(handle)
+        .map_or_else(|_| warn!("setup log handler failed"), |_| {})
 }
 
 fn json_fmt(writer: NonBlocking) -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
@@ -477,7 +484,9 @@ impl<'a> FormatFields<'a> for IstioJsonFormat {
 /// Inspired by https://github.com/dbrgn/tracing-test
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use crate::telemetry::{APPLICATION_START_TIME, IstioJsonFormat, fmt_layer};
+    use crate::telemetry::{
+        APPLICATION_START_TIME, IstioJsonFormat, logging_layers, set_log_handle,
+    };
     use itertools::Itertools;
     use once_cell::sync::Lazy;
     use serde_json::Value;
@@ -637,8 +646,12 @@ pub mod testing {
             .event_format(IstioJsonFormat())
             .fmt_fields(IstioJsonFormat())
             .with_writer(mock_writer);
+
+        let (layers, handle) = logging_layers(non_blocking);
+        set_log_handle(handle);
+
         tracing_subscriber::registry()
-            .with(fmt_layer(non_blocking))
+            .with(layers)
             .with(layer)
             .init();
     }
