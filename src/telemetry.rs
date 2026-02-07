@@ -36,6 +36,7 @@ use tracing_subscriber::fmt::format::{JsonVisitor, Writer};
 use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::layer::Layered;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{Layer, Registry, filter, prelude::*, reload};
 
@@ -48,10 +49,25 @@ pub fn setup_logging() -> tracing_appender::non_blocking::WorkerGuard {
         .lossy(false)
         .buffered_lines_limit(1000) // Buffer up to 1000 lines to avoid blocking on logs
         .finish(std::io::stdout());
-    tracing_subscriber::registry()
-        .with(fmt_layer(non_blocking))
-        .init();
+
+    let (layers, handle) = logging_layers(non_blocking);
+    set_log_handle(handle);
+
+    tracing_subscriber::registry().with(layers).init();
     _guard
+}
+
+fn logging_layers(writer: NonBlocking) -> (reload::Layer<FilteredLayers, Registry>, LogHandle) {
+    let layers = fmt_layer(writer)
+        .and_then(otlp_layer())
+        .with_filter(default_filter());
+    reload::Layer::new(layers)
+}
+
+fn set_log_handle(handle: LogHandle) {
+    LOG_HANDLE
+        .set(handle)
+        .map_or_else(|_| warn!("setup log handler failed"), |_| {})
 }
 
 fn json_fmt(writer: NonBlocking) -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
@@ -76,12 +92,69 @@ fn fmt_layer(writer: NonBlocking) -> Box<dyn Layer<Registry> + Send + Sync + 'st
     } else {
         plain_fmt(writer)
     };
-    let filter = default_filter();
-    let (layer, reload) = reload::Layer::new(format.with_filter(filter));
-    LOG_HANDLE
-        .set(reload)
-        .map_or_else(|_| warn!("setup log handler failed"), |_| {});
-    Box::new(layer)
+    Box::new(format)
+}
+
+fn otlp_layer() -> Option<Box<dyn Layer<Registry> + Send + Sync + 'static>> {
+    if env::var("OTLP_LOGGING").unwrap_or_default() == "true" {
+        #[cfg(not(feature = "otel"))]
+        panic!("ztunnel is not build with OpenTelemetry support");
+
+        #[cfg(feature = "otel")]
+        Some(otlp_tracing_bridge())
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "otel")]
+fn otlp_tracing_bridge() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
+    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+    use tracing_subscriber::EnvFilter;
+
+    let provider = otlp_logger_provider();
+    let otel_layer = OpenTelemetryTracingBridge::new(&provider);
+
+    // To prevent a telemetry-induced-telemetry loop, OpenTelemetry's own internal
+    // logging is properly suppressed. However, logs emitted by external components
+    // (such as reqwest, tonic, etc.) are not suppressed as they do not propagate
+    // OpenTelemetry context. Until this issue is addressed
+    // (https://github.com/open-telemetry/opentelemetry-rust/issues/2877),
+    // filtering like this is the best way to suppress such logs.
+    //
+    // The filter levels are set as follows:
+    // - Allow `trace` level and above by default.
+    // - Completely restrict logs from `hyper`, `tonic`, `h2`, and `reqwest`.
+    //
+    // Note: This filtering will also drop logs from these components even when
+    // they are used outside of the OTLP Exporter.
+    let filter_otel = EnvFilter::new("trace")
+        .add_directive("hyper=off".parse().unwrap())
+        .add_directive("tonic=off".parse().unwrap())
+        .add_directive("h2=off".parse().unwrap())
+        .add_directive("reqwest=off".parse().unwrap());
+
+    Box::new(otel_layer.with_filter(filter_otel))
+}
+
+#[cfg(feature = "otel")]
+fn otlp_logger_provider() -> opentelemetry_sdk::logs::SdkLoggerProvider {
+    use opentelemetry_otlp::{LogExporter, WithExportConfig};
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+
+    let mut builder = LogExporter::builder()
+        .with_tonic()
+        .with_timeout(std::time::Duration::from_secs(10));
+
+    if let Ok(endpoint) = env::var("OTEL_COLLECTOR_ENDPOINT") {
+        builder = builder.with_endpoint(endpoint)
+    }
+
+    let exporter = builder.build().expect("Failed to create log exporter");
+
+    SdkLoggerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build()
 }
 
 fn default_filter() -> filter::Targets {
@@ -95,8 +168,9 @@ fn default_filter() -> filter::Targets {
 
 // a handle to get and set the log level
 type BoxLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
-type FilteredLayer = filter::Filtered<BoxLayer, filter::Targets, Registry>;
-type LogHandle = reload::Handle<FilteredLayer, Registry>;
+type BoxLayers = Layered<Option<BoxLayer>, BoxLayer, Registry>;
+type FilteredLayers = filter::Filtered<BoxLayers, filter::Targets, Registry>;
+type LogHandle = reload::Handle<FilteredLayers, Registry>;
 
 /// set_level dynamically updates the logging level to *include* level. If `reset` is true, it will
 /// reset the entire logging configuration first.
@@ -410,7 +484,9 @@ impl<'a> FormatFields<'a> for IstioJsonFormat {
 /// Inspired by https://github.com/dbrgn/tracing-test
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use crate::telemetry::{APPLICATION_START_TIME, IstioJsonFormat, fmt_layer};
+    use crate::telemetry::{
+        APPLICATION_START_TIME, IstioJsonFormat, logging_layers, set_log_handle,
+    };
     use itertools::Itertools;
     use once_cell::sync::Lazy;
     use serde_json::Value;
@@ -570,8 +646,12 @@ pub mod testing {
             .event_format(IstioJsonFormat())
             .fmt_fields(IstioJsonFormat())
             .with_writer(mock_writer);
+
+        let (layers, handle) = logging_layers(non_blocking);
+        set_log_handle(handle);
+
         tracing_subscriber::registry()
-            .with(fmt_layer(non_blocking))
+            .with(layers)
             .with(layer)
             .init();
     }
