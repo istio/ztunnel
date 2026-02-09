@@ -14,7 +14,7 @@
 
 use crate::{
     config::Config,
-    identity::{CompositeId, Error, Identity, PidClientTrait, RequestKeyEnum},
+    identity::{CompositeId, Error, Identity, PidClientTrait},
     inpod::WorkloadUid,
     tls,
 };
@@ -331,24 +331,21 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
 /// interchangeably with other certificate authority implementations.
 #[async_trait]
 impl<C: DelegatedIdentityApi> crate::identity::CaClientTrait for SpireClient<C> {
+    type Key = WorkloadUid;
+
     /// Fetches a certificate for the given identity using SPIRE's selector-based approach.
     /// This is the main integration point with ztunnel's certificate manager.
     ///
     /// # Arguments
-    /// * `id` - SPIFFE identity to fetch certificate for
+    /// * `id` - Composite identity containing the SPIFFE identity and workload UID key
     ///
     /// # Returns
     /// WorkloadCertificate that can be used for TLS operations
     async fn fetch_certificate(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<WorkloadUid>,
     ) -> Result<tls::WorkloadCertificate, Error> {
-        match id.key() {
-            RequestKeyEnum::Workload(wl_uid) => self.get_cert_by_workload_uid(wl_uid).await,
-            _ => Err(Error::InvalidConfiguration(
-                "PID mode requires workload UID for attestation".to_string(),
-            )),
-        }
+        self.get_cert_by_workload_uid(id.key()).await
     }
 }
 
@@ -357,6 +354,7 @@ pub mod spire_tests {
     use crate::config;
     use crate::identity::CaClientTrait;
     use crate::identity::MockPidClientTrait;
+    use crate::identity::RequestKey;
     use crate::identity::SecretManager;
     use crate::identity::WorkloadPid;
 
@@ -475,9 +473,9 @@ pub mod spire_tests {
 
         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
 
-        let composite_id = CompositeId::new(
+        let composite_id = CompositeId::with_key(
             identity,
-            RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())),
+            WorkloadUid::new("uid-123456".to_string()),
         );
 
         let fetch_result = spire_client.fetch_certificate(&composite_id).await;
@@ -559,11 +557,11 @@ pub mod spire_tests {
 
         let composite_id = CompositeId::new(
             Identity::from_parts("example.org".into(), "default".into(), "test-sa".into()),
-            RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())),
+            RequestKey::Workload(WorkloadUid::new("uid-123456".to_string())),
         );
         let composite_id_diff_uid = CompositeId::new(
             Identity::from_parts("example.org".into(), "default".into(), "test-sa".into()),
-            RequestKeyEnum::Workload(WorkloadUid::new("uid-654321".to_string())),
+            RequestKey::Workload(WorkloadUid::new("uid-654321".to_string())),
         );
         let sm = SecretManager::new_with_client(spire_client);
         let certs = sm.fetch_certificate(&composite_id).await.unwrap();
@@ -620,7 +618,7 @@ pub mod spire_tests {
 
         let composite_id = CompositeId::new(
             Identity::from_parts("example.org".into(), "default".into(), "test-sa".into()),
-            RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())),
+            RequestKey::Workload(WorkloadUid::new("uid-123456".to_string())),
         );
         let sm = SecretManager::new_with_client(spire_client);
         let certs = sm.fetch_certificate(&composite_id).await;
@@ -678,9 +676,9 @@ pub mod spire_tests {
 
         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
 
-        let composite_id = CompositeId::new(
+        let composite_id = CompositeId::with_key(
             identity,
-            RequestKeyEnum::Workload(WorkloadUid::new("uid-123456".to_string())),
+            WorkloadUid::new("uid-123456".to_string()),
         );
 
         let fetch_result = spire_client.fetch_certificate(&composite_id).await;
