@@ -53,4 +53,3 @@ static PQC_ENABLED: Lazy<bool> =
 #[allow(dead_code)]
 static TLS12_ENABLED: Lazy<bool> =
     Lazy::new(|| env::var("TLS12_ENABLED").unwrap_or_default() == "true");
-

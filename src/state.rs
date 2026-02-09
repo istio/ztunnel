@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::authpol_log;
 use crate::identity::{Identity, SecretManager};
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
@@ -29,7 +30,6 @@ use crate::tls;
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
-use crate::authpol_log;
 use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
 use educe::Educe;
@@ -597,7 +597,10 @@ impl DemandProxyState {
         for pol in allow_dry_run.iter() {
             if pol.matches(conn) {
                 dry_run_allow_matched = true;
-                authpol_log!(policy = pol.to_key().as_str(), "dry-run: allow policy match");
+                authpol_log!(
+                    policy = pol.to_key().as_str(),
+                    "dry-run: allow policy match"
+                );
             }
         }
         if allow.is_empty() && !allow_dry_run.is_empty() && !dry_run_allow_matched {
