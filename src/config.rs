@@ -117,6 +117,10 @@ const PROXY_MODE_SHARED: &str = "shared";
 const LOCALHOST_APP_TUNNEL: &str = "LOCALHOST_APP_TUNNEL";
 const ENABLE_ENHANCED_BAGGAGE: &str = "ENABLE_RESPONSE_BAGGAGE";
 
+/// When true, authorization policy logs are emitted at INFO level instead of DEBUG.
+pub static AUTHZ_POLICY_INFO_LOGGING: once_cell::sync::Lazy<bool> =
+    once_cell::sync::Lazy::new(|| env::var("AUTHZ_POLICY_INFO_LOGGING").unwrap_or_default() == "true");
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RootCert {
     File(PathBuf),

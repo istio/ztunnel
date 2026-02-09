@@ -46,10 +46,6 @@ pub mod xds;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
-/// When true, authorization policy logs are emitted at INFO level instead of DEBUG.
-pub static AUTHZ_POLICY_INFO_LOGGING: Lazy<bool> =
-    Lazy::new(|| env::var("AUTHZ_POLICY_INFO_LOGGING").unwrap_or_default() == "true");
-
 #[allow(dead_code)]
 static PQC_ENABLED: Lazy<bool> =
     Lazy::new(|| env::var("COMPLIANCE_POLICY").unwrap_or_default() == "pqc");
@@ -58,15 +54,3 @@ static PQC_ENABLED: Lazy<bool> =
 static TLS12_ENABLED: Lazy<bool> =
     Lazy::new(|| env::var("TLS12_ENABLED").unwrap_or_default() == "true");
 
-/// Logs a message at INFO level if AUTHZ_POLICY_INFO_LOGGING is set to "true",
-/// otherwise logs at DEBUG level.
-#[macro_export]
-macro_rules! authpol_log {
-    ($($arg:tt)+) => {
-        if *$crate::AUTHZ_POLICY_INFO_LOGGING {
-            tracing::info!($($arg)+);
-        } else {
-            tracing::debug!($($arg)+);
-        }
-    };
-}
