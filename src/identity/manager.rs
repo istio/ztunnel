@@ -144,7 +144,7 @@ impl Identity {
         }
     }
 
-    pub fn to_composite_id(&self) -> CompositeId<RequestKeyEnum> {
+    pub fn to_composite_id(&self) -> CompositeId<RequestKey> {
         CompositeId::new_id(self.clone())
     }
 }
@@ -163,13 +163,13 @@ impl Default for Identity {
 }
 
 #[derive(Eq, PartialEq, Clone, Hash, Debug)]
-pub struct CompositeId<RequestKeyEnum> {
+pub struct CompositeId<K> {
     id: Identity,
-    key: RequestKeyEnum,
+    key: K,
 }
 
 #[derive(Eq, PartialEq, Clone, Hash, Debug)]
-pub enum RequestKeyEnum {
+pub enum RequestKey {
     Identity(Identity),
     Workload(WorkloadUid),
 }
@@ -187,8 +187,8 @@ impl WorkloadPid {
     }
 }
 
-impl CompositeId<RequestKeyEnum> {
-    pub fn new(id: Identity, key: RequestKeyEnum) -> Self {
+impl<K> CompositeId<K> {
+    pub fn with_key(id: Identity, key: K) -> Self {
         Self { id, key }
     }
 
@@ -196,30 +196,87 @@ impl CompositeId<RequestKeyEnum> {
         &self.id
     }
 
-    pub fn key(&self) -> &RequestKeyEnum {
+    pub fn key(&self) -> &K {
         &self.key
+    }
+}
+
+impl CompositeId<RequestKey> {
+    pub fn new(id: Identity, key: RequestKey) -> Self {
+        Self { id, key }
     }
 
     pub fn new_id(id: Identity) -> Self {
         Self {
             id: id.clone(),
-            key: RequestKeyEnum::Identity(id),
+            key: RequestKey::Identity(id),
         }
     }
 }
 
-impl fmt::Display for CompositeId<RequestKeyEnum> {
+impl<K> fmt::Display for CompositeId<K> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.id)
     }
 }
 
+/// Trait for extracting a client-specific key from a `CompositeId<RequestKey>`.
+/// This allows each `CaClientTrait` implementation to receive only the key
+/// type it needs (e.g., `Identity` for Istio CA, `WorkloadUid` for SPIRE).
+pub trait FromCompositeId: Sized + Send + Sync {
+    fn from_composite(id: &CompositeId<RequestKey>) -> Result<Self, Error>;
+}
+
+impl FromCompositeId for RequestKey {
+    fn from_composite(id: &CompositeId<RequestKey>) -> Result<Self, Error> {
+        Ok(id.key().clone())
+    }
+}
+
+impl FromCompositeId for Identity {
+    fn from_composite(id: &CompositeId<RequestKey>) -> Result<Self, Error> {
+        Ok(id.id().clone())
+    }
+}
+
+impl FromCompositeId for WorkloadUid {
+    fn from_composite(id: &CompositeId<RequestKey>) -> Result<Self, Error> {
+        match id.key() {
+            RequestKey::Workload(uid) => Ok(uid.clone()),
+            _ => Err(Error::InvalidConfiguration(
+                "expected Workload key for SPIRE attestation".to_string(),
+            )),
+        }
+    }
+}
+
 #[async_trait]
 pub trait CaClientTrait: Send + Sync {
+    type Key: Send + Sync;
     async fn fetch_certificate(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<Self::Key>,
     ) -> Result<tls::WorkloadCertificate, Error>;
+}
+
+/// Adapter that wraps any `CaClientTrait` implementation and converts
+/// `CompositeId<RequestKey>` to the client's specific key type.
+struct KeyAdapter<C: CaClientTrait>(C);
+
+#[async_trait]
+impl<C: CaClientTrait> CaClientTrait for KeyAdapter<C>
+where
+    C::Key: FromCompositeId,
+{
+    type Key = RequestKey;
+    async fn fetch_certificate(
+        &self,
+        id: &CompositeId<RequestKey>,
+    ) -> Result<tls::WorkloadCertificate, Error> {
+        let typed_key = C::Key::from_composite(id)?;
+        let typed_id = CompositeId::with_key(id.id().clone(), typed_key);
+        self.0.fetch_certificate(&typed_id).await
+    }
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -288,7 +345,7 @@ impl PartialOrd for PendingPriority {
 
 // Implements the actual logic behind SecretManager.
 struct Worker {
-    client: Box<dyn CaClientTrait>,
+    client: Box<dyn CaClientTrait<Key = RequestKey>>,
     // For now, certificates contain SystemTime so we need to convert it to Instant. Using Converter
     // allows us to work on Instants without referring to the current SystemTime, which allows for
     // time control in unit tests.
@@ -296,14 +353,14 @@ struct Worker {
     // TODO: Change tls::Certs to use Instant instead of SystemTime.
     time_conv: crate::time::Converter,
     // Maps Identity to the certificate state.
-    certs: Mutex<HashMap<CompositeId<RequestKeyEnum>, CertChannel>>,
+    certs: Mutex<HashMap<CompositeId<RequestKey>, CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
 }
 
 impl Worker {
     fn new(
-        client: Box<dyn CaClientTrait>,
+        client: Box<dyn CaClientTrait<Key = RequestKey>>,
         requests: mpsc::Receiver<Request>,
         cfg: SecretManagerConfig,
     ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
@@ -323,7 +380,7 @@ impl Worker {
         (worker, tokio::spawn(async move { w.run(requests).await }))
     }
 
-    async fn has_id(&self, id: &CompositeId<RequestKeyEnum>) -> bool {
+    async fn has_id(&self, id: &CompositeId<RequestKey>) -> bool {
         self.certs.lock().await.contains_key(id)
     }
 
@@ -344,7 +401,7 @@ impl Worker {
         let mut fetches = FuturesUnordered::new();
         // The set of identities for which there are pending fetches. Elements of `fetches` and
         // `processing` correspond to each other.
-        let mut processing: HashMap<CompositeId<RequestKeyEnum>, Fetch> = HashMap::new();
+        let mut processing: HashMap<CompositeId<RequestKey>, Fetch> = HashMap::new();
         // Identities for which we will need to refresh certificates in the future, ordered by the
         // priority and time at which the refresh needs to happen.
         //
@@ -353,13 +410,13 @@ impl Worker {
         // the future, for all other priorities Instant::now() is used as the scheduled time of the
         // refresh. In other words, at any point in time, there are no high-priority
         // (not Background) items scheduled to run in the future.
-        let mut pending: KeyedPriorityQueue<CompositeId<RequestKeyEnum>, PendingPriority> =
+        let mut pending: KeyedPriorityQueue<CompositeId<RequestKey>, PendingPriority> =
             KeyedPriorityQueue::new();
         // The set of pending Identity requests with backoffs (i.e. pending requests that have already failed at least once).
         // Basically, each cert fetch attempt gets its own backoff.
         // This avoids delays where a fetch of identity A for pod A needlessly stalls the refetch of
         // identity B for pod B. Kept separate from the `pending` KeyedPriorityKey for convenience.
-        let mut pending_backoffs_by_id: HashMap<CompositeId<RequestKeyEnum>, ExponentialBackoff> =
+        let mut pending_backoffs_by_id: HashMap<CompositeId<RequestKey>, ExponentialBackoff> =
             HashMap::new();
 
         'main: loop {
@@ -529,7 +586,7 @@ impl Worker {
     }
 
     // Returns whether the Identity is still managed.
-    async fn update_certs(&self, id: &CompositeId<RequestKeyEnum>, certs: CertState) -> bool {
+    async fn update_certs(&self, id: &CompositeId<RequestKey>, certs: CertState) -> bool {
         // Both errors (lack of entry in the `certs` map and a send error) are handled the same way
         // (by returning false): either (a) there was no entry in the `certs` map due to a
         // forget_certificate call some time ago or (b) a forget_certificate call was made and
@@ -546,7 +603,7 @@ impl Worker {
     /// Returns existing valid certificate and its expiry time, or None if unavailable/expired
     async fn get_existing_cert_info(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<RequestKey>,
     ) -> Option<(Arc<tls::WorkloadCertificate>, Instant)> {
         if let Some(cert_channel) = self.certs.lock().await.get(id) {
             match &*cert_channel.rx.borrow() {
@@ -591,8 +648,8 @@ async fn maybe_sleep_until(till: Option<Instant>) -> bool {
 }
 
 pub enum Request {
-    Fetch(CompositeId<RequestKeyEnum>, Priority),
-    Forget(CompositeId<RequestKeyEnum>),
+    Fetch(CompositeId<RequestKey>, Priority),
+    Forget(CompositeId<RequestKey>),
 }
 
 pub struct SecretManagerConfig {
@@ -647,9 +704,12 @@ impl SecretManager {
         Ok(Self::new_with_client(caclient))
     }
 
-    pub fn new_with_client<C: 'static + CaClientTrait>(client: C) -> Self {
+    pub fn new_with_client<C: 'static + CaClientTrait>(client: C) -> Self
+    where
+        C::Key: FromCompositeId,
+    {
         Self::new_internal(
-            Box::new(client),
+            Box::new(KeyAdapter(client)),
             SecretManagerConfig {
                 time_conv: crate::time::Converter::new(),
                 concurrency: 8,
@@ -682,7 +742,7 @@ impl SecretManager {
     }
 
     fn new_internal(
-        client: Box<dyn CaClientTrait>,
+        client: Box<dyn CaClientTrait<Key = RequestKey>>,
         cfg: SecretManagerConfig,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(10);
@@ -704,7 +764,7 @@ impl SecretManager {
 
     async fn start_fetch(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<RequestKey>,
         pri: Priority,
     ) -> Result<watch::Receiver<CertState>, Error> {
         let mut certs = self.worker.certs.lock().await;
@@ -760,7 +820,7 @@ impl SecretManager {
 
     pub async fn fetch_certificate_pri(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<RequestKey>,
         pri: Priority,
     ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
         // This method is intentionally left simple, since unit tests are based on start_fetch
@@ -771,12 +831,12 @@ impl SecretManager {
 
     pub async fn fetch_certificate(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<RequestKey>,
     ) -> Result<Arc<tls::WorkloadCertificate>, Error> {
         self.fetch_certificate_pri(id, Priority::RealTime).await
     }
 
-    pub async fn forget_certificate(&self, id: &CompositeId<RequestKeyEnum>) {
+    pub async fn forget_certificate(&self, id: &CompositeId<RequestKey>) {
         // TODO: consider keeping the cert around for a minute or so to avoid churn
         // We would ideally drop any pending or new requests to rotate.
         if self.worker.certs.lock().await.remove(id).is_some() {
@@ -788,7 +848,7 @@ impl SecretManager {
     // but due to locking that would require a self-referential type.
     pub async fn collect_certs<R>(
         &self,
-        f: impl Fn(&CompositeId<RequestKeyEnum>, &CertState) -> R,
+        f: impl Fn(&CompositeId<RequestKey>, &CertState) -> R,
     ) -> Vec<R> {
         let mut ret = Vec::new();
         for (id, chan) in self.worker.certs.lock().await.iter() {
@@ -843,7 +903,7 @@ pub mod mock {
         });
         Arc::new(
             SecretManager::new_internal(
-                Box::new(client),
+                Box::new(super::KeyAdapter(client)),
                 super::SecretManagerConfig {
                     time_conv,
                     concurrency: 2,
@@ -1014,7 +1074,7 @@ mod tests {
             cert_lifetime: 2 * CERT_HALFLIFE,
         });
         let (secret_manager, worker) = SecretManager::new_internal(
-            Box::new(caclient.clone()),
+            Box::new(KeyAdapter(caclient.clone())),
             SecretManagerConfig {
                 time_conv,
                 concurrency,
@@ -1317,7 +1377,10 @@ mod tests {
         test.caclient.set_error(true).await;
         assert!(
             test.caclient
-                .fetch_certificate(&id.to_composite_id())
+                .fetch_certificate(&CompositeId::with_key(
+                    id.clone(),
+                    id.clone(),
+                ))
                 .await
                 .is_err()
         );

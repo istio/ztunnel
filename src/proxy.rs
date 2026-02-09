@@ -33,7 +33,7 @@ use tracing::{Instrument, debug, trace, warn};
 use inbound::Inbound;
 pub use metrics::*;
 
-use crate::identity::{CompositeId, Identity, RequestKeyEnum, SecretManager};
+use crate::identity::{CompositeId, Identity, RequestKey, SecretManager};
 
 use crate::dns::resolver::Resolver;
 use crate::drain::DrainWatcher;
@@ -217,10 +217,10 @@ impl LocalWorkloadInformation {
         let key = if self.cfg.spire_enabled {
             CompositeId::new(
                 id.clone(),
-                RequestKeyEnum::Workload(WorkloadUid::new(wl.uid.to_string())),
+                RequestKey::Workload(WorkloadUid::new(wl.uid.to_string())),
             )
         } else {
-            CompositeId::new(id.clone(), RequestKeyEnum::Identity(wl.identity().clone()))
+            CompositeId::new(id.clone(), RequestKey::Identity(wl.identity().clone()))
         };
 
         self.full_cert_manager.fetch_certificate(&key).await

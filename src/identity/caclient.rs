@@ -22,7 +22,7 @@ use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tracing::{debug, error, instrument, warn};
 
 use crate::identity::auth::AuthSource;
-use crate::identity::{CompositeId, Error, RequestKeyEnum};
+use crate::identity::{CompositeId, Error, Identity};
 use crate::tls::{self, TlsGrpcChannel};
 use crate::xds::istio::ca::IstioCertificateRequest;
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
@@ -60,7 +60,7 @@ impl CaClient {
     #[instrument(skip_all)]
     async fn fetch_certificate(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<Identity>,
     ) -> Result<tls::WorkloadCertificate, Error> {
         let cs = tls::csr::CsrOptions {
             san: id.to_string(),
@@ -126,9 +126,10 @@ impl CaClient {
 
 #[async_trait]
 impl crate::identity::CaClientTrait for CaClient {
+    type Key = Identity;
     async fn fetch_certificate(
         &self,
-        id: &CompositeId<RequestKeyEnum>,
+        id: &CompositeId<Identity>,
     ) -> Result<tls::WorkloadCertificate, Error> {
         self.fetch_certificate(id).await
     }
@@ -204,7 +205,7 @@ pub mod mock {
 
         async fn fetch_certificate(
             &self,
-            id: &CompositeId<RequestKeyEnum>,
+            id: &CompositeId<Identity>,
         ) -> Result<tls::WorkloadCertificate, Error> {
             let Identity::Spiffe {
                 trust_domain: td,
@@ -249,9 +250,10 @@ pub mod mock {
 
     #[async_trait]
     impl crate::identity::CaClientTrait for CaClient {
+        type Key = Identity;
         async fn fetch_certificate(
             &self,
-            id: &CompositeId<RequestKeyEnum>,
+            id: &CompositeId<Identity>,
         ) -> Result<tls::WorkloadCertificate, Error> {
             self.fetch_certificate(id).await
         }
@@ -266,7 +268,7 @@ mod tests {
     use matches::assert_matches;
 
     use crate::{
-        identity::{Error, Identity},
+        identity::{CompositeId, Error, Identity},
         test_helpers, tls,
         xds::istio::ca::IstioCertificateResponse,
     };
@@ -277,7 +279,10 @@ mod tests {
         let (mock, ca_client) = test_helpers::ca::CaServer::spawn().await;
         mock.send(Ok(res)).unwrap();
         ca_client
-            .fetch_certificate(&Identity::default().to_composite_id())
+            .fetch_certificate(&CompositeId::with_key(
+                Identity::default(),
+                Identity::default(),
+            ))
             .await
     }
 

@@ -15,7 +15,7 @@
 use crate::config;
 use crate::config::ProxyMode;
 use crate::identity::Priority::Warmup;
-use crate::identity::{CompositeId, Request, RequestKeyEnum, SecretManager};
+use crate::identity::{CompositeId, Request, RequestKey, SecretManager};
 use crate::inpod::WorkloadUid;
 use crate::state::workload::{InboundProtocol, Workload};
 use std::sync::Arc;
@@ -102,14 +102,14 @@ impl CertFetcherImpl {
             (w.native_tunnel || w.protocol == InboundProtocol::HBONE && !self.cfg.spire_enabled)
     }
 
-    fn build_key(&self, w: &Workload) -> CompositeId<RequestKeyEnum> {
+    fn build_key(&self, w: &Workload) -> CompositeId<RequestKey> {
         if self.cfg.spire_enabled {
             CompositeId::new(
                 w.identity(),
-                RequestKeyEnum::Workload(WorkloadUid::new(w.uid.to_string())),
+                RequestKey::Workload(WorkloadUid::new(w.uid.to_string())),
             )
         } else {
-            CompositeId::new(w.identity(), RequestKeyEnum::Identity(w.identity().clone()))
+            CompositeId::new(w.identity(), RequestKey::Identity(w.identity().clone()))
         }
     }
 }
