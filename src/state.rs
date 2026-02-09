@@ -29,6 +29,7 @@ use crate::tls;
 use crate::xds::istio::security::Authorization as XdsAuthorization;
 use crate::xds::istio::workload::Address as XdsAddress;
 use crate::xds::{AdsClient, Demander, LocalClient, ProxyStateUpdater};
+use crate::authpol_log;
 use crate::{cert_fetcher, config, rbac, xds};
 use crate::{proxy, strng};
 use educe::Educe;
@@ -577,13 +578,13 @@ impl DemandProxyState {
 
         for pol in deny_dry_run.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "dry-run deny policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "dry-run: deny policy match");
             }
         }
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "deny policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "deny policy match");
                 return Err(proxy::AuthorizationRejectionError::ExplicitlyDenied(
                     pol.namespace.to_owned(),
                     pol.name.to_owned(),
@@ -596,23 +597,23 @@ impl DemandProxyState {
         for pol in allow_dry_run.iter() {
             if pol.matches(conn) {
                 dry_run_allow_matched = true;
-                debug!(policy = pol.to_key().as_str(), "dry-run allow policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "dry-run: allow policy match");
             }
         }
         if allow.is_empty() && !allow_dry_run.is_empty() && !dry_run_allow_matched {
             // this is going to be an allow, but the conn would be denied if dry-run policies
             // became enforced because none matched
-            debug!("dry-run no allow policies match");
+            authpol_log!("dry-run: no allow policies match");
         }
         // "If there are no ALLOW policies for the workload, allow the request."
         if allow.is_empty() {
-            debug!("no allow policies, allow");
+            authpol_log!("no allow policies, allow");
             return Ok(());
         }
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "allow policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "allow policy match");
                 return Ok(());
             } else {
                 trace!(
@@ -622,7 +623,7 @@ impl DemandProxyState {
             }
         }
         // "Deny the request."
-        debug!("no allow policies matched");
+        authpol_log!("no allow policies matched");
         Err(proxy::AuthorizationRejectionError::NotAllowed)
     }
 
