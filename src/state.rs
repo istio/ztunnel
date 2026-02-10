@@ -1710,11 +1710,11 @@ mod tests {
 
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("policy", "ns1/dry-run-deny"),
-            ("message", "dry-run deny policy match"),
+            ("message", "dry-run: deny policy match"),
         ]));
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("policy", "ns1/dry-run-allow"),
-            ("message", "dry-run allow policy match"),
+            ("message", "dry-run: allow policy match"),
         ]));
     }
 
