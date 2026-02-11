@@ -133,6 +133,11 @@ accessible by making an HTTP request to either "/stats/prometheus" or "/metrics"
 - Proxies started (`istio_proxies_started_total`)
 - Proxies stopped (`istio_proxies_stopped_total`)
 
+#### Certificate metrics
+
+- Cert expiration seconds (`istio_cert_expiration_seconds`): Gauge of seconds until the leaf
+  certificate expires (negative if expired), labeled by `identity` (SPIFFE URI).
+
 #### XDS metrics
 
 - XDS Connection terminations (`istio_xds_connection_terminations_total`)

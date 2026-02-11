@@ -30,6 +30,8 @@ use crate::test_helpers::linux::TestMode::{Dedicated, Shared};
 use arcstr::ArcStr;
 use itertools::Itertools;
 use nix::unistd::mkdtemp;
+use prometheus_client::registry::Registry;
+use std::sync::Arc;
 use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
@@ -250,8 +252,19 @@ impl WorkloadManager {
                     // inside the pod's netns
                     helpers::run_command("scripts/ztunnel-redirect.sh")?;
                 }
-                let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
-                let app = crate::app::build_with_cert(Arc::new(cfg), cert_manager.clone()).await?;
+                let mut registry = Registry::default();
+                let identity_metrics = Arc::new(identity::metrics::Metrics::new());
+                let cert_manager = identity::mock::new_secret_manager_with_metrics(
+                    Duration::from_secs(10),
+                    identity_metrics.clone(),
+                );
+                let app = crate::app::build_with_cert_and_registry(
+                    Arc::new(cfg),
+                    cert_manager.clone(),
+                    identity_metrics,
+                    registry,
+                )
+                .await?;
                 let shutdown = app.shutdown.trigger();
 
                 // inpod mode doesn't have ore need these, so just put bogus values.

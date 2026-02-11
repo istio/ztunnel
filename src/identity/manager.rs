@@ -27,7 +27,7 @@ use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, Instant, sleep_until};
 
-use crate::{strng, tls};
+use crate::{identity::metrics, strng, tls};
 
 use super::CaClient;
 use super::Error::{self, Spiffe};
@@ -219,6 +219,7 @@ struct Worker {
     certs: Mutex<HashMap<Identity, CertChannel>>,
     // How many concurrent fetch_certificate calls can be pending at a time.
     concurrency: u16,
+    metrics: Arc<metrics::Metrics>,
 }
 
 impl Worker {
@@ -235,6 +236,7 @@ impl Worker {
             time_conv: cfg.time_conv,
             concurrency: cfg.concurrency,
             certs: Default::default(),
+            metrics: cfg.metrics,
         });
 
         // Process requests in the background. The task will terminate on its own when the
@@ -446,19 +448,61 @@ impl Worker {
         while fetches.next().await.is_some() {}
     }
 
+    async fn update_cert_expiration_metric(
+        &self,
+        id: &Identity,
+        not_after: Option<std::time::SystemTime>,
+    ) {
+        let labels = metrics::CertExpirationLabels {
+            identity: id.clone(),
+        };
+
+        let Some(not_after) = not_after else {
+            self.metrics.cert_expiration_seconds.remove(&labels);
+            return;
+        };
+        let Some(not_after) = self
+            .time_conv
+            .system_time_to_instant(not_after)
+        else {
+            self.metrics.cert_expiration_seconds.remove(&labels);
+            return;
+        };
+        let now = std::time::Instant::now();
+        let seconds = if not_after >= now {
+            i64::try_from(not_after.duration_since(now).as_secs()).unwrap_or(i64::MAX)
+        } else {
+            -i64::try_from(now.duration_since(not_after).as_secs()).unwrap_or(i64::MAX)
+        };
+        self.metrics
+            .cert_expiration_seconds
+            .get_or_create(&labels)
+            .set(seconds);
+    }
+
     // Returns whether the Identity is still managed.
     async fn update_certs(&self, id: &Identity, certs: CertState) -> bool {
         // Both errors (lack of entry in the `certs` map and a send error) are handled the same way
         // (by returning false): either (a) there was no entry in the `certs` map due to a
         // forget_certificate call some time ago or (b) a forget_certificate call was made and
         // finished just after the lock was released (but before certs was sent)
-        match self.certs.lock().await.get(id) {
-            Some(state) => {
-                state.tx.send(certs).expect("state.rx cannot be gone");
-                true
+        let not_after = match &certs {
+            CertState::Available(cert) => Some(cert.cert.expiration().not_after),
+            _ => None,
+        };
+        let updated = {
+            match self.certs.lock().await.get(id) {
+                Some(state) => {
+                    state.tx.send(certs).expect("state.rx cannot be gone");
+                    true
+                }
+                None => false,
             }
-            None => false,
+        };
+        if updated {
+            self.update_cert_expiration_metric(id, not_after).await;
         }
+        updated
     }
 
     /// Returns existing valid certificate and its expiry time, or None if unavailable/expired
@@ -516,6 +560,7 @@ pub enum Request {
 pub struct SecretManagerConfig {
     time_conv: crate::time::Converter,
     concurrency: u16,
+    metrics: Arc<metrics::Metrics>,
 }
 
 // push_increase pushes an item onto the queue if its not present, otherwise updates the priority to the
@@ -547,7 +592,10 @@ impl fmt::Debug for SecretManager {
 }
 
 impl SecretManager {
-    pub async fn new(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
+    pub async fn new(
+        cfg: Arc<crate::config::Config>,
+        metrics: Arc<metrics::Metrics>,
+    ) -> Result<Self, Error> {
         let caclient = CaClient::new(
             cfg.ca_address
                 .clone()
@@ -562,15 +610,19 @@ impl SecretManager {
             cfg.ca_headers.vec.clone(),
         )
         .await?;
-        Ok(Self::new_with_client(caclient))
+        Ok(Self::new_with_client_and_metrics(caclient, metrics))
     }
 
-    pub fn new_with_client<C: 'static + CaClientTrait>(client: C) -> Self {
+    pub fn new_with_client_and_metrics<C: 'static + CaClientTrait>(
+        client: C,
+        metrics: Arc<metrics::Metrics>,
+    ) -> Self {
         Self::new_internal(
             Box::new(client),
             SecretManagerConfig {
                 time_conv: crate::time::Converter::new(),
                 concurrency: 8,
+                metrics,
             },
         )
         .0
@@ -676,6 +728,7 @@ impl SecretManager {
         // We would ideally drop any pending or new requests to rotate.
         if self.worker.certs.lock().await.remove(id).is_some() {
             self.post(Request::Forget(id.clone())).await;
+            self.worker.update_cert_expiration_metric(id, None).await;
         }
     }
 
@@ -707,6 +760,7 @@ pub mod mock {
     };
 
     use crate::identity::caclient::mock::{self, CaClient as MockCaClient};
+    use crate::identity::metrics;
 
     use super::SecretManager;
 
@@ -724,9 +778,34 @@ pub mod mock {
         })
     }
 
+    fn default_metrics() -> Arc<metrics::Metrics> {
+        Arc::new(metrics::Metrics::new())
+    }
+
     // There is no need to return Arc, but most callers want one so it simplifies the code - and we
     // don't care about the extra overhead in tests.
     pub fn new_secret_manager_cfg(cfg: Config) -> Arc<SecretManager> {
+        new_secret_manager_cfg_with_metrics(cfg, default_metrics())
+    }
+
+    pub fn new_secret_manager_with_metrics(
+        cert_lifetime: Duration,
+        metrics: Arc<metrics::Metrics>,
+    ) -> Arc<SecretManager> {
+        new_secret_manager_cfg_with_metrics(
+            Config {
+                cert_lifetime,
+                fetch_latency: Duration::ZERO,
+                epoch: None,
+            },
+            metrics,
+        )
+    }
+
+    pub fn new_secret_manager_cfg_with_metrics(
+        cfg: Config,
+        metrics: Arc<metrics::Metrics>,
+    ) -> Arc<SecretManager> {
         let time_conv = crate::time::Converter::new_at(cfg.epoch.unwrap_or_else(SystemTime::now));
         let client = MockCaClient::new(mock::ClientConfig {
             cert_lifetime: cfg.cert_lifetime,
@@ -739,6 +818,7 @@ pub mod mock {
                 super::SecretManagerConfig {
                     time_conv,
                     concurrency: 2,
+                    metrics,
                 },
             )
             .0,
@@ -855,6 +935,34 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn test_cert_expiration_metric() {
+        let cert_lifetime = Duration::from_secs(60);
+        let identity_metrics = Arc::new(crate::identity::metrics::Metrics::new());
+        let secret_manager = mock::new_secret_manager_cfg_with_metrics(
+            mock::Config {
+                cert_lifetime,
+                fetch_latency: Duration::ZERO,
+                epoch: Some(time::SystemTime::UNIX_EPOCH),
+            },
+            identity_metrics.clone(),
+        );
+        let id: Identity = Default::default();
+        secret_manager.fetch_certificate(&id).await.unwrap();
+
+        let labels = crate::identity::metrics::CertExpirationLabels {
+            identity: id,
+        };
+        let gauge = identity_metrics
+            .cert_expiration_seconds
+            .get(&labels)
+            .expect("metric missing");
+        let value = gauge.get();
+        let max = i64::try_from(cert_lifetime.as_secs()).unwrap();
+        assert!(value <= max);
+        assert!(value > 0);
+    }
+
     fn collect_strings<T: IntoIterator>(xs: T) -> Vec<String>
     where
         T::Item: ToString,
@@ -899,6 +1007,7 @@ mod tests {
         //    nearest millisecond. That means eg. sleep(1ms) will advance the timer by 2ms while
         //    sleep(600us) will advance the timer by only 1ms.
         let time_conv = crate::time::Converter::new();
+        let identity_metrics = Arc::new(crate::identity::metrics::Metrics::new());
         let caclient = MockCaClient::new(caclient::mock::ClientConfig {
             time_conv: time_conv.clone(),
             fetch_latency: SEC,
@@ -909,6 +1018,7 @@ mod tests {
             SecretManagerConfig {
                 time_conv,
                 concurrency,
+                metrics: identity_metrics,
             },
         );
         Test {

@@ -508,7 +508,12 @@ fn hbone_connections(c: &mut Criterion) {
 
     // Global setup: spin up an echo server and ztunnel instance
     let (echo_addr, ta) = rt.block_on(async move {
-        let cert_manager = identity::mock::new_secret_manager(Duration::from_secs(10));
+        let mut registry = Registry::default();
+        let identity_metrics = Arc::new(identity::metrics::Metrics::new());
+        let cert_manager = identity::mock::new_secret_manager_with_metrics(
+            Duration::from_secs(10),
+            identity_metrics.clone(),
+        );
         let port = 80;
         let config_source = Some(hbone_connection_config());
         let config = test_helpers::test_config_with_port_xds_addr_and_root_cert(
@@ -517,7 +522,12 @@ fn hbone_connections(c: &mut Criterion) {
             None,
             config_source,
         );
-        let app = app::build_with_cert(Arc::new(config), cert_manager.clone())
+        let app = app::build_with_cert_and_registry(
+            Arc::new(config),
+            cert_manager.clone(),
+            identity_metrics,
+            registry,
+        )
             .await
             .unwrap();
         let ta = TestApp::from((&app, cert_manager));
