@@ -14,6 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
@@ -428,6 +429,12 @@ impl OutboundConnection {
         connection_stats.record(res);
     }
 
+    /// Delay between successive connection attempts in FIRST_HEALTHY_RACE mode.
+    /// If a connection attempt neither succeeds nor fails within this window,
+    /// the next candidate is started in parallel. If the attempt fails immediately
+    /// (e.g. RST), the next candidate starts right away without waiting.
+    const RACE_ATTEMPT_DELAY: Duration = Duration::from_millis(300);
+
     async fn proxy_to_race(
         &mut self,
         stream: TcpStream,
@@ -452,20 +459,63 @@ impl OutboundConnection {
         let res = (async {
             let socket_factory = self.pi.socket_factory.as_ref();
             let mut futs = futures_util::stream::FuturesUnordered::new();
-            for &addr in candidates {
+            let mut remaining = candidates.iter();
+
+            // Start the first connection attempt immediately
+            if let Some(&addr) = remaining.next() {
                 futs.push(super::freebind_connect(None, addr, socket_factory));
             }
 
-            // Take the first successful connection
             let mut winner = None;
-            while let Some(result) = futures_util::StreamExt::next(&mut futs).await {
-                match result {
-                    Ok(tcp) => {
-                        winner = Some(tcp);
-                        break;
+            loop {
+                if futs.is_empty() {
+                    // No more in-flight attempts and no more candidates
+                    break;
+                }
+
+                if remaining.len() > 0 {
+                    // We have more candidates to try. Wait for either:
+                    // 1. An in-flight attempt to complete (success or failure)
+                    // 2. The delay timer to expire (start next candidate in parallel)
+                    tokio::select! {
+                        biased;
+                        result = futures_util::StreamExt::next(&mut futs) => {
+                            match result {
+                                Some(Ok(tcp)) => {
+                                    winner = Some(tcp);
+                                    break;
+                                }
+                                Some(Err(err)) => {
+                                    debug!(?err, "race candidate connection failed");
+                                    // Immediate failure: start next candidate right away
+                                    if let Some(&addr) = remaining.next() {
+                                        futs.push(super::freebind_connect(None, addr, socket_factory));
+                                    }
+                                }
+                                None => break, // FuturesUnordered is empty
+                            }
+                        }
+                        _ = tokio::time::sleep(Self::RACE_ATTEMPT_DELAY) => {
+                            // Timer expired without success or failure.
+                            // Start the next candidate in parallel.
+                            if let Some(&addr) = remaining.next() {
+                                debug!(?addr, "race timer expired, starting next candidate");
+                                futs.push(super::freebind_connect(None, addr, socket_factory));
+                            }
+                        }
                     }
-                    Err(err) => {
-                        debug!(?err, "race candidate connection failed");
+                } else {
+                    // No more candidates to start. Just wait for remaining in-flight
+                    // attempts to complete.
+                    match futures_util::StreamExt::next(&mut futs).await {
+                        Some(Ok(tcp)) => {
+                            winner = Some(tcp);
+                            break;
+                        }
+                        Some(Err(err)) => {
+                            debug!(?err, "race candidate connection failed");
+                        }
+                        None => break,
                     }
                 }
             }
@@ -841,10 +891,13 @@ fn baggage(r: &Request) -> String {
 enum UpstreamTarget {
     /// Connect to a single upstream address (default behavior).
     Single(SocketAddr),
-    /// Race connections to all candidates in parallel (FIRST_HEALTHY_RACE).
+    /// Race connections to candidates using a timer-based approach (FIRST_HEALTHY_RACE).
+    /// Candidates are tried sequentially with a delay between attempts. If an attempt
+    /// fails immediately, the next candidate starts right away. If neither success nor
+    /// failure occurs within the delay, the next candidate starts in parallel.
     /// The first successful TCP handshake wins; others are cancelled.
     Race {
-        /// All candidate addresses to race connections against.
+        /// Candidate addresses to race connections against, in order of preference.
         candidates: Vec<SocketAddr>,
         /// Representative address used for metrics and connection tracking.
         /// Typically the first candidate.
