@@ -211,6 +211,12 @@ impl OutboundConnection {
             metrics,
         ));
 
+        if !req.race_candidates.is_empty() {
+            self.proxy_to_race(source_stream, &req, connection_result_builder)
+                .await;
+            return;
+        }
+
         match req.protocol {
             OutboundProtocol::DOUBLEHBONE => {
                 // We box this since its not a common path and it would make the future really big.
@@ -422,6 +428,67 @@ impl OutboundConnection {
         connection_stats.record(res);
     }
 
+    async fn proxy_to_race(
+        &mut self,
+        stream: TcpStream,
+        req: &Request,
+        connection_stats_builder: Box<ConnectionResultBuilder>,
+    ) {
+        let connection_stats = Box::new(connection_stats_builder.build());
+        let candidates = &req.race_candidates;
+
+        debug!(
+            count = candidates.len(),
+            ?candidates,
+            "racing upstream connections (FIRST_HEALTHY_RACE)"
+        );
+
+        let res = (async {
+            let socket_factory = self.pi.socket_factory.as_ref();
+            let mut futs = futures_util::stream::FuturesUnordered::new();
+            for &addr in candidates {
+                futs.push(super::freebind_connect(None, addr, socket_factory));
+            }
+
+            // Take the first successful connection
+            let mut winner = None;
+            while let Some(result) = futures_util::StreamExt::next(&mut futs).await {
+                match result {
+                    Ok(tcp) => {
+                        winner = Some(tcp);
+                        break;
+                    }
+                    Err(err) => {
+                        debug!(?err, "race candidate connection failed");
+                    }
+                }
+            }
+
+            let outbound = match winner {
+                Some(tcp) => tcp,
+                None => {
+                    // All candidates failed; RST-close the downstream socket
+                    rst_close(stream);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "all race candidates failed",
+                    )
+                    .into());
+                }
+            };
+
+            // Proxying data between downstream and winning upstream
+            copy::copy_bidirectional(
+                copy::TcpStreamSplitter(stream),
+                copy::TcpStreamSplitter(outbound),
+                &connection_stats,
+            )
+            .await
+        })
+        .await;
+        connection_stats.record(res);
+    }
+
     fn conn_metrics_from_request(req: &Request) -> ConnectionOpen {
         let (derived_source, security_policy) = match req.protocol {
             OutboundProtocol::HBONE | OutboundProtocol::DOUBLEHBONE => (
@@ -512,6 +579,7 @@ impl OutboundConnection {
                 // the configuration. So for the final destination credentials
                 // (final_sans) we use the upstream workload credentials.
                 final_sans: upstream.service_sans(),
+                race_candidates: vec![],
             })
         } else {
             // Do not try to send cross-network traffic without network gateway.
@@ -574,6 +642,7 @@ impl OutboundConnection {
                     actual_destination,
                     upstream_sans,
                     final_sans: vec![],
+                    race_candidates: vec![],
                 });
             }
             // this was service addressed but we did not find a waypoint
@@ -613,6 +682,7 @@ impl OutboundConnection {
                 actual_destination: target,
                 upstream_sans: vec![],
                 final_sans: vec![],
+                race_candidates: vec![],
             });
         };
 
@@ -677,6 +747,7 @@ impl OutboundConnection {
                     actual_destination,
                     upstream_sans,
                     final_sans: vec![],
+                    race_candidates: vec![],
                 });
             }
             // Workload doesn't have a waypoint; send directly
@@ -703,6 +774,11 @@ impl OutboundConnection {
 
         // For case no waypoint for both side and direct to remote node proxy
         let (upstream_sans, final_sans) = (us.workload_and_services_san(), vec![]);
+        let race_candidates: Vec<SocketAddr> = us
+            .race_candidates
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, us.port))
+            .collect();
         debug!("built request to workload");
         Ok(Request {
             protocol: OutboundProtocol::from(us.workload.protocol),
@@ -713,8 +789,18 @@ impl OutboundConnection {
             actual_destination,
             upstream_sans,
             final_sans,
+            race_candidates,
         })
     }
+}
+
+/// RST-close a downstream TCP stream by setting SO_LINGER(0) before dropping.
+/// This sends a TCP RST instead of FIN, which is critical for happy-eyeballs
+/// clients that interpret FIN as "connection succeeded then server hung up".
+fn rst_close(stream: TcpStream) {
+    let sock_ref = socket2::SockRef::from(&stream);
+    let _ = sock_ref.set_linger(Some(std::time::Duration::ZERO));
+    drop(stream);
 }
 
 fn build_forwarded(remote_addr: SocketAddr, server: &Option<ServiceDescription>) -> String {
@@ -760,6 +846,10 @@ struct Request {
     // This field only matters if we need to know both the identity of the next hop, as well as the
     // final hop (currently, this is only double HBONE).
     final_sans: Vec<Identity>,
+
+    // When FIRST_HEALTHY_RACE is active, all candidate upstream addresses to race connections against.
+    // Empty for default connect strategy.
+    race_candidates: Vec<SocketAddr>,
 }
 
 #[cfg(test)]
@@ -2007,6 +2097,7 @@ mod tests {
             actual_destination: "10.0.0.1:8080".parse().unwrap(),
             upstream_sans: vec![],
             final_sans: vec![],
+            race_candidates: vec![],
         };
 
         let remote_addr = "127.0.0.1:12345".parse().unwrap();

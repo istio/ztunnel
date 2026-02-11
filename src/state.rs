@@ -17,7 +17,7 @@ use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
 use crate::state::service::{
-    Endpoint, IpFamily, LoadBalancerMode, LoadBalancerScopes, ServiceStore,
+    ConnectStrategy, Endpoint, IpFamily, LoadBalancerMode, LoadBalancerScopes, ServiceStore,
 };
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
@@ -71,6 +71,9 @@ pub struct Upstream {
     pub service_sans: Vec<Strng>,
     /// If this was from a service, the service info.
     pub destination_service: Option<ServiceDescription>,
+    /// When FIRST_HEALTHY_RACE is active, all DNS-resolved IPs to race connections against.
+    /// Empty for default connect strategy.
+    pub race_candidates: Vec<IpAddr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -720,6 +723,39 @@ impl DemandProxyState {
             .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
     }
 
+    /// Like resolve_on_demand_dns, but returns ALL resolved IPs ordered by IP family preference.
+    /// Used by FIRST_HEALTHY_RACE to race connections to all candidates.
+    async fn resolve_all_on_demand_dns(
+        &self,
+        workload: &Workload,
+        original_target_address: SocketAddr,
+    ) -> Result<Vec<IpAddr>, Error> {
+        let workload_uid = workload.uid.clone();
+        let hostname = workload.hostname.clone();
+        trace!(%hostname, "starting DNS lookup (all IPs)");
+
+        let resp = match self.dns_resolver.lookup_ip(hostname.as_str()).await {
+            Err(err) => {
+                warn!(?err,%hostname,"dns lookup failed");
+                return Err(Error::NoResolvedAddresses(workload_uid.to_string()));
+            }
+            Ok(resp) => resp,
+        };
+        trace!(%hostname, "dns lookup complete (all IPs) {resp:?}");
+
+        let (matching, unmatching): (Vec<_>, Vec<_>) = resp
+            .as_lookup()
+            .record_iter()
+            .filter_map(|record| record.data().ip_addr())
+            .partition(|record| record.is_ipv6() == original_target_address.is_ipv6());
+        // Return all IPs, with matching IP family first.
+        let all: Vec<IpAddr> = matching.into_iter().chain(unmatching).collect();
+        if all.is_empty() {
+            return Err(Error::EmptyResolvedAddresses(workload_uid.to_string()));
+        }
+        Ok(all)
+    }
+
     // same as fetch_workload, but if the caller knows the workload is enroute already,
     // will retry on cache miss for a configured amount of time - returning the workload
     // when we get it, or nothing if the timeout is exceeded, whichever happens first
@@ -827,6 +863,31 @@ impl DemandProxyState {
         };
         let svc_desc = svc.clone().map(|s| ServiceDescription::from(s.as_ref()));
         let ip_family_restriction = svc.as_ref().and_then(|s| s.ip_families);
+
+        // Check if FIRST_HEALTHY_RACE is enabled for this service
+        let is_race = svc
+            .as_ref()
+            .and_then(|s| s.load_balancer.as_ref())
+            .map(|lb| lb.connect_strategy == ConnectStrategy::FirstHealthyRace)
+            .unwrap_or(false);
+
+        if is_race && !wl.hostname.is_empty() {
+            // For FIRST_HEALTHY_RACE, resolve all DNS IPs and populate race_candidates
+            let all_ips = Box::pin(self.resolve_all_on_demand_dns(&wl, original_target_address))
+                .await?;
+            let selected = all_ips.first().copied();
+            let res = Upstream {
+                workload: wl,
+                selected_workload_ip: selected,
+                port,
+                service_sans: svc.map(|s| s.subject_alt_names.clone()).unwrap_or_default(),
+                destination_service: svc_desc,
+                race_candidates: all_ips,
+            };
+            tracing::trace!(?res, "finalize_upstream (race)");
+            return Ok(Some(res));
+        }
+
         let selected_workload_ip = self
             .pick_workload_destination_or_resolve(
                 &wl,
@@ -841,6 +902,7 @@ impl DemandProxyState {
             port,
             service_sans: svc.map(|s| s.subject_alt_names.clone()).unwrap_or_default(),
             destination_service: svc_desc,
+            race_candidates: Vec::new(),
         };
         tracing::trace!(?res, "finalize_upstream");
         Ok(Some(res))
@@ -1828,6 +1890,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
                 health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
+                connect_strategy: ConnectStrategy::Default,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
@@ -1842,6 +1905,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
                 health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
+                connect_strategy: ConnectStrategy::Default,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
