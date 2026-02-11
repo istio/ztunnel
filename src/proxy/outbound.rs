@@ -196,7 +196,7 @@ impl OutboundConnection {
         let _conn_guard = self.pi.connection_manager.track_outbound(
             source_addr,
             dest_addr,
-            req.actual_destination,
+            req.upstream_target.tracking_addr(),
             req.protocol,
         );
 
@@ -204,14 +204,14 @@ impl OutboundConnection {
         let hbone_target = req.hbone_target_destination.clone();
         let connection_result_builder = Box::new(ConnectionResultBuilder::new(
             source_addr,
-            req.actual_destination,
+            req.upstream_target.tracking_addr(),
             hbone_target,
             start,
             Self::conn_metrics_from_request(&req),
             metrics,
         ));
 
-        if !req.race_candidates.is_empty() {
+        if let UpstreamTarget::Race { .. } = &req.upstream_target {
             self.proxy_to_race(source_stream, &req, connection_result_builder)
                 .await;
             return;
@@ -260,7 +260,7 @@ impl OutboundConnection {
                 src_id: req.source.identity(),
                 dst_id: req.final_sans.clone(),
                 src: remote_addr.ip(),
-                dst: req.actual_destination,
+                dst: req.upstream_target.single_addr(),
             };
 
             // Fetch certs and establish inner TLS connection.
@@ -392,7 +392,7 @@ impl OutboundConnection {
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
             dst_id: req.upstream_sans.clone(),
             src: remote_addr.ip(),
-            dst: req.actual_destination,
+            dst: req.upstream_target.single_addr(),
         });
         let (upgraded, baggage) = Box::pin(self.pool.send_request_pooled(&pool_key, request))
             .instrument(trace_span!("outbound connect"))
@@ -411,7 +411,7 @@ impl OutboundConnection {
         let res = (async {
             let outbound = super::freebind_connect(
                 None, // No need to spoof source IP on outbound
-                req.actual_destination,
+                req.upstream_target.single_addr(),
                 self.pi.socket_factory.as_ref(),
             )
             .await?;
@@ -435,7 +435,13 @@ impl OutboundConnection {
         connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
         let connection_stats = Box::new(connection_stats_builder.build());
-        let candidates = &req.race_candidates;
+        let candidates = match &req.upstream_target {
+            UpstreamTarget::Race { candidates, .. } => candidates,
+            UpstreamTarget::Single(_) => {
+                debug!("proxy_to_race called with Single upstream target, this should not happen");
+                return;
+            }
+        };
 
         debug!(
             count = candidates.len(),
@@ -463,6 +469,8 @@ impl OutboundConnection {
                     }
                 }
             }
+            // Explicitly drop remaining futures to cancel in-progress connection attempts.
+            drop(futs);
 
             let outbound = match winner {
                 Some(tcp) => tcp,
@@ -567,9 +575,11 @@ impl OutboundConnection {
                 hbone_target_destination,
                 actual_destination_workload: Some(gateway_upstream.workload.clone()),
                 intended_destination_service: Some(ServiceDescription::from(service)),
-                actual_destination: gateway_upstream.workload_socket_addr().ok_or(
-                    Error::NoValidDestination(Box::new((*gateway_upstream.workload).clone())),
-                )?,
+                upstream_target: UpstreamTarget::Single(
+                    gateway_upstream.workload_socket_addr().ok_or(
+                        Error::NoValidDestination(Box::new((*gateway_upstream.workload).clone())),
+                    )?,
+                ),
                 // The outer tunnel of double HBONE is terminated by the E/W
                 // gateway and so for the credentials of the next hop
                 // (upstream_sans) we use gateway credentials.
@@ -579,7 +589,6 @@ impl OutboundConnection {
                 // the configuration. So for the final destination credentials
                 // (final_sans) we use the upstream workload credentials.
                 final_sans: upstream.service_sans(),
-                race_candidates: vec![],
             })
         } else {
             // Do not try to send cross-network traffic without network gateway.
@@ -639,10 +648,9 @@ impl OutboundConnection {
                     hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: Some(ServiceDescription::from(&*target_service)),
-                    actual_destination,
+                    upstream_target: UpstreamTarget::Single(actual_destination),
                     upstream_sans,
                     final_sans: vec![],
-                    race_candidates: vec![],
                 });
             }
             // this was service addressed but we did not find a waypoint
@@ -679,10 +687,9 @@ impl OutboundConnection {
                 hbone_target_destination: None,
                 actual_destination_workload: None,
                 intended_destination_service: None,
-                actual_destination: target,
+                upstream_target: UpstreamTarget::Single(target),
                 upstream_sans: vec![],
                 final_sans: vec![],
-                race_candidates: vec![],
             });
         };
 
@@ -744,10 +751,9 @@ impl OutboundConnection {
                     hbone_target_destination: Some(HboneAddress::SocketAddr(target)),
                     actual_destination_workload: Some(waypoint.workload),
                     intended_destination_service: us.destination_service.clone(),
-                    actual_destination,
+                    upstream_target: UpstreamTarget::Single(actual_destination),
                     upstream_sans,
                     final_sans: vec![],
-                    race_candidates: vec![],
                 });
             }
             // Workload doesn't have a waypoint; send directly
@@ -774,11 +780,23 @@ impl OutboundConnection {
 
         // For case no waypoint for both side and direct to remote node proxy
         let (upstream_sans, final_sans) = (us.workload_and_services_san(), vec![]);
-        let race_candidates: Vec<SocketAddr> = us
-            .race_candidates
-            .iter()
-            .map(|ip| SocketAddr::new(*ip, us.port))
-            .collect();
+        // Only race connections for TCP (non-mesh) destinations. If the destination is
+        // in the mesh (HBONE), we should not race as we'd need proper mTLS setup per connection.
+        let upstream_target = if us.workload.protocol == InboundProtocol::TCP
+            && !us.race_candidates.is_empty()
+        {
+            let candidates: Vec<SocketAddr> = us
+                .race_candidates
+                .iter()
+                .map(|ip| SocketAddr::new(*ip, us.port))
+                .collect();
+            UpstreamTarget::Race {
+                representative: actual_destination,
+                candidates,
+            }
+        } else {
+            UpstreamTarget::Single(actual_destination)
+        };
         debug!("built request to workload");
         Ok(Request {
             protocol: OutboundProtocol::from(us.workload.protocol),
@@ -786,10 +804,9 @@ impl OutboundConnection {
             hbone_target_destination,
             actual_destination_workload: Some(us.workload.clone()),
             intended_destination_service: us.destination_service.clone(),
-            actual_destination,
+            upstream_target,
             upstream_sans,
             final_sans,
-            race_candidates,
         })
     }
 }
@@ -818,6 +835,41 @@ fn baggage(r: &Request) -> String {
     baggage::baggage_header_val(&r.source.baggage(), &r.source.workload_type)
 }
 
+/// Represents the upstream target for an outbound connection.
+/// Either a single destination address or multiple candidates to race.
+#[derive(Debug)]
+enum UpstreamTarget {
+    /// Connect to a single upstream address (default behavior).
+    Single(SocketAddr),
+    /// Race connections to all candidates in parallel (FIRST_HEALTHY_RACE).
+    /// The first successful TCP handshake wins; others are cancelled.
+    Race {
+        /// All candidate addresses to race connections against.
+        candidates: Vec<SocketAddr>,
+        /// Representative address used for metrics and connection tracking.
+        /// Typically the first candidate.
+        representative: SocketAddr,
+    },
+}
+
+impl UpstreamTarget {
+    /// Returns the address to use for metrics and connection tracking.
+    fn tracking_addr(&self) -> SocketAddr {
+        match self {
+            UpstreamTarget::Single(addr) => *addr,
+            UpstreamTarget::Race { representative, .. } => *representative,
+        }
+    }
+
+    /// Returns the single destination address for non-race connect paths.
+    fn single_addr(&self) -> SocketAddr {
+        match self {
+            UpstreamTarget::Single(addr) => *addr,
+            UpstreamTarget::Race { representative, .. } => *representative,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Request {
     protocol: OutboundProtocol,
@@ -831,10 +883,8 @@ struct Request {
     // service, but rather the original intended service.
     // May be unset in case of non-service traffic
     intended_destination_service: Option<ServiceDescription>,
-    // The address we should actually request to. This is the "next hop" address; could be a waypoint, network gateway,
-    // etc.
-    // When using HBONE, the `hbone_target_destination` is the inner :authority and `actual_destination` is the TCP destination.
-    actual_destination: SocketAddr,
+    // The upstream target to connect to. Either a single address or multiple candidates to race.
+    upstream_target: UpstreamTarget,
     // If using HBONE, the inner (:authority) of the HBONE request.
     hbone_target_destination: Option<HboneAddress>,
 
@@ -846,10 +896,6 @@ struct Request {
     // This field only matters if we need to know both the identity of the next hop, as well as the
     // final hop (currently, this is only double HBONE).
     final_sans: Vec<Identity>,
-
-    // When FIRST_HEALTHY_RACE is active, all candidate upstream addresses to race connections against.
-    // Empty for default connect strategy.
-    race_candidates: Vec<SocketAddr>,
 }
 
 #[cfg(test)]
@@ -990,7 +1036,7 @@ mod tests {
                         .as_ref()
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
-                    destination: &r.actual_destination.to_string(),
+                    destination: &r.upstream_target.tracking_addr().to_string(),
                 })
             );
         } else {
@@ -2094,10 +2140,9 @@ mod tests {
             )),
             actual_destination_workload: None,
             intended_destination_service: None,
-            actual_destination: "10.0.0.1:8080".parse().unwrap(),
+            upstream_target: UpstreamTarget::Single("10.0.0.1:8080".parse().unwrap()),
             upstream_sans: vec![],
             final_sans: vec![],
-            race_candidates: vec![],
         };
 
         let remote_addr = "127.0.0.1:12345".parse().unwrap();
