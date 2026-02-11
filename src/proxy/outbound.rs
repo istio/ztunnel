@@ -196,7 +196,7 @@ impl OutboundConnection {
         let _conn_guard = self.pi.connection_manager.track_outbound(
             source_addr,
             dest_addr,
-            req.upstream_target.tracking_addr(),
+            req.upstream_target.addr(),
             req.protocol,
         );
 
@@ -204,7 +204,7 @@ impl OutboundConnection {
         let hbone_target = req.hbone_target_destination.clone();
         let connection_result_builder = Box::new(ConnectionResultBuilder::new(
             source_addr,
-            req.upstream_target.tracking_addr(),
+            req.upstream_target.addr(),
             hbone_target,
             start,
             Self::conn_metrics_from_request(&req),
@@ -260,7 +260,7 @@ impl OutboundConnection {
                 src_id: req.source.identity(),
                 dst_id: req.final_sans.clone(),
                 src: remote_addr.ip(),
-                dst: req.upstream_target.single_addr(),
+                dst: req.upstream_target.addr(),
             };
 
             // Fetch certs and establish inner TLS connection.
@@ -392,7 +392,7 @@ impl OutboundConnection {
             // Clone here shouldn't be needed ideally, we could just take ownership of Request.
             dst_id: req.upstream_sans.clone(),
             src: remote_addr.ip(),
-            dst: req.upstream_target.single_addr(),
+            dst: req.upstream_target.addr(),
         });
         let (upgraded, baggage) = Box::pin(self.pool.send_request_pooled(&pool_key, request))
             .instrument(trace_span!("outbound connect"))
@@ -411,7 +411,7 @@ impl OutboundConnection {
         let res = (async {
             let outbound = super::freebind_connect(
                 None, // No need to spoof source IP on outbound
-                req.upstream_target.single_addr(),
+                req.upstream_target.addr(),
                 self.pi.socket_factory.as_ref(),
             )
             .await?;
@@ -438,7 +438,7 @@ impl OutboundConnection {
         let candidates = match &req.upstream_target {
             UpstreamTarget::Race { candidates, .. } => candidates,
             UpstreamTarget::Single(_) => {
-                debug!("proxy_to_race called with Single upstream target, this should not happen");
+                error!("BUG: proxy_to_race called with Single upstream target");
                 return;
             }
         };
@@ -853,16 +853,11 @@ enum UpstreamTarget {
 }
 
 impl UpstreamTarget {
-    /// Returns the address to use for metrics and connection tracking.
-    fn tracking_addr(&self) -> SocketAddr {
-        match self {
-            UpstreamTarget::Single(addr) => *addr,
-            UpstreamTarget::Race { representative, .. } => *representative,
-        }
-    }
-
-    /// Returns the single destination address for non-race connect paths.
-    fn single_addr(&self) -> SocketAddr {
+    /// Returns a representative address for metrics, connection tracking, and
+    /// non-race connect paths. For Single, this is the actual destination.
+    /// For Race, this is the first candidate (used as a fallback for code paths
+    /// that require a single address).
+    fn addr(&self) -> SocketAddr {
         match self {
             UpstreamTarget::Single(addr) => *addr,
             UpstreamTarget::Race { representative, .. } => *representative,
@@ -1036,7 +1031,7 @@ mod tests {
                         .as_ref()
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
-                    destination: &r.upstream_target.tracking_addr().to_string(),
+                    destination: &r.upstream_target.addr().to_string(),
                 })
             );
         } else {
