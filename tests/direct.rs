@@ -47,13 +47,12 @@ fn default_identity() -> ztunnel::identity::Identity {
 
 async fn wait_for_metric(app: &TestApp, metric: &str) -> ParsedMetrics {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    let mut last_dump = String::new();
     loop {
         let metrics = app.metrics().await.unwrap();
         if metrics.query(metric, &Default::default()).is_some() {
             return metrics;
         }
-        last_dump = metrics.dump();
+        let last_dump = metrics.dump();
         if std::time::Instant::now() >= deadline {
             panic!("expected metric {metric}; metrics: {last_dump}");
         }
@@ -126,7 +125,7 @@ async fn test_conflicting_bind_error_admin() {
 async fn test_shutdown_drain() {
     helpers::initialize_telemetry();
 
-    let mut registry = Registry::default();
+    let registry = Registry::default();
     let identity_metrics = Arc::new(ztunnel::identity::metrics::Metrics::new());
     let cert_manager =
         new_secret_manager_with_metrics(Duration::from_secs(10), identity_metrics.clone());
@@ -180,7 +179,7 @@ async fn test_shutdown_forced_drain() {
 
     let cfg = test_config();
 
-    let mut registry = Registry::default();
+    let registry = Registry::default();
     let identity_metrics = Arc::new(ztunnel::identity::metrics::Metrics::new());
     let cert_manager =
         new_secret_manager_with_metrics(Duration::from_secs(10), identity_metrics.clone());
