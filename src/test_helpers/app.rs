@@ -80,7 +80,7 @@ where
     F: AsyncFn(TestApp) -> FO,
 {
     initialize_telemetry();
-    let mut registry = Registry::default();
+    let registry = Registry::default();
     let identity_metrics = Arc::new(crate::identity::metrics::Metrics::new());
     let cert_manager = identity::mock::new_secret_manager_with_metrics(
         Duration::from_secs(10),

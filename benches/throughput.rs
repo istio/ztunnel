@@ -508,7 +508,7 @@ fn hbone_connections(c: &mut Criterion) {
 
     // Global setup: spin up an echo server and ztunnel instance
     let (echo_addr, ta) = rt.block_on(async move {
-        let mut registry = Registry::default();
+        let registry = Registry::default();
         let identity_metrics = Arc::new(identity::metrics::Metrics::new());
         let cert_manager = identity::mock::new_secret_manager_with_metrics(
             Duration::from_secs(10),

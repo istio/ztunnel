@@ -252,7 +252,7 @@ impl WorkloadManager {
                     // inside the pod's netns
                     helpers::run_command("scripts/ztunnel-redirect.sh")?;
                 }
-                let mut registry = Registry::default();
+                let registry = Registry::default();
                 let identity_metrics = Arc::new(identity::metrics::Metrics::new());
                 let cert_manager = identity::mock::new_secret_manager_with_metrics(
                     Duration::from_secs(10),
