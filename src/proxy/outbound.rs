@@ -487,7 +487,7 @@ impl OutboundConnection {
                                 }
                                 Some(Err(err)) => {
                                     debug!(?err, "race candidate connection failed");
-                                    // Immediate failure: start next candidate right away
+                                    // Race candidate ailure: start next candidate right away
                                     if let Some(&addr) = remaining.next() {
                                         futs.push(super::freebind_connect(None, addr, socket_factory));
                                     }
