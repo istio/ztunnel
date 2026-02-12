@@ -528,8 +528,8 @@ fn hbone_connections(c: &mut Criterion) {
             identity_metrics,
             registry,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let ta = TestApp::from((&app, cert_manager));
         ta.ready().await;
 

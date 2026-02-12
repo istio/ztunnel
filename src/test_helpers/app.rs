@@ -96,8 +96,8 @@ where
         identity_metrics,
         registry,
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let shutdown = app.shutdown.trigger().clone();
 
     let ta = TestApp::from((&app, cert_manager));

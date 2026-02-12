@@ -461,10 +461,7 @@ impl Worker {
             self.metrics.cert_expiration_seconds.remove(&labels);
             return;
         };
-        let Some(not_after) = self
-            .time_conv
-            .system_time_to_instant(not_after)
-        else {
+        let Some(not_after) = self.time_conv.system_time_to_instant(not_after) else {
             self.metrics.cert_expiration_seconds.remove(&labels);
             return;
         };
@@ -950,9 +947,7 @@ mod tests {
         let id: Identity = Default::default();
         secret_manager.fetch_certificate(&id).await.unwrap();
 
-        let labels = crate::identity::metrics::CertExpirationLabels {
-            identity: id,
-        };
+        let labels = crate::identity::metrics::CertExpirationLabels { identity: id };
         let gauge = identity_metrics
             .cert_expiration_seconds
             .get(&labels)

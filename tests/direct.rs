@@ -135,8 +135,8 @@ async fn test_shutdown_drain() {
         identity_metrics,
         registry,
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let ta = TestApp::from((&app, cert_manager));
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
@@ -189,8 +189,8 @@ async fn test_shutdown_forced_drain() {
         identity_metrics,
         registry,
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let ta = TestApp::from((&app, cert_manager));
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
