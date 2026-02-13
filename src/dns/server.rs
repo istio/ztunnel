@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hickory_proto::ProtoErrorKind;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_proto::ProtoErrorKind;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::system_conf::read_system_conf;
+use hickory_server::ServerFuture;
 use hickory_server::authority::LookupError;
 use hickory_server::server::Request;
-use hickory_server::ServerFuture;
 use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
@@ -45,10 +45,10 @@ use crate::dns::resolver::{Answer, Resolver};
 use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
-use crate::state::service::{IpFamily, Service, ServiceMatch};
-use crate::state::workload::address::Address;
-use crate::state::workload::Workload;
 use crate::state::DemandProxyState;
+use crate::state::service::{IpFamily, Service, ServiceMatch};
+use crate::state::workload::Workload;
+use crate::state::workload::address::Address;
 use crate::strng::Strng;
 use crate::{config, dns};
 
