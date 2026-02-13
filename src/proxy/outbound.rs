@@ -227,7 +227,7 @@ impl OutboundConnection {
                     .await
             }
             OutboundProtocol::TCP => {
-                self.proxy_to_tcp(source_stream, &req, connection_result_builder)
+                self.proxy_to_tcp(source_stream, source_addr, &req, connection_result_builder)
                     .await
             }
         };
@@ -397,14 +397,19 @@ impl OutboundConnection {
     async fn proxy_to_tcp(
         &mut self,
         stream: TcpStream,
+        source_addr: SocketAddr,
         req: &Request,
         connection_stats_builder: Box<ConnectionResultBuilder>,
     ) {
         let connection_stats = Box::new(connection_stats_builder.build());
-
+        let local = if self.pi.cfg.enable_outbound_original_source {
+            Some(source_addr.ip())
+        } else {
+            None
+        };
         let res = (async {
             let outbound = super::freebind_connect(
-                None, // No need to spoof source IP on outbound
+                local,
                 req.actual_destination,
                 self.pi.socket_factory.as_ref(),
             )
