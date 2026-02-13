@@ -23,10 +23,10 @@ use tracing::trace;
 use xds::istio::workload::Service as XdsService;
 
 use crate::state::workload::{
-    byte_to_ip, network_addr, GatewayAddress, NamespacedHostname, NetworkAddress, Workload,
-    WorkloadError,
+    GatewayAddress, NamespacedHostname, NetworkAddress, Workload, WorkloadError, byte_to_ip,
+    network_addr,
 };
-use crate::state::workload::{is_default, HealthStatus};
+use crate::state::workload::{HealthStatus, is_default};
 use crate::strng::Strng;
 use crate::xds::istio::workload::load_balancing::Scope as XdsScope;
 use crate::xds::istio::workload::{IpFamilies, PortList};
