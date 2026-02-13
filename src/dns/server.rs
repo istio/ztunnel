@@ -21,7 +21,6 @@ use hickory_resolver::system_conf::read_system_conf;
 use hickory_server::ServerFuture;
 use hickory_server::authority::LookupError;
 use hickory_server::server::Request;
-use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
@@ -47,9 +46,10 @@ use crate::drain::{DrainMode, DrainWatcher};
 use crate::metrics::{DeferRecorder, IncrementRecorder, Recorder};
 use crate::proxy::Error;
 use crate::state::DemandProxyState;
-use crate::state::service::{IpFamily, Service};
+use crate::state::service::{IpFamily, Service, ServiceMatch};
 use crate::state::workload::Workload;
 use crate::state::workload::address::Address;
+use crate::strng::Strng;
 use crate::{config, dns};
 
 const DEFAULT_TCP_REQUEST_TIMEOUT: u64 = 5;
@@ -184,26 +184,6 @@ impl Server {
             }
         }
         info!("dns server drained");
-    }
-}
-
-enum MatchReason<'a> {
-    Canonical(&'a Arc<Service>),
-    First(&'a Arc<Service>),
-    Namespace(&'a Arc<Service>),
-    PreferredNamespace(&'a Arc<Service>),
-    None,
-}
-
-impl<'a> From<MatchReason<'a>> for Option<&'a Arc<Service>> {
-    fn from(value: MatchReason<'a>) -> Option<&'a Arc<Service>> {
-        match value {
-            MatchReason::Canonical(s)
-            | MatchReason::First(s)
-            | MatchReason::Namespace(s)
-            | MatchReason::PreferredNamespace(s) => Some(s),
-            MatchReason::None => None,
-        }
     }
 }
 
@@ -386,7 +366,7 @@ impl Store {
                 let services: Vec<Arc<Service>> = state
                     .services
                     .get_by_host(&search_name_str)
-                    .iter()
+                    .into_iter()
                     .flatten()
                     // Remove things without a VIP, unless they are Kubernetes headless services.
                     // This will trigger us to forward upstream.
@@ -406,39 +386,18 @@ impl Store {
                     })
                     // Get the service matching the client namespace. If no match exists, just
                     // return the first service.
-                    // .find_or_first(|service| service.namespace == client.namespace)
-                    .cloned()
                     .collect();
 
-                let service: Option<&Arc<Service>> = services
-                    .iter()
-                    .fold_while(MatchReason::None, |r, s| {
-                        if s.namespace == client.namespace {
-                            itertools::FoldWhile::Done(MatchReason::Namespace(s))
-                        } else if s.canonical {
-                            itertools::FoldWhile::Continue(MatchReason::Canonical(s))
-                        } else {
-                            // TODO: deprecate preferred_service_namespace
-                            // https://github.com/istio/ztunnel/issues/1709
-                            if let Some(preferred_namespace) =
-                                self.prefered_service_namespace.as_ref()
-                                && preferred_namespace.as_str() == s.namespace
-                                && !matches!(r, MatchReason::Canonical(_))
-                            {
-                                return itertools::FoldWhile::Continue(
-                                    MatchReason::PreferredNamespace(s),
-                                );
-                            }
-                            match r {
-                                MatchReason::None => {
-                                    itertools::FoldWhile::Continue(MatchReason::First(s))
-                                }
-                                _ => itertools::FoldWhile::Continue(r),
-                            }
-                        }
-                    })
-                    .into_inner()
+                let preferred_namespace: Strng = self
+                    .prefered_service_namespace
+                    .as_deref()
+                    .unwrap_or("")
                     .into();
+                let service: Option<&Arc<Service>> = ServiceMatch::find_best_match(
+                    services.iter(),
+                    Some(&client.namespace),
+                    Some(&preferred_namespace),
+                );
 
                 // First, lookup the host as a service.
                 if let Some(service) = service {
@@ -1884,7 +1843,7 @@ mod tests {
             .unwrap()
             .iter()
             .map(|(_, addr)| *addr)
-            .collect_vec()
+            .collect()
     }
 
     fn kube_fqdn<S1: AsRef<str>, S2: AsRef<str>>(name: S1, ns: S2) -> String {
