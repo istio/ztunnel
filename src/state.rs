@@ -873,8 +873,8 @@ impl DemandProxyState {
 
         if is_race && !wl.hostname.is_empty() {
             // For FIRST_HEALTHY_RACE, resolve all DNS IPs and populate race_candidates.
-            let all_ips = Box::pin(self.resolve_all_on_demand_dns(&wl, original_target_address))
-                .await?;
+            let all_ips =
+                Box::pin(self.resolve_all_on_demand_dns(&wl, original_target_address)).await?;
             // selected_workload_ip is set to the first candidate for compatibility with
             // code paths that require a non-None IP (e.g., actual_destination computation).
             // The actual upstream connection will be determined by connection racing.

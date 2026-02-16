@@ -626,9 +626,11 @@ impl OutboundConnection {
                 actual_destination_workload: Some(gateway_upstream.workload.clone()),
                 intended_destination_service: Some(ServiceDescription::from(service)),
                 upstream_target: UpstreamTarget::Single(
-                    gateway_upstream.workload_socket_addr().ok_or(
-                        Error::NoValidDestination(Box::new((*gateway_upstream.workload).clone())),
-                    )?,
+                    gateway_upstream
+                        .workload_socket_addr()
+                        .ok_or(Error::NoValidDestination(Box::new(
+                            (*gateway_upstream.workload).clone(),
+                        )))?,
                 ),
                 // The outer tunnel of double HBONE is terminated by the E/W
                 // gateway and so for the credentials of the next hop
@@ -832,21 +834,20 @@ impl OutboundConnection {
         let (upstream_sans, final_sans) = (us.workload_and_services_san(), vec![]);
         // Only race connections for TCP (non-mesh) destinations. If the destination is
         // in the mesh (HBONE), we should not race as we'd need proper mTLS setup per connection.
-        let upstream_target = if us.workload.protocol == InboundProtocol::TCP
-            && !us.race_candidates.is_empty()
-        {
-            let candidates: Vec<SocketAddr> = us
-                .race_candidates
-                .iter()
-                .map(|ip| SocketAddr::new(*ip, us.port))
-                .collect();
-            UpstreamTarget::Race {
-                representative: actual_destination,
-                candidates,
-            }
-        } else {
-            UpstreamTarget::Single(actual_destination)
-        };
+        let upstream_target =
+            if us.workload.protocol == InboundProtocol::TCP && !us.race_candidates.is_empty() {
+                let candidates: Vec<SocketAddr> = us
+                    .race_candidates
+                    .iter()
+                    .map(|ip| SocketAddr::new(*ip, us.port))
+                    .collect();
+                UpstreamTarget::Race {
+                    representative: actual_destination,
+                    candidates,
+                }
+            } else {
+                UpstreamTarget::Single(actual_destination)
+            };
         debug!("built request to workload");
         Ok(Request {
             protocol: OutboundProtocol::from(us.workload.protocol),
