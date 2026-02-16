@@ -487,6 +487,19 @@ pub fn log_early_deny<E: std::error::Error>(
     );
 }
 
+/// Logs a message at INFO level if AUTHZ_POLICY_INFO_LOGGING is set to "true",
+/// otherwise logs at DEBUG level.
+#[macro_export]
+macro_rules! authpol_log {
+    ($($arg:tt)+) => {
+        if *$crate::config::AUTHZ_POLICY_INFO_LOGGING {
+            tracing::info!($($arg)+);
+        } else {
+            tracing::debug!($($arg)+);
+        }
+    };
+}
+
 macro_rules! access_log {
     ($res:expr, $($fields:tt)*) => {
         let err = $res.as_ref().err().map(|e| e.to_string());
