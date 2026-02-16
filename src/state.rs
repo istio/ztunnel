@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::authpol_log;
 use crate::identity::{Identity, SecretManager};
 use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
@@ -581,13 +582,13 @@ impl DemandProxyState {
 
         for pol in deny_dry_run.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "dry-run deny policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "dry-run: deny policy match");
             }
         }
         // "If there are any DENY policies that match the request, deny the request."
         for pol in deny.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "deny policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "deny policy match");
                 return Err(proxy::AuthorizationRejectionError::ExplicitlyDenied(
                     pol.namespace.to_owned(),
                     pol.name.to_owned(),
@@ -596,20 +597,30 @@ impl DemandProxyState {
                 trace!(policy = pol.to_key().as_str(), "deny policy does not match");
             }
         }
+        let mut dry_run_allow_matched = false;
         for pol in allow_dry_run.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "dry-run allow policy match");
+                dry_run_allow_matched = true;
+                authpol_log!(
+                    policy = pol.to_key().as_str(),
+                    "dry-run: allow policy match"
+                );
             }
+        }
+        if allow.is_empty() && !allow_dry_run.is_empty() && !dry_run_allow_matched {
+            // this is going to be an allow, but the conn would be denied if dry-run policies
+            // became enforced because none matched
+            authpol_log!("dry-run: no allow policies match");
         }
         // "If there are no ALLOW policies for the workload, allow the request."
         if allow.is_empty() {
-            debug!("no allow policies, allow");
+            authpol_log!("no allow policies, allow");
             return Ok(());
         }
         // "If any of the ALLOW policies match the request, allow the request."
         for pol in allow.iter() {
             if pol.matches(conn) {
-                debug!(policy = pol.to_key().as_str(), "allow policy match");
+                authpol_log!(policy = pol.to_key().as_str(), "allow policy match");
                 return Ok(());
             } else {
                 trace!(
@@ -619,7 +630,7 @@ impl DemandProxyState {
             }
         }
         // "Deny the request."
-        debug!("no allow policies matched");
+        authpol_log!("no allow policies matched");
         Err(proxy::AuthorizationRejectionError::NotAllowed)
     }
 
@@ -1703,11 +1714,11 @@ mod tests {
 
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("policy", "ns1/dry-run-deny"),
-            ("message", "dry-run deny policy match"),
+            ("message", "dry-run: deny policy match"),
         ]));
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("policy", "ns1/dry-run-allow"),
-            ("message", "dry-run allow policy match"),
+            ("message", "dry-run: allow policy match"),
         ]));
     }
 
