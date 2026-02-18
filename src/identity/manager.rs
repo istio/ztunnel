@@ -1377,10 +1377,7 @@ mod tests {
         test.caclient.set_error(true).await;
         assert!(
             test.caclient
-                .fetch_certificate(&CompositeId::with_key(
-                    id.clone(),
-                    id.clone(),
-                ))
+                .fetch_certificate(&CompositeId::with_key(id.clone(), id.clone(),))
                 .await
                 .is_err()
         );
