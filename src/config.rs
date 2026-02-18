@@ -775,10 +775,8 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             bind_wildcard,
             pc.stats_port.unwrap_or(DEFAULT_STATS_PORT),
         )),
-        readiness_addr: Address::SocketAddr(SocketAddr::new(
-            bind_wildcard,
-            DEFAULT_READINESS_PORT, // There is no config for this in ProxyConfig currently
-        )),
+        // readiness probe should only be accessible over localhost (kubelet runs on same node)
+        readiness_addr: Address::Localhost(ipv6_localhost_enabled, DEFAULT_READINESS_PORT),
 
         socks5_addr,
         inbound_addr,
