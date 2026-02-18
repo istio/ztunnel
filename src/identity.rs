@@ -57,7 +57,7 @@ pub enum Error {
     Forgotten,
     #[error("BUG: identity requested {0}, but only allowed {1:?}")]
     BugInvalidIdentityRequest(Identity, Arc<WorkloadInfo>),
-    #[error("failed to fetch pid for workload: {0}")]
+    #[error("failed to fetch bundle for workload: {0}")]
     FailedToFetchBundle(String),
     #[error("certificate is in invalid format")]
     CertificateInvalidFormat(),
