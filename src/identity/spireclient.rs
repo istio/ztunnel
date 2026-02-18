@@ -473,10 +473,8 @@ pub mod spire_tests {
 
         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
 
-        let composite_id = CompositeId::with_key(
-            identity,
-            WorkloadUid::new("uid-123456".to_string()),
-        );
+        let composite_id =
+            CompositeId::with_key(identity, WorkloadUid::new("uid-123456".to_string()));
 
         let fetch_result = spire_client.fetch_certificate(&composite_id).await;
 
@@ -676,10 +674,8 @@ pub mod spire_tests {
 
         assert!(identity.to_string() == "spiffe://example.org/ns/default/sa/test-sa");
 
-        let composite_id = CompositeId::with_key(
-            identity,
-            WorkloadUid::new("uid-123456".to_string()),
-        );
+        let composite_id =
+            CompositeId::with_key(identity, WorkloadUid::new("uid-123456".to_string()));
 
         let fetch_result = spire_client.fetch_certificate(&composite_id).await;
 
@@ -793,8 +789,6 @@ pub mod spire_tests {
     fn mock_stream_svid_success_response(
         spiffe_id: String,
     ) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
-        // build a stream that yields X509Svid responses
-        // can you provide a minimal example of building such a stream?
         let (mut tx, rx) = mpsc::channel(10);
         tokio::spawn(async move {
             let svid = generate_svid(&spiffe_id, "example.org");
@@ -806,8 +800,6 @@ pub mod spire_tests {
     fn mock_stream_svid_success_delay_response(
         spiffe_id: String,
     ) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
-        // build a stream that yields X509Svid responses
-        // can you provide a minimal example of building such a stream?
         let (mut tx, rx) = mpsc::channel(10);
         tokio::spawn(async move {
             tx.send(Err(GrpcClientError::EmptyResponse)).await.unwrap();
@@ -823,8 +815,6 @@ pub mod spire_tests {
     fn mock_stream_svid_success_delay_response_timeout(
         _: String,
     ) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
-        // build a stream that yields X509Svid responses
-        // can you provide a minimal example of building such a stream?
         let (_, rx) = mpsc::channel(10);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -835,8 +825,6 @@ pub mod spire_tests {
     fn mock_stream_svid_success_delay_response_timeout_empty(
         _: String,
     ) -> Box<dyn Stream<Item = Result<X509Svid, GrpcClientError>> + Send + Unpin> {
-        // build a stream that yields X509Svid responses
-        // can you provide a minimal example of building such a stream?
         let (mut tx, rx) = mpsc::channel(10);
         tokio::spawn(async move {
             tx.send(Err(GrpcClientError::EmptyResponse)).await.unwrap();

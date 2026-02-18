@@ -121,7 +121,6 @@ educe = "0.6"
 spire-api = "0.3.6"
 spiffe = "0.7"
 tempfile = { version = "3.23", optional = true}
-hyperlocal = "0.9.1"
 mockall = "0.14.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
