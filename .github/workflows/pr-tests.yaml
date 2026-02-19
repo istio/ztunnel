@@ -24,11 +24,10 @@ jobs:
           sudo apt-get install -y protobuf-compiler libprotobuf-dev
 
       - name: Install Rust Toolchain
-        uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: "1.90"
           components: rustfmt
-          override: true
 
       - name: Cache Cargo Registry
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
@@ -58,10 +57,9 @@ jobs:
           sudo apt-get install -y protobuf-compiler libprotobuf-dev
 
       - name: Install Rust Toolchain
-        uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: "1.90"
-          override: true
 
       - name: Cache Cargo Registry
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
