@@ -1,0 +1,183 @@
+name: Image Release Build
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-binary:
+    name: Build Binary (${{ matrix.arch }}, ${{ matrix.tls_mode }})
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+        tls_mode:
+          - aws-lc
+          - boring
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - tls_mode: aws-lc
+            image_suffix: ""
+          - tls_mode: boring
+            image_suffix: "-fips"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: "1.90"
+
+      - name: Cache Cargo Registry
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            out/rust
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ matrix.tls_mode }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ matrix.tls_mode }}-
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev cmake
+
+      # BoringSSL FIPS vendored path is hardcoded to x86_64; fix for arm64
+      - name: Fix BoringSSL FIPS Path for arm64
+        if: matrix.tls_mode == 'boring' && matrix.arch == 'arm64'
+        run: sed -i 's/x86_64/arm64/g' .cargo/config.toml
+
+      - name: Build Release Binary
+        run: TLS_MODE=${{ matrix.tls_mode }} make build-release
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ztunnel-${{ matrix.arch }}${{ matrix.image_suffix }}
+          path: out/rust/release/ztunnel
+
+  build-image:
+    name: Build and Push Release Image (ztunnel${{ matrix.tag_suffix }})
+    needs: build-binary
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - tls_mode: aws-lc
+            image_suffix: ""
+            tag_suffix: ""
+          - tls_mode: boring
+            image_suffix: "-fips"
+            tag_suffix: "-fips"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Download amd64 Binary
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ztunnel-amd64${{ matrix.image_suffix }}
+          path: out/docker/amd64/
+
+      - name: Download arm64 Binary
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ztunnel-arm64${{ matrix.image_suffix }}
+          path: out/docker/arm64/
+
+      - name: Prepare Build Context
+        run: |
+          chmod +x out/docker/amd64/ztunnel out/docker/arm64/ztunnel
+          cp Dockerfile out/docker/Dockerfile
+
+      - name: Login to Quay.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_RELEASE_USERNAME }}
+          password: ${{ secrets.QUAY_RELEASE_PASSWORD }}
+
+      - name: Build and Push Release Image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: out/docker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: quay.io/${{ vars.QUAY_ORGANIZATION }}/ztunnel:${{ github.ref_name }}${{ matrix.tag_suffix }}
+          build-args: BASE_IMAGE=gcr.io/distroless/cc-debian12:nonroot
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-binary, build-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Download All Binaries
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: artifacts/
+
+      - name: Prepare Binary Assets
+        run: |
+          mkdir -p release-assets
+          for dir in artifacts/ztunnel-*; do
+            name=$(basename "$dir")
+            cp "$dir/ztunnel" "release-assets/${name}"
+            chmod +x "release-assets/${name}"
+          done
+
+      - name: Login to Quay.io
+        run: skopeo login -u "${{ secrets.QUAY_RELEASE_USERNAME }}" -p "${{ secrets.QUAY_RELEASE_PASSWORD }}" quay.io
+
+      - name: Export Container Images
+        run: |
+          TAG="${{ github.ref_name }}"
+          REGISTRY="quay.io/${{ vars.QUAY_ORGANIZATION }}"
+
+          for variant in "" "-fips"; do
+            for arch in amd64 arm64; do
+              skopeo copy --override-arch "${arch}" \
+                "docker://${REGISTRY}/ztunnel:${TAG}${variant}" \
+                "docker-archive:release-assets/ztunnel-image-${arch}${variant}.tar:${REGISTRY}/ztunnel:${TAG}${variant}"
+              gzip "release-assets/ztunnel-image-${arch}${variant}.tar"
+            done
+          done
+
+      - name: List Release Assets
+        run: ls -la release-assets/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            release-assets/*
