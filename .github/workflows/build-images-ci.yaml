@@ -1,0 +1,137 @@
+name: Image CI Build
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+env:
+  CARGO_TERM_COLOR: always
+  QUAY_ORGANIZATION: cilium
+
+jobs:
+  build-binary:
+    name: Build Binary (${{ matrix.arch }}, ${{ matrix.tls_mode }})
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+        tls_mode:
+          - aws-lc
+          - boring
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - tls_mode: aws-lc
+            image_suffix: ""
+          - tls_mode: boring
+            image_suffix: "-fips"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust Toolchain
+        uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
+        with:
+          toolchain: "1.90"
+          override: true
+
+      - name: Cache Cargo Registry
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            out/rust
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ matrix.tls_mode }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ matrix.tls_mode }}-
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev cmake
+
+      # BoringSSL FIPS vendored path is hardcoded to x86_64; fix for arm64
+      - name: Fix BoringSSL FIPS Path for arm64
+        if: matrix.tls_mode == 'boring' && matrix.arch == 'arm64'
+        run: sed -i 's/x86_64/arm64/g' .cargo/config.toml
+
+      - name: Build Release Binary
+        run: TLS_MODE=${{ matrix.tls_mode }} make build-release
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ztunnel-${{ matrix.arch }}${{ matrix.image_suffix }}
+          path: out/rust/release/ztunnel
+
+  build-image:
+    name: Build and Push Images (${{ matrix.image_name }}-ci)
+    needs: build-binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - tls_mode: aws-lc
+            image_name: ztunnel
+            image_suffix: ""
+          - tls_mode: boring
+            image_name: ztunnel-fips
+            image_suffix: "-fips"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Download amd64 Binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ztunnel-amd64${{ matrix.image_suffix }}
+          path: out/docker/amd64/
+
+      - name: Download arm64 Binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ztunnel-arm64${{ matrix.image_suffix }}
+          path: out/docker/arm64/
+
+      - name: Prepare Build Context
+        run: |
+          chmod +x out/docker/amd64/ztunnel out/docker/arm64/ztunnel
+          cp Dockerfile out/docker/Dockerfile
+
+      - name: Compute Image Tag
+        id: meta
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Quay.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Build and Push CI Image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: out/docker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.image_name }}-ci:${{ steps.meta.outputs.sha }}
+          build-args: BASE_IMAGE=gcr.io/distroless/cc-debian12:nonroot
