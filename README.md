@@ -3,6 +3,18 @@
 Ztunnel provides an implementation of the ztunnel component of
 [ambient mesh](https://istio.io/latest/blog/2022/introducing-ambient-mesh/).
 
+## SPIRE CA Support (Fork)
+
+Upstream ztunnel only supports Istio's built-in CA for certificate issuance. This fork adds support for SPIRE as an alternative Certificate Authority, enabling SPIFFE-based workload identity for environments that use SPIRE instead of Istio's CA.
+
+### Why Under Cilium
+
+- Cilium is the primary consumer of this SPIRE integration for now.
+- Provides a home for the fork while the SPIRE CA support is developed and validated.
+- Once the implementation is mature and merged upstream, the fork can be archived.
+
+This is a temporary fork, not a permanent divergence. The goal is to upstream the SPIRE CA support to Istio's ztunnel repository.
+
 ## Feature Scope
 
 Ztunnel is intended to be a purpose built implementation of the node proxy in [ambient mesh](https://istio.io/latest/blog/2022/introducing-ambient-mesh/).

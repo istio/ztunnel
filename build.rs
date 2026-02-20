@@ -38,6 +38,7 @@ fn main() -> Result<(), anyhow::Error> {
         "proto/authorization.proto",
         "proto/citadel.proto",
         "proto/zds.proto",
+        "proto/cri-api.proto",
     ]
     .iter()
     .map(|name| std::env::current_dir().unwrap().join(name))

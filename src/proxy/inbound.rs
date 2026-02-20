@@ -959,6 +959,7 @@ mod tests {
             }),
             state.clone(),
             new_secret_manager(Duration::from_secs(10)),
+            Arc::new(cfg.clone()),
         ));
         let pi = Arc::new(ProxyInputs::new(
             Arc::new(cfg),
