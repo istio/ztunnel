@@ -487,6 +487,47 @@ pub mod spire_tests {
     }
 
     #[tokio::test]
+    async fn test_get_cert_by_pid_changed() {
+        let mut mock_client = MockDelegatedIdentityApi::new();
+        let mut pid_client = MockPidClientTrait::new();
+
+        mock_client.expect_get_x509_svids().returning(|_req| {
+            let stream = mock_stream_svid_success_response(
+                "spiffe://example.org/ns/default/sa/test-sa".to_string(),
+            );
+            Ok(stream)
+        });
+
+        mock_client
+            .expect_get_x509_bundles()
+            .returning(|| Ok(mock_bundle_response()));
+
+        pid_client
+            .expect_fetch_pid()
+            .returning(|_| Ok(WorkloadPid::new(10)));
+
+        let mut cfg = config::parse_config().unwrap();
+        cfg.spire_enabled = true;
+
+        let cfg = Arc::new(cfg);
+
+        let spire_client = SpireClient::new(
+            mock_client,
+            "example.org".to_string(),
+            Box::new(pid_client),
+            Arc::clone(&cfg),
+        );
+
+        let identity =
+            Identity::from_parts("example.org".into(), "default".into(), "test-sa".into());
+        let composite_id =
+            CompositeId::with_key(identity.clone(), WorkloadUid::new("uid-123456".to_string()));
+        let result = spire_client.get_cert_by_pid(1337, &composite_id).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_get_cert_by_pid_not_found() {
         let mut mock_client = MockDelegatedIdentityApi::new();
         let mut pid_client = MockPidClientTrait::new();
