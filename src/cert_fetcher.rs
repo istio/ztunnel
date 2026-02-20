@@ -99,7 +99,7 @@ impl CertFetcherImpl {
             // We only get certs for our own node
             Some(w.node.as_ref()) == self.local_node.as_deref() &&
             // If it doesn't support HBONE it *probably* doesn't need a cert.
-            (w.native_tunnel || w.protocol == InboundProtocol::HBONE && !self.cfg.spire_enabled)
+            (w.native_tunnel || w.protocol == InboundProtocol::HBONE) && !self.cfg.spire_enabled
     }
 
     fn build_key(&self, w: &Workload) -> CompositeId<RequestKey> {
