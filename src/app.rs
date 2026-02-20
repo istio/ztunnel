@@ -32,9 +32,11 @@ use crate::state::ProxyStateManager;
 use crate::{admin, config, metrics, proxy, readiness, signal};
 use crate::{dns, xds};
 
-pub async fn build_with_cert(
+pub async fn build_with_cert_and_registry(
     config: Arc<config::Config>,
     cert_manager: Arc<SecretManager>,
+    identity_metrics: Arc<crate::identity::metrics::Metrics>,
+    mut registry: Registry,
 ) -> anyhow::Result<Bound> {
     // Start the data plane worker pool.
     let data_plane_pool = new_data_plane_pool(config.num_worker_threads);
@@ -76,10 +78,10 @@ pub async fn build_with_cert(
     })?;
 
     // Register metrics.
-    let mut registry = Registry::default();
     register_process_metrics(&mut registry);
     let istio_registry = metrics::sub_registry(&mut registry);
     let _ = metrics::meta::Metrics::new(istio_registry);
+    identity_metrics.register(istio_registry);
     let xds_metrics = xds::Metrics::new(istio_registry);
     let proxy_metrics = Arc::new(proxy::Metrics::new(istio_registry));
     let dns_metrics = if config.dns_proxy {
@@ -313,21 +315,26 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
 }
 
 pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
+    let registry = Registry::default();
+    let identity_metrics = Arc::new(crate::identity::metrics::Metrics::new());
     let cert_manager = if config.fake_ca {
-        mock_secret_manager()
+        mock_secret_manager(identity_metrics.clone())
     } else {
-        Arc::new(SecretManager::new(config.clone()).await?)
+        Arc::new(SecretManager::new(config.clone(), identity_metrics.clone()).await?)
     };
-    build_with_cert(config, cert_manager).await
+    build_with_cert_and_registry(config, cert_manager, identity_metrics, registry).await
 }
 
 #[cfg(feature = "testing")]
-fn mock_secret_manager() -> Arc<SecretManager> {
-    crate::identity::mock::new_secret_manager(std::time::Duration::from_secs(86400))
+fn mock_secret_manager(metrics: Arc<crate::identity::metrics::Metrics>) -> Arc<SecretManager> {
+    crate::identity::mock::new_secret_manager_with_metrics(
+        std::time::Duration::from_secs(86400),
+        metrics,
+    )
 }
 
 #[cfg(not(feature = "testing"))]
-fn mock_secret_manager() -> Arc<SecretManager> {
+fn mock_secret_manager(_metrics: Arc<crate::identity::metrics::Metrics>) -> Arc<SecretManager> {
     unimplemented!("fake_ca requires --features testing")
 }
 
