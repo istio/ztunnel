@@ -68,8 +68,8 @@ fn orig_dst_addr(stream: &tokio::net::TcpStream) -> io::Result<SocketAddr> {
                 if !sock.ip_transparent_v4().unwrap_or(false) {
                     // In TPROXY mode, this is normal, so don't bother logging
                     warn!(
-                        peer=?stream.peer_addr().unwrap(),
-                        local=?stream.local_addr().unwrap(),
+                        peer=%stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "N.A.".to_string()),
+                        local=%stream.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "N.A.".to_string()),
                         "failed to read SO_ORIGINAL_DST: {e4:?}, {e6:?}"
                     );
                 }
