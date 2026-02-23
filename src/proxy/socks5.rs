@@ -150,8 +150,17 @@ async fn handle_socks_connection(mut oc: OutboundConnection, mut stream: TcpStre
                 warn!("failed to send socks success response: {err}");
                 return;
             }
-            let remote_addr =
-                socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+            let peer = match stream.peer_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    debug!(
+                        component = "socks5",
+                        "failed to get peer address, dropping connection: {}", e
+                    );
+                    return;
+                }
+            };
+            let remote_addr = socket::to_canonical(peer);
             oc.proxy_to(stream, remote_addr, target).await
         }
         Err(e) => {
@@ -170,7 +179,7 @@ async fn negotiate_socks_connection(
     pi: &ProxyInputs,
     stream: &mut TcpStream,
 ) -> Result<SocketAddr, SocksError> {
-    let remote_addr = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
+    let remote_addr = socket::to_canonical(stream.peer_addr()?);
 
     // Version(5), Number of auth methods
     let mut version = [0u8; 2];
