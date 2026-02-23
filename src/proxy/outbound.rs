@@ -158,8 +158,18 @@ pub(super) struct OutboundConnection {
 
 impl OutboundConnection {
     async fn proxy(&mut self, source_stream: TcpStream) {
-        let source_addr =
-            socket::to_canonical(source_stream.peer_addr().expect("must receive peer addr"));
+        let peer = match source_stream.peer_addr() {
+            Ok(addr) => addr,
+            Err(e) => {
+                debug!(
+                    component = "outbound",
+                    "failed to get peer address, dropping connection: {}", e
+                );
+                return;
+            }
+        };
+
+        let source_addr = socket::to_canonical(peer);
         let dst_addr = socket::orig_dst_addr_or_default(&source_stream);
         self.proxy_to(source_stream, source_addr, dst_addr).await;
     }
