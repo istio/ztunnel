@@ -334,10 +334,11 @@ impl TryFrom<&XdsService> for Service {
                     lb.health_policy,
                 )?
                 .into(),
-                dns_connect_strategy: xds::istio::workload::load_balancing::DnsConnectStrategy::try_from(
-                    lb.dns_connect_strategy,
-                )?
-                .into(),
+                dns_connect_strategy:
+                    xds::istio::workload::load_balancing::DnsConnectStrategy::try_from(
+                        lb.dns_connect_strategy,
+                    )?
+                    .into(),
             })
         } else {
             None
