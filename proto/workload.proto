@@ -166,7 +166,7 @@ message LoadBalancing {
   // health_policy defines how we should filter endpoints
   HealthPolicy health_policy = 3;
 
-  enum ConnectStrategy {
+  enum DnsConnectStrategy {
     // Default behavior: resolve DNS to a single randomly-chosen IP.
     DEFAULT = 0;
     // Race upstream connections to ALL DNS-resolved IPs in parallel.
@@ -175,7 +175,7 @@ message LoadBalancing {
     FIRST_HEALTHY_RACE = 1;
   }
   // connect_strategy defines how upstream connections are established for DNS-resolved endpoints.
-  ConnectStrategy connect_strategy = 4;
+  DnsConnectStrategy connect_strategy = 4;
 }
 
 // Workload represents a workload - an endpoint (or collection behind a hostname).

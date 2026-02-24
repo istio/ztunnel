@@ -17,7 +17,7 @@ use crate::proxy::{Error, OnDemandDnsLabels};
 use crate::rbac::Authorization;
 use crate::state::policy::PolicyStore;
 use crate::state::service::{
-    ConnectStrategy, Endpoint, IpFamily, LoadBalancerMode, LoadBalancerScopes, ServiceStore,
+    DnsConnectStrategy, Endpoint, IpFamily, LoadBalancerMode, LoadBalancerScopes, ServiceStore,
 };
 use crate::state::service::{Service, ServiceDescription};
 use crate::state::workload::{
@@ -868,7 +868,7 @@ impl DemandProxyState {
         let is_race = svc
             .as_ref()
             .and_then(|s| s.load_balancer.as_ref())
-            .map(|lb| lb.connect_strategy == ConnectStrategy::FirstHealthyRace)
+            .map(|lb| lb.connect_strategy == DnsConnectStrategy::FirstHealthyRace)
             .unwrap_or(false);
 
         if is_race && !wl.hostname.is_empty() {
@@ -1893,7 +1893,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
                 health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
-                connect_strategy: ConnectStrategy::Default,
+                connect_strategy: DnsConnectStrategy::Default,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
@@ -1908,7 +1908,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
                 health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
-                connect_strategy: ConnectStrategy::Default,
+                connect_strategy: DnsConnectStrategy::Default,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()

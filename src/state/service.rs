@@ -192,20 +192,20 @@ impl TryFrom<XdsScope> for LoadBalancerScopes {
 }
 
 #[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-pub enum ConnectStrategy {
+pub enum DnsConnectStrategy {
     #[default]
     Default,
     FirstHealthyRace,
 }
 
-impl From<xds::istio::workload::load_balancing::ConnectStrategy> for ConnectStrategy {
-    fn from(value: xds::istio::workload::load_balancing::ConnectStrategy) -> Self {
+impl From<xds::istio::workload::load_balancing::DnsConnectStrategy> for DnsConnectStrategy {
+    fn from(value: xds::istio::workload::load_balancing::DnsConnectStrategy) -> Self {
         match value {
-            xds::istio::workload::load_balancing::ConnectStrategy::Default => {
-                ConnectStrategy::Default
+            xds::istio::workload::load_balancing::DnsConnectStrategy::Default => {
+                DnsConnectStrategy::Default
             }
-            xds::istio::workload::load_balancing::ConnectStrategy::FirstHealthyRace => {
-                ConnectStrategy::FirstHealthyRace
+            xds::istio::workload::load_balancing::DnsConnectStrategy::FirstHealthyRace => {
+                DnsConnectStrategy::FirstHealthyRace
             }
         }
     }
@@ -218,7 +218,7 @@ pub struct LoadBalancer {
     pub mode: LoadBalancerMode,
     pub health_policy: LoadBalancerHealthPolicy,
     #[serde(default)]
-    pub connect_strategy: ConnectStrategy,
+    pub connect_strategy: DnsConnectStrategy,
 }
 
 impl From<xds::istio::workload::IpFamilies> for Option<IpFamily> {
@@ -334,7 +334,7 @@ impl TryFrom<&XdsService> for Service {
                     lb.health_policy,
                 )?
                 .into(),
-                connect_strategy: xds::istio::workload::load_balancing::ConnectStrategy::try_from(
+                connect_strategy: xds::istio::workload::load_balancing::DnsConnectStrategy::try_from(
                     lb.connect_strategy,
                 )?
                 .into(),
