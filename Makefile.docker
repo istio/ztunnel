@@ -1,0 +1,38 @@
+# Copyright Authors of Cilium
+# SPDX-License-Identifier: Apache-2.0
+
+export DOCKER_BUILDKIT=1
+
+DOCKER ?= docker
+IMAGE_REGISTRY ?= quay.io/cilium
+IMAGE_NAME ?= ztunnel
+IMAGE_TAG ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+IMAGE ?= $(IMAGE_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
+BASE_IMAGE ?= gcr.io/distroless/cc-debian12:nonroot
+DOCKER_PLATFORMS ?= linux/amd64,linux/arm64
+ARCH ?= amd64
+
+# Stage pre-built binary into Docker build context
+docker-context:
+	@mkdir -p out/docker/$(ARCH)
+	cp out/rust/release/ztunnel out/docker/$(ARCH)/ztunnel
+
+# Build image for local platform (assumes binary already built via `make build-release`)
+docker-image: docker-context
+	cp Dockerfile out/docker/Dockerfile
+	$(DOCKER) build \
+		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
+		-t $(IMAGE) \
+		out/docker/
+
+# Build and push multi-arch (for CI use with buildx)
+docker-image-push:
+	cp Dockerfile out/docker/Dockerfile
+	$(DOCKER) buildx build \
+		--platform $(DOCKER_PLATFORMS) \
+		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
+		-t $(IMAGE) \
+		--push \
+		out/docker/
+
+.PHONY: docker-context docker-image docker-image-push

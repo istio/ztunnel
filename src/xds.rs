@@ -191,7 +191,7 @@ impl ProxyStateUpdateMutator {
                     .workloads
                     .was_last_identity_on_node(&prev.node, &prev.identity())
             {
-                self.cert_fetcher.clear_cert(&prev.identity());
+                self.cert_fetcher.clear_cert(&prev);
             }
             // We removed a workload, no reason to attempt to remove a service with the same name
             return;

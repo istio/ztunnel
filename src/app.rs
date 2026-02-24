@@ -19,6 +19,7 @@ use crate::proxyfactory::ProxyFactory;
 use crate::drain;
 use anyhow::Context;
 use prometheus_client::registry::Registry;
+use spire_api::DelegatedIdentityClient;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -315,6 +316,9 @@ fn new_data_plane_pool(num_worker_threads: usize) -> mpsc::Sender<DataPlaneTask>
 pub async fn build(config: Arc<config::Config>) -> anyhow::Result<Bound> {
     let cert_manager = if config.fake_ca {
         mock_secret_manager()
+    } else if config.spire_enabled {
+        let dc = DelegatedIdentityClient::default().await?;
+        Arc::new(SecretManager::new_with_spire_client(config.clone(), dc).await?)
     } else {
         Arc::new(SecretManager::new(config.clone()).await?)
     };

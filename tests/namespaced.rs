@@ -1024,7 +1024,10 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let cert = zt
+                    .cert_manager
+                    .fetch_certificate(&id.to_composite_id())
+                    .await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let hbone = SocketAddr::new(srv.ip(), 15008);
                 let tcp_stream = TcpStream::connect(hbone).await.unwrap();
@@ -1086,7 +1089,10 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let cert = zt
+                    .cert_manager
+                    .fetch_certificate(&id.to_composite_id())
+                    .await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
@@ -1168,7 +1174,10 @@ mod namespaced {
                 let dst_id =
                     identity::Identity::from_str("spiffe://cluster.local/ns/default/sa/server")
                         .unwrap();
-                let cert = zt.cert_manager.fetch_certificate(id).await?;
+                let cert = zt
+                    .cert_manager
+                    .fetch_certificate(&id.to_composite_id())
+                    .await?;
                 let connector = cert.outbound_connector(vec![dst_id]).unwrap();
                 let tcp_stream = TcpStream::connect(SocketAddr::from((srv.ip(), 15008)))
                     .await
@@ -1219,7 +1228,7 @@ mod namespaced {
                 (zt, 15080, Request),      // socks5: localhost
                 (zt, 15000, Request),      // admin: localhost
                 (zt, 15020, Http),         // Stats: accept connection and returns a HTTP error
-                (zt, 15021, Http),         // Readiness: accept connection and returns a HTTP error
+                (zt, 15021, Request),      // Readiness: bound to localhost, connection reset
                 (ourself, 15001, Request), // Outbound: should be blocked due to recursive call
                 (ourself, 15006, Request), // Inbound: should be blocked due to recursive call
                 (ourself, 15008, Request), // HBONE: expected TLS, reject
@@ -1251,7 +1260,7 @@ mod namespaced {
                 (zt, 15080, Connection), // socks5: localhost
                 (zt, 15000, Connection), // admin: localhost
                 (zt, 15020, Http),       // Stats: accept connection and returns a HTTP error
-                (zt, 15021, Http),       // Readiness: accept connection and returns a HTTP error
+                (zt, 15021, Connection), // Readiness: bound to localhost, not reachable
                 // All are accepted as "inbound plaintext" but then immediately closed
                 (ourself, 15001, Request),
                 (ourself, 15006, Request),
@@ -1325,7 +1334,7 @@ mod namespaced {
         let ta = manager.deploy_ztunnel(DEFAULT_NODE).await?;
         let ztunnel_identity_obj = ta.ztunnel_identity.as_ref().unwrap().clone();
         ta.cert_manager
-            .fetch_certificate(&ztunnel_identity_obj)
+            .fetch_certificate(&ztunnel_identity_obj.to_composite_id())
             .await?;
         let ztunnel_identity_str = ztunnel_identity_obj.to_string();
 

@@ -515,11 +515,14 @@ mod tests {
         });
         for i in 0..2 {
             manager
-                .fetch_certificate(&identity::Identity::Spiffe {
-                    trust_domain: "trust_domain".into(),
-                    namespace: "namespace".into(),
-                    service_account: strng::format!("sa-{i}"),
-                })
+                .fetch_certificate(
+                    &identity::Identity::Spiffe {
+                        trust_domain: "trust_domain".into(),
+                        namespace: "namespace".into(),
+                        service_account: strng::format!("sa-{i}"),
+                    }
+                    .to_composite_id(),
+                )
                 .await
                 .unwrap();
             // Make sure certificates are a significant amount of time apart, for better
@@ -528,7 +531,9 @@ mod tests {
         }
 
         manager
-            .fetch_certificate(&identity("spiffe://error/ns/forgotten/sa/sa-failed"))
+            .fetch_certificate(
+                &identity("spiffe://error/ns/forgotten/sa/sa-failed").to_composite_id(),
+            )
             .await
             .unwrap_err();
 
@@ -536,7 +541,9 @@ mod tests {
         let pending_manager = manager.clone();
         let pending_fetch = tokio::task::spawn(async move {
             pending_manager
-                .fetch_certificate(&identity("spiffe://test/ns/test/sa/sa-pending"))
+                .fetch_certificate(
+                    &identity("spiffe://test/ns/test/sa/sa-pending").to_composite_id(),
+                )
                 .await
         });
         tokio::time::sleep(Duration::from_nanos(1)).await;

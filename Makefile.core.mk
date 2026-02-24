@@ -18,6 +18,9 @@ coverage:
 build:
 	cargo build $(FEATURES)
 
+build-release:
+	cargo build --release $(FEATURES)
+
 # Build the inpodserver example
 inpodserver:
 	cargo build --example inpodserver
@@ -69,3 +72,5 @@ clean:
 
 rust-version:
 	./common/scripts/run.sh /usr/bin/rustc -vV
+
+.PHONY: build-release

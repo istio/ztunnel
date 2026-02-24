@@ -22,6 +22,7 @@ use std::{fmt, io};
 
 use hickory_proto::ProtoError;
 
+use crate::inpod::WorkloadUid;
 use crate::strng::Strng;
 use rand::Rng;
 use socket2::TcpKeepalive;
@@ -32,7 +33,7 @@ use tracing::{Instrument, debug, trace, warn};
 use inbound::Inbound;
 pub use metrics::*;
 
-use crate::identity::{Identity, SecretManager};
+use crate::identity::{CompositeId, Identity, RequestKey, SecretManager};
 
 use crate::dns::resolver::Resolver;
 use crate::drain::DrainWatcher;
@@ -177,6 +178,7 @@ pub struct LocalWorkloadInformation {
     // full_cert_manager gives access to the full SecretManager. This MUST only be given restricted
     // access to the appropriate certificates
     full_cert_manager: Arc<SecretManager>,
+    cfg: Arc<config::Config>,
 }
 
 impl LocalWorkloadInformation {
@@ -184,11 +186,13 @@ impl LocalWorkloadInformation {
         wi: Arc<WorkloadInfo>,
         state: DemandProxyState,
         cert_manager: Arc<SecretManager>,
+        cfg: Arc<config::Config>,
     ) -> LocalWorkloadInformation {
         LocalWorkloadInformation {
             wi,
             state,
             full_cert_manager: cert_manager,
+            cfg: cfg.clone(),
         }
     }
 
@@ -209,7 +213,17 @@ impl LocalWorkloadInformation {
             namespace: (&self.wi.namespace).into(),
             service_account: (&self.wi.service_account).into(),
         };
-        self.full_cert_manager.fetch_certificate(id).await
+
+        let key = if self.cfg.spire_enabled {
+            CompositeId::new(
+                id.clone(),
+                RequestKey::Workload(WorkloadUid::new(wl.uid.to_string())),
+            )
+        } else {
+            CompositeId::new(id.clone(), RequestKey::Identity(wl.identity().clone()))
+        };
+
+        self.full_cert_manager.fetch_certificate(&key).await
     }
 
     pub fn workload_info(&self) -> Arc<WorkloadInfo> {
