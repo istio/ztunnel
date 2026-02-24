@@ -131,6 +131,7 @@ jobs:
     name: Create GitHub Release
     needs: [build-binary, build-image]
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     steps:
@@ -143,6 +144,7 @@ jobs:
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: artifacts/
+          pattern: ztunnel-*
 
       - name: Prepare Binary Assets
         run: |
