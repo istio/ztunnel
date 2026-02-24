@@ -81,8 +81,14 @@ impl ContainerRuntimeManager {
         let mut map: HashMap<String, String> = std::collections::HashMap::new();
         map.insert("io.kubernetes.pod.uid".to_string(), pod_uid.clone());
 
+
+        let ready_state = cri::PodSandboxStateValue{
+            state: 0, // PodSandboxState::SandboxReady
+        };
+
         let pod_filter = cri::PodSandboxFilter {
             label_selector: map,
+            state: Some(ready_state),
             ..Default::default()
         };
 
@@ -120,11 +126,16 @@ impl ContainerRuntimeManager {
             sandbox_id
         );
 
+        let container_ready = cri::ContainerStateValue {
+            state: 1, // ContainerState::ContainerRunning
+        };
+
         // 2. List containers in that sandbox
         let containers = match client
             .list_containers(ListContainersRequest {
                 filter: Some(cri::ContainerFilter {
                     pod_sandbox_id: sandbox_id.clone(),
+                    state: Some(container_ready),
                     ..Default::default()
                 }),
             })
@@ -192,6 +203,14 @@ impl ContainerRuntimeManager {
 
             tracing::debug!("Found PID {} for container {}", pid.pid, c.id);
             pids.push(pid.pid);
+        }
+
+        if pids.is_empty() {
+            tracing::error!("No running containers found for pod UID: {}", pod_uid);
+            return Err(tonic::Status::not_found(format!(
+                "No running containers found for pod UID: {}",
+                pod_uid
+            )));
         }
 
         tracing::info!(
@@ -283,12 +302,18 @@ mod tests {
                 sandboxes
                     .into_iter()
                     .filter(|sandbox| {
-                        filter.label_selector.iter().all(|(key, expected_value)| {
+                        // Filter by label selector
+                        let labels_match = filter.label_selector.iter().all(|(key, expected_value)| {
                             sandbox
                                 .labels
                                 .get(key)
                                 .map_or(false, |actual_value| actual_value == expected_value)
-                        })
+                        });
+                        // Filter by state if specified
+                        let state_match = filter.state.as_ref().map_or(true, |state_filter| {
+                            sandbox.state == state_filter.state
+                        });
+                        labels_match && state_match
                     })
                     .collect()
             } else {
@@ -302,10 +327,33 @@ mod tests {
 
         async fn list_containers(
             &self,
-            _request: tonic::Request<ListContainersRequest>,
+            request: tonic::Request<ListContainersRequest>,
         ) -> std::result::Result<tonic::Response<ListContainersResponse>, tonic::Status> {
             let containers = self.containers.lock().await.clone();
-            Ok(Response::new(ListContainersResponse { containers }))
+            let req = request.into_inner();
+
+            let filtered = if let Some(filter) = req.filter {
+                containers
+                    .into_iter()
+                    .filter(|container| {
+                        // Filter by sandbox ID if specified
+                        let sandbox_match = if filter.pod_sandbox_id.is_empty() {
+                            true
+                        } else {
+                            container.pod_sandbox_id == filter.pod_sandbox_id
+                        };
+                        // Filter by state if specified
+                        let state_match = filter.state.as_ref().map_or(true, |state_filter| {
+                            container.state == state_filter.state
+                        });
+                        sandbox_match && state_match
+                    })
+                    .collect()
+            } else {
+                containers
+            };
+
+            Ok(Response::new(ListContainersResponse { containers: filtered }))
         }
 
         async fn container_status(
@@ -338,6 +386,7 @@ mod tests {
             lock.push(Container {
                 id: "fake-id-123".into(),
                 pod_sandbox_id: "fake-sandbox-123".into(),
+                state: 1, // CONTAINER_RUNNING
                 ..Default::default()
             });
 
@@ -426,6 +475,224 @@ mod tests {
         assert_eq!(pids_result.unwrap(), vec![4321]);
 
         // 7. Clean up
+        server_handle.abort();
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    /// Helper to create a mock server and client for testing
+    async fn setup_mock_server(
+        mock: MockRuntimeService,
+        socket_path: &str,
+    ) -> (RuntimeServiceClient<tonic::transport::Channel>, tokio::task::JoinHandle<()>) {
+        let _ = std::fs::remove_file(socket_path);
+        let uds = UnixListener::bind(socket_path).expect("failed to bind UDS");
+        let incoming = UnixListenerStream::new(uds);
+
+        let svc = RuntimeServiceServer::new(mock);
+        let server_handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(incoming)
+                .await
+                .expect("server failed");
+        });
+
+        let socket_path_str = socket_path.to_string();
+        let endpoint = Endpoint::try_from("http://[::]:50051").unwrap();
+        let channel = endpoint
+            .connect_with_connector(service_fn(move |_uri: Uri| {
+                let path = socket_path_str.clone();
+                async move {
+                    let stream = UnixStream::connect(path).await?;
+                    Ok::<_, std::io::Error>(TokioIo::new(stream))
+                }
+            }))
+            .await
+            .expect("failed to connect to mock UDS server");
+
+        (RuntimeServiceClient::new(channel), server_handle)
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_not_ready_returns_not_found() {
+        // Test that a sandbox in NotReady state (state=1) is filtered out
+        let mock = MockRuntimeService::default();
+        {
+            let mut lock = mock.sandboxes.lock().await;
+            lock.push(cri::PodSandbox {
+                id: "not-ready-sandbox".into(),
+                state: 1, // SANDBOX_NOTREADY
+                labels: {
+                    let mut m = HashMap::new();
+                    m.insert("io.kubernetes.pod.uid".into(), "not-ready-pod-uid".into());
+                    m
+                },
+                ..Default::default()
+            });
+        }
+
+        let socket_path = "/tmp/test-cri-sandbox-not-ready.sock";
+        let (client, server_handle) = setup_mock_server(mock, socket_path).await;
+
+        let cri_manager = ContainerRuntimeManager::new_with_client(client);
+        let result = cri_manager
+            .get_pids_for_pod("not-ready-pod-uid".to_string())
+            .await;
+
+        // Should return not found because sandbox is not in Ready state
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        server_handle.abort();
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
+    async fn test_exited_containers_filtered_out() {
+        // Test that containers not in Running state are filtered out
+        let mock = MockRuntimeService::default();
+        {
+            // Add a ready sandbox
+            let mut lock = mock.sandboxes.lock().await;
+            lock.push(cri::PodSandbox {
+                id: "ready-sandbox-123".into(),
+                state: 0, // SANDBOX_READY
+                labels: {
+                    let mut m = HashMap::new();
+                    m.insert("io.kubernetes.pod.uid".into(), "pod-with-exited-containers".into());
+                    m
+                },
+                ..Default::default()
+            });
+
+            // Add containers that are NOT running (exited)
+            let mut lock = mock.containers.lock().await;
+            lock.push(Container {
+                id: "exited-container-1".into(),
+                pod_sandbox_id: "ready-sandbox-123".into(),
+                state: 2, // CONTAINER_EXITED
+                ..Default::default()
+            });
+            lock.push(Container {
+                id: "exited-container-2".into(),
+                pod_sandbox_id: "ready-sandbox-123".into(),
+                state: 0, // CONTAINER_CREATED
+                ..Default::default()
+            });
+
+            // Add container statuses (should not be queried since containers are filtered)
+            let mut lock = mock.container_statuses.lock().await;
+            lock.insert(
+                "exited-container-1".into(),
+                cri::ContainerStatusResponse {
+                    info: {
+                        let mut m = HashMap::new();
+                        m.insert("info".into(), r#"{"pid": 0}"#.into());
+                        m
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+
+        let socket_path = "/tmp/test-cri-exited-containers.sock";
+        let (client, server_handle) = setup_mock_server(mock, socket_path).await;
+
+        let cri_manager = ContainerRuntimeManager::new_with_client(client);
+        let result = cri_manager
+            .get_pids_for_pod("pod-with-exited-containers".to_string())
+            .await;
+
+        // Should return NotFound error since no containers are running
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert!(err.message().contains("No running containers found"));
+
+        server_handle.abort();
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
+    async fn test_mixed_container_states_returns_only_running() {
+        // Test that only running containers are returned when there's a mix
+        let mock = MockRuntimeService::default();
+        {
+            let mut lock = mock.sandboxes.lock().await;
+            lock.push(cri::PodSandbox {
+                id: "mixed-sandbox".into(),
+                state: 0, // SANDBOX_READY
+                labels: {
+                    let mut m = HashMap::new();
+                    m.insert("io.kubernetes.pod.uid".into(), "mixed-state-pod".into());
+                    m
+                },
+                ..Default::default()
+            });
+
+            let mut lock = mock.containers.lock().await;
+            // Running container
+            lock.push(Container {
+                id: "running-container".into(),
+                pod_sandbox_id: "mixed-sandbox".into(),
+                state: 1, // CONTAINER_RUNNING
+                ..Default::default()
+            });
+            // Exited container
+            lock.push(Container {
+                id: "exited-container".into(),
+                pod_sandbox_id: "mixed-sandbox".into(),
+                state: 2, // CONTAINER_EXITED
+                ..Default::default()
+            });
+            // Created but not started container
+            lock.push(Container {
+                id: "created-container".into(),
+                pod_sandbox_id: "mixed-sandbox".into(),
+                state: 0, // CONTAINER_CREATED
+                ..Default::default()
+            });
+
+            let mut lock = mock.container_statuses.lock().await;
+            lock.insert(
+                "running-container".into(),
+                cri::ContainerStatusResponse {
+                    info: {
+                        let mut m = HashMap::new();
+                        m.insert("info".into(), r#"{"pid": 9999}"#.into());
+                        m
+                    },
+                    ..Default::default()
+                },
+            );
+            // Exited container would have PID 0
+            lock.insert(
+                "exited-container".into(),
+                cri::ContainerStatusResponse {
+                    info: {
+                        let mut m = HashMap::new();
+                        m.insert("info".into(), r#"{"pid": 0}"#.into());
+                        m
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+
+        let socket_path = "/tmp/test-cri-mixed-states.sock";
+        let (client, server_handle) = setup_mock_server(mock, socket_path).await;
+
+        let cri_manager = ContainerRuntimeManager::new_with_client(client);
+        let result = cri_manager
+            .get_pids_for_pod("mixed-state-pod".to_string())
+            .await;
+
+        // Should only return the PID of the running container
+        assert!(result.is_ok());
+        let pids = result.unwrap();
+        assert_eq!(pids, vec![9999]);
+
         server_handle.abort();
         let _ = std::fs::remove_file(socket_path);
     }
