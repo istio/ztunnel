@@ -218,7 +218,7 @@ pub struct LoadBalancer {
     pub mode: LoadBalancerMode,
     pub health_policy: LoadBalancerHealthPolicy,
     #[serde(default)]
-    pub connect_strategy: DnsConnectStrategy,
+    pub dns_connect_strategy: DnsConnectStrategy,
 }
 
 impl From<xds::istio::workload::IpFamilies> for Option<IpFamily> {
@@ -334,8 +334,8 @@ impl TryFrom<&XdsService> for Service {
                     lb.health_policy,
                 )?
                 .into(),
-                connect_strategy: xds::istio::workload::load_balancing::DnsConnectStrategy::try_from(
-                    lb.connect_strategy,
+                dns_connect_strategy: xds::istio::workload::load_balancing::DnsConnectStrategy::try_from(
+                    lb.dns_connect_strategy,
                 )?
                 .into(),
             })
