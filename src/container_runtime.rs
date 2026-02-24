@@ -81,8 +81,7 @@ impl ContainerRuntimeManager {
         let mut map: HashMap<String, String> = std::collections::HashMap::new();
         map.insert("io.kubernetes.pod.uid".to_string(), pod_uid.clone());
 
-
-        let ready_state = cri::PodSandboxStateValue{
+        let ready_state = cri::PodSandboxStateValue {
             state: 0, // PodSandboxState::SandboxReady
         };
 
@@ -303,16 +302,18 @@ mod tests {
                     .into_iter()
                     .filter(|sandbox| {
                         // Filter by label selector
-                        let labels_match = filter.label_selector.iter().all(|(key, expected_value)| {
-                            sandbox
-                                .labels
-                                .get(key)
-                                .map_or(false, |actual_value| actual_value == expected_value)
-                        });
+                        let labels_match =
+                            filter.label_selector.iter().all(|(key, expected_value)| {
+                                sandbox
+                                    .labels
+                                    .get(key)
+                                    .map_or(false, |actual_value| actual_value == expected_value)
+                            });
                         // Filter by state if specified
-                        let state_match = filter.state.as_ref().map_or(true, |state_filter| {
-                            sandbox.state == state_filter.state
-                        });
+                        let state_match = filter
+                            .state
+                            .as_ref()
+                            .map_or(true, |state_filter| sandbox.state == state_filter.state);
                         labels_match && state_match
                     })
                     .collect()
@@ -343,9 +344,10 @@ mod tests {
                             container.pod_sandbox_id == filter.pod_sandbox_id
                         };
                         // Filter by state if specified
-                        let state_match = filter.state.as_ref().map_or(true, |state_filter| {
-                            container.state == state_filter.state
-                        });
+                        let state_match = filter
+                            .state
+                            .as_ref()
+                            .map_or(true, |state_filter| container.state == state_filter.state);
                         sandbox_match && state_match
                     })
                     .collect()
@@ -353,7 +355,9 @@ mod tests {
                 containers
             };
 
-            Ok(Response::new(ListContainersResponse { containers: filtered }))
+            Ok(Response::new(ListContainersResponse {
+                containers: filtered,
+            }))
         }
 
         async fn container_status(
@@ -483,7 +487,10 @@ mod tests {
     async fn setup_mock_server(
         mock: MockRuntimeService,
         socket_path: &str,
-    ) -> (RuntimeServiceClient<tonic::transport::Channel>, tokio::task::JoinHandle<()>) {
+    ) -> (
+        RuntimeServiceClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let _ = std::fs::remove_file(socket_path);
         let uds = UnixListener::bind(socket_path).expect("failed to bind UDS");
         let incoming = UnixListenerStream::new(uds);
@@ -560,7 +567,10 @@ mod tests {
                 state: 0, // SANDBOX_READY
                 labels: {
                     let mut m = HashMap::new();
-                    m.insert("io.kubernetes.pod.uid".into(), "pod-with-exited-containers".into());
+                    m.insert(
+                        "io.kubernetes.pod.uid".into(),
+                        "pod-with-exited-containers".into(),
+                    );
                     m
                 },
                 ..Default::default()
