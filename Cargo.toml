@@ -11,6 +11,7 @@ tls-boring = ["dep:boring", "dep:boring-sys", "boring-rustls-provider/fips-only"
 tls-ring = ["dep:ring", "rustls/ring", "tokio-rustls/ring", "hyper-rustls/ring", "dep:rcgen"]
 tls-aws-lc = ["dep:ring", "rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs", "hyper-rustls/aws-lc-rs", "dep:rcgen", "rcgen/aws_lc_rs"]
 tls-openssl = ["dep:rustls-openssl", "dep:openssl", "dep:openssl-sys"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing"]
 testing = ["dep:rcgen", "rcgen/x509-parser", "dep:tempfile"] # Enables utilities supporting tests.
 
 [lib]
@@ -119,6 +120,10 @@ tracing-appender = "0.2"
 tokio-util = { version = "0.7", features = ["io-util"] }
 educe = "0.6"
 tempfile = { version = "3.21", optional = true}
+opentelemetry-otlp = { version = "0.31.0", optional = true, features = ["grpc-tonic"] }
+opentelemetry = { version = "0.31.0", optional = true }
+opentelemetry_sdk = { version = "0.31.0", optional = true }
+opentelemetry-appender-tracing = { version = "0.31.0", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netns-rs = "0.1"

@@ -50,8 +50,6 @@ fn increase_open_files_limit() {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _log_flush = telemetry::setup_logging();
-
     // For now we don't need a complex CLI, so rather than pull in dependencies just use basic argv[1]
     match std::env::args().nth(1).as_deref() {
         None | Some("proxy") => (),
@@ -69,6 +67,7 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap()
         .block_on(async move {
+            let _log_flush = telemetry::setup_logging();
             let config = Arc::new(config::parse_config()?);
             proxy(config).await
         })
