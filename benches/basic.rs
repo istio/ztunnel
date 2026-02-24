@@ -119,6 +119,7 @@ pub fn load_balance(c: &mut Criterion) {
         ],
         mode: load_balancing::Mode::Failover as i32,
         health_policy: 0,
+        dns_connect_strategy: 0,
     });
     run("locality-10", 10, locality.clone());
     run("locality-1000", 1000, locality.clone());
