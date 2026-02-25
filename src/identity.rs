@@ -19,6 +19,8 @@ use std::sync::Arc;
 mod caclient;
 pub use caclient::*;
 
+pub mod metrics;
+
 pub mod manager;
 pub use manager::*;
 
@@ -31,6 +33,7 @@ pub mod mock {
     pub use super::caclient::mock::CaClient;
     pub use super::manager::mock::{
         Config as SecretManagerConfig, new_secret_manager, new_secret_manager_cfg,
+        new_secret_manager_cfg_with_metrics, new_secret_manager_with_metrics,
     };
 }
 

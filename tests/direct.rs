@@ -21,6 +21,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::Empty;
 use hyper::{Method, Request};
+use prometheus_client::registry::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -28,13 +29,36 @@ use tokio::time;
 use tokio::time::timeout;
 
 use ztunnel::config;
-use ztunnel::identity::mock::new_secret_manager;
+use ztunnel::identity::mock::new_secret_manager_with_metrics;
 use ztunnel::test_helpers::app::{self as testapp, ParsedMetrics};
 use ztunnel::test_helpers::app::{DestinationAddr, TestApp};
 use ztunnel::test_helpers::assert_eventually;
 use ztunnel::test_helpers::dns::run_dns;
 use ztunnel::test_helpers::helpers::initialize_telemetry;
 use ztunnel::test_helpers::*;
+
+fn default_identity() -> ztunnel::identity::Identity {
+    ztunnel::identity::Identity::Spiffe {
+        trust_domain: ztunnel::identity::DEFAULT_TRUST_DOMAIN.into(),
+        namespace: "default".into(),
+        service_account: "default".into(),
+    }
+}
+
+async fn wait_for_metric(app: &TestApp, metric: &str) -> ParsedMetrics {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let metrics = app.metrics().await.unwrap();
+        if metrics.query(metric, &Default::default()).is_some() {
+            return metrics;
+        }
+        let last_dump = metrics.dump();
+        if std::time::Instant::now() >= deadline {
+            panic!("expected metric {metric}; metrics: {last_dump}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 #[tokio::test]
 async fn test_shutdown_lifecycle() {
@@ -101,10 +125,18 @@ async fn test_conflicting_bind_error_admin() {
 async fn test_shutdown_drain() {
     helpers::initialize_telemetry();
 
-    let cert_manager = new_secret_manager(Duration::from_secs(10));
-    let app = ztunnel::app::build_with_cert(Arc::new(test_config()), cert_manager.clone())
-        .await
-        .unwrap();
+    let registry = Registry::default();
+    let identity_metrics = Arc::new(ztunnel::identity::metrics::Metrics::new());
+    let cert_manager =
+        new_secret_manager_with_metrics(Duration::from_secs(10), identity_metrics.clone());
+    let app = ztunnel::app::build_with_cert_and_registry(
+        Arc::new(test_config()),
+        cert_manager.clone(),
+        identity_metrics,
+        registry,
+    )
+    .await
+    .unwrap();
     let ta = TestApp::from((&app, cert_manager));
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
@@ -147,10 +179,18 @@ async fn test_shutdown_forced_drain() {
 
     let cfg = test_config();
 
-    let cert_manager = new_secret_manager(Duration::from_secs(10));
-    let app = ztunnel::app::build_with_cert(Arc::new(cfg), cert_manager.clone())
-        .await
-        .unwrap();
+    let registry = Registry::default();
+    let identity_metrics = Arc::new(ztunnel::identity::metrics::Metrics::new());
+    let cert_manager =
+        new_secret_manager_with_metrics(Duration::from_secs(10), identity_metrics.clone());
+    let app = ztunnel::app::build_with_cert_and_registry(
+        Arc::new(cfg),
+        cert_manager.clone(),
+        identity_metrics,
+        registry,
+    )
+    .await
+    .unwrap();
     let ta = TestApp::from((&app, cert_manager));
     let echo = tcp::TestServer::new(tcp::Mode::ReadWrite, 0).await;
     let echo_addr = echo.address();
@@ -350,7 +390,9 @@ async fn test_hostname_request_local() {
 #[tokio::test]
 async fn test_stats_exist() {
     testapp::with_app(test_config(), async move |app| {
-        let metrics = app.metrics().await.unwrap();
+        let id = default_identity();
+        app.cert_manager.fetch_certificate(&id).await.unwrap();
+        let metrics = wait_for_metric(&app, "istio_cert_expiration_seconds").await;
         for metric in &[
             // Meta
             ("istio_build"),
@@ -366,6 +408,8 @@ async fn test_stats_exist() {
             ("istio_dns_upstream_requests_total"),
             ("istio_dns_upstream_failures_total"),
             ("istio_dns_upstream_request_duration_seconds"),
+            // Certs.
+            ("istio_cert_expiration_seconds"),
         ] {
             assert!(
                 metrics.query(metric, &Default::default()).is_some(),
@@ -393,6 +437,32 @@ async fn test_stats_exist() {
                     assert!(doc.contains("unstable"), "{name}: {doc}");
                 }
             }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_cert_expiration_metric() {
+    testapp::with_app(test_config(), async move |app| {
+        let id = default_identity();
+        app.cert_manager.fetch_certificate(&id).await.unwrap();
+        let metrics = wait_for_metric(&app, "istio_cert_expiration_seconds").await;
+        let samples = metrics
+            .query("istio_cert_expiration_seconds", &Default::default())
+            .expect("expected cert expiration metric");
+        assert!(!samples.is_empty(), "metrics: {}", metrics.dump());
+        for sample in samples {
+            match sample.value {
+                prometheus_parse::Value::Gauge(v) => {
+                    assert!(v.is_finite(), "unexpected metric value: {v}");
+                }
+                _ => panic!("unexpected metric type"),
+            }
+            assert!(
+                sample.labels.get("identity").is_some(),
+                "expected identity label on cert metric"
+            );
         }
     })
     .await;
