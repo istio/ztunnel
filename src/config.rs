@@ -35,6 +35,7 @@ use crate::{identity, state};
 use {crate::test_helpers::MpscAckReceiver, crate::xds::LocalConfig, tokio::sync::Mutex};
 
 const ENABLE_PROXY: &str = "ENABLE_PROXY";
+const TRANSPARENT_NETWORK_POLICIES: &str = "TRANSPARENT_NETWORK_POLICIES";
 const KUBERNETES_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const NETWORK: &str = "NETWORK";
 const NODE_NAME: &str = "NODE_NAME";
@@ -194,6 +195,8 @@ pub struct Config {
     pub proxy: bool,
     /// If true, a DNS proxy will be used.
     pub dns_proxy: bool,
+    /// If true, the communicatin will be stablished by the original destination port.
+    pub transparent_network_policies: bool,
 
     pub window_size: u32,
     pub connection_window_size: u32,
@@ -718,6 +721,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
 
     validate_config(Config {
         proxy: parse_default(ENABLE_PROXY, true)?,
+        transparent_network_policies: parse_default(TRANSPARENT_NETWORK_POLICIES, false)?,
         // Enable by default; running the server is not an issue, clients still need to opt-in to sending their
         // DNS requests to Ztunnel.
         dns_proxy: pc
