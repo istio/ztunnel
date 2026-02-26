@@ -33,6 +33,8 @@ use tracing::warn;
 
 use crate::tls;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
+use x509_parser::revocation_list::CertificateRevocationList;
 
 #[derive(Clone, Debug)]
 pub struct Certificate {
@@ -237,6 +239,37 @@ fn parse_key(mut key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
     }
 }
 
+/// Searches the provided CRL DER blobs for `cert`'s serial number.
+/// Returns `Some(reason)` if the certificate is listed as revoked,
+///     where `reason`(`Option<String>`) is `None` when the CRL entry carries no reason extension.
+/// Returns `None` if the certificate is not found in any CRL.
+fn find_cert_revocation(
+    cert: &Certificate,
+    crls: &[rustls::pki_types::CertificateRevocationListDer<'_>],
+) -> Option<Option<String>> {
+    let our_serial = &cert.parsed().serial;
+
+    for crl_der in crls {
+        // CertificateRevocationList::from_der returns (remaining_bytes, parsed_crl).
+        // we only care about the parsed_crl
+        match CertificateRevocationList::from_der(crl_der.as_ref()) {
+            Ok((_, crl)) => {
+                for revoked in crl.iter_revoked_certificates() {
+                    if revoked.serial() == our_serial {
+                        //reason_code() retruns Option<(critical: bool, ReasonCode)>
+                        let reason = revoked.reason_code().map(|(_, code)| code.to_string());
+                        return Some(reason);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("failed to parse CRL for self-revocation check: {e:?}");
+            }
+        }
+    }
+    None
+}
+
 impl WorkloadCertificate {
     pub fn new(key: &[u8], cert: &[u8], chain: Vec<&[u8]>) -> Result<WorkloadCertificate, Error> {
         let cert = parse_cert(cert.to_vec())?;
@@ -316,11 +349,15 @@ impl WorkloadCertificate {
         if let Some(ref mgr) = crl_manager {
             let crls = mgr.get_crl_ders();
             if !crls.is_empty() {
+                // Warn if ztunnel's own certificate is in the CRL.
+                if let Some(reason) = find_cert_revocation(&self.cert, &crls) {
+                    warn!(serial = %self.cert.serial(), identity = ?self.cert.identity(), reason = reason.as_deref().unwrap_or("unexpecified"), "own certificate is listed in the CRL; peers may reject connections until certificate is renewed");
+                }
+
                 builder = builder.with_crls(crls).allow_unknown_revocation_status(); // fail-open for unknown status
             }
         }
 
-        // TODO: check if our own certificate is revoked in the CRL and log warning
         let raw_client_cert_verifier = builder.build()?;
 
         let client_cert_verifier =
@@ -424,6 +461,11 @@ mod test {
     use crate::tls::WorkloadCertificate;
     use crate::tls::mock::{TEST_ROOT, TEST_ROOT_KEY, TEST_ROOT2, TEST_ROOT2_KEY, TestIdentity};
 
+    use rcgen::{
+        CertificateRevocationListParams, Issuer, KeyIdMethod, KeyPair, RevocationReason,
+        RevokedCertParams, SerialNumber,
+    };
+    use rustls::pki_types::CertificateRevocationListDer;
     use std::str::FromStr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -484,5 +526,81 @@ mod test {
         let mut buf = [0u8; 4];
         tls.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"serv");
+    }
+
+    #[test]
+    fn test_own_cert_revocation_detected() {
+        // --- Generate a test workload certificate ---
+        let id = Identity::from_str("spiffe://td/ns/n/sa/a").unwrap();
+        let (key, cert) = crate::tls::mock::generate_test_certs_with_root(
+            &TestIdentity::Identity(id),
+            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(3600),
+            None,
+            TEST_ROOT_KEY,
+        );
+
+        let workload_cert =
+            WorkloadCertificate::new(key.as_bytes(), cert.as_bytes(), vec![TEST_ROOT]).unwrap();
+
+        let serial_bytes = workload_cert.cert.parsed().serial.to_bytes_be();
+
+        let ca_key = KeyPair::from_pem(std::str::from_utf8(TEST_ROOT_KEY).unwrap()).unwrap();
+
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let make_crl_der = |revoked_serial: &[u8]| -> CertificateRevocationListDer<'static> {
+            let crl_params = CertificateRevocationListParams {
+                this_update: time::OffsetDateTime::now_utc(),
+                next_update: time::OffsetDateTime::now_utc() + time::Duration::days(30),
+                crl_number: SerialNumber::from(1u64),
+                issuing_distribution_point: None,
+                revoked_certs: vec![RevokedCertParams {
+                    serial_number: SerialNumber::from_slice(revoked_serial),
+                    revocation_time: time::OffsetDateTime::now_utc(),
+                    reason_code: Some(RevocationReason::KeyCompromise),
+                    invalidity_date: None,
+                }],
+                key_identifier_method: KeyIdMethod::Sha256,
+            };
+
+            let crl = crl_params.signed_by(&issuer).unwrap();
+            let crl_pem = crl.pem().unwrap();
+            let der_crl: Vec<_> = rustls_pemfile::read_all(&mut std::io::BufReader::new(
+                std::io::Cursor::new(crl_pem.as_bytes()),
+            ))
+            .filter_map(|item| match item {
+                Ok(rustls_pemfile::Item::Crl(der)) => {
+                    Some(CertificateRevocationListDer::from(der.to_vec()))
+                }
+                _ => None,
+            })
+            .collect();
+            der_crl
+                .into_iter()
+                .next()
+                .expect("CRL PEM must yield one DER entry")
+        };
+
+        // test one:
+        let crl_with_our_serial = make_crl_der(&serial_bytes);
+        assert!(
+            super::find_cert_revocation(&workload_cert.cert, &[crl_with_our_serial]).is_some(),
+            "find_cert_revocation must return Some when own serial is in CRL"
+        );
+
+        // test two:
+        let other_serial = [0x00, 0x01, 0x02, 0x03]; // arbitrary serial
+        let crl_without_our_serial = make_crl_der(&other_serial);
+        assert!(
+            super::find_cert_revocation(&workload_cert.cert, &[crl_without_our_serial]).is_none(),
+            "find_cert_revocation must return None when own serial is not in CRL"
+        );
     }
 }
