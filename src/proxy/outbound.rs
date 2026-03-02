@@ -203,6 +203,20 @@ impl OutboundConnection {
 
         let metrics = self.pi.metrics.clone();
         let hbone_target = req.hbone_target_destination.clone();
+
+        if let UpstreamTarget::Race { .. } = &req.upstream_target {
+            self.proxy_to_race(
+                source_stream,
+                &req,
+                source_addr,
+                hbone_target,
+                start,
+                metrics,
+            )
+            .await;
+            return;
+        }
+
         let connection_result_builder = Box::new(ConnectionResultBuilder::new(
             source_addr,
             req.upstream_target.addr(),
@@ -211,12 +225,6 @@ impl OutboundConnection {
             Self::conn_metrics_from_request(&req),
             metrics,
         ));
-
-        if let UpstreamTarget::Race { .. } = &req.upstream_target {
-            self.proxy_to_race(source_stream, &req, connection_result_builder)
-                .await;
-            return;
-        }
 
         match req.protocol {
             OutboundProtocol::DOUBLEHBONE => {
@@ -439,9 +447,11 @@ impl OutboundConnection {
         &mut self,
         stream: TcpStream,
         req: &Request,
-        connection_stats_builder: Box<ConnectionResultBuilder>,
+        source_addr: SocketAddr,
+        hbone_target: Option<HboneAddress>,
+        start: Instant,
+        metrics: Arc<metrics::Metrics>,
     ) {
-        let connection_stats = Box::new(connection_stats_builder.build());
         let candidates = match &req.upstream_target {
             UpstreamTarget::Race { candidates, .. } => candidates,
             UpstreamTarget::Single(_) => {
@@ -456,93 +466,103 @@ impl OutboundConnection {
             "racing upstream connections (FIRST_HEALTHY_RACE)"
         );
 
-        let res = (async {
-            let socket_factory = self.pi.socket_factory.as_ref();
-            let mut futs = futures_util::stream::FuturesUnordered::new();
-            let mut remaining = candidates.iter();
+        let socket_factory = self.pi.socket_factory.as_ref();
+        let mut futs = futures_util::stream::FuturesUnordered::new();
+        let mut remaining = candidates.iter();
 
-            // Start the first connection attempt immediately
-            if let Some(&addr) = remaining.next() {
-                futs.push(super::freebind_connect(None, addr, socket_factory));
+        // Start the first connection attempt immediately
+        if let Some(&addr) = remaining.next() {
+            futs.push(super::freebind_connect(None, addr, socket_factory));
+        }
+
+        let mut winner = None;
+        loop {
+            if futs.is_empty() {
+                // No more in-flight attempts and no more candidates
+                break;
             }
 
-            let mut winner = None;
-            loop {
-                if futs.is_empty() {
-                    // No more in-flight attempts and no more candidates
-                    break;
+            if remaining.len() > 0 {
+                // We have more candidates to try. Wait for either:
+                // 1. An in-flight attempt to complete (success or failure)
+                // 2. The delay timer to expire (start next candidate in parallel)
+                tokio::select! {
+                    biased;
+                    result = futures_util::StreamExt::next(&mut futs) => {
+                        match result {
+                            Some(Ok(tcp)) => {
+                                winner = Some(tcp);
+                                break;
+                            }
+                            Some(Err(err)) => {
+                                debug!(?err, "race candidate connection failed");
+                                // Race candidate failure: start next candidate right away
+                                if let Some(&addr) = remaining.next() {
+                                    futs.push(super::freebind_connect(None, addr, socket_factory));
+                                }
+                            }
+                            None => break, // FuturesUnordered is empty
+                        }
+                    }
+                    _ = tokio::time::sleep(Self::RACE_ATTEMPT_DELAY) => {
+                        // Timer expired without success or failure.
+                        // Start the next candidate in parallel.
+                        if let Some(&addr) = remaining.next() {
+                            debug!(?addr, "race timer expired, starting next candidate");
+                            futs.push(super::freebind_connect(None, addr, socket_factory));
+                        }
+                    }
                 }
-
-                if remaining.len() > 0 {
-                    // We have more candidates to try. Wait for either:
-                    // 1. An in-flight attempt to complete (success or failure)
-                    // 2. The delay timer to expire (start next candidate in parallel)
-                    tokio::select! {
-                        biased;
-                        result = futures_util::StreamExt::next(&mut futs) => {
-                            match result {
-                                Some(Ok(tcp)) => {
-                                    winner = Some(tcp);
-                                    break;
-                                }
-                                Some(Err(err)) => {
-                                    debug!(?err, "race candidate connection failed");
-                                    // Race candidate ailure: start next candidate right away
-                                    if let Some(&addr) = remaining.next() {
-                                        futs.push(super::freebind_connect(None, addr, socket_factory));
-                                    }
-                                }
-                                None => break, // FuturesUnordered is empty
-                            }
-                        }
-                        _ = tokio::time::sleep(Self::RACE_ATTEMPT_DELAY) => {
-                            // Timer expired without success or failure.
-                            // Start the next candidate in parallel.
-                            if let Some(&addr) = remaining.next() {
-                                debug!(?addr, "race timer expired, starting next candidate");
-                                futs.push(super::freebind_connect(None, addr, socket_factory));
-                            }
-                        }
+            } else {
+                // No more candidates to start. Just wait for remaining in-flight
+                // attempts to complete.
+                match futures_util::StreamExt::next(&mut futs).await {
+                    Some(Ok(tcp)) => {
+                        winner = Some(tcp);
+                        break;
                     }
-                } else {
-                    // No more candidates to start. Just wait for remaining in-flight
-                    // attempts to complete.
-                    match futures_util::StreamExt::next(&mut futs).await {
-                        Some(Ok(tcp)) => {
-                            winner = Some(tcp);
-                            break;
-                        }
-                        Some(Err(err)) => {
-                            debug!(?err, "race candidate connection failed");
-                        }
-                        None => break,
+                    Some(Err(err)) => {
+                        debug!(?err, "race candidate connection failed");
                     }
+                    None => break,
                 }
             }
-            // Explicitly drop remaining futures to cancel in-progress connection attempts.
-            drop(futs);
+        }
+        // Explicitly drop remaining futures to cancel in-progress connection attempts.
+        drop(futs);
 
-            let outbound = match winner {
-                Some(tcp) => tcp,
-                None => {
-                    // All candidates failed; RST-close the downstream socket
-                    rst_close(stream);
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionRefused,
-                        "all race candidates failed",
-                    )
-                    .into());
-                }
-            };
+        let outbound = match winner {
+            Some(tcp) => tcp,
+            None => {
+                // All candidates failed; RST-close the downstream socket
+                rst_close(stream);
+                return;
+            }
+        };
 
-            // Proxying data between downstream and winning upstream
-            copy::copy_bidirectional(
-                copy::TcpStreamSplitter(stream),
-                copy::TcpStreamSplitter(outbound),
-                &connection_stats,
+        // Now that we know the winning destination, build the connection stats
+        // with the actual peer address rather than the representative.
+        let actual_dst = outbound
+            .peer_addr()
+            .unwrap_or_else(|_| req.upstream_target.addr());
+        let connection_stats = Box::new(
+            ConnectionResultBuilder::new(
+                source_addr,
+                actual_dst,
+                hbone_target,
+                start,
+                Self::conn_metrics_from_request(req),
+                metrics,
             )
-            .await
-        })
+            .build(),
+        );
+
+        // Proxying data between downstream and winning upstream
+        let res = copy::copy_bidirectional(
+            copy::TcpStreamSplitter(stream),
+            copy::TcpStreamSplitter(outbound),
+            &connection_stats,
+        )
         .await;
         connection_stats.record(res);
     }
