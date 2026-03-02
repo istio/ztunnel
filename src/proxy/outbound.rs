@@ -2240,6 +2240,144 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_race_reports_actual_destination() {
+        initialize_telemetry();
+
+        // Candidate 1: bind a port and immediately drop the listener so connections are refused.
+        let refused_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused_addr = refused_listener.local_addr().unwrap();
+        drop(refused_listener);
+
+        // Candidate 2: a real TCP echo server that accepts connections.
+        let good_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_addr = good_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = good_listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let (mut r, mut w) = socket.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+
+        let cfg = Arc::new(Config {
+            local_node: Some("local-node".to_string()),
+            ..crate::config::parse_config().unwrap()
+        });
+        let source = XdsWorkload {
+            uid: "cluster1//v1/Pod/ns/source-workload".to_string(),
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            addresses: vec![Bytes::copy_from_slice(&[127, 0, 0, 1])],
+            node: "local-node".to_string(),
+            ..Default::default()
+        };
+        let state = new_proxy_state(&[source], &[], &[]);
+        let sock_fact = Arc::new(crate::proxy::DefaultSocketFactory::default());
+        let wi = WorkloadInfo {
+            name: "source-workload".to_string(),
+            namespace: "ns".to_string(),
+            service_account: "default".to_string(),
+        };
+        let local_workload_information = Arc::new(LocalWorkloadInformation::new(
+            Arc::new(wi),
+            state.clone(),
+            identity::mock::new_secret_manager(Duration::from_secs(10)),
+        ));
+        let metrics = test_proxy_metrics();
+        let mut outbound = OutboundConnection {
+            pi: Arc::new(ProxyInputs {
+                state: state.clone(),
+                cfg: cfg.clone(),
+                metrics: metrics.clone(),
+                socket_factory: sock_fact.clone(),
+                local_workload_information: local_workload_information.clone(),
+                connection_manager: ConnectionManager::default(),
+                resolver: None,
+                disable_inbound_freebind: false,
+                crl_manager: None,
+            }),
+            id: TraceParent::new(),
+            pool: WorkloadHBONEPool::new(
+                cfg.clone(),
+                sock_fact,
+                local_workload_information.clone(),
+            ),
+            hbone_port: cfg.inbound_addr.port(),
+        };
+
+        let source_workload = outbound
+            .pi
+            .local_workload_information
+            .get_workload()
+            .await
+            .unwrap();
+
+        // The representative is the refused address (first candidate),
+        // but the winner should be the good address (second candidate).
+        let req = Request {
+            protocol: OutboundProtocol::TCP,
+            source: source_workload,
+            hbone_target_destination: None,
+            actual_destination_workload: None,
+            intended_destination_service: None,
+            upstream_target: UpstreamTarget::Race {
+                candidates: vec![refused_addr, good_addr],
+                representative: refused_addr,
+            },
+            upstream_sans: vec![],
+            final_sans: vec![],
+        };
+
+        // Create a connected TCP pair to simulate downstream.
+        let downstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let downstream_addr = downstream_listener.local_addr().unwrap();
+        let connect_fut = tokio::net::TcpStream::connect(downstream_addr);
+        let accept_fut = downstream_listener.accept();
+        let (downstream_stream, accept_result) = tokio::join!(connect_fut, accept_fut);
+        let downstream_stream = downstream_stream.unwrap();
+        let (proxy_stream, _) = accept_result.unwrap();
+
+        let source_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let start = Instant::now();
+
+        // Spawn proxy_to_race in a task, then close the downstream to let it finish.
+        let handle = tokio::spawn({
+            let metrics = metrics.clone();
+            async move {
+                outbound
+                    .proxy_to_race(
+                        proxy_stream,
+                        &req,
+                        source_addr,
+                        None, // no hbone_target
+                        start,
+                        metrics,
+                    )
+                    .await;
+            }
+        });
+
+        // Give the race a moment to connect, then close downstream to end the copy.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(downstream_stream);
+
+        // Wait for proxy_to_race to complete.
+        handle.await.unwrap();
+
+        // The access log should have dst.addr set to the actual winning address (good_addr),
+        // NOT the representative (refused_addr).
+        let good_addr_str = good_addr.to_string();
+        crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
+            ("scope", "access"),
+            ("dst.addr", good_addr_str.as_str()),
+            ("direction", "outbound"),
+            ("message", "connection complete"),
+        ]));
+    }
+
     #[derive(PartialEq, Debug)]
     struct ExpectedRequest<'a> {
         protocol: OutboundProtocol,
