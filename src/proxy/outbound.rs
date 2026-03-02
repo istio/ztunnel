@@ -205,14 +205,15 @@ impl OutboundConnection {
         let hbone_target = req.hbone_target_destination.clone();
 
         if let UpstreamTarget::Race { .. } = &req.upstream_target {
-            self.proxy_to_race(
+            // Box::pin to avoid inflating the parent future's size with the racing state machine.
+            Box::pin(self.proxy_to_race(
                 source_stream,
                 &req,
                 source_addr,
                 hbone_target,
                 start,
                 metrics,
-            )
+            ))
             .await;
             return;
         }
