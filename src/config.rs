@@ -906,11 +906,25 @@ fn validate_uri(uri_str: Option<String>) -> Result<Option<String>, Error> {
     let Some(uri_str) = uri_str else {
         return Ok(uri_str);
     };
-    let uri = Uri::try_from(&uri_str)?;
-    if uri.scheme().is_none() {
-        return Ok(Some("https://".to_owned() + &uri_str));
+    // Unix socket URIs are not supported by hyper's Uri parser, so handle them separately.
+    // Only absolute paths are accepted (e.g., unix:///path or unix:/path).
+    if uri_str.starts_with("unix:") {
+        if crate::tls::unix_socket_path(&uri_str).is_some() {
+            return Ok(Some(uri_str));
+        }
+        return Err(Error::ProxyConfig(anyhow::anyhow!(
+            "unix URI must include an absolute socket path (e.g., unix:///run/sock)"
+        )));
     }
-    Ok(Some(uri_str))
+    let uri = Uri::try_from(&uri_str)?;
+    match uri.scheme_str() {
+        Some("https") | Some("http") => Ok(Some(uri_str)),
+        None => Ok(Some("https://".to_owned() + &uri_str)), // Default to https
+        Some(scheme) => Err(Error::ProxyConfig(anyhow::anyhow!(
+            "unsupported URI scheme: {}",
+            scheme
+        ))),
+    }
 }
 
 #[derive(serde::Deserialize, Default, Clone, PartialEq, Eq)]
@@ -1186,6 +1200,56 @@ pub mod tests {
             let value: AsciiMetadataValue = AsciiMetadataValue::from_str(&v).unwrap();
             assert!(metadata.vec.contains(&(key, value)));
         }
+    }
+
+    #[test]
+    fn test_validate_uri_unix_schemes() {
+        // unix:///path - standard triple-slash form
+        assert_eq!(
+            validate_uri(Some("unix:///run/spire/sockets/agent.sock".to_string())).unwrap(),
+            Some("unix:///run/spire/sockets/agent.sock".to_string())
+        );
+
+        // unix:/path - single-slash form
+        assert_eq!(
+            validate_uri(Some("unix:/run/sockets/agent.sock".to_string())).unwrap(),
+            Some("unix:/run/sockets/agent.sock".to_string())
+        );
+
+        // relative path - rejected (unix://relative is not an absolute path)
+        assert!(validate_uri(Some("unix://run/sockets/agent.sock".to_string())).is_err());
+
+        // empty path - rejected
+        assert!(validate_uri(Some("unix:".to_string())).is_err());
+        assert!(validate_uri(Some("unix://".to_string())).is_err());
+        assert!(validate_uri(Some("unix:///".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_validate_uri_existing_schemes() {
+        // https - accepted unchanged
+        assert_eq!(
+            validate_uri(Some("https://istiod:15012".to_string())).unwrap(),
+            Some("https://istiod:15012".to_string())
+        );
+
+        // http - accepted unchanged
+        assert_eq!(
+            validate_uri(Some("http://localhost:15012".to_string())).unwrap(),
+            Some("http://localhost:15012".to_string())
+        );
+
+        // No scheme - defaults to https://
+        assert_eq!(
+            validate_uri(Some("istiod:15012".to_string())).unwrap(),
+            Some("https://istiod:15012".to_string())
+        );
+
+        // None input - returns None
+        assert_eq!(validate_uri(None).unwrap(), None);
+
+        // Unsupported scheme - returns error
+        assert!(validate_uri(Some("ftp://example.com".to_string())).is_err());
     }
 
     #[test]
