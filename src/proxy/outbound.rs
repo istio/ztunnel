@@ -872,9 +872,7 @@ impl OutboundConnection {
                     .iter()
                     .map(|ip| SocketAddr::new(*ip, us.port))
                     .collect();
-                UpstreamTarget::Race {
-                    candidates,
-                }
+                UpstreamTarget::Race { candidates }
             } else {
                 UpstreamTarget::Single(actual_destination)
             };
@@ -2357,7 +2355,7 @@ mod tests {
                         proxy_stream,
                         &req,
                         source_addr,
-                        None, // no hbone_target
+                        None,         // no hbone_target
                         refused_addr, // orig_dst: use first candidate as the original destination
                         start,
                         metrics,
