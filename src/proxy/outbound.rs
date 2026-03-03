@@ -193,13 +193,6 @@ impl OutboundConnection {
                 return;
             }
         };
-        // TODO: should we use the original address or the actual address? Both seems nice!
-        let _conn_guard = self.pi.connection_manager.track_outbound(
-            source_addr,
-            dest_addr,
-            req.upstream_target.addr(),
-            req.protocol,
-        );
 
         let metrics = self.pi.metrics.clone();
         let hbone_target = req.hbone_target_destination.clone();
@@ -211,12 +204,21 @@ impl OutboundConnection {
                 &req,
                 source_addr,
                 hbone_target,
+                dest_addr,
                 start,
                 metrics,
             ))
             .await;
             return;
         }
+
+        // TODO: should we use the original address or the actual address? Both seems nice!
+        let _conn_guard = self.pi.connection_manager.track_outbound(
+            source_addr,
+            dest_addr,
+            req.upstream_target.addr(),
+            req.protocol,
+        );
 
         let connection_result_builder = Box::new(ConnectionResultBuilder::new(
             source_addr,
@@ -444,12 +446,14 @@ impl OutboundConnection {
     /// (e.g. RST), the next candidate starts right away without waiting.
     const RACE_ATTEMPT_DELAY: Duration = Duration::from_millis(300);
 
+    #[allow(clippy::too_many_arguments)]
     async fn proxy_to_race(
         &mut self,
         stream: TcpStream,
         req: &Request,
         source_addr: SocketAddr,
         hbone_target: Option<HboneAddress>,
+        orig_dst: SocketAddr,
         start: Instant,
         metrics: Arc<metrics::Metrics>,
     ) {
@@ -546,6 +550,12 @@ impl OutboundConnection {
         let actual_dst = outbound
             .peer_addr()
             .unwrap_or_else(|_| req.upstream_target.addr());
+        let _conn_guard = self.pi.connection_manager.track_outbound(
+            source_addr,
+            orig_dst,
+            actual_dst,
+            req.protocol,
+        );
         let connection_stats = Box::new(
             ConnectionResultBuilder::new(
                 source_addr,
@@ -863,7 +873,6 @@ impl OutboundConnection {
                     .map(|ip| SocketAddr::new(*ip, us.port))
                     .collect();
                 UpstreamTarget::Race {
-                    representative: actual_destination,
                     candidates,
                 }
             } else {
@@ -921,21 +930,18 @@ enum UpstreamTarget {
     Race {
         /// Candidate addresses to race connections against, in order of preference.
         candidates: Vec<SocketAddr>,
-        /// Representative address used for metrics and connection tracking.
-        /// Typically the first candidate.
-        representative: SocketAddr,
     },
 }
 
 impl UpstreamTarget {
-    /// Returns a representative address for metrics, connection tracking, and
-    /// non-race connect paths. For Single, this is the actual destination.
-    /// For Race, this is the first candidate (used as a fallback for code paths
-    /// that require a single address).
+    /// Returns a representative address for this target.
+    /// For Single, this is the actual destination.
+    /// For Race, this is the first candidate (used only as a fallback;
+    /// the real winning address is determined after racing).
     fn addr(&self) -> SocketAddr {
         match self {
             UpstreamTarget::Single(addr) => *addr,
-            UpstreamTarget::Race { representative, .. } => *representative,
+            UpstreamTarget::Race { candidates, .. } => candidates[0],
         }
     }
 }
@@ -2316,8 +2322,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The representative is the refused address (first candidate),
-        // but the winner should be the good address (second candidate).
+        // The first candidate is refused, so the winner should be the second (good_addr).
         let req = Request {
             protocol: OutboundProtocol::TCP,
             source: source_workload,
@@ -2326,7 +2331,6 @@ mod tests {
             intended_destination_service: None,
             upstream_target: UpstreamTarget::Race {
                 candidates: vec![refused_addr, good_addr],
-                representative: refused_addr,
             },
             upstream_sans: vec![],
             final_sans: vec![],
@@ -2354,6 +2358,7 @@ mod tests {
                         &req,
                         source_addr,
                         None, // no hbone_target
+                        refused_addr, // orig_dst: use first candidate as the original destination
                         start,
                         metrics,
                     )
@@ -2369,7 +2374,7 @@ mod tests {
         handle.await.unwrap();
 
         // The access log should have dst.addr set to the actual winning address (good_addr),
-        // NOT the representative (refused_addr).
+        // NOT the first candidate (refused_addr).
         let good_addr_str = good_addr.to_string();
         crate::telemetry::testing::assert_contains(std::collections::HashMap::from([
             ("scope", "access"),
