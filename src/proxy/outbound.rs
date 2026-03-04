@@ -242,14 +242,6 @@ impl OutboundConnection {
         ));
 
         match *req {
-            Request::Tcp(ref r) => {
-                self.proxy_to_tcp(source_stream, r, connection_result_builder)
-                    .await
-            }
-            Request::Hbone(ref r) => {
-                self.proxy_to_hbone(source_stream, source_addr, r, connection_result_builder)
-                    .await
-            }
             Request::DoubleHbone(ref r) => {
                 // We box this since its not a common path and it would make the future really big.
                 Box::pin(self.proxy_to_double_hbone(
@@ -259,6 +251,14 @@ impl OutboundConnection {
                     connection_result_builder,
                 ))
                 .await
+            }
+            Request::Hbone(ref r) => {
+                self.proxy_to_hbone(source_stream, source_addr, r, connection_result_builder)
+                    .await
+            }
+            Request::Tcp(ref r) => {
+                self.proxy_to_tcp(source_stream, r, connection_result_builder)
+                    .await
             }
             Request::RaceTcp(_) => unreachable!(),
         }
