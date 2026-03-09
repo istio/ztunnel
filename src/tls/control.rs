@@ -21,13 +21,17 @@ use hyper::body::Incoming;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use itertools::Itertools;
+use notify::{RecommendedWatcher, Watcher};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, FileIdMap, new_debouncer};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::future::Future;
 use std::io::Cursor;
+use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tonic::body::Body;
@@ -273,5 +277,95 @@ impl tower::Service<http::Request<Body>> for TlsGrpcChannel {
             auth.insert_headers(req.headers_mut()).await?;
             Ok(client.request(req).await?)
         })
+    }
+}
+
+struct RootCertManagerInner {
+    root_cert: RootCert,
+    _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
+}
+
+pub(crate) struct RootCertManager {
+    inner: RwLock<RootCertManagerInner>,
+    dirty: AtomicBool,
+}
+
+impl RootCertManager {
+    pub(crate) fn new(root_cert: RootCert) -> Result<Arc<Self>, Error> {
+        let manager = Arc::new(Self {
+            inner: RwLock::new(RootCertManagerInner {
+                root_cert: root_cert.clone(),
+                _debouncer: None,
+            }),
+            dirty: AtomicBool::new(false),
+        });
+
+        if let RootCert::File(path) = &root_cert {
+            let debouncer = manager.start_watcher(path)?;
+
+            manager.inner.write().unwrap()._debouncer = Some(debouncer);
+        }
+
+        Ok(manager)
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn root_cert(&self) -> RootCert {
+        self.inner.read().unwrap().root_cert.clone()
+    }
+
+    fn start_watcher(
+        self: &Arc<Self>,
+        path: &Path,
+    ) -> Result<Debouncer<RecommendedWatcher, FileIdMap>, Error> {
+        let watch_dir = path.parent().ok_or_else(|| {
+            Error::InvalidRootCert("root cert path must have a parent directory".to_string())
+        })?;
+
+        let manager = Arc::clone(self);
+
+        let mut debouncer = new_debouncer(
+            Duration::from_secs(2),
+            None,
+            move |result: DebounceEventResult| match result {
+                Ok(events) if !events.is_empty() => {
+                    debug!(
+                        event_count = events.len(),
+                        "root cert directory changed; scheduling TLS channel rebuild"
+                    );
+                    manager.dirty.store(true, Ordering::Release);
+                }
+                Err(errors) => {
+                    for e in errors {
+                        debug!(error = ?e, "root cert watcher error");
+                    }
+                }
+                _ => {}
+            },
+        )
+        .map_err(|e| Error::InvalidRootCert(format!("failed to create root cert watcher: {e}")))?;
+
+        debouncer
+            .watcher()
+            .watch(watch_dir, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| {
+                Error::InvalidRootCert(format!(
+                    "failed to watch root cert directory {watch_dir:?}: {e}"
+                ))
+            })?;
+
+        debug!(path = ?watch_dir, "root cert file watcher started");
+        Ok(debouncer)
     }
 }
