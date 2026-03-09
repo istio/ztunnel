@@ -553,9 +553,7 @@ impl SecretManager {
                 .clone()
                 .expect("ca_address must be set to use CA"),
             cfg.alt_ca_hostname.clone(),
-            Box::new(tls::ControlPlaneAuthentication::RootCert(
-                cfg.ca_root_cert.clone(),
-            )),
+            cfg.ca_root_cert.clone(),
             cfg.auth.clone(),
             cfg.proxy_mode == ProxyMode::Shared,
             cfg.secret_ttl.as_secs().try_into().unwrap_or(60 * 60 * 24),

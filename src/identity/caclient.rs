@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use prost_types::Struct;
@@ -21,15 +22,24 @@ use tonic::IntoRequest;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tracing::{debug, error, instrument, warn};
 
+use crate::config::RootCert;
 use crate::identity::Error;
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
-use crate::tls::{self, TlsGrpcChannel};
+use crate::tls::{self, RootCertManager, TlsGrpcChannel, control_plane_client_config};
 use crate::xds::istio::ca::IstioCertificateRequest;
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
 
 pub struct CaClient {
-    pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
+    pub client: std::sync::RwLock<IstioCertificateServiceClient<TlsGrpcChannel>>,
+    /// gRPC endpoint of istiod ( retained to be able to "rebuild_channel")
+    address: String,
+    /// alternate hostname for TLS SNI / certificate verification
+    alt_hostname: Option<String>,
+    /// Token source for authorization header on gRPC requests
+    auth: AuthSource,
+    /// Signals when CA root cert file on disk has changed and TLS channel needs to be rebuilt
+    root_cert_manager: Option<Arc<RootCertManager>>,
     pub enable_impersonated_identity: bool,
     pub secret_ttl: i64,
     ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
@@ -39,27 +49,89 @@ impl CaClient {
     pub async fn new(
         address: String,
         alt_hostname: Option<String>,
-        cert_provider: Box<dyn tls::ControlPlaneClientCertProvider>,
+        root_cert: RootCert,
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
         ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
     ) -> Result<CaClient, Error> {
-        let svc =
-            tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
-        let client = IstioCertificateServiceClient::new(svc);
+        //Build initial TLS ClientConfig from the current root cert
+        let client_config = control_plane_client_config(&root_cert, alt_hostname.clone()).await?;
+        let tls_grpc_channel = tls::grpc_connector(address.clone(), auth.clone(), client_config)?;
+        let initial_client = IstioCertificateServiceClient::new(tls_grpc_channel);
+
+        // Start the file watcher only for file-based certs.
+        let root_cert_manager = if let RootCert::File(_) = &root_cert {
+            Some(RootCertManager::new(root_cert.clone())?)
+        } else {
+            None
+        };
+
         Ok(CaClient {
-            client,
+            client: std::sync::RwLock::new(initial_client),
+            address,
+            alt_hostname,
+            auth,
+            root_cert_manager,
             enable_impersonated_identity,
             secret_ttl,
             ca_headers,
         })
+    }
+
+    /// Rebuilds gRPC client using the current root cert from disk.
+    ///
+    /// Reads the cert file again and recreates gRPC channel using the new info stored in `CaClient`
+    ///
+    /// Returns an error if:
+    /// - cert file is missing or malformed
+    /// - gRPC connector cannot be created.
+    async fn rebuild_channel(
+        &self,
+    ) -> Result<IstioCertificateServiceClient<TlsGrpcChannel>, Error> {
+        let root_cert = self
+            .root_cert_manager
+            .as_ref()
+            .expect("rebuild_channel requires root_cert_manager to be Some")
+            .root_cert();
+
+        let client_config =
+            control_plane_client_config(&root_cert, self.alt_hostname.clone()).await?;
+        let tls_grpc_channel =
+            tls::grpc_connector(self.address.clone(), self.auth.clone(), client_config)?;
+        Ok(IstioCertificateServiceClient::new(tls_grpc_channel))
     }
 }
 
 impl CaClient {
     #[instrument(skip_all)]
     async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+        // Hot reload check
+        // If the cert has changed sine last call, rebuild the channel before making the request.
+        // If rebuild fails:
+        // - log a warning
+        // - rearm the flag to try again on next call attempt
+        // - fail through the existing channel
+        if let Some(ref manager) = self.root_cert_manager
+            && manager.take_dirty()
+        {
+            match self.rebuild_channel().await {
+                Ok(new_client) => {
+                    // Replace current client
+                    *self.client.write().unwrap() = new_client;
+                    debug!("TLS channel rebuild after CA root cert rotation");
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to rebuild TLS channel after root cert rotation; retaining old channel, will retry on next fetch");
+                    // rearm so the next fetch_certificate call tries again
+                    manager.mark_dirty();
+                }
+            }
+        }
+
+        // Clone the client *before* releasing the RwLock so it is not carried across awaits
+        let client = self.client.read().unwrap().clone();
+
         let cs = tls::csr::CsrOptions {
             san: id.to_string(),
         }
@@ -93,8 +165,7 @@ impl CaClient {
             }
         });
 
-        let resp = self
-            .client
+        let resp = client
             .clone()
             .create_certificate(req.into_request())
             .await
@@ -256,13 +327,16 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
 
-    use std::time::Duration;
+    use std::{io::Write, time::Duration};
 
     use matches::assert_matches;
+    use tempfile::NamedTempFile;
 
     use crate::{
+        config::RootCert,
         identity::{Error, Identity},
-        test_helpers, tls,
+        test_helpers,
+        tls::{self, RootCertManager, mock::TEST_ROOT},
         xds::istio::ca::IstioCertificateResponse,
     };
 
@@ -314,5 +388,28 @@ mod tests {
         })
         .await;
         assert_matches!(res, Ok(_));
+    }
+
+    #[test]
+    fn root_cert_manager_dirty_flag_api() {
+        let mut root_file = NamedTempFile::new().unwrap();
+        root_file.write_all(TEST_ROOT).unwrap();
+
+        let manager = RootCertManager::new(RootCert::File(root_file.path().to_path_buf()))
+            .expect("RootCertManager must be created");
+
+        assert!(!manager.take_dirty(), "new manager should not be dirty");
+
+        // simulate file watcher trigger
+        manager.mark_dirty();
+
+        assert!(
+            manager.take_dirty(),
+            "take_dirty must return true when dirty"
+        );
+        assert!(
+            !manager.take_dirty(),
+            "take_dirty must return false after reset"
+        );
     }
 }
