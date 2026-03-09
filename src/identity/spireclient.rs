@@ -204,52 +204,46 @@ impl<C: DelegatedIdentityApi> SpireClient<C> {
         &self,
         value: DelegateAttestationRequest,
     ) -> Result<X509Svid, Error> {
-        // Initiate streaming request to SPIRE server using Kubernetes selectors
-        // clone() is cheap here as DelegatedIdentityClient uses Arc internally
-        let stream = self.client.get_x509_svids(value).await.map_err(|e| {
-            Error::FailedToFetchCertificate(format!("Failed to stream X.509 SVIDs: {e}"))
-        })?;
-        // Set reasonable timeout to prevent indefinite blocking on unresponsive SPIRE servers
         let time_out = self.cfg.spire_timeout;
 
-        // Process the stream with timeout protection
-        // SPIRE may deliver multiple responses, but we only need the first successful one
-        tokio::pin!(stream);
+        // Wrap both stream establishment AND reading in a single timeout.
+        // The gRPC stream_x509_svids call can hang indefinitely if the SPIRE
+        // agent's socket accepts the connection but never responds (e.g., during
+        // a prolonged restart). Without this, a hung connection blocks the
+        // identity manager's fetch slot and prevents cert rotation.
         let sf = tokio::time::timeout(time_out, async {
+            let stream = self.client.get_x509_svids(value).await.map_err(|e| {
+                Error::FailedToFetchCertificate(format!("Failed to stream X.509 SVIDs: {e}"))
+            })?;
+
+            // SPIRE may deliver multiple responses, but we only need the first successful one
+            tokio::pin!(stream);
             while let Some(svid_response) = stream.next().await {
                 match svid_response {
                     Ok(response) => {
-                        // Successfully received a certificate - return immediately
                         return Ok(response);
                     }
                     Err(e) => {
-                        // Log stream errors but continue waiting for subsequent responses
-                        // Some responses may fail while others succeed
                         tracing::warn!("Error receiving SVID response: {}", e);
                     }
                 }
             }
-            // Stream ended without delivering any successful responses
             Err(Error::FailedToFetchCertificate(
                 "No SVIDs received in stream".to_string(),
             ))
         })
         .await;
 
-        // Handle nested Result types from timeout + stream operations
-        let svid_response = match sf {
-            Ok(Ok(response)) => response, // Successfully got certificate within timeout
-            Ok(Err(e)) => return Err(e),
+        match sf {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(e),
             Err(_) => {
-                // Timeout expired before receiving any certificates
-                tracing::error!("Timeout while waiting for SVID stream");
-                return Err(Error::FailedToFetchCertificate(
+                tracing::error!("Timeout while waiting for SPIRE SVID (stream establishment or reading took longer than {:?})", time_out);
+                Err(Error::FailedToFetchCertificate(
                     "Timeout while waiting for SVID stream".to_string(),
-                ));
+                ))
             }
-        };
-
-        Ok(svid_response)
+        }
     }
 
     /// Fetches a workload certificate from SPIRE using the provided attestation request.
