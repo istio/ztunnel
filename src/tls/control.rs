@@ -309,10 +309,6 @@ impl RootCertManager {
         Ok(manager)
     }
 
-    pub(crate) fn is_dirty(&self) -> bool {
-        self.dirty.load(Ordering::Acquire)
-    }
-
     pub(crate) fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::AcqRel)
     }
@@ -387,7 +383,7 @@ mod tests {
         let manager = RootCertManager::new(RootCert::Static(Bytes::from_static(TEST_ROOT)))
             .expect("static cert manager must not fail");
 
-        assert!(!manager.is_dirty(), "static cert must never be dirty");
+        assert!(!manager.take_dirty(), "static cert must never be dirty");
         assert!(
             manager.inner.read().unwrap()._debouncer.is_none(),
             "no debouncer for static certs"
@@ -402,7 +398,7 @@ mod tests {
         let manager = RootCertManager::new(RootCert::File(file.path().to_path_buf()))
             .expect("file cert manager must not fail");
 
-        assert!(!manager.is_dirty(), "new manager must not start dirty");
+        assert!(!manager.take_dirty(), "new manager must not start dirty");
         assert!(
             manager.inner.read().unwrap()._debouncer.is_some(),
             "file cert must have a debouncer"
@@ -417,7 +413,7 @@ mod tests {
         let manager = RootCertManager::new(RootCert::File(file.path().to_path_buf()))
             .expect("file cert manager must not fail");
 
-        assert!(!manager.is_dirty(), "new manager must not start dirty");
+        assert!(!manager.take_dirty(), "new manager must not start dirty");
 
         manager.dirty.store(true, Ordering::Release);
         assert!(manager.take_dirty(), "take_dirty should return true when dirty");

@@ -385,7 +385,7 @@ mod tests {
         let manager = RootCertManager::new(RootCert::File(root_file.path().to_path_buf()))
             .expect("RootCertManager must be created");
 
-        assert!(!manager.is_dirty(), "new manager should not be dirty");
+        assert!(!manager.take_dirty(), "new manager should not be dirty");
 
         // simulate file watcher trigger 
         manager.mark_dirty();
