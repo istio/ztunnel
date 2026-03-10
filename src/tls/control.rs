@@ -180,7 +180,7 @@ impl ServerCertVerifier for AltHostnameVerifier {
     }
 }
 
-async fn control_plane_client_config(
+pub(crate) async fn control_plane_client_config(
     root_cert: &RootCert,
     alt_hostname: Option<String>,
 ) -> Result<ClientConfig, Error> {

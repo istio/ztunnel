@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use prost_types::Struct;
@@ -21,15 +22,25 @@ use tonic::IntoRequest;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 use tracing::{debug, error, instrument, warn};
 
+use crate::config::RootCert;
 use crate::identity::Error;
 use crate::identity::auth::AuthSource;
 use crate::identity::manager::Identity;
-use crate::tls::{self, TlsGrpcChannel};
+use crate::tls::{self, RootCertManager, TlsGrpcChannel, control_plane_client_config};
 use crate::xds::istio::ca::IstioCertificateRequest;
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
+use crate::xds::istio::ca::istio_certificate_service_server::IstioCertificateService;
 
 pub struct CaClient {
-    pub client: IstioCertificateServiceClient<TlsGrpcChannel>,
+    pub client: std::sync::RwLock<IstioCertificateServiceClient<TlsGrpcChannel>>,
+    /// gRPC endpoint of istiod ( retained to be able to "rebuild_channel")
+    address: String,
+    /// alternate hostname for TLS SNI / certificate verification
+    alt_hostname: Option<String>,
+    /// Token source for authorization header on gRPC requests
+    auth: AuthSource,
+    /// Signals when CA root cert file on disk has changed and TLS channel needs to be rebuilt
+    root_cert_manager: Option<Arc<RootCertManager>>,
     pub enable_impersonated_identity: bool,
     pub secret_ttl: i64,
     ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
@@ -39,27 +50,76 @@ impl CaClient {
     pub async fn new(
         address: String,
         alt_hostname: Option<String>,
-        cert_provider: Box<dyn tls::ControlPlaneClientCertProvider>,
+        root_cert: RootCert,
         auth: AuthSource,
         enable_impersonated_identity: bool,
         secret_ttl: i64,
         ca_headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
     ) -> Result<CaClient, Error> {
-        let svc =
-            tls::grpc_connector(address, auth, cert_provider.fetch_cert(alt_hostname).await?)?;
-        let client = IstioCertificateServiceClient::new(svc);
+        //Build initial TLS ClientConfig from the current root cert
+        let client_config = control_plane_client_config(&root_cert, alt_hostname.clone()).await?;
+        let tls_grpc_channel = tls::grpc_connector(address.clone(), auth.clone(), client_config)?;
+        let initial_client = IstioCertificateServiceClient::new(tls_grpc_channel);
+
+        // Start the file watcher only for file-based certs.
+        let root_cert_manager = if let RootCert::File(_) = &root_cert {
+            Some(RootCertManager::new(root_cert.clone()).map_err(Into::into)?)
+        } else {
+            None
+        };
+
         Ok(CaClient {
-            client,
+            client: std::sync::RwLock::new(initial_client),
+            address,
+            alt_hostname,
+            auth,
+            root_cert_manager,
             enable_impersonated_identity,
             secret_ttl,
             ca_headers,
         })
+    }
+
+    async fn rebuild_channel(
+        &self,
+    ) -> Result<IstioCertificateServiceClient<TlsGrpcChannel>, Error> {
+        let root_cert = self
+            .root_cert_manager
+            .as_ref()
+            .expect("rebuild_channel requires root_cert_manager to be Some")
+            .root_cert();
+
+        let client_config =
+            control_plane_client_config(&root_cert, self.alt_hostname.clone()).await?;
+        let tls_grpc_channel =
+            tls::grpc_connector(self.address.clone(), self.auth.clone(), client_config)?;
+        Ok(IstioCertificateServiceClient::new(tls_grpc_channel))
     }
 }
 
 impl CaClient {
     #[instrument(skip_all)]
     async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
+        /// Hot reload check
+        if let Some(ref manager) = self.root_cert_manager {
+            if manager.take_dirty() {
+                match self.rebuild_channel().await {
+                    Ok(new_client) => {
+                        // Replace current client
+                        *self.client.write().unwrap() = new_client;
+                        debug!("TLS channel rebuild after CA root cert rotation");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to rebuild TLS channel after root cert rotation; retaining old channel, will retry on next fetch");
+                        // rearm so the next fetch_certificate call tries again
+                        manager.mark_dirty();
+                    }
+                }
+            }
+        }
+
+        let client = self.client.read().unwrap().clone();
+
         let cs = tls::csr::CsrOptions {
             san: id.to_string(),
         }
@@ -93,8 +153,7 @@ impl CaClient {
             }
         });
 
-        let resp = self
-            .client
+        let resp = client
             .clone()
             .create_certificate(req.into_request())
             .await
