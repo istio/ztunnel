@@ -447,13 +447,13 @@ mod namespaced {
 
         let sent = format!("{REQ_SIZE}");
         let recv = format!("{HBONE_REQ_SIZE}");
-        let hbone_addr = format!("{TEST_VIP}:80");
+        let hbone_addr = "service.default.svc.cluster.local:80";
         let dst_addr = format!("{waypoint_ip}:15008");
         let want = HashMap::from([
             ("scope", "access"),
             ("src.workload", "client"),
             ("dst.workload", "waypoint"),
-            ("dst.hbone_addr", &hbone_addr),
+            ("dst.hbone_addr", hbone_addr),
             ("dst.addr", &dst_addr),
             ("bytes_sent", &sent),
             ("bytes_recv", &recv),
