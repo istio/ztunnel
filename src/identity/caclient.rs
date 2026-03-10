@@ -29,7 +29,6 @@ use crate::identity::manager::Identity;
 use crate::tls::{self, RootCertManager, TlsGrpcChannel, control_plane_client_config};
 use crate::xds::istio::ca::IstioCertificateRequest;
 use crate::xds::istio::ca::istio_certificate_service_client::IstioCertificateServiceClient;
-use crate::xds::istio::ca::istio_certificate_service_server::IstioCertificateService;
 
 pub struct CaClient {
     pub client: std::sync::RwLock<IstioCertificateServiceClient<TlsGrpcChannel>>,
@@ -63,7 +62,7 @@ impl CaClient {
 
         // Start the file watcher only for file-based certs.
         let root_cert_manager = if let RootCert::File(_) = &root_cert {
-            Some(RootCertManager::new(root_cert.clone()).map_err(Into::into)?)
+            Some(RootCertManager::new(root_cert.clone())?)
         } else {
             None
         };
@@ -100,7 +99,7 @@ impl CaClient {
 impl CaClient {
     #[instrument(skip_all)]
     async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
-        /// Hot reload check
+        // Hot reload check
         if let Some(ref manager) = self.root_cert_manager {
             if manager.take_dirty() {
                 match self.rebuild_channel().await {
