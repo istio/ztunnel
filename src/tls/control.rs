@@ -416,11 +416,19 @@ mod tests {
         assert!(!manager.take_dirty(), "new manager must not start dirty");
 
         manager.dirty.store(true, Ordering::Release);
-        assert!(manager.take_dirty(), "take_dirty should return true when dirty");
-        assert!(!manager.take_dirty(), "take_dirty should return false after clearing");
+        assert!(
+            manager.take_dirty(),
+            "take_dirty should return true when dirty"
+        );
+        assert!(
+            !manager.take_dirty(),
+            "take_dirty should return false after clearing"
+        );
 
         manager.mark_dirty();
-        assert!(manager.take_dirty(), "take_dirty should return true after rearm");
-
+        assert!(
+            manager.take_dirty(),
+            "take_dirty should return true after rearm"
+        );
     }
 }

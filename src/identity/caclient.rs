@@ -100,19 +100,19 @@ impl CaClient {
     #[instrument(skip_all)]
     async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
         // Hot reload check
-        if let Some(ref manager) = self.root_cert_manager {
-            if manager.take_dirty() {
-                match self.rebuild_channel().await {
-                    Ok(new_client) => {
-                        // Replace current client
-                        *self.client.write().unwrap() = new_client;
-                        debug!("TLS channel rebuild after CA root cert rotation");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to rebuild TLS channel after root cert rotation; retaining old channel, will retry on next fetch");
-                        // rearm so the next fetch_certificate call tries again
-                        manager.mark_dirty();
-                    }
+        if let Some(ref manager) = self.root_cert_manager
+            && manager.take_dirty()
+        {
+            match self.rebuild_channel().await {
+                Ok(new_client) => {
+                    // Replace current client
+                    *self.client.write().unwrap() = new_client;
+                    debug!("TLS channel rebuild after CA root cert rotation");
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to rebuild TLS channel after root cert rotation; retaining old channel, will retry on next fetch");
+                    // rearm so the next fetch_certificate call tries again
+                    manager.mark_dirty();
                 }
             }
         }
@@ -387,10 +387,16 @@ mod tests {
 
         assert!(!manager.take_dirty(), "new manager should not be dirty");
 
-        // simulate file watcher trigger 
+        // simulate file watcher trigger
         manager.mark_dirty();
 
-        assert!(manager.take_dirty(), "take_dirty must return true when dirty");
-        assert!(!manager.take_dirty(), "take_dirty must return false after reset");
+        assert!(
+            manager.take_dirty(),
+            "take_dirty must return true when dirty"
+        );
+        assert!(
+            !manager.take_dirty(),
+            "take_dirty must return false after reset"
+        );
     }
 }
