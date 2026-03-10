@@ -315,13 +315,16 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
 
-    use std::time::Duration;
+    use std::{io::Write, time::Duration};
 
     use matches::assert_matches;
+    use tempfile::NamedTempFile;
 
     use crate::{
+        config::RootCert,
         identity::{Error, Identity},
-        test_helpers, tls,
+        test_helpers,
+        tls::{self, RootCertManager, mock::TEST_ROOT},
         xds::istio::ca::IstioCertificateResponse,
     };
 
@@ -373,5 +376,22 @@ mod tests {
         })
         .await;
         assert_matches!(res, Ok(_));
+    }
+
+    #[test]
+    fn root_cert_manager_dirty_flag_api() {
+        let mut root_file = NamedTempFile::new().unwrap();
+        root_file.write_all(TEST_ROOT).unwrap();
+
+        let manager = RootCertManager::new(RootCert::File(root_file.path().to_path_buf()))
+            .expect("RootCertManager must be created");
+
+        assert!(!manager.is_dirty(), "new manager should not be dirty");
+
+        // simulate file watcher trigger 
+        manager.mark_dirty();
+
+        assert!(manager.take_dirty(), "take_dirty must return true when dirty");
+        assert!(!manager.take_dirty(), "take_dirty must return false after reset");
     }
 }

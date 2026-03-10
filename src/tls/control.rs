@@ -369,3 +369,62 @@ impl RootCertManager {
         Ok(debouncer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use std::io::Write;
+
+    use bytes::Bytes;
+    use tempfile::NamedTempFile;
+
+    use crate::tls::mock::TEST_ROOT;
+
+    use super::*;
+
+    #[test]
+    fn static_cert_is_never_dirty() {
+        let manager = RootCertManager::new(RootCert::Static(Bytes::from_static(TEST_ROOT)))
+            .expect("static cert manager must not fail");
+
+        assert!(!manager.is_dirty(), "static cert must never be dirty");
+        assert!(
+            manager.inner.read().unwrap()._debouncer.is_none(),
+            "no debouncer for static certs"
+        );
+    }
+
+    #[test]
+    fn file_cert_starts_clean() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(TEST_ROOT).unwrap();
+
+        let manager = RootCertManager::new(RootCert::File(file.path().to_path_buf()))
+            .expect("file cert manager must not fail");
+
+        assert!(!manager.is_dirty(), "new manager must not start dirty");
+        assert!(
+            manager.inner.read().unwrap()._debouncer.is_some(),
+            "file cert must have a debouncer"
+        );
+    }
+
+    #[test]
+    fn take_dirty_and_make_dirty_work() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(TEST_ROOT).unwrap();
+
+        let manager = RootCertManager::new(RootCert::File(file.path().to_path_buf()))
+            .expect("file cert manager must not fail");
+
+        assert!(!manager.is_dirty(), "new manager must not start dirty");
+
+        manager.dirty.store(true, Ordering::Release);
+        assert!(manager.take_dirty(), "take_dirty should return true when dirty");
+        assert!(!manager.take_dirty(), "take_dirty should return false after clearing");
+
+        manager.mark_dirty();
+        assert!(manager.take_dirty(), "take_dirty should return true after rearm");
+
+    }
+}
