@@ -82,6 +82,8 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     if *TLS12_ENABLED {
         // Add TLS 1.2 FIPS-compatible cipher suites
         cipher_suites.extend([
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
             rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
             rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
         ]);
@@ -101,6 +103,8 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     if *TLS12_ENABLED {
         // Add TLS 1.2 FIPS-compatible cipher suites
         cipher_suites.extend([
+            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
             rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
             rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
         ]);
@@ -126,6 +130,8 @@ pub(super) fn provider() -> Arc<CryptoProvider> {
     if *TLS12_ENABLED {
         // Add TLS 1.2 FIPS-compatible cipher suites
         cipher_suites.extend([
+            rustls_openssl::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            rustls_openssl::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
             rustls_openssl::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
             rustls_openssl::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
         ]);
