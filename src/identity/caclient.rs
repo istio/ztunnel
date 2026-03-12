@@ -79,6 +79,13 @@ impl CaClient {
         })
     }
 
+    /// Rebuilds gRPC client using the current root cert from disk.
+    ///
+    /// Reads the cert file again and recreates gRPC channel using the new info stored in `CaClient`
+    ///
+    /// Returns an error if:
+    /// - cert file is missing or malformed
+    /// - gRPC connector cannot be created.
     async fn rebuild_channel(
         &self,
     ) -> Result<IstioCertificateServiceClient<TlsGrpcChannel>, Error> {
@@ -100,6 +107,11 @@ impl CaClient {
     #[instrument(skip_all)]
     async fn fetch_certificate(&self, id: &Identity) -> Result<tls::WorkloadCertificate, Error> {
         // Hot reload check
+        // If the cert has changed sine last call, rebuild the channel before making the request.
+        // If rebuild fails:
+        // - log a warning
+        // - rearm the flag to try again on next call attempt
+        // - fail through the existing channel
         if let Some(ref manager) = self.root_cert_manager
             && manager.take_dirty()
         {
@@ -117,6 +129,7 @@ impl CaClient {
             }
         }
 
+        // Clone the client *before* releasing the RwLock so it is not carried across awaits
         let client = self.client.read().unwrap().clone();
 
         let cs = tls::csr::CsrOptions {

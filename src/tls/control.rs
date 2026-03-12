@@ -280,17 +280,39 @@ impl tower::Service<http::Request<Body>> for TlsGrpcChannel {
     }
 }
 
+/// Internal state of [`RootCertManager`]
+///
+/// Separated into its own struct to protect it behind a `RwLock`
+/// and be mutated after the outer `Arc` is created
 struct RootCertManagerInner {
+    /// Original cert source. Retained to be able to read it again on reload
     root_cert: RootCert,
+
+    /// OS watcher
     _debouncer: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
+/// Watches the CA root certificate file for changes and signals it with a flag.
+///
+/// Note: watcher is set on CA root cet's parent directory due to Kubernetes handle of ConfigMaps
+///       Whenever a ConfigMap changes Kubernetes creates a new timestamped folder with the content
+///       and atomically hot-swap a symlink to point to the new folder.
+///       If we setup a watcher on the file itself we will miss this event
 pub(crate) struct RootCertManager {
     inner: RwLock<RootCertManagerInner>,
+
+    /// Set to `true` by OS watcher when cert directory changes => ConfigMap changed.
+    /// Reset by CaClient after a successful channel rebuild
     dirty: AtomicBool,
 }
 
 impl RootCertManager {
+    /// Creates a new manager for `root_cert`
+    ///
+    /// If `root_cert` is a `RootCert::File` it starts a folder watcher on the cert's parent dir
+    ///
+    /// Returns an error if cert's parent dir cannot be watched (e.g. it does not exist).
+    /// A missing cert file is not detect here, it will be detected at channel rebuild by [`CaClient`]
     pub(crate) fn new(root_cert: RootCert) -> Result<Arc<Self>, Error> {
         let manager = Arc::new(Self {
             inner: RwLock::new(RootCertManagerInner {
@@ -309,18 +331,24 @@ impl RootCertManager {
         Ok(manager)
     }
 
+    /// Atomically reads and clears the dirty flag
     pub(crate) fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
+    /// Re-arms dirty flag
     pub(crate) fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
     }
 
+    /// Returns the original cert source
     pub(crate) fn root_cert(&self) -> RootCert {
         self.inner.read().unwrap().root_cert.clone()
     }
 
+    /// Register an OS dir watcher on `path`'s parent dir.
+    ///
+    /// Any filesystem event in that dir will set the `dirty` flag after a (2 seconds) debounce
     fn start_watcher(
         self: &Arc<Self>,
         path: &Path,
